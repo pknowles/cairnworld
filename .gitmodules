@@ -1,0 +1,3 @@
+[submodule "cairn"]
+	path = cairn
+	url = git@github.com:yochaigal/cairn.git
