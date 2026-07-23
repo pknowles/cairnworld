@@ -9,6 +9,14 @@ NPC and PC agents may only interact with the world using a strict set of LLM fac
 This acts as a boundary for LLM hallucinations corrupting game state, means each agent may focus on honestly helping the NPC or player.
 The GM agent then has less responsibility and can focus on its own job without conflating context.
 
+Philosophical tangent: most of this could happen in a single chat of a very
+large model (well, ignoring multiplayer), but in practice the context quickly
+becomes overrun, hallucinations destroy the experience and the chat is all too
+easily guided by the user's text simply allowing any action or plan to happen
+without good consequences. The hope is the structure introduced here allow
+better separation between characters, context management, fixed structure and
+real dice rolls.
+
 # Game setting and story narrative
 
 The setting must make sense for the rules of the game. It doesn't always have to
@@ -35,7 +43,7 @@ answers each in turn and makes a new summary. It is told that it may drop ideas
 from the previous summary that no longer make sense or work for a cohesive story
 after reviewing the previous answers. This process loops until the Questioner is
 satisfied the world feels complete or some limit is reached. The final "world
-summary" is the product.
+summary" and the world/campaign name is the product.
 
 The looping above is split into the following phases. The questioner is simply
 prompted with these phases, which will flow through to the Storyteller.
@@ -52,7 +60,9 @@ fine grain control over how much thinking is done before the final output is
 accepted. Maybe there's already technologies that could do this more robustly.
 I'd be interested to know.
 
-Some examples of meta-questions and questions are below.
+Some examples of meta-questions and questions are below. Testing the
+initialization loop with a few of these and evaluating would be important. Maybe
+trying to further consolidate too.
 
 - **Meta-questions and seed questions**
   - What makes a good RPG setting?
@@ -64,6 +74,28 @@ Some examples of meta-questions and questions are below.
   - What are some proven storytelling structures?
   - For some of the ideas above, what are some ways to incorporate the rule of three writing principle?
   - What other questions should we answer that would help make this setting and story interesting?
+  - What questions should a designer ask to determine whether a scenario contains meaningful choices?
+  - What questions reveal whether one option dominates all the apparent alternatives?
+  - What questions expose hidden assumptions about the player’s resources, abilities, knowledge, or incentives?
+  - What questions test whether the central conflict arises from genuinely incompatible goals?
+  - What questions help determine whether NPCs are coherent agents rather than scripted obstacles?
+  - What questions should be asked about the information players need to make informed decisions?
+  - What questions reveal whether clues and discoveries create opportunities rather than gate progress?
+  - What questions determine whether the environment meaningfully affects decisions and outcomes?
+  - What questions test whether character abilities and equipment matter without trivializing the whole scenario?
+  - What questions distinguish a meaningful cost from one that is merely nominal or irrelevant?
+  - What questions determine whether different approaches produce genuinely different trade-offs and consequences?
+  - What questions should be asked before resolving an action with a roll or other mechanic?
+  - What questions reveal whether failure changes the situation rather than merely delaying success?
+  - What questions test whether players can improve their position through preparation, knowledge, equipment, or creativity?
+  - What questions help identify decorative, redundant, or disconnected scenario elements?
+  - What questions test whether the scenario remains coherent when players behave unexpectedly?
+  - What questions should be asked from the perspectives of cautious, aggressive, compassionate, and exploitative players?
+  - What questions reveal whether the scenario rewards judgment rather than guessing the designer’s intended solution?
+  - What questions determine whether the scenario is as small and simple as it can be without losing depth?
+  - What questions provide the strongest adversarial review of an open-ended RPG scenario before play?
+  - What questions should a designer ask to uncover categorical flaws in a small, open-ended RPG scenario, especially flaws involving dominant solutions, hidden assumptions, incoherent motivations, irrelevant costs, gated information, weak consequences, and illusory choice?
+
 - **More specific questions**
   - What will the conflict be between the players, their goal and other NPCs?
   - What structure(s) should this story take? E.g. beginning/setup,
@@ -100,8 +132,30 @@ Some examples of meta-questions and questions are below.
   - Which parts of the setting align and aid the player characters?
   - How does each character interact with the world? I.e. in terms of their wants, actions, impact. In a good setting, _everything_ is connected.
   - For some of the ideas above, what are some ways to incorporate the rule of three writing principle?
+  - What does each involved party want, fear, and refuse to sacrifice?
+  - Why can’t everyone’s goals be satisfied immediately?
+  - Would the situation remain interesting if no dice were rolled?
+  - Is any solution clearly safer, cheaper, easier, and more rewarding than all others?
+  - Are supposed costs actually meaningful within the scenario’s timescale?
+  - Does every viable solution require some combination of sacrifice, risk, leverage, discovery, or ingenuity?
+  - Does character creation meaningfully change which approaches are available or attractive?
+  - Are we accidentally assuming every character owns an item that trivializes the problem?
+  - Does a useful ability or item solve one obstacle, or collapse the entire scenario?
+  - Do NPCs respond according to coherent motives, or behave like fixed-price puzzle mechanisms?
+  - Can NPC behavior be predicted reasonably when the player attempts something unexpected?
+  - What information must the player know to make an informed first decision?
+  - Are important opportunities discoverable through ordinary observation and interaction rather than gated behind arbitrary checks?
+  - Does each environmental feature create a decision, opportunity, danger, or source of leverage?
+  - Could any location, object, clue, or NPC be removed without materially changing play?
+  - Before calling for a roll, what concrete negative consequence is the character risking?
+  - Does failure change the situation enough to prevent consequence-free repetition?
+  - Can preparation, positioning, equipment, patience, or negotiation remove the need for a roll?
+  - Do different methods—compassion, deception, force, stealth, compromise—produce meaningfully different consequences?
+  - Can the scenario survive the player ignoring the apparent objective or intended solution?
+  - What would the most cautious, exploitative, compassionate, and violent players each do first?
+  - Is the interesting part deciding what to do, rather than discovering what the designer expects?
 
-## Storyteller output and tools
+## Storyteller initialization output and tools
 
 At some point the storyteller must be able to initialize game state. The world
 summary is one output. It must also create locations, paths between locations
@@ -115,14 +169,182 @@ For each NPCs location and path, the Questioner concept is again executed to add
 detail to each. The Questioner is given the world summary and the seed prompt
 provided by the Storyteller.
 
+## Character creation
+
+When player characters first enter the world, character creation begins
+immediately. The player's agent must guide players through creating a character
+with a rich background but must communicate with the Storyteller agent, which
+has an agenda. The Storyteller's goal is to make the player relevant to the
+world setting, connecting them to events, items, locations and NPCs. It must
+also avoid the same connections as other players. The Storyteller again works
+with the Questioner to promote richer ideas for setting and story integration.
+
+I'm not sure exactly how this interaction will be implemented. We'll have to
+experiment with a few ideas and see which gives the best results. My first idea
+is to have the player's agent ask the Storyteller for three background ideas.
+The storyteller must make three background and "scrub" the story spoiler
+components from them. The player will not see the tool call result directly. The
+player agent then describes the options but gives the player the additional
+option of suggesting changes or even their own idea. The player's agent then
+gives the player's changes/counter idea to the Storyteller, which attempts to
+adapt it to the story, then return a single obfuscated/spoiler-scrubbed result.
+This process continues until the player is happy with the background, at which
+point the player's agent can assign the background and move on.
+
+IIUC most of the Cairn character creation is otherwise well defined.
+
+One future idea is to allow the player to negotiate more powerful abilities or a
+wealthier start, if they accept a penalty or character flaw. The Storyteller
+must approve such a request. Another idea is to allow the Storyteller to suggest
+a blind penalty where the player's request is accepted and the Storyteller
+applies the penalty to the character sheet directly (likely a story/setting
+related background penalty that makes the campaign harder for the character).
+
+# Agents
+
+## Player agents
+
+All players interact with the world purely by chatting with their agent and its
+singular chat history. The agent's job is to help the player succeed in the game
+and above all have fun. The agent can prompt them to explore when they're stuck,
+remind them that they can ask the GM questions to uncover more of their
+perceived environment before acting. Doing so may require active skill checks.
+Perhaps their character knows something of the world's background but without
+asking the player would never know. For example: "has my player heard of this
+place before" would be a question the agent should forward to the Storyteller.
+In turn this may divulge some enriching arbitrary history or provide a useful
+clue. Whichever it is, the Storyteller must record it.
+
+## GM interaction
+
+The GM agent handles tool requests from characters - both NPC agents and player
+agents.
+
+In the simplest form, a player might wants to attack an NPC. The attack tool
+call is very rigid and has a deterministic outcome. The GM arbitrates whether
+this is possible given their current situation. If granted, the GM simply
+approves the request and rust can trivially compute the result.
+
+The GM has the option of applying further environmental or situational
+consequences. For example the attack may be loud and draw the attention of other
+NPCs in the location. In this case in addition to approving the attack, the GM
+has its own tool calls that it can make.
+
+Initially, there will be no absolute positional tracking of characters. The
+Location, its NPCs and Storyteller prompt should imply relative layout that the
+GM can expand on.
+
+A more complicated example might be the player wanting to make an improvised
+action. In this case the GM must decide what can happen, make an appropriate
+dice roll for the result and narrate it. Doing so likely consumes the player's
+action for a turn and could progress time.
+
+The GM agent's role in this project is a little simpler than a real GM as it is
+split between the Storyteller. The GM resolves immediate interactions, whereas
+the storyteller decides longer term interaction.
+
+Possible idea: What if the GM agent was not told which characters are NPC and
+PCs, to make the world perfectly fair.
+
+Who decides how difficult an encounter should be and what control do they have
+over adjusting it?
+
+Thoughts: In a real RPG it'd be the GM. In this case it might be more of the
+storyteller's job. The players may also need to be told how difficult an
+encounter might look. There should be some encounters that are very easy and
+some that are impossibly hard - that players must be able to recognise and
+avoid. The number of enemies is the simplest control, but this should be set by
+the Storyteller. The equipment, weapons and skills of enemies can be set at
+their time of first use or when players first see them (quantum dynamics style,
+as long as they are constrained to be consistent with player observations so
+far). This may need some playtesting.
+
 ## Dynamic Storyteller
 
-This is an idea for the future. Not the initial version.
+These are currently ideas for the future. Not the initial version.
 
 New NPCs can enter the story, perhaps as some exit or die. Locations can be
 added, new paths can be found or some paths can be removed (e.g. a fallen
 bridge). These are initiated by a structured GM tool call, and succeed when a
 dice roll meets a GM-provided success threshold.
+
+The storyteller may implant ideas in NPC chats or append to their
+background/description. E.g. NPCs may need to react to player interaction or
+other NPCs in more complex ways to make the story interesting. This can happen
+organically with individual NPCs progressing their own chat history. However,
+the Storyteller has opportunity as it is aware of the broader context and can
+make decisions to make the setting and plot more interesting and fun for the
+players. For example, the Storyteller may notice PCs preferring certain kinds of
+play style and can increase the frequency and richness of the world in just that
+area for them. NPCs going off the rails may also need Storyteller guidance to be
+put back on track.
+
+## Agent syntax and tool calls
+
+Agent loop:
+- Send conversation, instructions, and tool definitions to the LLM.
+- The LLM returns either ordinary text or one or more structured tool calls.
+- Application validates and executes those calls.
+- Append the tool results to the conversation.
+- Run the LLM again.
+- Repeat until it produces a final response.
+
+Agents can call other agents. Each agent has its own separate context. In most
+cases agents have their own chat history that follow the same chat compaction
+rules as all others.
+
+Agent calls can be recursive. E.g. the GM may be asked to approve some action
+but in turn it may need to verify with the Storyteller, receive the response and
+then return the approval result.
+
+Recursion must be a tree. It is an error for an agent to call another already in
+its stack. Errors must propagate all the way to the top. Silent failures and
+default values are strictly forbidden. This goes for production too! If
+something fails the end user gets the full error stack complete with context and
+details of what happened so they can report it. Errors should encapsulate the
+context of their stack as they propagate so everything is trivially traceable.
+
+## Chat compaction
+
+LLM context is limited. When the total chat history token count is greater than
+some threshold, a portion of the chat history must be summarized/compacted:
+
+- Before: [summary_0, chat_0, ..., chat_n, chat_n+1, ..., chat_n+k]
+- After: [summary_1, chat_n+1, ..., chat_n+k]
+
+Where the number of raw chat messages in front of the summary (k) must not
+exceed some character count threshold. The ideas being:
+
+- Compaction is expensive, so do it infrequently
+- Keep some raw chat history after the summary as this is likely more important to keep accurate
+
+This must be done with care so that the summary only summarises the portion of
+chats that are compacted (chat_0 through chat_n).
+
+## Notes editing tools
+
+Much like coding agents editing a file, notes may get bigger than LLMs can be
+expected to reproduce faithfully.
+
+Test options and pick one or a combination that works best:
+
+- Provide line range replacement
+- Provide paragraph index replacement (risky as the index could trivially be wrong)
+- Add a review stage, where the model gets to look at the result, or maybe some
+  small context around the replaced region for verification and can undo it.
+- Store notes as key/value pairs and the whole value can be overwritten.
+  Actually this sounds pretty solid.
+
+What happens when notes get too big for context? Providing a list of note names
+and a query tool relies on agents knowing to query the name and they might miss
+things. Something to explore.
+
+## Consistency Checks
+
+Unproven future idea to test: would it be useful to regularly inject a question
+to the Storyteller (and maybe the GM too?) asking if all game objects are
+consistent with the story. Asking small models this sounds risky, especially
+asking them to make changes.
 
 # Game state
 
@@ -139,9 +361,22 @@ Game objects
 - Paths
   - Connecting location references {A, B}
   - Normal travel time
-  - Description of what is along the path in the order from location A to B
+  - Description of what is along the path in the order from location A to B, whether it is blocked and what would be needed to pass.
 - World state
   - Time
+  - Initial prompt (just for record; unused except for initialization input)
+  - Storyteller summary
+
+All game objects, including the World, will have a GM notes string for short
+term dynamic state. The GM will be encouraged to edit these frequently to track
+where characters are, whether there are applied conditions or rules it should
+follow. This becomes state fed into the GM prompt separately from its chat
+history.
+
+Similarly, all game objects, including the World, will have Storyteller notes.
+Most importantly, this allows the world to evolve. E.g. a player asks a question
+which is yet to have an answer. The Storyteller creates an answer and records it
+so that it stays consistent as the game progresses.
 
 ## Turns and time
 
@@ -169,42 +404,27 @@ do in the meantime and waiting could be a perfectly valid response. This
 probably means every PC has their own time variable as state, which then
 advances up to the global world time through actions or waiting.
 
-## GM interaction
-
-Possible idea: What if the GM agent was not told which characters are NPC and PCs, to make the world perfectly fair.
-
 ## Spell ideas
+
+In addition to the Cairn rules, the following spells would be uniquely useful
+given the technology of this game. However, given their utility and power they
+should be later game, volatile or difficult to cast.
+
 - **Read mind** is a tool call that gives the NPC's internal chat history as context to an LLM that produces a stylized summary. NPCs could even cast this on PCs!
 - **Command** can inject a thought directly into the chat of an NPC or PC. Players get to type this directly. If cast on a player it replaces their turn with the injected text.
 - **Erase mind** can delete one or more chat entries from an NPC, depending on dice roll success magnitude.
 
 ## Chat scheduling and priority for GM and NPC agents
 
-# Agents
-
-## Chat compaction
-
-LLM context is limited. When the total chat history token count is greater than
-some threshold, a portion of the chat history must be summarized/compacted:
-
-- Before: [summary_0, chat_0, ..., chat_n, chat_n+1, ..., chat_n+k]
-- After: [summary_1, chat_n+1, ..., chat_n+k]
-
-Where the number of raw chat messages in front of the summary (k) must not
-exceed some character count threshold. The ideas being:
-
-- Compaction is expensive, so do it infrequently
-- Keep some raw chat history after the summary as this is likely more important to keep accurate
-
-This must be done with care so that the summary only summarises the portion of
-chats that are compacted (chat_0 through chat_n).
-
 # Tech stack
 
 - Rust
 - mistral.rs GPU Inference, maybe with with Sao10K/L3-8B-Stheno-v3.3-32K Q4_K_M
 - Axum
+- Tokio?
+- sqlite
 - Cairn SRD second edition ruleset
+- RMCP
 
 # UI
 
@@ -218,11 +438,55 @@ After logging in in with OAuth2, e.g. a google account they see more. We only al
 
 ## World detail page
 
-Each world is a game instance. When users create a world it's a new playable game setting. When they do they can optionally provide a seed prompt that is fed to the Storyteller agent for world initialization.
+Each world is a game instance. When users create a world it's a new playable game setting. When they do they can optionally provide a seed prompt that is fed to the Storyteller agent for world initialization. This prompt is hidden but can be expanded.
 
-Clicking on a world from the main page goes to a world detail page. Players can change their character name for that world, click a Join button to enter the world. The player that owns the world can create special invitation links so their friends can also join the world. There is no email invite; only a unique link to the world. Friends must log in and click a Join button to accept the invitation, after which they are redirected to the world detail page. Players may optionally specify a limit for how many friends may use that link to join the world. For the owner, the world's detail page lists the links with remaining slots left. All players can see the names of all other players who have joined the world and their character names.
+The world/campaign is given a name after initialization. Below it is a world
+status of in-progress or complete. Below that is a recap for the current player.
+The recap is written by the player's agent after the player logs out and does
+not return for 60 seconds. It does not persist in the player agent's chat
+history; it's only for the world recap.
 
-There is a button to enable developer mode for a world. This mode cannot be disabled and becomes immediately visible to all players once enabled. A big warning modal must be accepted before changing to developer mode, noting that it enables complete visibility into internal game state and is effectively cheating. Developer mode enables complete inspection of chat logs from all agents - the Storyteller, GM and NPCs.
+If the world is complete it will have a short epilogue, describing what each
+player ends up doing. This will be written by the Storyteller. TODO: detail how
+this works. It should involve player agents briefly asking players what they'd
+like to do next. Future idea: have the Storyteller write and maintain a complete
+high level story of what plays out so the whole campaign is recorded and
+presented at the end. This would be the perfect input prompt for an epilogue.
+
+Clicking on a world from the main page goes to a world detail page. The player
+that owns the world can create special invitation links so their friends can
+also join the world. There is no email invite; only a unique link to the world.
+Friends must log in and click a Join button to accept the invitation, after
+which they are redirected to the world detail page. Players may optionally
+specify a limit for how many friends may use that link to join the world. For
+the owner, the world's detail page lists the links with remaining slots left.
+Links can be deleted at any time. All players can see the names of all other
+players who have joined the world. This is a tree view and under each player are
+their list of characters.
+
+Next to each player is a shortcut Join button to enter the world with that
+character.
+
+When a player joins a world they are automatically given a new character, with a
+placeholder name "Adventurer". The stats are undefined until they enter the game
+with that character, at which point the player's agent will guide them through
+character creation, with the help of the Storyteller, asking them to name it at
+the end.
+
+There is no character detail page. Instead, characters would ask their agent to
+describe it.
+
+Dead players will be marked with an icon. They can even still join the world,
+after which they may either wait for their companions to revive them or ask
+their agent for a new blank Adventurer character, which must be approved by the
+Storyteller.
+
+There is a button to enable developer mode for a world. This mode cannot be
+disabled and becomes immediately visible to all players once enabled. A big
+warning modal must be accepted before changing to developer mode, noting that it
+enables complete visibility into internal game state and is effectively
+cheating. Developer mode enables complete inspection of chat logs from all
+agents - the Storyteller, GM and NPCs.
 
 ## World game page
 
@@ -239,3 +503,75 @@ least one player joins and then narration happens for the transition to the new
 state after one more minute. At any time, players can ask in chat "who else in
 my party is here?" and their agent can respond with the appropriate tool call to
 check.
+
+**Polish ideas**
+
+Ideas for the future, after the basics are implemented.
+
+- For actions/saves the player rolls for, we could have a dice modal popup with
+  a rolling animation and result. If players want to roll their own dice, the
+  world owner could allow all players to enter their results (depending on their
+  judgement of their friends' honesty).
+
+# Debugging and Telemetry
+
+All games must be recorded in full. Data from old playthroughs can be useful in
+future testing. Real chats can be used as example data for validation. We can
+see if similar issues have happened before or even track when certain
+patterns/regressions started appearing. We should record the entire LLM chat
+history, summaries included, but in a way where we can reconstruct the identical
+input and output. Since compaction produces summaries covering a known range, we
+simply record the range of summaries and the raw chat index after which the
+summary was used as input instead of the previous history. Given an LLM
+inference result/chat output we need code to query and provide the input. We
+then have unit tests to verify the record has been made correctly. These chats
+will eventually become large. We will need a way to extract and archive them by
+date or age so we don't lose everything when we reclaim disk space. Archiving
+with compression should be efficient.
+
+I have a hunch that sifting through logs for cases where the chat output worked
+particularly well will eventually allow us to fine tune LLM models to produce
+better output.
+
+I expect the most difficult part of this project will be managing LLM context
+size and generation performance. We must track input and output token counts and
+processing time for every inference operation. The cumulative values for strings
+of operations must also be available. For example, the player tells their agent
+they want to attack an NPC. Their agent makes a tool call. The GM must approve
+it. The result must also be narrated by the GM and perhaps side effects happen.
+Every step adds up, which takes time. If we make a mistake and context size
+blows up for one of the agents we need to know.
+
+## Developer Mode
+
+Developer mode should split the main view into two columns. The regular chat on
+the left and all world objects, descriptions, agents, chat histories navigatable
+and displayed on the right. This should be available to all players. Again,
+developer mode is a one-way operation. For real games, players should not see
+this data as it is meta-gaming and would ruin the experience.
+
+## Live Coding Agent Interaction with MCP
+
+The game data must be trivially accessible to coding agents working on the
+project. Moreover, agents may want to test features and repro bugs quickly
+without writing temporary scripts. MCP that claude+codex could talk to directly
+may speed up development and I imagine could reuse the exact same LLM tool
+interfaces that game agents use.
+
+# An initial proof of concept
+
+Before jumping into the deep end, we should implement a minimal version of this
+game, text and explore. This will hopefully reveal directions that work and
+don't work early on.
+
+The smallest setup I can think of skips the Storyteller initialization and hard
+codes the setting, NPC(s), location(s) etc. Then we can jump straight to testing
+basic game mechanics, interaction with agents and the GM.
+
+A simple example was generated by GPT: [Bread Thief](scenarios/bread_thief.md).
+This can serve as a base for hard coding initial game objects and GM input
+prompts. Being able to save and load the world to json would be great for this.
+E.g. a CLI utility to manipulate the database - DRY/using project code of
+course. Then we could check in a playable scenario to git to initialize a world
+with. Maybe even for automated testing, ideally where we can assert tool calls
+are made in rust, but maybe also where an LLM evaluates agent output.

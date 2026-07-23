@@ -5,6 +5,11 @@ critical. Prompts, tool descriptions and context packets all consume model
 attention, which is very valuable and limited. Every addition has a cost; make
 sure it earns its place.
 
+In most cases, a failed LLM result can be solved with relatively subtle changes.
+The first thing to look for is subtle or implied contradictions, rules, actions,
+conclusions etc. Investigation must begin with a review of the LLM's context at
+the time it produced inappropriate output.
+
 If you do add anything it had better maintain strong importance consistency next
 to existing context. I.e. no pointless or distracting fluff. LLM models operate
 best with generic instruction. Avoid anything that smells of specific conditions
