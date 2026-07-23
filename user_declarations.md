@@ -200,30 +200,74 @@ a blind penalty where the player's request is accepted and the Storyteller
 applies the penalty to the character sheet directly (likely a story/setting
 related background penalty that makes the campaign harder for the character).
 
+## End Conditions
+
+The campaign completes when the storyteller says the players won or when all
+players are dead.
+
+The storyteller must run periodically so it can check for the win condition.
+This should happen when any relevant information may change. I tentatively think
+this should be a tool call from the GM. E.g. when combat ends because the
+players defeated the villain, or when the players return an item to someone or
+finish a conversation. This may require the GM to see a Storyteller note on an
+NPC or Location about whatever it is that's the win condition.
+
 # Agents
+
+An agent is just chat history. We will make an effort to compact it, which is
+important because there will be many. I.e. every NPC. We likely want to page out
+inactive NPC agent chats to disk to avoid memory pressure.
 
 ## Player agents
 
 All players interact with the world purely by chatting with their agent and its
 singular chat history. The agent's job is to help the player succeed in the game
 and above all have fun. The agent can prompt them to explore when they're stuck,
-remind them that they can ask the GM questions to uncover more of their
-perceived environment before acting. Doing so may require active skill checks.
-Perhaps their character knows something of the world's background but without
-asking the player would never know. For example: "has my player heard of this
-place before" would be a question the agent should forward to the Storyteller.
-In turn this may divulge some enriching arbitrary history or provide a useful
-clue. Whichever it is, the Storyteller must record it.
+remind them that they can ask the GM or Storyteller questions to uncover more of
+their perceived environment before acting. Doing so may require active skill
+checks. For example, the player might ask "can I see any signs of a secret
+compartment?" which is more of a local environment question that the agent
+should forward to the GM. The GM would then answer it and make sure it is
+recorded appropriately in the location notes. Perhaps their character knows
+something of a building's history but without asking the player would never
+know. For example: "has my player heard of this place before" would be a
+question the agent should forward to the Storyteller. In turn this may divulge
+some enriching arbitrary history or provide a useful clue. Whichever it is, the
+Storyteller must record it.
+
+Again, I like the idea that the agent is a friendly entity to the player, both
+helping tell the story but also on the player's side and trying to help. Much
+like the GM in a real RPG, but in this case with separate context to improve LLM
+performance, balance and fairness.
+
+When a player dies they stop being able to interact with the world. They must
+either request a new character (the player agent can make a tool call to create
+one, that will require confirmation) or the must wait for other PCs to find a
+way to revive them, if that's even possible in the Storyteller's world.
 
 ## GM interaction
 
 The GM agent handles tool requests from characters - both NPC agents and player
 agents.
 
-In the simplest form, a player might wants to attack an NPC. The attack tool
-call is very rigid and has a deterministic outcome. The GM arbitrates whether
-this is possible given their current situation. If granted, the GM simply
-approves the request and rust can trivially compute the result.
+Single GM vs multiple? If we had one, or rather a single chat history for it,
+this might cause contextual confusion if many players travel to separate
+locations. So far the GM seems to resolve local interaction, which by name is at
+a location. So we will technically have multiple GMs. The text here may refer to
+one, but it's always implied to be the one for the character's location. The GM
+manages sub-location dynamic state and arbitrates character interaction as per
+the game rules. Easy to change later too.
+
+In the simplest form, a player might wants to attack an NPC. The basic attack
+tool call is very rigid and has a deterministic outcome. The GM arbitrates
+whether this is possible given their current situation. If granted as-is, the GM
+simply approves the request and rust can trivially compute the result. The GM
+result for a requested attack should include an optional difficulty or
+situational modifier to allow granting but with modification. If not granted,
+the GM returns a text explanation for why it's not possible, not so simple and
+may describe extenuating circumstances that change how this action should
+happen. The GM should suggest alternatives the player has at their disposal. The
+player's agent then relays this, but may also suggest further ideas as above.
 
 The GM has the option of applying further environmental or situational
 consequences. For example the attack may be loud and draw the attention of other
@@ -244,7 +288,11 @@ split between the Storyteller. The GM resolves immediate interactions, whereas
 the storyteller decides longer term interaction.
 
 Possible idea: What if the GM agent was not told which characters are NPC and
-PCs, to make the world perfectly fair.
+PCs, to make the world interaction more realistic and appear fair. For example,
+ChatGPT generally allows the player to do anything they want and rarely enforces
+restrictions. In practice the Storyteller makes the game fun, so the world isn't
+necessarily fair, but local interactions (which the GM handles) must remain
+consistent for a more immersive experience.
 
 Who decides how difficult an encounter should be and what control do they have
 over adjusting it?
@@ -366,6 +414,9 @@ Game objects
   - Time
   - Initial prompt (just for record; unused except for initialization input)
   - Storyteller summary
+- Items
+  - Description
+  - Relevant stats, if weapons/armor etc. (type safe/structured)
 
 All game objects, including the World, will have a GM notes string for short
 term dynamic state. The GM will be encouraged to edit these frequently to track
@@ -378,11 +429,35 @@ Most importantly, this allows the world to evolve. E.g. a player asks a question
 which is yet to have an answer. The Storyteller creates an answer and records it
 so that it stays consistent as the game progresses.
 
+The GM may see the Storyteller's notes on directly relevant objects, but cannot
+edit them. It is up to the GM to maintain consistency with whatever the
+Storyteller decrees. The Storyteller should not see the GM's notes or it would
+be overloaded with unnecessary detail.
+
 ## Turns and time
 
-With many PC actions, the GM is asked how much time has progressed. The GM may
+With many PC actions, the GM returns how much time has progressed. The GM may
 decide since the players were only chatting, not much time has passed. Rust
 keeps track of this in the world state, but this is not shown in the UI.
+
+For a strict time system, every character (NPC and PC) would have a current
+time. Any character action would advance their current time. The world time
+advances to the maximum of all character times. Then all characters take turns
+to catch up in order of their current time (resolving ties with the combat DEX
+save if there is combat). However, it may be inconvenient to process time for
+all NPCs at the same granularity. I'd lean towards first saying any combat at a
+location must finish first. Next that NPCs in other locations may only act when
+whole hours pass.
+
+An easy multiplayer solution: players would have a greyed out send button in
+their chat until they can take a turn. Making actions out of order when out of
+combat is probably fine as long as they don't get too far ahead (e.g. when doing
+something for an hour they should not be allowed more actions until other
+players have decided what they will do). They may pre-type what they want to do
+though. A more complex one would allow asking GM and Storyteller questions. This
+may trigger note updates (see the quatum resolution) out of order mid-combat,
+but that's probably OK. Not sure how to handle the UI there though because the
+chat may or may not be a question. Something to decide on later.
 
 When time advances, main NPCs in other locations may get a chance to take
 actions, chat, organise and plot with other NPCs. While rare, this could allow
@@ -390,19 +465,25 @@ NPCs to suddenly enter a location or an encounter along a path between locations
 while players are there.
 
 If the time of day changes such as sunrise/sunset/darkness, the GM should
-narrate this to the player in the next chat response. This in turn may affect
-the difficulty the GM decides perception checks should be.
+narrate this to the player in the next chat response. Narration is an optional
+tool call the GM can make, which queues up the message, is played back
+immediately visibly to the player and the player agent can see this (in the same
+chat) before the tool call result is displayed to it. Time of day may in turn
+affect the difficulty the GM decides some actions such as perception checks
+should be.
 
 We need to design the game rules so the GM can have all PCs complete their turns
 up to the advanced time, with allowed room for error. During combat this would
 be strictly turn by turn and time advancement could probably be ignored
-entirely. When one player does something for a few hours, another player may get
-many turns to do something while they wait, e.g. have a conversation with some
-NPC in the same city/town. They shouldn't be forced to do actions until the time
-adds up perfectly. I guess the GM could effectively just ask what they want to
-do in the meantime and waiting could be a perfectly valid response. This
-probably means every PC has their own time variable as state, which then
-advances up to the global world time through actions or waiting.
+entirely.
+
+When one player does something for a few hours, another player may get many
+turns to do something while they wait, e.g. have a conversation with some NPC in
+the same city/town. They shouldn't be forced to do actions until the time adds
+up perfectly. I guess the GM could effectively just ask what they want to do in
+the meantime and waiting could be a perfectly valid response. This probably
+means every PC has their own time variable as state, which then advances up to
+the global world time through actions or waiting.
 
 ## Spell ideas
 
@@ -438,7 +519,12 @@ After logging in in with OAuth2, e.g. a google account they see more. We only al
 
 ## World detail page
 
-Each world is a game instance. When users create a world it's a new playable game setting. When they do they can optionally provide a seed prompt that is fed to the Storyteller agent for world initialization. This prompt is hidden but can be expanded.
+Each world is a game instance. When users create a world it's a new playable
+game setting. When they do they can optionally provide a seed prompt that is fed
+to the Storyteller agent for world initialization. This prompt is hidden by
+default but can be expanded.
+
+There is no enforced limit on the number of worlds that can be created.
 
 The world/campaign is given a name after initialization. Below it is a world
 status of in-progress or complete. Below that is a recap for the current player.
@@ -460,9 +546,13 @@ Friends must log in and click a Join button to accept the invitation, after
 which they are redirected to the world detail page. Players may optionally
 specify a limit for how many friends may use that link to join the world. For
 the owner, the world's detail page lists the links with remaining slots left.
-Links can be deleted at any time. All players can see the names of all other
-players who have joined the world. This is a tree view and under each player are
-their list of characters.
+Links can be deleted at any time, revoking their use if accidentally posted
+publicly. Links just allow players to join; there is no relation once joined.
+All players can see the names of all other players who have joined the world.
+This is a tree view and under each player are their list of characters. The
+world creator can remove joined users. Their association and characters remain
+but until they get another link to join they will be unable to access that
+world.
 
 Next to each player is a shortcut Join button to enter the world with that
 character.
@@ -520,14 +610,15 @@ future testing. Real chats can be used as example data for validation. We can
 see if similar issues have happened before or even track when certain
 patterns/regressions started appearing. We should record the entire LLM chat
 history, summaries included, but in a way where we can reconstruct the identical
-input and output. Since compaction produces summaries covering a known range, we
-simply record the range of summaries and the raw chat index after which the
-summary was used as input instead of the previous history. Given an LLM
-inference result/chat output we need code to query and provide the input. We
-then have unit tests to verify the record has been made correctly. These chats
-will eventually become large. We will need a way to extract and archive them by
-date or age so we don't lose everything when we reclaim disk space. Archiving
-with compression should be efficient.
+input and output. This includes tool calls implicitly since they are all json.
+Since compaction produces summaries covering a known range, we simply record the
+range of summaries and the raw chat index after which the summary was used as
+input instead of the previous history. Given an LLM inference result/chat output
+we need code to query and provide the input. We then have unit tests to verify
+the record has been made correctly. These chats will eventually become large. We
+will need a way to extract and archive them by date or age so we don't lose
+everything when we reclaim disk space. Archiving with compression should be
+efficient.
 
 I have a hunch that sifting through logs for cases where the chat output worked
 particularly well will eventually allow us to fine tune LLM models to produce
