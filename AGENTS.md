@@ -62,9 +62,14 @@ be, how it should work and any implementation requirements.
 
 It is forbidden for any agent to edit it, even if it's implied it's ok.
 
-Agents can absolutely draw the user's attention to it, suggest additions,
+Coding agents can absolutely draw the user's attention to it, suggest additions,
 updates, corrections or point out contradictions or issues. Notify the user
 about contradictions immediately.
+
+Coding agents may need to make decisions that aren't implied by
+user_declarations.md. In this case agents should suggest updates and
+clarification be made to that document so that project design declarations
+always flow from the top down.
 
 ## user_exerpts.md
 

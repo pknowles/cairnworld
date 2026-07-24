@@ -231,9 +231,9 @@ should forward to the GM. The GM would then answer it and make sure it is
 recorded appropriately in the location notes. Perhaps their character knows
 something of a building's history but without asking the player would never
 know. For example: "has my player heard of this place before" would be a
-question the agent should forward to the Storyteller. In turn this may divulge
-some enriching arbitrary history or provide a useful clue. Whichever it is, the
-Storyteller must record it.
+question only the Storyteller can answer. The GM must recognise this and defer
+to the Storyteller. In turn this may divulge some enriching arbitrary history or
+provide a useful clue. Whichever it is, the Storyteller must record it.
 
 Again, I like the idea that the agent is a friendly entity to the player, both
 helping tell the story but also on the player's side and trying to help. Much
@@ -245,7 +245,19 @@ either request a new character (the player agent can make a tool call to create
 one, that will require confirmation) or the must wait for other PCs to find a
 way to revive them, if that's even possible in the Storyteller's world.
 
+Each player chats with their own agents, but some messages, such as GM narration
+at a location would be queued and visible to all players at that location. This
+way, a player may attack an enemy. The GM may queue the narration of it while
+returning the approval. All other players get to see the result of the action
+made by the player.
+
 ## GM interaction
+
+When players begin play they should have an initialized location reference and
+description of where they are within the location. The GM immediately greets
+them by narrating the scene, their surroundings and any plot-relevant details
+related to things they can see or are arriving at. E.g. "you enter/arrive
+at/pass the gates of ..." and "somewhere in this city is probably ...".
 
 The GM agent handles tool requests from characters - both NPC agents and player
 agents.
@@ -256,32 +268,57 @@ locations. So far the GM seems to resolve local interaction, which by name is at
 a location. So we will technically have multiple GMs. The text here may refer to
 one, but it's always implied to be the one for the character's location. The GM
 manages sub-location dynamic state and arbitrates character interaction as per
-the game rules. Easy to change later too.
+the game rules. One possible pitfall is when characters move from one location
+to another, the GM in the new location would not have their recent context.
+Given the GM should provide the Storyteller with frequent encounter summaries,
+this may not be a problem - i.e. the new location's GM still has enough context
+to do its job. Easy to change later too.
 
-In the simplest form, a player might wants to attack an NPC. The basic attack
-tool call is very rigid and has a deterministic outcome. The GM arbitrates
-whether this is possible given their current situation. If granted as-is, the GM
-simply approves the request and rust can trivially compute the result. The GM
-result for a requested attack should include an optional difficulty or
-situational modifier to allow granting but with modification. If not granted,
-the GM returns a text explanation for why it's not possible, not so simple and
-may describe extenuating circumstances that change how this action should
-happen. The GM should suggest alternatives the player has at their disposal. The
-player's agent then relays this, but may also suggest further ideas as above.
+The following are a few examples that should serve to define the interface. In
+the simplest form, a player might wants to attack an NPC. They say that to their
+agent. The agent issues the tool call. The basic attack tool call is very rigid
+and has a deterministic outcome, but first it must be granted. The GM receives
+the tool call with a new global action ID (just nextId++ set on the request by
+rust) and arbitrates whether this is possible given their current situation. If
+granted as-is, the GM simply makes an approve-action call with the ID. Using an
+ID allows forwarding the tool call data and reduces LLM responsibility to copy
+it correctly. The arguments should be visible though, e.g. maybe the character
+has an injury preventing them using a two handed weapon and the GM needs to see
+all arguments to be able to reject the request. Rust can trivially verify the ID
+matches, compute the dice roll and the result, which is broadcast to players'
+chats in the current location. The approve-action call may include an optional
+difficulty or situational modifier that the GM deems appropriate, even adding,
+subtracting or limiting possible damage. The GM will see the result of the tool
+call and should issue a narration of the result, which is also broadcast to
+local player chats. If the GM does not grant the request it does not narrate
+anything and instead returns a text explanation for why it's not possible, not
+so simple, or may describe extenuating circumstances that change how this action
+should happen. The GM may suggest alternatives the player has at their disposal.
+The player's agent would then inform and help the player understand and might
+suggest a additional alternatives of its own. If the action was approved, the
+agent should already see both the dice roll result, the GM's narration and the
+success return value of the tool call and probably doesn't need to say anything
+more to the player - its output can be empty.
 
-The GM has the option of applying further environmental or situational
-consequences. For example the attack may be loud and draw the attention of other
-NPCs in the location. In this case in addition to approving the attack, the GM
-has its own tool calls that it can make.
+Since the GM sees the tool result it has option of applying further
+environmental or situational consequences with additional tool calls at its
+disposal. For example the attack may be loud and draw the attention of other
+NPCs in the location. Maybe the attacked character drops their burning torch
+onto flammable ground. Maybe other NPCs must make saves to avoid being forced to
+flee. All just examples.
 
-Initially, there will be no absolute positional tracking of characters. The
-Location, its NPCs and Storyteller prompt should imply relative layout that the
-GM can expand on.
+Currently I have no play for absolute positional tracking of characters. The
+Location, its NPCs and Storyteller prompt should imply relative layout defined
+by the GM's game object notes. I expect the game mechanics should simply avoid
+needing such state. Area-of-effect abilities are a possible future concern
+though.
 
-A more complicated example might be the player wanting to make an improvised
-action. In this case the GM must decide what can happen, make an appropriate
-dice roll for the result and narrate it. Doing so likely consumes the player's
-action for a turn and could progress time.
+A more complicated GM interaction example might be the player wanting to make an
+improvised action. In this case the GM must decide what can happen and make an
+appropriate dice roll based on a difficulty assessment, then apply effects using
+tool calls and finally narrate it. Doing so likely consumes the player's action
+for a turn and could progress time. I expect gameplay testing to uncover the
+required GM tool calls for this over time.
 
 The GM agent's role in this project is a little simpler than a real GM as it is
 split between the Storyteller. The GM resolves immediate interactions, whereas
@@ -305,7 +342,12 @@ avoid. The number of enemies is the simplest control, but this should be set by
 the Storyteller. The equipment, weapons and skills of enemies can be set at
 their time of first use or when players first see them (quantum dynamics style,
 as long as they are constrained to be consistent with player observations so
-far). This may need some playtesting.
+far). I'm kinda leaning towards a collaboration: the GM knows when an encounter
+might begin and should make a Storyteller tool call to get some guidance. The
+Storyteller may in turn create NPCs for the GM and then the GM would adjust
+their attributes/equipment/behaviour "as needed" (a common RPG phrase) based on
+the Storyteller's instructions for the encounter. The GM may then narrate the
+look/difficulty. This may need some playtesting.
 
 ## Dynamic Storyteller
 
@@ -341,6 +383,10 @@ Agents can call other agents. Each agent has its own separate context. In most
 cases agents have their own chat history that follow the same chat compaction
 rules as all others.
 
+In some cases action IDs are used to refer to and forward requests. This reduced
+LLM responsibility forwarding arguments, allows for validation and also avoids
+hidden/implicit state of "the most recent request" for example.
+
 Agent calls can be recursive. E.g. the GM may be asked to approve some action
 but in turn it may need to verify with the Storyteller, receive the response and
 then return the approval result.
@@ -367,7 +413,15 @@ exceed some character count threshold. The ideas being:
 - Keep some raw chat history after the summary as this is likely more important to keep accurate
 
 This must be done with care so that the summary only summarises the portion of
-chats that are compacted (chat_0 through chat_n).
+chats that are compacted (chat_0 through chat_n). I.e. for the compaction
+operation, the LLM should not see newer chats than those being compacted.
+Another way of thinking of this is that its history is temporarily truncated
+while it produces the summary, then the raw chats since are added back. When
+compaction happens, the agent itself is given a prompt directing/describing what
+to summarise. It needs to know what information will always be static and up to
+date, what will be lost and most importantly which information is important to
+keep. Many interactions in the chat are temporary and would not need recording,
+but some are not. This will likely need gameplay testing to optimize.
 
 ## Notes editing tools
 
@@ -398,9 +452,16 @@ asking them to make changes.
 
 Game objects
 - Player characters
+  - Name and ID - the ID is generated from the name and used by agents in tool
+    calls to uniquely identify the character
+  - Moved and Acted booleans for combat actions
   - Time
   - Location - both a reference to the location object and a string description within it
+  - Character sheet info, including background
 - Non-player characters
+  - Name and ID - the ID is generated from the name and used by agents in tool
+    calls to uniquely identify the character
+  - Moved and Acted booleans for combat actions
   - Description: background, motive, ambition, how they fit into the world,
     implies how they should act
 - Locations
@@ -414,9 +475,21 @@ Game objects
   - Time
   - Initial prompt (just for record; unused except for initialization input)
   - Storyteller summary
-- Items
+  - Next action ID
+- ItemType
   - Description
   - Relevant stats, if weapons/armor etc. (type safe/structured)
+- SpellType
+  - Description
+  - Relevant stats (type safe/structured)
+
+There could be an Item object with a Location|Character reference, and/or a
+fixed player inventory. Probably the former, since it'd be stored in the
+database, keeping the player inventory as an implicit query and making sure any
+modifications are implicitly validated to maintain inventory type/limit
+constraints appropriately.
+
+Rust union may be beneficial for handling/processing items.
 
 All game objects, including the World, will have a GM notes string for short
 term dynamic state. The GM will be encouraged to edit these frequently to track
@@ -429,10 +502,13 @@ Most importantly, this allows the world to evolve. E.g. a player asks a question
 which is yet to have an answer. The Storyteller creates an answer and records it
 so that it stays consistent as the game progresses.
 
-The GM may see the Storyteller's notes on directly relevant objects, but cannot
+The GM may see the Storyteller's notes on objects at the location/path, but cannot
 edit them. It is up to the GM to maintain consistency with whatever the
 Storyteller decrees. The Storyteller should not see the GM's notes or it would
 be overloaded with unnecessary detail.
+
+TODO: a path is just another location. Could consolidate or union them. Using a
+separate name would probably help LLMs understand the difference.
 
 ## Turns and time
 
@@ -447,7 +523,9 @@ to catch up in order of their current time (resolving ties with the combat DEX
 save if there is combat). However, it may be inconvenient to process time for
 all NPCs at the same granularity. I'd lean towards first saying any combat at a
 location must finish first. Next that NPCs in other locations may only act when
-whole hours pass.
+whole hours pass. I.e. the game and implementation may be better if we do not
+follow strict time ordering, but we can be close to it with rigid rules. To
+clarify, rust code will define when players are allowed to act, not the GM.
 
 An easy multiplayer solution: players would have a greyed out send button in
 their chat until they can take a turn. Making actions out of order when out of
@@ -455,9 +533,10 @@ combat is probably fine as long as they don't get too far ahead (e.g. when doing
 something for an hour they should not be allowed more actions until other
 players have decided what they will do). They may pre-type what they want to do
 though. A more complex one would allow asking GM and Storyteller questions. This
-may trigger note updates (see the quatum resolution) out of order mid-combat,
-but that's probably OK. Not sure how to handle the UI there though because the
-chat may or may not be a question. Something to decide on later.
+may trigger note updates, quantum resolution style out of order mid-combat.
+That's probably OK because the duality collapse just happens earlier than later.
+Not sure how to handle the UI there though because the chat may or may not be a
+question. Something to decide on later.
 
 When time advances, main NPCs in other locations may get a chance to take
 actions, chat, organise and plot with other NPCs. While rare, this could allow
@@ -485,6 +564,146 @@ the meantime and waiting could be a perfectly valid response. This probably
 means every PC has their own time variable as state, which then advances up to
 the global world time through actions or waiting.
 
+# Tool calls
+
+Many tool calls will have a short description that the player agent sees. When
+used, the GM is provided with an extended version from the rulebook. This
+prevents the GM's context from being overloaded with the entire rulebook text
+for all actions. For example, when a player attacks the GM will receive the
+weapon description and relevant rules from the rulebook to resolve the
+interaction. The same idea can apply to tool results, where additional context
+and rules are provided on a need-to-know basis.
+
+Many tool calls imply a roll will be made. Rolls are made by rust code, not
+LLMs! When implemented PC rolls will be made in the UI by players clicking a
+"roll" button - this is purely theatrical.
+
+## Character actions
+
+- Move - the character describes going to a new position in the current
+  location. This can be during or out of combat. If out of combat, the GM
+  narrates how far the character gets if not all the way, anything they see
+  along the way if applicable and the scene once they arrive. If in combat,
+  follow the move rules of combat.
+- Travel - like move, but takes the argument of a Path (if the character is at a
+  location) or Location (if the character is on a path). The GM either narrates
+  how far the character gets from their current position to the connection in
+  the current location/path if not all the way (this is a rejected action), or
+  verifies the character can move to the beginning of the path and narrates them
+  beginning travel (action accepted). Rust then moves the character's location
+  to the Path and re-initializes their description within the location to note
+  the location they entered from. The character then implicitly performs the
+  Travel tool call, which goes to their new Path's GM. Following the same flow,
+  the GM there narrate them moving to the location at the other end of the path,
+  or how far they get if they are interrupted (e.g. by event/ambush). Once Path
+  travel has completed, rust again moves the character location to the
+  destination, sets the location-description and they are greeted by the new
+  location's GM with a description of their surroundings (see above).
+- Say - just raw text that the GM is told the character wishes to say, with an
+  optional target for who the character is addressing. The character agent may
+  need to translate a general desire into a specific sentence. E.g. "I want to
+  ask if the bartender has heard of any unusual events recently" -> "Hey
+  NPC-name, have you noticed anything unusual recently?". The GM would typically
+  just accept/forward this to the NPC provided they can hear it. The GM add an
+  additional list of characters who overhear what was said.
+- Lie - the same as Say, except the speaker and all characters who hear it make
+  a WILL roll. Those that pass receive a canned note saying they think
+  Speaker-Name may be lying. This opposed check diverts from Cairn rules, but
+  fits the game mechanics here better. Player agents may confirm with the player
+  if they intend to be lying before making this tool call if there is possible
+  ambiguity. NPC agents must use it appropriately/honestly.
+- Attack - using a particular weapon
+- Retreat - implies a DEX save
+- Give/Drop/Place - initiates an item transfer
+- Take/Request/Pickup - sends a request for an item; if from another character,
+  the GM may forward that request to the character's agent for approval. If it's
+  from a PC, the player's agent must ask for player approval, which may time out
+  after a minute. A timeout is an error that propagates. The triggering
+  character agent receives both the timeout error and the narration that the
+  other character just stands there motionless.
+- Look/Investigate/Ask, the character agent may want more information about
+  their surroundings from the GM, to clarification something previously said or
+  to actually spend time searching for something. The GM may additionally
+  require a save or advance time. The GM may reject the request saying that that
+  this is the middle of combat and would cost an action and may leave them more
+  vulnerable to attack if the choose to proceed. The player should be able to
+  acknowledge this and make a second request to proceed regardless. Note that
+  this example is a rejection with a suggestion followed by a retry with an
+  acknowledgement. The GM LLM must be capable of performing this little dance as
+  it will be common during play and custom situation resolution. There is no
+  structured "retry"; my hope is that the GM agent will recognise the retry,
+  particularly if its prompt implies this proceedure and the player agent's
+  prompt suggests to include the text "risk aside/nevertheless, spending the
+  action to...". An alternative would be a separate confirmation dialog.
+
+The Give/Take actions are a formal way to let rust transfer items in the world.
+The idea is to avoid the risk that the GM fails/hallucinates and an item is
+duplicated or lost.
+
+On multiplayer party movement. Having individual players Travel would suck.
+Ideally the first PC to Travel from a location results in other players being
+asked if they want to stay behind with a one minute timeout (making the default
+keeping the party together). Then travel can be performed as a group with the
+GM's narrations broadcast to all those traveling. To make this happen, the
+travel request could include a list of characters to travel with that the player
+agent populates. Other players in the list get the chat request where they can
+say they'll stay. NPCs could be included (they would need to accept the implied
+invitation to join the party). Icing on the top: if any character declines to
+travel, the original player should have the option of aborting travel. I need to
+decide if we have a confirmation dialog for this. The simple solution is any
+player rejection propagates and the player must ask again, this time
+specifically excluding those that rejected. Then we have an awkward duplicate
+ask for staying behind for the players who are included in travel the second
+time too. Maybe auto-dismiss if they haven't added anything to the prompt since
+the previous question was asked?
+
+### NPC character actions
+
+- BePersuaded - during normal conversation between characters, the NPC character
+  agent may call this, with their own chosen difficulty modifier. It takes the
+  persuading character as an argument which defines the WILL roll made. This
+  makes character stats meaningful and adds a little randomness to the
+  persuasion.
+
+Saves to persuade/convince an NPC to do something needs careful handling as NPC
+agents are their own entity. The first idea that comes to mind is to skip the GM
+entirely and have the NPC agent initiate the roll. We would include the in NPC
+agent prompts that they are an NPC and when someone is asking something of them
+they should make a tool call to decide if they should be convinced. I added
+BePersuaded. They are in charge of adding the difficulty modifier, which could
+be implicitly affected by previous player interactions. The reasoning is that
+agent's chat history has the ideal context for whether they really would be
+convinced. They see the roll result and a "you have been persuaded" or not, as
+the case may be.
+
+## GM tools
+
+- Save - makes a character roll a given stat to pass a check, defend against
+  something etc. For example when the player wants to look for something, the GM
+  may make them save to find it. The save roll should take a very short string
+  saying what the save is for. The GM may apply difficulty modifiers. Not to be
+  used for persuasion (see BePersuaded)
+- SpawnItem - the GM may create items and loot on-the-fly. As an example, the
+  act of looking for loot may remind the GM that some loot should exist, but
+  only if the players succeed a check. Creating an item after-the-fact is fine
+  as long as it makes sense for it to have existed all along. This tool call
+  must be approved by the Storyteller or it is rejected with the Storyteller's
+  reason and the GM must decide what to do differently.
+- SpawnNPC - if combat is too easy or there's a skeleton hiding in a chest, for
+  example, the GM may use this to request a new NPC be spawned at the location.
+  Like SpawnItem this must be approved by the Storyteller.
+- TakeDamage - characters may take environmental damage. For example from traps,
+  falling, burning etc. This is strictly separate from damage from attacks and
+  allows the GM to create more interesting obstacles and situations. The damage
+  roll and possible save are programmable and decided by the GM. The GM should
+  be aware of how much damage would be lethal and know that they need to have
+  presented sufficient warning to players about consequences before applying
+  this.
+
+Saves could be rolled immediately by rust code. Character agents do not roll or
+resolve saves. If a player's character is making a save, we may want to add an
+interactive roll feature to the UI.
+
 ## Spell ideas
 
 In addition to the Cairn rules, the following spells would be uniquely useful
@@ -495,7 +714,8 @@ should be later game, volatile or difficult to cast.
 - **Command** can inject a thought directly into the chat of an NPC or PC. Players get to type this directly. If cast on a player it replaces their turn with the injected text.
 - **Erase mind** can delete one or more chat entries from an NPC, depending on dice roll success magnitude.
 
-## Chat scheduling and priority for GM and NPC agents
+Future idea: In rare cases the storyteller may create plot-relevant spells that
+can be discovered or learned.
 
 # Tech stack
 
@@ -571,12 +791,12 @@ after which they may either wait for their companions to revive them or ask
 their agent for a new blank Adventurer character, which must be approved by the
 Storyteller.
 
-There is a button to enable developer mode for a world. This mode cannot be
-disabled and becomes immediately visible to all players once enabled. A big
-warning modal must be accepted before changing to developer mode, noting that it
-enables complete visibility into internal game state and is effectively
-cheating. Developer mode enables complete inspection of chat logs from all
-agents - the Storyteller, GM and NPCs.
+There is a button to enable developer mode for a world that only the owner can
+click. This mode cannot be disabled and becomes immediately visible to all
+players once enabled. A big warning modal must be accepted before changing to
+developer mode, noting that it enables complete visibility into internal game
+state and is effectively cheating. Developer mode enables complete inspection of
+chat logs from all agents - the Storyteller, GM and NPCs.
 
 ## World game page
 
@@ -601,7 +821,16 @@ Ideas for the future, after the basics are implemented.
 - For actions/saves the player rolls for, we could have a dice modal popup with
   a rolling animation and result. If players want to roll their own dice, the
   world owner could allow all players to enter their results (depending on their
-  judgement of their friends' honesty).
+  judgement of their friends' honesty). This is entirely theatrical, for the
+  player experience of feeling part of the process and seeing their character
+  stats come into play. A one minute timeout could fall back to rust code just
+  making the roll for the player.
+- Confirmation dialog? E.g. the GM says "you might fall to your death; are you
+  sure?" Better yet, this is a GM message in chat with a text response. The
+  problem with this is how to handle non-binary responses. Having the player
+  agent interpret would be ideal but we will hit the recursion bug where the
+  player's agent is expecting a response for the initial tool call but instead
+  sees a confirmation request. Will need to think about it.
 
 # Debugging and Telemetry
 
@@ -636,10 +865,38 @@ blows up for one of the agents we need to know.
 ## Developer Mode
 
 Developer mode should split the main view into two columns. The regular chat on
-the left and all world objects, descriptions, agents, chat histories navigatable
-and displayed on the right. This should be available to all players. Again,
-developer mode is a one-way operation. For real games, players should not see
-this data as it is meta-gaming and would ruin the experience.
+the left and all world objects, descriptions, agents, chat histories etc. are
+navigatable/queryable and displayed on the right. This should be available to
+all players. Again, developer mode is a one-way operation. For real games,
+players should not see this data as it is meta-gaming and would ruin the
+experience.
+
+In addition to the raw agent chat histories, we'll need some structured debug
+views:
+
+- There needs to be a button on chat entries on the left to inspect them, which
+  will open a sequence view on the right. This will be the full tool call stack
+  through all agents involved in responding to the player's message. Clicking on
+  a dice roll should open the sequence view that the dice roll was involved in.
+- As mentioned earlier we need a way to reconstruct all that went into an LLM's
+  response. Messages in the debug view should link to an inference view that
+  shows the entire verbatim input given to the LLM and its returned output.
+
+Shortcuts between views are important for navigation. E.g. when looking at a
+sequence view (which only shows the direct request/responses from agents),
+developers may want to see the agent's raw chat history before that. E.g. to see
+the overall flow of the chat that a GM agent sees, not just the short
+request/response. This is different to the inference view because the chat
+history would be infinite scrolling raw chats and would not include additional
+agent context and summaries from compaction.
+
+In general the aim of developer mode is to include everything, all the raw data
+verbatim. This can be a bit overwhelming so some parts may be hidden. We should
+include an expandable section in raw chat histories to view summaries at the
+points compaction has occurred.
+
+Chat compaction is the result of LLM inference, so summaries will have an
+inference view too, again, showing the exact input and output.
 
 ## Live Coding Agent Interaction with MCP
 
