@@ -209,8 +209,37 @@ The storyteller must run periodically so it can check for the win condition.
 This should happen when any relevant information may change. I tentatively think
 this should be a tool call from the GM. E.g. when combat ends because the
 players defeated the villain, or when the players return an item to someone or
-finish a conversation. This may require the GM to see a Storyteller note on an
-NPC or Location about whatever it is that's the win condition.
+finish a conversation. The GM should "update" the storyteller about these bigger
+events, which will immediately let the Storyteller make a decision to end the
+game. This may require the GM to see a Storyteller note on an NPC or Location
+about whatever it is that's the win condition. Even items or NPC interactions of
+significance, once interaction is concluded the GM should send a short summary
+to the Storyteller.
+
+## Epilogue sequence
+
+This is a game mode that's set, after which no actions can be made except for
+talking.
+
+I'm not really sure how this will work yet. I would like players to have some
+input to decide what their characters will do. Players may like to read what
+NPCs end up doing too, and may even appreciate being able to chat with NPCs to
+decide what next. It can be assumed players can directly chat to any NPC they
+reference, i.e. no need to travel first. Some ideas are below.
+
+All NPCs are sent a canned message saying the campaign has concluded and this is
+now epilogue discussion (this is just added to their chat and they do not get a
+chance to act unless also spoken to by players).
+
+All characters receive the Storyteller end game narration. Player agents then
+receive a prompt to ask the player what they would like to do next, noting they
+may discuss with others.
+
+Once all players call a ReadyToEnd tool call (only available during the
+epilogue). This call takes a complete summary of what the players has decided.
+The Storyteller is given the summaries for each player and narrates a final
+epilogue. This is shown in the world detail page. Player chat boxes are disabled
+and once they close the game page they won't be able to return.
 
 # Agents
 
@@ -454,14 +483,14 @@ Game objects
 - Player characters
   - Name and ID - the ID is generated from the name and used by agents in tool
     calls to uniquely identify the character
-  - Moved and Acted booleans for combat actions
+  - InCombat, Moved and Acted booleans for combat actions
   - Time
   - Location - both a reference to the location object and a string description within it
   - Character sheet info, including background
 - Non-player characters
   - Name and ID - the ID is generated from the name and used by agents in tool
     calls to uniquely identify the character
-  - Moved and Acted booleans for combat actions
+  - InCombat, Moved and Acted booleans for combat actions
   - Description: background, motive, ambition, how they fit into the world,
     implies how they should act
 - Locations
@@ -508,7 +537,9 @@ Storyteller decrees. The Storyteller should not see the GM's notes or it would
 be overloaded with unnecessary detail.
 
 TODO: a path is just another location. Could consolidate or union them. Using a
-separate name would probably help LLMs understand the difference.
+separate name would probably help LLMs understand the difference. This will be
+better because then neighboring locations could simply connect without requiring
+some intermediate path that must be traveled.
 
 ## Turns and time
 
@@ -520,12 +551,19 @@ For a strict time system, every character (NPC and PC) would have a current
 time. Any character action would advance their current time. The world time
 advances to the maximum of all character times. Then all characters take turns
 to catch up in order of their current time (resolving ties with the combat DEX
-save if there is combat). However, it may be inconvenient to process time for
-all NPCs at the same granularity. I'd lean towards first saying any combat at a
-location must finish first. Next that NPCs in other locations may only act when
-whole hours pass. I.e. the game and implementation may be better if we do not
-follow strict time ordering, but we can be close to it with rigid rules. To
-clarify, rust code will define when players are allowed to act, not the GM.
+save if there is combat). To facilitate the per-turn single move and single
+action mechanic of Cairn, characters have a boolean to mark whether they have
+moved or acted.
+
+However, sticking to the above strict time tracking for the whole world may be
+inconvenient. We'd have to process time for all NPCs even though consequences
+would be unrelated. Drawing on quantum mechanics, there's no point processing
+until the outcome could affect anything. I'd lean towards first saying any
+combat at a location must finish first. Next that NPCs in other locations may
+only act when whole hours pass. I.e. the game and implementation may be better
+if we do not follow strict time ordering, but we can be close to it with rigid
+rules. To clarify, rust code will define when players are allowed to act, not
+the GM.
 
 An easy multiplayer solution: players would have a greyed out send button in
 their chat until they can take a turn. Making actions out of order when out of
@@ -564,6 +602,31 @@ the meantime and waiting could be a perfectly valid response. This probably
 means every PC has their own time variable as state, which then advances up to
 the global world time through actions or waiting.
 
+I think being in and out of combat needs to be a distinct state. It would be
+nice if not - time could simply advance by a set turn time. However, per the
+Cairn rules, there is an explicit limit of one move and one action per turn that
+only applies while in combat. It would be good to enforce this with rust flags
+so characters can't accidentally cheat and so we activate chats in turn order.
+I.e. out of combat, players and NPCs could often act simultaneously as long as
+their current time does not get too far ahead of the others (in which case they
+wait for the others to catch up, i.e. their chat is blocked). However, when
+in-combat only one player should have an active chat box at once and their turn
+should be implicitly over after making one move and one action, or explicitly
+skipping the rest of their turn. There is also a DEX roll to determine turn
+order, which is made only at the start of combat. Combat is somewhat ambiguous -
+starting when violence or active hostilities begin. Sticking with matching real
+RPGs my conclusion is to have the GM make the call to begin and end combat. This
+probably needs a prompt reminder and description for events to look out for that
+indicate the start and end. A worry is that this state may be tricky for the GM
+LLM to track. One idea is to add some safeties such as reminding the GM or
+forcing combat when an attack roll is made. Then reminding the GM if a character
+attempts an action that takes longer than a turn. A further worry is if some
+characters in a location become out of sync with their InCombat state. This may
+need some reworking and play testing. I.e. I'm not sure what ideas will work
+best so we should try a few that includes complicated situations where there may
+even be NPC or player bystanders, maybe also in the same Location but not in the
+same area within it, and pick the one that works best.
+
 # Tool calls
 
 Many tool calls will have a short description that the player agent sees. When
@@ -578,13 +641,34 @@ Many tool calls imply a roll will be made. Rolls are made by rust code, not
 LLMs! When implemented PC rolls will be made in the UI by players clicking a
 "roll" button - this is purely theatrical.
 
+## Character creation actions
+
+See [character
+creation](cairn/second-edition/players-guide/character-creation.md) in Cairn
+second edition.
+
+- ChooseBackground
+- RollBackground - if not choosing a background; the agent offers the player a choice
+- RollHitProtection
+- RollAttributes
+- RollTraits
+- RollBonds
+- RollAge
+- ReadyToBegin - called when the player has finished character creation
+
+ChooseBackground and RollBackground are only available when the Storyteller is
+not being used, e.g. during initial development (see An initial proof of
+concept).
+
 ## Character actions
 
 - Move - the character describes going to a new position in the current
   location. This can be during or out of combat. If out of combat, the GM
   narrates how far the character gets if not all the way, anything they see
   along the way if applicable and the scene once they arrive. If in combat,
-  follow the move rules of combat.
+  follow the move rules of combat. The GM augments the move action with the time
+  the move takes, ideally being consistent with the described layout of places
+  within the location in the location notes.
 - Travel - like move, but takes the argument of a Path (if the character is at a
   location) or Location (if the character is on a path). The GM either narrates
   how far the character gets from their current position to the connection in
@@ -621,20 +705,26 @@ LLMs! When implemented PC rolls will be made in the UI by players clicking a
   after a minute. A timeout is an error that propagates. The triggering
   character agent receives both the timeout error and the narration that the
   other character just stands there motionless.
-- Look/Investigate/Ask, the character agent may want more information about
-  their surroundings from the GM, to clarification something previously said or
-  to actually spend time searching for something. The GM may additionally
-  require a save or advance time. The GM may reject the request saying that that
-  this is the middle of combat and would cost an action and may leave them more
-  vulnerable to attack if the choose to proceed. The player should be able to
-  acknowledge this and make a second request to proceed regardless. Note that
-  this example is a rejection with a suggestion followed by a retry with an
-  acknowledgement. The GM LLM must be capable of performing this little dance as
-  it will be common during play and custom situation resolution. There is no
-  structured "retry"; my hope is that the GM agent will recognise the retry,
-  particularly if its prompt implies this proceedure and the player agent's
-  prompt suggests to include the text "risk aside/nevertheless, spending the
-  action to...". An alternative would be a separate confirmation dialog.
+- Look/Investigate/Open/Ask - more of a catch-all generic action. The character
+  agent may want more information about their surroundings from the GM, to
+  clarification something previously said or to actually spend time searching
+  for something. The GM may additionally require a save or advance time. The GM
+  may reject the request saying that that this is the middle of combat and would
+  cost an action and may leave them more vulnerable to attack if the choose to
+  proceed. The player should be able to acknowledge this and make a second
+  request to proceed regardless. Note that this example is a rejection with a
+  suggestion followed by a retry with an acknowledgement. The GM LLM must be
+  capable of performing this little dance as it will be common during play and
+  custom situation resolution. There is no structured "retry"; my hope is that
+  the GM agent will recognise the retry, particularly if its prompt implies this
+  proceedure and the player agent's prompt suggests to include the text "risk
+  aside/nevertheless, spending the action to...". An alternative would be a
+  separate confirmation dialog.
+- Wait - skips the remainder of their turn if in combat, waits a given amount of
+  time. This could default to waiting to catch up to world time (e.g. waiting
+  for another PC to finish doing something). If the wait is significant (i.e.
+  not in combat), the GM should quickly narrate the wait, e.g. what they see
+  while waiting.
 
 The Give/Take actions are a formal way to let rust transfer items in the world.
 The idea is to avoid the risk that the GM fails/hallucinates and an item is
@@ -683,6 +773,9 @@ the case may be.
   may make them save to find it. The save roll should take a very short string
   saying what the save is for. The GM may apply difficulty modifiers. Not to be
   used for persuasion (see BePersuaded)
+- RollInitiative - the same as Save, except this takes a list of characters and
+  writes the results to their objects so that they make actions in the correct
+  order as time updates.
 - SpawnItem - the GM may create items and loot on-the-fly. As an example, the
   act of looking for loot may remind the GM that some loot should exist, but
   only if the players succeed a check. Creating an item after-the-fact is fine
@@ -699,10 +792,31 @@ the case may be.
   be aware of how much damage would be lethal and know that they need to have
   presented sufficient warning to players about consequences before applying
   this.
+- BeginCombat - takes a list of characters, sets their InCombat flag and they
+  all roll DEX for turn order.
+- EndCombat - unsets the characters' InCombat flag.
+- UpdateStoryteller - send the Storyteller a text summary of some
+  event/interaction/resolution that just happened or completed, letting the
+  Storyteller make actions, update notes in turn.
 
 Saves could be rolled immediately by rust code. Character agents do not roll or
 resolve saves. If a player's character is making a save, we may want to add an
 interactive roll feature to the UI.
+
+Trapped chest example. The storyteller leaves a note on an important item saying
+it is in a hidden and trapped chest in a hut at a location. When the player uses
+Move to enter the hut, the GM uses Save to have the player to notice a chest
+poorly concealed by a cloth. When the player tries to open the chest, the GM
+makes them Save again to detect the trap and rejects the open request if they
+succeed, with the message that they notice a trap and stop before proceeding. If
+they fail to notice the trap, the GM uses TakeDamage as the penalty, unless they
+can roll a DEX save to jump out of the way in time. When the player finally
+opens the chest, the GM describes the item they found.
+
+## Storyteller tools
+
+- EndWorld - concludes the game for all players with a text narration of the
+  immediate ending and begins the epilogue sequence.
 
 ## Spell ideas
 
@@ -923,3 +1037,31 @@ E.g. a CLI utility to manipulate the database - DRY/using project code of
 course. Then we could check in a playable scenario to git to initialize a world
 with. Maybe even for automated testing, ideally where we can assert tool calls
 are made in rust, but maybe also where an LLM evaluates agent output.
+
+Ideas to make the first round of implementation even simpler:
+
+- Skip the epilogue sequence entirely. The game just ends. We use the
+  Storyteller's world ending summary as the epilogue summary instead.
+- Skip the background part of character creation with the Storyteller (it won't
+  work well if the storyteller didn't create the scenario anyway). We just
+  populate character stats as per the rules.
+- Skip the intro with Mara entirely and jump straight to the encounter. The
+  intro could simply be summarised as a location note that the GM can narrate
+  for the player's MO. The win condition can simply happen when the player has
+  the flour and is free to leave. The loss condition would be when the flour is
+  gone or destroyed. Storyteller notes can all be pre-written/hard coded in the
+  json file we use to initialize the world.
+- The hut and Mara are both in the same Location, so there is no travel between
+  them. The location notes will need to specify the hut and Mara are not close
+  so the player would need to Move from one place to the other.
+
+# TODO
+
+How will experience and character growth happen?
+
+The GM should be given an initial RollOmens call to make after all players have
+entered the game, but before the game starts. This means there needs to be a
+sync point where the GM waits until all players have called ReadyToBegin.
+Players should be warned by their agent only to call this when all players are
+online and have entered the game, otherwise the GM will need to bring them in
+later in the campaign.
