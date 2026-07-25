@@ -86,9 +86,42 @@ idea was updated, with a date.
 This file contains the high level concepts and ideas of the project and the
 overall approach to implementation. It is a structured consolidation of
 user_declarations.md and a place for implementing agents to expand ideas and
-fill in the gaps.
+fill in the gaps. TODOs are fine, but this is not a place to record progress or
+current state.
 
-## implementation_details.md
+## implementation_reference.md
 
 The specific implementation references go here. Consider this an index to both
-reference and detail how components in design.md are realised.
+reference and detail how components in design.md are realised. It must be kept
+up to date before committing changes.
+
+## plans/
+
+Implementation planning records. build order and status live here.
+Each plan is one self-contained increment with a goal, scope, steps,
+per-step verification and a Status line kept current. Completed plans remain
+as records - see plans/README.md for conventions. The document hierarchy is:
+user_declarations.md (ground truth) → design.md (desired end state) →
+plans/ (order, detail and status) → implementation_reference.md (index of what
+exists).
+
+Conventions:
+
+- Files are `NNNN-short-name.md`, numbered in creation order.
+- Every plan starts with a `Status:` line, one of: draft, approved,
+  in-progress, complete, abandoned - with the date of the last status change.
+  The status line is kept current; it is the single source of progress truth.
+- Contents: goal, scope (which design.md sections it realises), steps, and a
+  concrete verification for each step.
+- A completed or abandoned plan is not rewritten. If reality diverged, append
+  a short dated note saying what actually happened; corrections and follow-up
+  work get a new plan.
+- Broad roadmap plans may be refined by later, more detailed plans for
+  individual steps as they begin; the roadmap links to them as they appear.
+
+Unlike other documents here, plans will become stale and thats OK. They are
+typically only briefly used for reference while implementing. It may be useful
+to leave notes in plans if sections do become stale but not required
+exhaustively. Avoid mentioning history in both code and documents - that's what
+git is for.
+

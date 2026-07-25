@@ -976,6 +976,12 @@ it. The result must also be narrated by the GM and perhaps side effects happen.
 Every step adds up, which takes time. If we make a mistake and context size
 blows up for one of the agents we need to know.
 
+It will be common for a coding agent to want to test a prompt fix against many
+chat histories. A useful debugging feature could be to reference a specific LLM
+output message (maybe even save it to disk for later testing), replace the
+history to match the prompt changes and then re-generate. Ideally it would be a
+complete replay of its chat history, provided it's not too long.
+
 ## Developer Mode
 
 Developer mode should split the main view into two columns. The regular chat on
