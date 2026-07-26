@@ -12,9 +12,9 @@ pub struct MistralRsBackend {
 
 impl MistralRsBackend {
     pub async fn load(model_id_or_path: &str) -> Result<Self> {
-        let (dir, file) = model_id_or_path
-            .rsplit_once('/')
-            .context("--model must be a path or repo id containing a GGUF filename, e.g. dir/model.gguf")?;
+        let (dir, file) = model_id_or_path.rsplit_once('/').context(
+            "--model must be a path or repo id containing a GGUF filename, e.g. dir/model.gguf",
+        )?;
         let model = GgufModelBuilder::new(dir, vec![file])
             .build()
             .await
@@ -65,12 +65,15 @@ impl Backend for MistralRsBackend {
                     usage: chunk_usage,
                     ..
                 }) => {
-                    let finished = choices.first().is_some_and(|choice| choice.finish_reason.is_some());
+                    let finished = choices
+                        .first()
+                        .is_some_and(|choice| choice.finish_reason.is_some());
                     if let Some(ChunkChoice {
-                        delta: Delta {
-                            content: Some(delta),
-                            ..
-                        },
+                        delta:
+                            Delta {
+                                content: Some(delta),
+                                ..
+                            },
                         ..
                     }) = choices.first()
                     {
@@ -94,7 +97,7 @@ impl Backend for MistralRsBackend {
                     anyhow::bail!("model error during inference: {message}")
                 }
                 MrResponse::InternalError(error) | MrResponse::ValidationError(error) => {
-                    return Err(anyhow::anyhow!(error).context("inference stream error"))
+                    return Err(anyhow::anyhow!(error).context("inference stream error"));
                 }
                 _ => anyhow::bail!("unexpected response variant from chat stream"),
             }
