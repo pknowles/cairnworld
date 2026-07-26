@@ -1,0 +1,4 @@
+# Checked-in defaults, shared by everyone. Per-machine overrides (model path,
+# secrets, etc.) go in config/local.toml, which is gitignored.
+
+# model = "models/model.gguf"

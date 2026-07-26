@@ -100,6 +100,8 @@ reviewed and committed, or there is a real blocker.
   the intent of the rules here, not satisfy the checklist, although the
   checklists can be helpful reminders.
 - Self-review. See Pre-commit checklist above.
+- Fix the issues found during the self-review appropriately, making sure to
+  follow the coding standards while doing so.
 - Commit. The commit body should simply be a short and concise list of changes
   made. The title should be a short summary.
 

@@ -20,8 +20,12 @@ helping expose. This implies:
 
 Less is more. The right solution is straightforward and simple, implicitly
 handles all use cases and edge cases. Keep file sizes small and the number of
-files small. Every line of code added is a chance for a bug and incurs
-maintenance cost and tech debt. Make it count.
+files small. Every line of code added (i.e. our code) is a chance for a bug and
+incurs maintenance cost and tech debt. Make it count.
+
+Prefer canonical off-the-shelf libraries that have been proven and are well
+tested; avoid hand rolling things even if they sound simple. Pick the option
+that literally has less lines of our own code.
 
 Object ownership should be consistent with object lifetimes.
 

@@ -1,6 +1,6 @@
 # 0001 - Infrastructure to Bread Thief
 
-Status: draft (2026-07-25)
+Status: in-progress (2026-07-26) - milestone 1 complete, milestones 2-9 not started
 
 ## Goal
 
@@ -197,6 +197,43 @@ to integrate with.
      this milestone. If speed is unacceptably slow, that is itself a finding
      to flag to the user before continuing, not something to silently work
      around (e.g. by lowering quantization without saying so).
+
+### 2026-07-26 observation note (milestone 1)
+
+Hardware: RTX 3070, 8GB VRAM. Model: Llama 3.1 8B Instruct, Q4_K_M GGUF
+(bartowski quant), loaded via `mistralrs` 0.8.1 `GgufModelBuilder` with the
+`cuda` feature.
+
+- **VRAM**: ~5.85GB for the model itself (1.08GB baseline -> 6.93GB loaded),
+  leaving limited headroom on this 8GB card for KV cache at longer contexts.
+- **Speed**: ~9.7 tok/s sustained over a 200-token completion. Usable for a
+  REPL, but slow enough that it's worth watching once tool-call round trips
+  and longer contexts (milestone 3+) are in the mix - flagging per the "if
+  speed is unacceptably slow" note above rather than silently accepting it.
+- **Streaming**: confirmed genuinely incremental, not buffered - tokens
+  arrive roughly every ~75ms rather than all at once at the end.
+- **Temperature**: confirmed it visibly affects output (0.0 vs 1.3 changed a
+  one-word answer). This required a fix: `mistralrs`'s `RequestBuilder`
+  defaults to `SamplingParams::deterministic()`, which forces `top_k =
+  Some(1)` (greedy decoding) independent of temperature - setting only
+  temperature on top of that default is silently a no-op. `MistralRsBackend`
+  now starts from `SamplingParams::neutral()` before applying temperature.
+- **API surface note**: `Model::stream_chat_request` never emits a terminal
+  `Response::Done` - that variant is only sent on the non-streaming
+  `send_chat_request` path (confirmed by reading `mistralrs-core`'s
+  `pipeline/sampling.rs`). The last `Chunk` (the one with `finish_reason`
+  set) carries the final `usage`, so `MistralRsBackend::complete` assembles
+  the final text and usage from accumulated chunks rather than reading back
+  a `Done` response. This deviates from the initial reading of design.md's
+  sketch ("`complete` still returns the same fully-assembled `Response`...")
+  but the resulting `Response` shape returned to callers is unchanged.
+- **CUDA/driver note**: the dev machine's `/usr/local/cuda` (nvcc 13.2) was
+  ahead of the installed NVIDIA driver (initially supporting only CUDA
+  13.0), which made mistral.rs's compiled kernels fail at model-load with
+  `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`. Resolved by updating the driver.
+  Worth checking `nvidia-smi`'s reported CUDA version against `nvcc
+  --version` on any new dev machine before debugging inference failures as
+  a code problem.
 
 ### Definition of done
 
