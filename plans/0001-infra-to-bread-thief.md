@@ -1,6 +1,6 @@
 # 0001 - Infrastructure to Bread Thief
 
-Status: in-progress (2026-07-26) - milestone 1 complete, milestones 2-9 not started
+Status: in-progress (2026-07-26) - milestones 1-2 complete, milestones 3-9 not started
 
 ## Goal
 
@@ -248,3 +248,131 @@ Hardware: RTX 3070, 8GB VRAM. Model: Llama 3.1 8B Instruct, Q4_K_M GGUF
   scope" above before committing).
 - Status line at the top of this file is updated to `in-progress` when
   started and `complete` when done, per plans/README.md.
+
+## Milestone 2 detail: Recording + replay
+
+Goal: make recording structural before adding another inference feature.  A
+REPL completion must pass through one wrapper that persists the exact request
+representation sent to `Backend::complete`, its complete response, token usage,
+model identity, and elapsed time.  `cairnworld replay` must load that record,
+reconstruct the identical request, verify its hash, and submit it through the
+same backend API.
+
+### Scope
+
+- `store` backed by one SQLite database, configured with WAL and migrations.
+- Content-addressed `text` rows and `inference` rows only.  `agent`,
+  `message`, `summary`, `sequence`, and game-state rows belong to later
+  milestones; this slice records a complete backend request as one text
+  segment, rather than pre-empting their eventual segment types.
+- `RecordingBackend<B>` owns a backend and a store, implements `Backend`, and
+  is the only backend value constructed by the CLI.  Timing includes the whole
+  inner completion, including token streaming.
+- `chat --database <path>` records every reply.  `replay --database <path>
+  --model <path> <inference-id>` prints the recorded request and old/new
+  outputs, then runs the reconstructed request.
+
+### Data boundary
+
+`Request`, `Response`, and all nested LLM API types gain serde derives.  The
+recorded input is `serde_json::to_vec(&Request)` and its BLAKE3 hex hash.  The
+text table stores that exact UTF-8 JSON once, keyed by its hash; the inference
+row stores a JSON segment list with the single `{ "text": hash }` reference.
+Reconstruction resolves the segment, verifies the stored text hash and
+`input_hash`, then deserializes the request.  This is deliberately a narrow,
+lossless recording boundary for the current bare REPL.  Milestone 4 replaces
+the single request segment with role/context/summary/message segments while
+keeping the same reconstruction proof.
+
+### Steps
+
+1. **Persist the current backend contract.**
+   - Add serde derives to the LLM request/response types, including the tagged
+     content and role enums, so recorded JSON is explicit and round-trippable.
+   - Add `sqlx` (SQLite, Tokio Rustls runtime, migration support), `blake3`,
+     and a small async-stream helper only if the chosen CLI plumbing actually
+     needs it.  Do not introduce an ORM or a second serialization format.
+   - Verify: `cargo check` succeeds before implementing the database wrapper.
+
+2. **Create the store and migration.**
+   - Add an embedded SQL migration creating `text(hash, content)` and
+     `inference(id, segments, sampling, output, input_hash, input_tokens,
+     output_tokens, duration_ms, model, created_at)`.  Fields that require an
+     agent/sequence in the final schema are absent for this milestone rather
+     than nullable placeholders.
+   - `Store::open` creates the parent directory when one was supplied, opens a
+     single SQLite pool, enables foreign keys and WAL, and runs migrations.
+     It must return database errors with context; no automatic memory fallback.
+   - Verify: a temporary-file integration test opens a new store and confirms
+     its migration is usable by inserting and reading one content-addressed
+     text value.
+
+3. **Add recording and reconstruction.**
+   - `RecordingBackend<B>` serializes the request before the inner call,
+     streams tokens unchanged, measures monotonic elapsed time, and commits
+     the request text plus the completed response/usage as one inference
+     record only after a successful completion.  Failed calls are returned
+     with context and are not misrepresented as completed inferences.
+   - Store the configured model string in every record.  Preserve exact
+     request bytes in the content-addressed text row; do not regenerate JSON
+     when calculating the record hash.
+   - `Store::reconstruct_inference` resolves every segment, validates both
+     content-address and complete-input hashes, and returns the deserialized
+     `Request` plus the recorded output.
+   - Verify: a deterministic fake backend records a request, invokes its
+     token callback, and proves reconstruction equals the original request
+     and the persisted output/usage/duration/model are correct.  Corrupting a
+     stored hash must fail reconstruction, proving this is not a tautological
+     readback test.
+
+4. **Route both CLI paths through the abstraction.**
+   - `chat` gains `--database`, defaulting to `cairnworld.sqlite` only for the
+     database (the model remains explicitly configured as in milestone 1).
+     It opens the store before loading the model and constructs only a
+     `RecordingBackend` for calls.
+   - Add `replay <inference-id>` with the same database/model/temperature
+     options.  It reconstructs and verifies before loading the model, prints
+     old output and streams the new output, then records the replay as a new
+     inference through the same wrapper.
+   - Verify by hand with the GPU model: make a REPL request, use its database
+     row id with `replay`, and confirm the replayed record can itself be
+     reconstructed.  Inspect SQLite rows to establish that both calls have
+     token counts, duration, input hash, and model identity.
+
+5. **Document and commit the completed slice.**
+   - Update `implementation_reference.md` with the store, recording boundary,
+     CLI flags, and the deliberate single-segment limitation.
+   - Append a dated verification note to this plan with the actual command,
+     database path type (temporary/local), and outcome.  Review the scope
+     against milestone 3 to ensure tools, agents, and HTTP backends were not
+     added early.
+   - Run `cargo fmt --check`, `cargo test`, `cargo build --release`, and the
+     real-model chat/replay path.  Re-read coding and prompt standards for the
+     self-review, then make one self-contained commit.
+
+### Definition of done
+
+- No CLI code can invoke a concrete model backend without first wrapping it in
+  `RecordingBackend`.
+- Every successful REPL and replay completion creates a record containing the
+  exact serialized request, complete output, usage, duration, model, and
+  hashes.
+- Reconstruction validates hashes and returns a request byte-for-byte equal to
+  what the recorder received; the test uses a real SQLite store and catches a
+  deliberately corrupt record.
+- A real GPU chat followed by replay has been exercised end to end.
+- Documentation is updated, tests/build pass, and this increment is committed.
+
+### 2026-07-26 verification note (milestone 2)
+
+- `CUDA_COMPUTE_CAP=86 cargo test --offline` passed all three tests, including
+  the real GPU-backed streamed mistral.rs completion (355 seconds), the
+  recorder stream/reconstruction test, and corruption detection against SQLite.
+- A release REPL against the local Llama 3.1 8B Q4_K_M GGUF wrote inference 1
+  to a disposable `/tmp/cairnworld-milestone2-e2e.sqlite` database.  Its row
+  recorded the model path, 47 input tokens, 3 output tokens, 2,769 ms, and a
+  64-character BLAKE3 input hash.
+- `cairnworld replay ... 1` reconstructed and hash-validated that request,
+  printed the saved output, streamed a second `recorded` completion with the
+  same 47/3 token counts, and created the replay's own record.  This exercises
+  both CLI paths through `RecordingBackend` rather than a separate replay path.
