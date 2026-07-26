@@ -44,7 +44,11 @@ A single trait with one method, roughly:
 
 ```rust
 trait Backend {
-    async fn complete(&self, request: Request) -> Result<Response>;
+    async fn complete(
+        &self,
+        request: Request,
+        on_token: impl FnMut(&str),
+    ) -> Result<Response>;
 }
 
 struct Request {
@@ -58,6 +62,14 @@ struct Response {
     usage: Usage,                // input tokens, output tokens
 }
 ```
+
+`on_token` fires as generation produces output; mistral.rs and typical
+OpenAI-compatible APIs both stream natively, so this is not extra machinery,
+just not discarding what the backend already gives us. `complete` still
+returns the same fully-assembled `Response` at the end - recording, tool-call
+parsing and the agent loop all operate on the complete response exactly as
+before. Streaming is purely an additional, optional view onto the same
+generation; nothing downstream of the backend has to change to support it.
 
 Backends:
 
@@ -255,12 +267,18 @@ Pages and endpoints:
 - `/world/:id` - detail page (invites, players, dev mode toggle)
 - `/world/:id/play` - game page: one chat column with an input box
 - `WS /world/:id/ws` - the chat: client sends player text; server pushes chat
-  entries, broadcasts, and a `can_act` flag (drives the greyed-out send
-  button)
+  entries, broadcasts, a `can_act` flag (drives the greyed-out send button),
+  and token deltas keyed by message id for in-flight inferences
 
-Messages arrive whole (no token streaming) initially; streaming is a later
-polish item the websocket protocol doesn't preclude (messages carry ids that
-deltas could later reference).
+Player-facing chat only ever renders a message once the agent loop has
+resolved it to final narration - an in-progress turn may still turn out to
+be a tool call, and streaming raw tool-call syntax to a player would leak
+mechanics. So for players, streaming buys earlier-starting text rather than
+early partial text: the server can start pushing the narration's tokens as
+soon as the model itself commits to producing final text (i.e. is no longer
+mid tool-call), rather than waiting for the whole message. In dev mode there
+is no such restriction (see below) - the raw stream, including tool-call
+syntax, is exactly what a developer wants to watch.
 
 ## Auth
 
@@ -285,6 +303,12 @@ the right column navigates:
 - Any inference → inference view: reconstructed verbatim input and verbatim
   output
 - Game objects → current state and notes
+
+An in-progress sequence view shows each open inference's raw token stream
+live, verbatim, as it generates - tool-call syntax included. This is the
+direct, at-a-glance read on generation speed user_declarations.md asks for
+("we need to know" when context size or performance blows up), and it uses
+the same `on_token` callback as everything else - no separate mechanism.
 
 All views are plain server-rendered data from the tables above; the sequence
 spine means no extra bookkeeping exists only for debugging.
@@ -444,11 +468,6 @@ operating on chat histories. (Dynamic Storyteller; Spell ideas.)
    useful for debugging comparisons; proposal is to add it alongside the
    bake-off, when tool-calling behaviour is being compared across models
    anyway.
-3. **Token streaming to the UI.** Deferred; whole messages first. Flagging so
-   the websocket protocol keeps a message-id field that streaming can later
-   attach deltas to.
-4. **user_declarations.md tech stack.** It currently names
-   Sao10K/L3-8B-Stheno-v3.3-32K as the candidate model and lists neither
-   Leptos nor sqlx. Suggested updates once these decisions settle: model TBD
-   pending milestone 3, add Leptos and sqlx (design.md must not contradict
-   the declarations).
+3. **user_declarations.md tech stack.** It lists neither Leptos nor sqlx.
+   Suggested addition once these decisions settle (design.md must not
+   contradict the declarations).

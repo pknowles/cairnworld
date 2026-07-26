@@ -86,3 +86,6 @@ instructions. Less is more.
 - Did you test to verify the new prompt assembly?
 - Did a real chat through the normal product path verify the intended model
   behavior with the intended provider, visible tools, and backend?
+- Is an LLM doing something that is fully deterministic that would be better
+  done by the programming language? Inference is expensive and best for fuzzy
+  interpretation and tasks.

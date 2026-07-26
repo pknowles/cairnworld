@@ -65,6 +65,8 @@ initialization loop with a few of these and evaluating would be important. Maybe
 trying to further consolidate too.
 
 - **Meta-questions and seed questions**
+  - What are the steps of Joseph Campbell's the hero's journey?
+  - What are the steps of Dan Harmon’s story circle?
   - What makes a good RPG setting?
   - What makes a good detective story?
   - What types of characters make dramatic and interesting mysteries to uncover?
@@ -834,7 +836,7 @@ can be discovered or learned.
 # Tech stack
 
 - Rust
-- mistral.rs GPU Inference, maybe with with Sao10K/L3-8B-Stheno-v3.3-32K Q4_K_M
+- mistral.rs GPU Inference - we should try a few models to see which fit best out of the box
 - Axum
 - Tokio?
 - sqlite
@@ -927,6 +929,10 @@ least one player joins and then narration happens for the transition to the new
 state after one more minute. At any time, players can ask in chat "who else in
 my party is here?" and their agent can respond with the appropriate tool call to
 check.
+
+LLMs generate tokens over time. Streaming this to the browser would create a
+good user and developer experience, even if the end result requires parsing
+intermediate tool calls.
 
 **Polish ideas**
 

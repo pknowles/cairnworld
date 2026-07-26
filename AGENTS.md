@@ -12,7 +12,11 @@ with it first. Faster now than later.
 
 Some files may be temporary or intentionally un-tracked. You may use
 .git/info/exclude for these, not .gitignore. Never use `git add -A`; prefer `git
-add -u`, be surgical and explicitly add new files.
+add -u`, be surgical and explicitly add new files. Use temporary commits rather
+than git stash or copying files as they are far more robust and there is less
+risk of losing anything.
+
+Use integrated edit/search tools rather than grep/sed when at all possible.
 
 # Pre-commit checklist
 
@@ -29,9 +33,75 @@ hard gate and MUST be followed:
    - Did you follow the rules here and in coding_standards.md and prompt_standards.md?
    - If you changed any LLM prompt, context packet, tool description, or model-facing instruction, did you complete the review checklist in prompt_standards.md?
    - Are your changes project-consistent, modular and did not introduce duplication?
-   - Did you "fix" anything without evidence, i.e. proving the thing you fixed was actually the cause and true underlying problem?
+   - Did you "fix" anything without evidence, i.e. proving the thing you fixed was actually the cause and true underlying problem? See Debugging below for details.
    - Did you write any workarounds or bandaids that only fix a specific symptom, i.e. without finding the true cause needed for a robust solution? E.g. evidence-less, speculative or defensive "just in case" code without user sign off?
    - Anything else the user should know about?
+
+# Debugging
+
+LLMs frequently make wild guesses/speculations. That's fine, but DO NOT act on
+them. For each,
+
+- Describe a testable experiment that would either prove your hypothesis or
+  further bisect the problem
+- Would the outcome of the experiment actually tell you useful information? I.e.
+  after knowing would you have proof or have at least ruled in/out some
+  possibilities.
+- Actually run the experiment(s). Don't assume you know because you've looked at
+  the code.
+- If it's faster to simply try a fix, make sure it's clearly labelled as as
+  temporary experiment that is not checked in, adding "TEMPORARY. DO NOT
+  SUBMIT". Clean it up afterwards. It is imperative that experimental code not
+  mingle with development code. A good solution is to make a temporary commit
+  that you will amend later.
+- Verify fixes actually fix the original issue by attempting to reproduce the
+  original issue yourself. Given changes were made, verify impacted features
+  (related to the changed code) still work.
+
+# Implementation loop
+
+The following describes one iteration of a loop to follow when performing a long
+term debugging or feature implementation task. Before starting multiple loops
+it's important to define the finish line. Exactly what needs to be verified
+working before stopping. Do not stop until the work is complete, tested,
+reviewed and committed, or there is a real blocker.
+
+- Define the goal for this iteration. Take stock and assess the current state.
+  This is the time to see the forest for the trees. Have you been working
+  effectively? Do you need to make changes to your strategies to unnecessarily
+  going down rabbit holes and getting stuck? Course correct if needed, evaluate
+  possible refactors, recognise coding patterns that are actually getting in the
+  way. I.e. given all the requirements and use cases, what code structure would
+  best fit, in a way that's modular, separable, composable, will allow for
+  future changes and have low maintenance overhead.
+- If debugging a problem, list your hypotheses and then list experiments you
+  will perform to prove which is correct. I.e. don't fix speculations/guesses.
+  See Debugging above.
+- Plan what will be implemented or changed. Obviously don't write code otherwise
+  that'd be an implementation and not a plan, but bullet point the changes that
+  will need to be made. Include the motivation and intent. Check it aligns with
+  the project documentation.
+- Implement one complete slice that can be committed. See Worktree and git
+  sanitation above. The project must be in a good state at the end so we can git
+  bisect. You may need to revisit the plan or implement a little more to achieve
+  this. I.e. do not over-correct and waste time forcing an intermediate state
+  between complete features to work when we can just be coarser with our commits
+  or have a bigger restructure. Reuse, refactor and update existing
+  infrastructure and abstractions; don't add multiple similar implementations.
+  Look for and remove dead code - it'll still be in the git history and again,
+  every line of code has a cost! Take the time to do it right, don't take lazy
+  shortcuts.
+- Test the implementation. End to end is a must, even if you do this manually
+  yourself. Do not check in code that has not been executed. If some code
+  features are complex and risky, add unit tests for all the use cases with
+  permutations of data. Balance testing with implementation speed. Testing must
+  be fast and efficient, not testing useless invariants just for the sake of
+  checking off testing. The goal here is to make the project succeed and perform
+  the intent of the rules here, not satisfy the checklist, although the
+  checklists can be helpful reminders.
+- Self-review. See Pre-commit checklist above.
+- Commit. The commit body should simply be a short and concise list of changes
+  made. The title should be a short summary.
 
 # Index
 
@@ -64,7 +134,10 @@ It is forbidden for any agent to edit it, even if it's implied it's ok.
 
 Coding agents can absolutely draw the user's attention to it, suggest additions,
 updates, corrections or point out contradictions or issues. Notify the user
-about contradictions immediately.
+about contradictions immediately. If the agent has reason to divert, this MUST
+be brought to the user's attention to fix otherwise future agents will clobber
+the change in decision since user_declarations is the highest level ground
+truth.
 
 Coding agents may need to make decisions that aren't implied by
 user_declarations.md. In this case agents should suggest updates and
