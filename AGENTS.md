@@ -30,12 +30,22 @@ hard gate and MUST be followed:
 4. Self-review performed:
    - Did you do everything agreed upon?
    - Anything missed or shortcuts taken?
-   - Did you follow the rules here and in coding_standards.md and prompt_standards.md?
+   - Did you follow the rules here and in coding_standards.md and
+     prompt_standards.md?
+   - If designing/planning, verify the implementation matches a direct user
+     requirement and that there was no better and more straight forward way (see
+     design.md below). Check that the design aligns with the coding standards.
+     Does the implementation ordering flow so data and dependencies will simply
+     already exist when needed or are constructs being introduced unnecessarily
+     that would simply not be needed if the ordering were corrected or steps
+     were consolidated?
    - If you changed any LLM prompt, context packet, tool description, or model-facing instruction, did you complete the review checklist in prompt_standards.md?
    - Are your changes project-consistent, modular and did not introduce duplication?
    - Did you "fix" anything without evidence, i.e. proving the thing you fixed was actually the cause and true underlying problem? See Debugging below for details.
    - Did you write any workarounds or bandaids that only fix a specific symptom, i.e. without finding the true cause needed for a robust solution? E.g. evidence-less, speculative or defensive "just in case" code without user sign off?
    - Anything else the user should know about?
+
+All issues should be fixed appropriately before committing.
 
 # Debugging
 
@@ -68,19 +78,26 @@ reviewed and committed, or there is a real blocker.
 
 - Define the goal for this iteration. Take stock and assess the current state.
   This is the time to see the forest for the trees. Have you been working
-  effectively? Do you need to make changes to your strategies to unnecessarily
-  going down rabbit holes and getting stuck? Course correct if needed, evaluate
-  possible refactors, recognise coding patterns that are actually getting in the
-  way. I.e. given all the requirements and use cases, what code structure would
-  best fit, in a way that's modular, separable, composable, will allow for
-  future changes and have low maintenance overhead.
+  effectively? Are the current plans working smoothly or are you having to jump
+  through hoops to follow it when it's actually flawed design? Do you need to
+  make changes to your strategies to avoid going down unnecessary rabbit holes
+  and getting stuck? Course correct if needed, evaluate possible refactors,
+  recognise when coding patterns are actually getting in the way. I.e. given all
+  the requirements and use cases, what code structure would best fit, in a way
+  that's modular, separable, composable, will allow for future changes and have
+  low maintenance overhead.
 - If debugging a problem, list your hypotheses and then list experiments you
   will perform to prove which is correct. I.e. don't fix speculations/guesses.
   See Debugging above.
 - Plan what will be implemented or changed. Obviously don't write code otherwise
   that'd be an implementation and not a plan, but bullet point the changes that
   will need to be made. Include the motivation and intent. Check it aligns with
-  the project documentation.
+  the project documentation. Check the order of implementation works and that
+  the plan doesn't require features that aren't there yet, or wouldn't be made
+  simpler if a feature was there. Check that the granularity of the plan is
+  appropriate - i.e. we won't need to write extra code just to have an
+  intermediate step work and that we won't be implementing too much without
+  modular testing in one big blob.
 - Implement one complete slice that can be committed. See Worktree and git
   sanitation above. The project must be in a good state at the end so we can git
   bisect. You may need to revisit the plan or implement a little more to achieve
@@ -164,6 +181,13 @@ user_declarations.md and a place for implementing agents to expand ideas and
 fill in the gaps. TODOs are fine, but this is not a place to record progress or
 current state.
 
+Before writing plans from this document, check it for false assumptions. For
+example it has sometimes described the addition of an entirely unnecessary
+system/feature/approach, just because it was the first idea a coding agent wrote
+down. Every decision must be traceable to a user declaration. If adding a new
+system/framework/abstraction, make sure you have listed ~3 alternatives,
+evaluated each against the coding standards and picked the most appropriate.
+
 ## implementation_reference.md
 
 The specific implementation references go here. Consider this an index to both
@@ -172,31 +196,16 @@ up to date before committing changes.
 
 ## plans/
 
-Implementation planning records. build order and status live here.
-Each plan is one self-contained increment with a goal, scope, steps,
-per-step verification and a Status line kept current. Completed plans remain
-as records - see plans/README.md for conventions. The document hierarchy is:
-user_declarations.md (ground truth) → design.md (desired end state) →
+Implementation planning records. Build order and status live here. Each plan is
+one self-contained increment with a goal, scope, steps, per-step verification
+and possibly a status line kept current. Completed plans may remain as records,
+however it is expected they become stale. Do NOT refer to them as reference or
+attempt to maintain them as references. In fact deleting them once they are in
+git, completed and stale is probably best to avoid confusion given they'll be in
+the git history.  Avoid mentioning history in both code and documents - that's
+what git is for. Feel free to refactor plans inline if we pivot - it is only
+going to lead to confusion if they are considered set in stone. The document
+flow is: user_declarations.md (ground truth) → design.md (desired end state) →
 plans/ (order, detail and status) → implementation_reference.md (index of what
-exists).
-
-Conventions:
-
-- Files are `NNNN-short-name.md`, numbered in creation order.
-- Every plan starts with a `Status:` line, one of: draft, approved,
-  in-progress, complete, abandoned - with the date of the last status change.
-  The status line is kept current; it is the single source of progress truth.
-- Contents: goal, scope (which design.md sections it realises), steps, and a
-  concrete verification for each step.
-- A completed or abandoned plan is not rewritten. If reality diverged, append
-  a short dated note saying what actually happened; corrections and follow-up
-  work get a new plan.
-- Broad roadmap plans may be refined by later, more detailed plans for
-  individual steps as they begin; the roadmap links to them as they appear.
-
-Unlike other documents here, plans will become stale and thats OK. They are
-typically only briefly used for reference while implementing. It may be useful
-to leave notes in plans if sections do become stale but not required
-exhaustively. Avoid mentioning history in both code and documents - that's what
-git is for.
-
+exists). Naming them with a date prefix may help to know their order and what's
+most recent.

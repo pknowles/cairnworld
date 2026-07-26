@@ -1,6 +1,6 @@
+mod context;
 mod llm;
 mod mistralrs_backend;
-mod recording_backend;
 mod settings;
 mod store;
 
@@ -9,11 +9,10 @@ use std::{io::Write, path::Path};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use llm::{Backend, Message, Request, Role, Sampling};
+use llm::{Message, Role, Sampling};
 use mistralrs_backend::MistralRsBackend;
-use recording_backend::RecordingBackend;
 use settings::Settings;
-use store::Store;
+use store::{RecordedOutcome, Store};
 
 #[derive(Parser)]
 #[command(name = "cairnworld")]
@@ -90,18 +89,11 @@ fn resolve_model(model: Option<String>) -> Result<String> {
     }
 }
 
-async fn recording_backend(
-    model: &str,
-    database: &Path,
-) -> Result<RecordingBackend<MistralRsBackend>> {
-    let store = Store::open(database)
-        .await
-        .context("opening inference store")?;
+async fn backend(model: &str) -> Result<MistralRsBackend> {
     eprintln!("Loading model from {model}...");
-    let backend = MistralRsBackend::load(model)
+    MistralRsBackend::load(model)
         .await
-        .context("failed to load model")?;
-    Ok(RecordingBackend::new(backend, store, model.to_string()))
+        .context("failed to load model")
 }
 
 async fn run_chat(
@@ -110,16 +102,27 @@ async fn run_chat(
     system: Option<String>,
     database: &Path,
 ) -> Result<()> {
-    let backend = recording_backend(model, database).await?;
+    let store = Store::open(database)
+        .await
+        .context("opening inference store")?;
+    let world = store
+        .create_world("chat sandbox")
+        .await
+        .context("creating chat sandbox world")?;
+    let agent = store
+        .create_agent(world, "sandbox", "chat")
+        .await
+        .context("creating chat sandbox agent")?;
+    let backend = backend(model).await?;
     eprintln!("Model loaded. Type a message, or /quit to exit.");
 
-    let mut history = Vec::new();
-    if let Some(system) = system {
-        history.push(Message {
+    let static_messages = system
+        .into_iter()
+        .map(|content| Message {
             role: Role::System,
-            content: system,
-        });
-    }
+            content,
+        })
+        .collect::<Vec<_>>();
 
     let stdin = std::io::stdin();
     let mut line = String::new();
@@ -137,26 +140,33 @@ async fn run_chat(
             break;
         }
 
-        history.push(Message {
-            role: Role::User,
-            content: text.to_string(),
-        });
-
-        let request = Request {
-            messages: history.clone(),
-            tools: vec![],
-            sampling: Sampling { temperature },
-        };
+        store
+            .append_message(
+                agent,
+                &Message {
+                    role: Role::User,
+                    content: text.to_string(),
+                },
+            )
+            .await
+            .context("storing chat message")?;
 
         let mut reply = String::new();
-        let response = backend
-            .complete(request, |token| {
+        let response = context::complete(
+            &store,
+            &backend,
+            agent,
+            &static_messages,
+            Sampling { temperature },
+            model,
+            |token| {
                 print!("{token}");
                 let _ = std::io::stdout().flush();
                 reply.push_str(token);
-            })
-            .await
-            .context("inference failed")?;
+            },
+        )
+        .await
+        .context("inference failed")?;
         println!();
 
         let llm::Content::Text(text) = response.content else {
@@ -164,10 +174,16 @@ async fn run_chat(
         };
         debug_assert_eq!(text, reply);
 
-        history.push(Message {
-            role: Role::Assistant,
-            content: text,
-        });
+        store
+            .append_message(
+                agent,
+                &Message {
+                    role: Role::Assistant,
+                    content: text,
+                },
+            )
+            .await
+            .context("storing assistant response")?;
     }
 
     Ok(())
@@ -185,19 +201,29 @@ async fn run_replay(model: &str, database: &Path, inference_id: i64) -> Result<(
         "Recorded request:\n{}",
         serde_json::to_string_pretty(&recorded.request)?
     );
-    println!(
-        "Recorded output:\n{}",
-        serde_json::to_string_pretty(&recorded.response)?
-    );
+    match &recorded.outcome {
+        RecordedOutcome::Response(response) => println!(
+            "Recorded output:\n{}",
+            serde_json::to_string_pretty(response)?
+        ),
+        RecordedOutcome::Error(error) => println!("Recorded error:\n{error}"),
+    }
     println!("Replayed output:");
-    let backend = recording_backend(model, database).await?;
-    let response = backend
-        .complete(recorded.request, |token| {
+    let backend = backend(model).await?;
+    let response = context::complete_recipe(
+        &store,
+        &backend,
+        recorded.agent_id,
+        &recorded.segments,
+        recorded.request.sampling,
+        model,
+        |token| {
             print!("{token}");
             let _ = std::io::stdout().flush();
-        })
-        .await
-        .context("replaying recorded inference")?;
+        },
+    )
+    .await
+    .context("replaying recorded inference")?;
     println!(
         "\nReplay usage: {} input tokens, {} output tokens",
         response.usage.input_tokens, response.usage.output_tokens

@@ -17,30 +17,30 @@ when things were built.
   Sampling starts from `SamplingParams::neutral()`, not the crate's default
   `deterministic()` (which forces greedy `top_k = 1` independent of
   temperature).
-- `src/recording_backend.rs` - `RecordingBackend<B>` owns a `Backend` and a
-  `Store`.  It is the CLI's only model-call boundary: it passes streaming
-  tokens through unchanged, then records each successful completed request,
-  response, usage, model string, and elapsed duration.
+- `src/context.rs` - the only model-call boundary. It assembles a request from
+  content-addressed static text and persisted agent messages, streams through
+  the backend, then records either the completed response or the failure using
+  the same reference recipe.
 
 ## Persistence and recording (design.md: Persistence and recording)
 
 - `src/store.rs` and `migrations/0001_recording.sql` - SQLite store, WAL mode,
-  migration, content-addressed `text` records and `inference` records.
-  Milestone 2 records the bare REPL request as one canonical JSON text segment;
-  agent/message/summary segments remain deliberately deferred until their
-  corresponding persistence layer in milestone 4.  Reconstruction rechecks
-  the text BLAKE3 hash, record input hash, sampling, and usage columns before
-  returning the deserialized request and output.
+  migration, identity-only `world`/`agent` rows, ordered `message` history,
+  content-addressed `text`, and `inference` recipes. A recipe refers to static
+  text and an agent message range; reconstruction rereads those rows, verifies
+  text and assembled-input BLAKE3 hashes, and checks stored sampling and usage.
+  An inference contains exactly one response or error, so failed calls preserve
+  their reconstructable input without entering the agent's message history.
 
 ## Dev CLI (design.md: Dev CLI: chat, fork, replay)
 
 - `src/main.rs` - `cairnworld chat [--model <path>] [--temperature <f32>]
-  [--system <text>] [--database <path>]` is a bare 1:1 REPL over
-  `Vec<Message>` held in process memory, with each completion recorded.  The
-  `cairnworld replay [--model <path>] [--database <path>] <inference-id>`
-  command reconstructs and validates its request, displays the old request and
-  output, then runs the same recording path again.  `--kind`, `--fork`, and
-  `--prompts` remain milestone 4 work.
+  [--system <text>] [--database <path>]` creates a sandbox world and agent,
+  then persists each user and assistant message. `cairnworld replay [--model
+  <path>] [--database <path>] <inference-id>` reconstructs and validates the
+  recorded recipe, displays its response or error, and records the replay by
+  calling the same context boundary. `--kind`, `--fork`, and `--prompts` remain
+  later work.
 
 ## Configuration
 
