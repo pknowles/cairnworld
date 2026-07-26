@@ -112,6 +112,7 @@ mod tests {
     use crate::settings::Settings;
 
     #[tokio::test]
+    #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
     async fn stream_and_final_response_agree() {
         let model_path = Settings::load()
             .expect("settings should load")

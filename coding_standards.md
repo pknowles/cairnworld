@@ -31,6 +31,9 @@ Object ownership should be consistent with object lifetimes.
 
 Reuse API objects rather than wrapping, translating and copying memory.
 
+Keep a single definition so nothing has to be kept in sync. Prefer implied
+values that can easily be constructed at runtime rather that duplicating.
+
 Performance is important. Pipeline processing, avoid unnecessary stalls and
 synchronization, particularly GPU stalls. Simply reference, don't copy memory
 unless there is no other way.
@@ -48,6 +51,14 @@ error with context and should immediately fail testing. Fallbacks, warnings, and
 retry loops are all code smells that delay seeing problems and make debugging
 many times harder. If a critical service fails to start, do not continue and
 pretend everything is okay. Fail fast and loudly.
+
+Comments should document intent more than implementation. The code should
+already define how it works. This way someone reading the comment could verify
+that the code does its job as per the overall high level goal. In particular,
+when implementing a plan (likely based off a design doc and user requirements),
+it can be useful to add the rationale from there to the comments. Then the plan
+is no longer needed after implementing since the code has both intent and
+implementation.
 
 # Testing
 

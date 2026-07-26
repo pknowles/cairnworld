@@ -102,11 +102,15 @@ generation remains a fallback mechanism for weak tool callers.
 
 ## Recording is not optional
 
-The only path to the model runs through a recording wrapper that owns the
-backend. Code cannot call the backend directly, so every inference in every
-environment is recorded with token counts and wall time. This satisfies the
-"record everything, always" requirement structurally instead of by
-discipline.
+Every inference in every environment is recorded with token counts and wall
+time. This is structural rather than a matter of discipline: the only code
+that calls a backend is the context assembly function (see Agent loop),
+which builds an input from stored messages and text and records the outcome
+in the same operation. Recording is therefore not a separate feature layered
+over inference - it is a property of the one place that knows an input's
+provenance. A wrapper below the backend cannot do this job: handed an
+already-assembled request, it knows only opaque bytes, and can do no better
+than storing a copy of them.
 
 # Persistence and recording
 
@@ -144,8 +148,8 @@ packets, compaction instructions - live in one content-addressed table:
 An inference is recorded as a recipe of references plus verbatim output:
 
 - `inference(id, agent_id, sequence_id, parent_inference_id, segments,
-  sampling, output, input_hash, input_tokens, output_tokens, duration_ms,
-  model, created_at)`
+  sampling, output, error, input_hash, input_tokens, output_tokens,
+  duration_ms, model, created_at)`
 
 `segments` is a JSON array describing the input in order, e.g.
 `[{text: <hash>}, {summary: <id>}, {messages: [first_seq, last_seq]},
@@ -154,6 +158,16 @@ hash of the fully assembled input actually sent, so a unit test can reassemble
 and verify equality for every recorded inference. This test runs over real
 recorded data, which makes any drift between assembly and recording fail
 loudly.
+
+A failed inference is recorded, not dropped: exactly one of `output`/`error`
+is set, and a failure keeps its full recipe and `input_hash` so the prompt
+that produced it reconstructs and replays like any other. Failures are as
+interesting as successes when debugging prompts and model behaviour, and an
+unrecorded failure is invisible after the fact. A failed output is never fed
+back into an agent's context - it is not a `message`, so context assembly
+never sees it. Dev mode's chat history renders the union of `message` rows
+and failed inferences, so a failure appears inline in the transcript and
+opens into its inference view like any other entry.
 
 Because compaction is itself an inference, summaries automatically get the
 same record and the same reconstruction guarantee.
@@ -297,11 +311,12 @@ One-way per-world flag as declared. The game page splits into two columns;
 the right column navigates:
 
 - Agent list → raw chat history (infinite scroll, summaries shown as
-  expandable inserts at their compaction points)
+  expandable inserts at their compaction points, failed inferences shown
+  inline where they occurred)
 - Chat entries → sequence view: the call tree of inferences and actions for
   that entry's sequence, with per-node and cumulative token/time costs
 - Any inference → inference view: reconstructed verbatim input and verbatim
-  output
+  output, or the recorded error for a failed one
 - Game objects → current state and notes
 
 An in-progress sequence view shows each open inference's raw token stream
