@@ -223,9 +223,12 @@ Structural rules, enforced in rust:
 
 ## Tools
 
-A tool = name + short description + JSON schema + rust handler. Each agent
-kind has a fixed tool set. Two mechanics from user_declarations.md shape the
-framework:
+A tool is one visible operation: its name, short description, JSON schema, and
+ the Rust code that validates and performs it. Each agent kind builds its own
+ fixed tool list from the features it offers. When an agent loop needs to find
+ an operation by the model-supplied name, it uses that list directly as a small
+ lookup table; there is no central tool registry, manager, or service with a
+ separate lifetime. Two mechanics from user_declarations.md shape the tools:
 
 - **Action IDs and approve-action.** When a character agent's tool call needs
   GM arbitration, rust assigns the next action id, stores the validated
@@ -359,8 +362,8 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   `--kind gm|npc|player|storyteller` selects the role prompt and tool set,
   and the full context assembly and compaction machinery is exercised - so a
   REPL session is a faithful stand-in for in-game behaviour, not an
-  approximation. Rust-side tool handlers execute for real against the
-  sandbox world's state.
+  approximation. Rust-side tool code executes for real against the sandbox
+  world's state.
 - **Fork:** `cairnworld chat --fork <agent-id> [--at <seq>]` copies an
   existing agent's history (from any world, up to an optional seq) into a
   sandbox agent and drops into the REPL at that point. The source world is
