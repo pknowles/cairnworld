@@ -25,8 +25,8 @@ Layers, each depending only on those above it:
 1. `llm` - inference backends behind one trait; every call recorded
 2. `store` - sqlite persistence: chat histories, game objects, inference
    records
-3. `agent` - context assembly, the agent loop, tool registry, agent-to-agent
-   call tree
+3. `agent` - context assembly, the agent loop, per-invocation tool lists,
+   agent-to-agent call tree
 4. `game` - game objects, actions, dice, Cairn rules
 5. `web` - axum routes, websocket chat, Leptos frontend, dev mode views
 6. `mcp` - RMCP server exposing the same tool surface to coding agents
@@ -59,6 +59,7 @@ struct Request {
 
 struct Response {
     content: Content,            // Text(String) | ToolCalls(Vec<ToolCall>)
+    reasoning: Option<String>,   // chain-of-thought, when the model emits it
     usage: Usage,                // input tokens, output tokens
 }
 ```
@@ -223,9 +224,12 @@ Structural rules, enforced in rust:
 
 ## Tools
 
-A tool = name + short description + JSON schema + rust handler. Each agent
-kind has a fixed tool set. Two mechanics from user_declarations.md shape the
-framework:
+A tool is one visible operation: its name, short description, JSON schema, and
+ the Rust code that validates and performs it. Each agent kind builds its own
+ fixed tool list from the features it offers. When an agent loop needs to find
+ an operation by the model-supplied name, it uses that list directly as a small
+ lookup table; there is no central tool registry, manager, or service with a
+ separate lifetime. Two mechanics from user_declarations.md shape the tools:
 
 - **Action IDs and approve-action.** When a character agent's tool call needs
   GM arbitration, rust assigns the next action id, stores the validated
@@ -316,7 +320,9 @@ the right column navigates:
 - Chat entries → sequence view: the call tree of inferences and actions for
   that entry's sequence, with per-node and cumulative token/time costs
 - Any inference → inference view: reconstructed verbatim input and verbatim
-  output, or the recorded error for a failed one
+  output, or the recorded error for a failed one. Where a model emitted
+  reasoning, it is shown collapsed beside the output - recorded like any other
+  model output, but never re-fed into a later context
 - Game objects → current state and notes
 
 An in-progress sequence view shows each open inference's raw token stream
@@ -359,8 +365,8 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   `--kind gm|npc|player|storyteller` selects the role prompt and tool set,
   and the full context assembly and compaction machinery is exercised - so a
   REPL session is a faithful stand-in for in-game behaviour, not an
-  approximation. Rust-side tool handlers execute for real against the
-  sandbox world's state.
+  approximation. Rust-side tool code executes for real against the sandbox
+  world's state.
 - **Fork:** `cairnworld chat --fork <agent-id> [--at <seq>]` copies an
   existing agent's history (from any world, up to an optional seq) into a
   sandbox agent and drops into the REPL at that point. The source world is
@@ -392,7 +398,7 @@ An RMCP server (own subcommand or enabled under `serve`) exposing:
 - read access to the debug spine: sequences, inferences, reconstruction,
   chat histories, game objects
 
-This reuses the tool registry and store queries verbatim - it is a thin
+This reuses the same tool lists and store queries verbatim - it is a thin
 transport, not a second implementation.
 
 # Off-the-shelf dependencies
@@ -431,8 +437,9 @@ sections of user_declarations.md.
 
 ## Actions and rules (TODO)
 
-The full character/NPC/GM/Storyteller tool sets over the framework's tool
-registry, rule packets from the Cairn SRD, item transfer invariants
+The full character/NPC/GM/Storyteller tool sets over the framework's
+per-invocation tool lists, rule packets from the Cairn SRD, item transfer
+invariants
 (Give/Take through rust so items cannot duplicate), BePersuaded, save
 mechanics. (Tool calls; GM interaction.)
 

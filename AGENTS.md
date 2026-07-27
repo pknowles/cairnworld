@@ -43,6 +43,7 @@ hard gate and MUST be followed:
    - Are your changes project-consistent, modular and did not introduce duplication?
    - Did you "fix" anything without evidence, i.e. proving the thing you fixed was actually the cause and true underlying problem? See Debugging below for details.
    - Did you write any workarounds or bandaids that only fix a specific symptom, i.e. without finding the true cause needed for a robust solution? E.g. evidence-less, speculative or defensive "just in case" code without user sign off?
+   - Did you skip or relax tests that resulted in important coverage lost?
    - Anything else the user should know about?
 
 All issues should be fixed appropriately before committing.

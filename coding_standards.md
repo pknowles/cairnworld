@@ -10,6 +10,18 @@ Ownership is in the object itself. Processing happens in the constructor. The
 data lives on in the object. Name the object after the data it holds. Do not
 create "manager" or "<verb>-er" objects - this is an anti-pattern.
 
+Group by feature, domain, responsibility, or reason to change, not by type or technical category. Things that change together should live together.
+
+Don’t introduce a named construct merely to group a category of operations. It's
+often similar to grouping by type. Names such as registry, manager, service,
+dispatcher, or controller often imply a central object with its own
+responsibility and lifetime. The real need is often ordinary code, objects,
+associative arrays, usage patterns. Start from the data and operation that
+genuinely exist; use straight forward local representation. Introduce an
+abstraction only when it owns real data or expresses a proven shared behaviour
+that cannot be clearer as normal code. Do not reshape unrelated operations to
+fit a generic abstraction for the sake of its name.
+
 Prefer complete-at-initialization, RAII, as rust is designed for. This
 guarantees dependencies exist first, before dependent objects are constructed.
 Any tension likely indicates a design issue that the compiler and language is
