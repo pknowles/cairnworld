@@ -1,7 +1,7 @@
 # Infrastructure to Bread Thief
 
-Status: in-progress (2026-07-26) - milestones 1-2 complete; milestone 3 next
-(see detail below); milestones 4-9 not started
+Status: in-progress (2026-07-26) - milestones 1-2 complete; milestone 3
+planned and awaiting its model bake-off; milestones 4-9 not started
 
 ## Goal
 
@@ -233,3 +233,124 @@ deleting it.
   queryable with its error and reconstructable input.
 - A real GPU chat followed by replay has been exercised end to end.
 - Documentation matches the code; tests and builds pass; one commit.
+
+## Milestone 3 detail: Tool calls + model bake-off
+
+Goal: prove the same recorded agent loop can offer a schema-derived tool,
+persist the assistant tool call and rust-generated result in its history, then
+produce a final response. Compare that exact interaction on the candidate
+models before selecting the default model.
+
+### Terms used in this plan
+
+- A **tool** is one visible operation offered to a model: its name, short
+  description, argument schema, argument type, and Rust code that performs the
+  operation. It is not a generic service.
+- A **tool list** is the fixed list of tools offered for one agent invocation.
+  It is assembled with that invocation's other input. Looking up a returned
+  tool name is an ordinary search of this local list; there is no global
+  `ToolRegistry`, manager, or controller.
+- A **tool-call message** is the assistant chat entry containing the model's
+  structured call name, arguments, and call id. A **tool-result message** is
+  the following tool chat entry containing that id and Rust's result. These are
+  persisted messages, not text rendered for debugging.
+- A **tool-definition segment** is a content-addressed reference to the exact
+  JSON tool list sent with an inference. It lets replay reconstruct `Request`
+  including its tools without storing another complete request blob.
+
+### Scope and design choice
+
+1. **Structured messages and reconstruction.** Expand message content from
+   text-only to tagged text, tool-call, and tool-result values. The assistant's
+   call id is retained in its call and its result. Extend the recipe format with
+   a tool-definition segment and reconstruct the identical tool list alongside
+   messages and sampling. This is the persistence slice; it does not execute a
+   tool yet.
+
+   Verify: a stored text/call/result history and a tool-definition segment
+   reconstruct hash-equal; missing, corrupt, and cross-agent references fail
+   with context. Existing text-only histories still reconstruct.
+
+2. **Backend protocol support.** Teach both backends to send the shared tool
+   definitions and return the shared structured calls. The mistral.rs backend
+   must assemble streamed tool-call deltas as well as streamed text. The
+   OpenAI-compatible backend translates the same shared request and response
+   types over its streaming HTTP protocol; it has no separate agent or
+   recording path. CLI parsing constructs one complete provider configuration
+   (local GGUF or OpenAI-compatible endpoint/model/authentication), rather than
+   accepting unrelated optional flags.
+
+   Verify: backend fixtures cover ordinary text, one call, multiple calls, and
+   fragmented streamed call arguments. A local HTTP test server verifies the
+   wire representation and its error context without an external account.
+
+3. **One dice operation and the agent loop.** Add `roll_die` as the only tool
+   offered by the REPL in this milestone. Its argument type rejects zero sides
+   during deserialization and its `JsonSchema` states the same lower bound; a
+   test proves that agreement. The local tool list supplies its definition and
+   finds it by name. Rust generates the result in `1..=sides`; the model never
+   supplies the result. This proves the agent loop from
+   user_declarations.md: invoke, persist the returned call, validate and run it,
+   append the result, then invoke again for final text.
+
+   A valid call appends one assistant tool-call message and its matching result
+   messages in returned order. An invalid call is already preserved as the
+   successful inference's output, but appends no invented result and causes no
+   further inference; its validation error propagates with context. A backend
+   error remains a failed inference record through the existing context path.
+
+   Verify: scripted backend responses exercise final text with no tool, one
+   valid roll, and multiple valid rolls. The final response must receive and use
+   the actual persisted result; reconstructed inputs before and after the roll
+   must be hash-equal.
+
+4. **REPL, replay, and bake-off.** Wire `chat` through this real loop and keep
+   `replay` at the existing inference boundary, so each replay reuses the exact
+   recorded tool definitions and messages. Run the same fixed prompt set,
+   schemas, sampling, and trial count on Qwen3 8B, Hermes, and Llama 3.1 8B
+   Instruct. Record each run in its sandbox database.
+
+   The bake-off measures separately: structural tool correctness (valid name,
+   schema-valid arguments, matching id/result, and final use of that result),
+   conversational/NPC voice, useful long-context behaviour, latency, and VRAM.
+   Select a model only after the acceptance threshold and trial count are agreed
+   before testing; one dice exchange alone is not sufficient evidence for the
+   broader model decision.
+
+### Alternatives considered
+
+- Letting mistral.rs invoke callbacks would make the application miss the
+  call/result messages that define the agent's history.
+- Putting pseudo-tool JSON in a prompt would create a second unvalidated
+  protocol and bypass the model's native tool interface.
+- A global registry/service would group unrelated tool operations by technical
+  category and impose a separate lifetime without owning game data. A local
+  invocation-specific tool list provides the required lookup directly.
+
+### LLM test-design review checkpoint
+
+Happy paths: final text without a tool; one valid dice call followed by final
+text; several valid dice calls followed by final text; replay of each inference
+in that exchange; and the same exchange through each backend.
+
+Edges: unknown name, malformed JSON, zero sides, multiple calls with distinct
+ids, a mixture of valid and invalid calls, fragmented streamed call arguments,
+empty final text, and backend failure before or during streamed output.
+
+Expected outcomes: valid calls have schema-valid arguments, a Rust-generated
+bounded result paired with the visible call id, and final text based on that
+result. Invalid calls and backend failures stop immediately with accumulated
+context; neither produces a fabricated tool result or a later model call.
+Every inference input remains reconstructable, while only backend failures are
+stored as failed inference outcomes.
+
+Validation options: scripted backend tests exercise the real loop cheaply and
+make history/reconstruction observable; an HTTP test server tests protocol
+translation without duplicating the loop; real candidate runs test model
+behaviour and performance. Together they catch a loop that merely appends text,
+a protocol adapter that loses ids or splits arguments incorrectly, and a model
+that emits plausible-looking but unusable calls.
+
+Stop here for user review before specifying negative-result tests, thresholds,
+or implementation. The test-design process in coding_standards.md requires this
+checkpoint.
