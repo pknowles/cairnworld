@@ -42,3 +42,49 @@ On the abstraction this rule was introduced to prevent:
 
 The biggest risk of leaving it is that a later agent reads it and makes bad
 assumptions.
+
+## Hide roll numbers; distinguish a failed call from a failed save
+
+Observed 2026-07-27: given one hazard, Llama 3.1 8B called `save` three times
+with identical arguments, re-rolling after each failure, then emitted a fourth
+call as raw text with a difficulty it chose itself.
+
+> to solve this I think we need to hide the number from the model and just
+> report the textual result. One issue is we need to distinguish a failed tool
+> call from a failed save. I suspect the model is confused. Are there better
+> words we can use or can we just be more explicit about the tool call
+> succeeding with the result that the save failed?
+
+> I think we should test these ideas without just picking one
+
+The roll value is theatre for the player, not information the model needs. A
+tool call that completes is a success even when the save it resolved did not
+pass, and the wording must not let those two read as the same thing.
+
+## "Without storing it redundantly" means no whole-input blobs, not dedup
+
+On why `text` should not be keyed by a content hash:
+
+> the point of this was not to store the entire input text in its own field
+> for EVERY inference. this would be absurd
+
+> the chance that a model outputs identical text in different chats is so low
+> that storing with the hash being the PK just doesn't make sense and will
+> lead to more confusion. it's just not going to be worth it.
+
+The recipe of references already satisfies the declaration. Deduplicating
+identical strings was never asked for, saves almost nothing (only role prompts
+and tool definitions are content-addressed), and buys a shared mutable row that
+one edit could use to rewrite history for every inference referencing it. Use
+an ordinary surrogate key.
+
+## Safety bounds on the agent loop
+
+> add two project wide configurable safety bounds: one max for individual
+> chats and one max for the total llm inference calls that include recursive
+> inference. when either is hit the result implicitly returns and propagates
+> an error saying which was hit. this will land in the user's terminal since
+> it will propagate and agents will not get a chance to respond to it
+
+The bounds exist to stop a runaway, so hitting one is a hard error that
+reaches the user - never something an agent can observe and react to.
