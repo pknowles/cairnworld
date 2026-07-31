@@ -6,7 +6,7 @@ when things were built.
 ## Inference layer (design.md: Inference layer)
 
 - `src/llm.rs` - the `Backend` trait, `Request`/`Response`/`Message`/
-  `ToolDefinition`/`Sampling`/`Content`/`Usage` types.
+  `MessageContent`/`ToolDefinition`/`Sampling`/`Content`/`Usage` types.
 - `src/mistralrs_backend.rs` - `MistralRsBackend`, the mistral.rs
   implementation of `Backend`. Loads a GGUF model via `GgufModelBuilder`
   (`cuda` feature). `complete` drives `on_token` from
@@ -16,36 +16,57 @@ when things were built.
   non-streaming `send_chat_request` path), so there is nothing to read back.
   Sampling starts from `SamplingParams::neutral()`, not the crate's default
   `deterministic()` (which forces greedy `top_k = 1` independent of
-  temperature).
+  temperature). It maps native structured tool calls and reasoning deltas to
+  the shared types, and applies the recorded `enable_thinking` setting. Tools
+  are sent with `strict`, constraining generation to the argument schema.
+- `third_party/mistral.rs` - submodule of https://github.com/pknowles/mistral.rs,
+  depended on by path. It carries one fix absent upstream: Qwen3 GGUF inference
+  omits the device move before the final norm that the Llama path performs, so
+  any CPU/GPU layer split fails in rms-norm. Clone with `--recurse-submodules`,
+  or run `git submodule update --init` in an existing checkout.
+- `templates/hermes-tools.jinja` - the Hermes 3 GGUF ships a bare ChatML
+  template that silently drops tool definitions, so its tool surface is unusable
+  without it. `[models.hermes]` supplies it automatically.
 - `src/context.rs` - the only model-call boundary. It assembles a request from
-  content-addressed static text and persisted agent messages, streams through
+  stored static prompt text and persisted agent messages, streams through
   the backend, then records either the completed response or the failure using
   the same reference recipe.
+- `src/agent.rs` - resolves one recorded chat turn: persists each assistant
+  response, runs calls from the invocation-local tool list, persists their
+  results, and repeats until final text.
+- `src/tools.rs` - the local `save` tool and the ordinary invocation-local
+  lookup used to derive `ToolDefinition`s and run the matching Rust callback.
 
 ## Persistence and recording (design.md: Persistence and recording)
 
 - `src/store.rs` and `migrations/0001_recording.sql` - SQLite store, WAL mode,
-  migration, identity-only `world`/`agent` rows, ordered `message` history,
-  content-addressed `text`, and `inference` recipes. A recipe refers to static
-  text and an agent message range; reconstruction rereads those rows, verifies
-  text and assembled-input BLAKE3 hashes, and checks stored sampling and usage.
-  An inference contains exactly one response or error, so failed calls preserve
-  their reconstructable input without entering the agent's message history.
+  identity-only `world`/`agent` rows, ordered `message` history, write-once
+  `text` prompt rows, and `inference` recipes. A recipe refers to static text,
+  a tool-definition segment, and an agent message range; reconstruction rereads
+  those rows, verifies the assembled input against its BLAKE3 hash, and checks
+  stored sampling and usage. An inference contains exactly one response or
+  error, so failed calls preserve their reconstructable input without entering
+  the agent's message history. Pre-1.0 the schema is edited in place rather
+  than migrated - changing it invalidates existing database files.
 
 ## Dev CLI (design.md: Dev CLI: chat, fork, replay)
 
-- `src/main.rs` - `cairnworld chat [--model <path>] [--temperature <f32>]
-  [--system <text>] [--database <path>]` creates a sandbox world and agent,
-  then persists each user and assistant message. `cairnworld replay [--model
-  <path>] [--database <path>] <inference-id>` reconstructs and validates the
-  recorded recipe, displays its response or error, and records the replay by
-  calling the same context boundary. `--kind`, `--fork`, and `--prompts` remain
-  later work.
+- `src/main.rs` - `cairnworld chat [--model <name|path>] [--temperature <f32>]
+  [--enable-thinking] [--system <text>] [--database <path>] [--chat-template
+  <path>]` creates a sandbox world and agent, then resolves each turn through
+  the agent loop. `cairnworld replay [--model <name|path>] [--database <path>]
+  <inference-id>` reconstructs and validates the recorded recipe, displays its
+  response or error, and records the replay by calling the same context
+  boundary. `--kind`, `--fork`, and `--prompts` remain later work.
+- `src/settings.rs` - `[models.<name>]` entries pair a GGUF path with the chat
+  template that file needs, so `--model hermes` carries its template
+  automatically. `--model` also accepts a path directly, and `--chat-template`
+  overrides whatever the entry specifies.
 
 ## Configuration
 
 - `src/settings.rs` - `Settings`, loaded via the `config` crate (toml
   feature only) layering `default.toml` (checked in) under `local.toml`
-  (gitignored, per-machine overrides). Currently holds only `model`; `--model`
-  on the CLI wins over both files if given.
-- Models are not checked in; `models/` is gitignored.
+  (gitignored, per-machine overrides). Holds the `[models.<name>]` entries
+  described above, `model` naming the default among them, and `limits`.
+- Weights are not checked in; `models/` is gitignored.
