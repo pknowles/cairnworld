@@ -643,6 +643,9 @@ Many tool calls imply a roll will be made. Rolls are made by rust code, not
 LLMs! When implemented PC rolls will be made in the UI by players clicking a
 "roll" button - this is purely theatrical.
 
+All tool calls should actually use snake_case. I only used camel in this doc as
+a mild convention make references to special names distinct.
+
 ## Character creation actions
 
 See [character

@@ -14,7 +14,11 @@ Some files may be temporary or intentionally un-tracked. You may use
 .git/info/exclude for these, not .gitignore. Never use `git add -A`; prefer `git
 add -u`, be surgical and explicitly add new files. Use temporary commits rather
 than git stash or copying files as they are far more robust and there is less
-risk of losing anything.
+risk of losing anything. Never add temporary changes to uncommitted/dirty files
+as you may lose track of which changes are which. Separate with a temporary
+commit first. Never use `git checkout` to revert changes you think you made.
+Coding agents often screw this up and delete code because they don't realise
+there are other changes in a file they edited.
 
 Use integrated edit/search tools rather than grep/sed when at all possible.
 
