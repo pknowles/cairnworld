@@ -1,3 +1,6 @@
 [submodule "cairn"]
 	path = cairn
 	url = git@github.com:yochaigal/cairn.git
+[submodule "third_party/mistral.rs"]
+	path = third_party/mistral.rs
+	url = https://github.com/pknowles/mistral.rs

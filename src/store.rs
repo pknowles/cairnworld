@@ -7,7 +7,9 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
-use crate::llm::{Content, Message, Request, Response, Role, Sampling, Usage};
+use crate::llm::{
+    Message, MessageContent, Request, Response, Role, Sampling, ToolDefinition, Usage,
+};
 
 #[derive(Clone)]
 pub struct Store {
@@ -17,7 +19,8 @@ pub struct Store {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Segment {
-    Text { text: String, role: Role },
+    Text { text: i64, role: Role },
+    Tools { text: i64 },
     Messages { messages: MessageRange },
 }
 
@@ -133,17 +136,19 @@ impl Store {
                 .await
                 .with_context(|| format!("finding next message sequence for agent {agent_id}"))?;
         let role = serde_json::to_string(&message.role).context("serializing message role")?;
-        let content = serde_json::to_string(&Content::Text(message.content.clone()))
-            .context("serializing message content")?;
-        let result =
-            sqlx::query("INSERT INTO message (agent_id, seq, role, content) VALUES (?, ?, ?, ?)")
-                .bind(agent_id)
-                .bind(seq)
-                .bind(role)
-                .bind(content)
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| format!("appending message {seq} for agent {agent_id}"))?;
+        let content =
+            serde_json::to_string(&message.content).context("serializing message content")?;
+        let result = sqlx::query(
+            "INSERT INTO message (agent_id, seq, role, content, reasoning) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(agent_id)
+        .bind(seq)
+        .bind(role)
+        .bind(content)
+        .bind(&message.reasoning)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("appending message {seq} for agent {agent_id}"))?;
         transaction
             .commit()
             .await
@@ -151,15 +156,24 @@ impl Store {
         Ok(result.last_insert_rowid())
     }
 
-    pub async fn put_text(&self, content: &str) -> Result<String> {
-        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        sqlx::query("INSERT OR IGNORE INTO text (hash, content) VALUES (?, ?)")
-            .bind(&hash)
+    /// Store one static prompt piece and return the id a recipe refers to.
+    /// Rows are never updated, so the reference stays true to what was sent.
+    pub async fn store_prompt_text(&self, content: &str) -> Result<i64> {
+        let result = sqlx::query("INSERT INTO text (content) VALUES (?)")
             .bind(content)
             .execute(&self.pool)
             .await
-            .context("storing content-addressed text")?;
-        Ok(hash)
+            .context("storing prompt text")?;
+        Ok(result.last_insert_rowid())
+    }
+
+    async fn text(&self, id: i64) -> Result<String> {
+        sqlx::query_scalar("SELECT content FROM text WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("loading prompt text")?
+            .with_context(|| format!("inference references missing text {id}"))
     }
 
     pub async fn message_segment(&self, agent_id: i64) -> Result<Option<Segment>> {
@@ -189,24 +203,17 @@ impl Store {
         sampling: Sampling,
     ) -> Result<Request> {
         let mut messages = Vec::new();
+        let mut tools = Vec::new();
         for segment in segments {
             match segment {
                 Segment::Text { text, role } => {
-                    let content: String =
-                        sqlx::query_scalar("SELECT content FROM text WHERE hash = ?")
-                            .bind(text)
-                            .fetch_optional(&self.pool)
-                            .await
-                            .context("loading content-addressed text")?
-                            .with_context(|| format!("inference references missing text {text}"))?;
-                    ensure!(
-                        blake3::hash(content.as_bytes()).to_hex().as_str() == text,
-                        "text content does not match its hash {text}"
-                    );
-                    messages.push(Message {
-                        role: role.clone(),
-                        content,
-                    });
+                    messages.push(Message::text(role.clone(), self.text(*text).await?));
+                }
+                Segment::Tools { text } => {
+                    let definitions: Vec<ToolDefinition> =
+                        serde_json::from_str(&self.text(*text).await?)
+                            .context("deserializing tool definitions")?;
+                    tools.extend(definitions);
                 }
                 Segment::Messages { messages: range } => {
                     ensure!(
@@ -260,28 +267,25 @@ impl Store {
                                 range.agent_id, row.seq
                             )
                         })?;
-                        let Content::Text(content) = serde_json::from_str(&row.content)
+                        let content: MessageContent = serde_json::from_str(&row.content)
                             .with_context(|| {
                                 format!(
                                     "deserializing content for agent {} message {}",
                                     range.agent_id, row.seq
                                 )
-                            })?
-                        else {
-                            anyhow::bail!(
-                                "agent {} message {} is not text content",
-                                range.agent_id,
-                                row.seq
-                            );
-                        };
-                        messages.push(Message { role, content });
+                            })?;
+                        messages.push(Message {
+                            role,
+                            content,
+                            reasoning: String::new(),
+                        });
                     }
                 }
             }
         }
         Ok(Request {
             messages,
-            tools: vec![],
+            tools,
             sampling,
         })
     }
@@ -399,8 +403,24 @@ impl Store {
         })
     }
 
+    /// Rewrite a prompt row that should never change, so tests can prove
+    /// tampering is detected rather than silently reconstructed.
     #[cfg(test)]
-    async fn inference_count(&self) -> Result<i64> {
+    pub(crate) async fn corrupt_text_for_test(&self, containing: &str) {
+        let rows = sqlx::query("UPDATE text SET content = '[]' WHERE content LIKE ?")
+            .bind(format!("%{containing}%"))
+            .execute(&self.pool)
+            .await
+            .expect("corrupting text should succeed")
+            .rows_affected();
+        assert_eq!(
+            rows, 1,
+            "expected exactly one text row matching {containing}"
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn inference_count(&self) -> Result<i64> {
         sqlx::query_scalar("SELECT COUNT(*) FROM inference")
             .fetch_one(&self.pool)
             .await
@@ -413,6 +433,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::llm::Content;
 
     fn database_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -428,6 +449,7 @@ mod tests {
     fn response() -> Response {
         Response {
             content: Content::Text("A locked chest.".to_string()),
+            reasoning: String::new(),
             usage: Usage {
                 input_tokens: 12,
                 output_tokens: 5,
@@ -449,25 +471,22 @@ mod tests {
         store
             .append_message(
                 agent,
-                &Message {
-                    role: Role::User,
-                    content: "What is beneath the floorboards?".to_string(),
-                },
+                &Message::text(Role::User, "What is beneath the floorboards?"),
             )
             .await
             .expect("user message should persist");
         store
             .append_message(
                 agent,
-                &Message {
-                    role: Role::Assistant,
-                    content: "A locked chest.".to_string(),
-                },
+                &Message::assistant(
+                    Content::Text("A locked chest.".to_string()),
+                    "scratch work".to_string(),
+                ),
             )
             .await
             .expect("assistant message should persist");
         let prompt = store
-            .put_text("You are a careful guide.")
+            .store_prompt_text("You are a careful guide.")
             .await
             .expect("prompt should persist");
         let segments = vec![
@@ -482,9 +501,24 @@ mod tests {
                 .expect("history should have a range"),
         ];
         let request = store
-            .request_for_segments(agent, &segments, Sampling { temperature: 0.7 })
+            .request_for_segments(
+                agent,
+                &segments,
+                Sampling {
+                    temperature: 0.7,
+                    enable_thinking: false,
+                },
+            )
             .await
             .expect("request should assemble");
+        let stored_reasoning: String =
+            sqlx::query_scalar("SELECT reasoning FROM message WHERE agent_id = ? AND seq = 1")
+                .bind(agent)
+                .fetch_one(&store.pool)
+                .await
+                .expect("assistant reasoning should persist");
+        assert_eq!(stored_reasoning, "scratch work");
+        assert!(request.messages[1].reasoning.is_empty());
         (store, path, agent, segments, request)
     }
 
@@ -549,7 +583,10 @@ mod tests {
             Segment::Text { text, .. } => text,
             _ => unreachable!(),
         };
-        sqlx::query("UPDATE text SET content = 'corrupt' WHERE hash = ?")
+        // Prompt rows are written once and never updated. Rewriting one is
+        // therefore corruption, and `input_hash` over the whole reassembled
+        // request is what catches it.
+        sqlx::query("UPDATE text SET content = 'corrupt' WHERE id = ?")
             .bind(text)
             .execute(&store.pool)
             .await
@@ -559,7 +596,7 @@ mod tests {
                 .contains("does not match")
         );
 
-        sqlx::query("UPDATE text SET content = ? WHERE hash = ?")
+        sqlx::query("UPDATE text SET content = ? WHERE id = ?")
             .bind("You are a careful guide.")
             .bind(text)
             .execute(&store.pool)

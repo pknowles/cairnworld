@@ -1,10 +1,15 @@
+mod agent;
 mod context;
 mod llm;
 mod mistralrs_backend;
 mod settings;
 mod store;
+mod tools;
 
-use std::{io::Write, path::Path};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,19 +30,25 @@ struct Cli {
 enum Command {
     /// Interactive stdio conversation with the model.
     Chat {
-        /// Path to a local GGUF model file, e.g. models/model.gguf. Falls
-        /// back to the `model` key in local.toml/default.toml if omitted.
+        /// Configured model name, e.g. llama, hermes, qwen. A GGUF path also
+        /// works. Falls back to the `model` key in local.toml/default.toml.
         #[arg(long)]
         model: Option<String>,
         /// Sampling temperature.
         #[arg(long, default_value_t = 1.0)]
         temperature: f32,
+        /// Enable the model's reasoning mode when its template supports it.
+        #[arg(long)]
+        enable_thinking: bool,
         /// Optional system prompt.
         #[arg(long)]
         system: Option<String>,
         /// SQLite database used to record every completion.
         #[arg(long, default_value = "cairnworld.sqlite")]
         database: String,
+        /// Chat template overriding both the GGUF's and the configured one.
+        #[arg(long)]
+        chat_template: Option<PathBuf>,
     },
     /// Re-run one recorded inference after validating its reconstructed input.
     Replay {
@@ -47,6 +58,9 @@ enum Command {
         /// Path to a local GGUF model file. Falls back to `model` in settings.
         #[arg(long)]
         model: Option<String>,
+        /// Chat template overriding the one in the GGUF.
+        #[arg(long)]
+        chat_template: Option<PathBuf>,
         /// Inference record ID to reconstruct and re-run.
         inference_id: i64,
     },
@@ -57,50 +71,70 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+    let settings = Settings::load()?;
     match cli.command {
         Command::Chat {
             model,
             temperature,
+            enable_thinking,
             system,
             database,
+            chat_template,
         } => {
             run_chat(
-                &resolve_model(model)?,
+                resolve_model(model.as_deref(), chat_template, &settings)?,
                 temperature,
+                enable_thinking,
                 system,
                 Path::new(&database),
+                settings.limits,
             )
             .await
         }
         Command::Replay {
             database,
             model,
+            chat_template,
             inference_id,
-        } => run_replay(&resolve_model(model)?, Path::new(&database), inference_id).await,
+        } => {
+            run_replay(
+                resolve_model(model.as_deref(), chat_template, &settings)?,
+                Path::new(&database),
+                inference_id,
+            )
+            .await
+        }
     }
 }
 
-fn resolve_model(model: Option<String>) -> Result<String> {
-    match model {
-        Some(model) => Ok(model),
-        None => Settings::load()?
-            .model
-            .context("no --model given and no `model` key set in local.toml/default.toml"),
+/// A `--chat-template` on the command line wins over the configured one, so a
+/// template can be tried against any model without editing configuration.
+fn resolve_model(
+    requested: Option<&str>,
+    chat_template: Option<PathBuf>,
+    settings: &Settings,
+) -> Result<settings::Model> {
+    let mut model = settings.model(requested)?;
+    if chat_template.is_some() {
+        model.chat_template = chat_template;
     }
+    Ok(model)
 }
 
-async fn backend(model: &str) -> Result<MistralRsBackend> {
-    eprintln!("Loading model from {model}...");
-    MistralRsBackend::load(model)
+async fn backend(model: &settings::Model) -> Result<MistralRsBackend> {
+    eprintln!("Loading model from {}...", model.path);
+    MistralRsBackend::load(&model.path, model.chat_template.as_deref())
         .await
         .context("failed to load model")
 }
 
 async fn run_chat(
-    model: &str,
+    model: settings::Model,
     temperature: f32,
+    enable_thinking: bool,
     system: Option<String>,
     database: &Path,
+    limits: settings::Limits,
 ) -> Result<()> {
     let store = Store::open(database)
         .await
@@ -113,16 +147,14 @@ async fn run_chat(
         .create_agent(world, "sandbox", "chat")
         .await
         .context("creating chat sandbox agent")?;
-    let backend = backend(model).await?;
+    let backend = backend(&model).await?;
     eprintln!("Model loaded. Type a message, or /quit to exit.");
 
     let static_messages = system
         .into_iter()
-        .map(|content| Message {
-            role: Role::System,
-            content,
-        })
+        .map(|content| Message::text(Role::System, content))
         .collect::<Vec<_>>();
+    let tools = [tools::save()];
 
     let stdin = std::io::stdin();
     let mut line = String::new();
@@ -141,55 +173,43 @@ async fn run_chat(
         }
 
         store
-            .append_message(
-                agent,
-                &Message {
-                    role: Role::User,
-                    content: text.to_string(),
-                },
-            )
+            .append_message(agent, &Message::text(Role::User, text))
             .await
             .context("storing chat message")?;
 
-        let mut reply = String::new();
-        let response = context::complete(
+        // Each REPL turn is one external trigger, so it gets its own budget.
+        let mut budget = agent::Budget::new(limits);
+        let response = agent::complete(
             &store,
             &backend,
+            &mut budget,
             agent,
             &static_messages,
-            Sampling { temperature },
-            model,
+            &tools,
+            Sampling {
+                temperature,
+                enable_thinking,
+            },
+            &model.path,
             |token| {
                 print!("{token}");
                 let _ = std::io::stdout().flush();
-                reply.push_str(token);
             },
         )
         .await
-        .context("inference failed")?;
-        println!();
-
-        let llm::Content::Text(text) = response.content else {
-            anyhow::bail!("expected text content; tool calls are not supported in this milestone");
+        .context("resolving chat turn")?;
+        // A turn may run several inferences, so streamed output spans all of
+        // them while `response` is only the last; the store holds the record.
+        let llm::Content::Text(_) = response.content else {
+            anyhow::bail!("agent loop returned tool calls as its final response");
         };
-        debug_assert_eq!(text, reply);
-
-        store
-            .append_message(
-                agent,
-                &Message {
-                    role: Role::Assistant,
-                    content: text,
-                },
-            )
-            .await
-            .context("storing assistant response")?;
+        println!();
     }
 
     Ok(())
 }
 
-async fn run_replay(model: &str, database: &Path, inference_id: i64) -> Result<()> {
+async fn run_replay(model: settings::Model, database: &Path, inference_id: i64) -> Result<()> {
     let store = Store::open(database)
         .await
         .context("opening inference store")?;
@@ -209,14 +229,14 @@ async fn run_replay(model: &str, database: &Path, inference_id: i64) -> Result<(
         RecordedOutcome::Error(error) => println!("Recorded error:\n{error}"),
     }
     println!("Replayed output:");
-    let backend = backend(model).await?;
+    let backend = backend(&model).await?;
     let response = context::complete_recipe(
         &store,
         &backend,
         recorded.agent_id,
         &recorded.segments,
         recorded.request.sampling,
-        model,
+        &model.path,
         |token| {
             print!("{token}");
             let _ = std::io::stdout().flush();
