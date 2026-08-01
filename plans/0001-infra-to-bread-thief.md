@@ -752,10 +752,12 @@ Ordered so each one builds and is verifiable before the next depends on it.
    satisfied by both backends.
 
 4. **Compaction itself.** Given an agent over its token threshold, choose the
-   split point that leaves at least the configured raw tail, assemble a
-   compaction request from a compaction prompt plus history truncated at that
-   point, run it through the existing `context::complete` boundary, and store
-   the result as a summary carrying its `inference_id`.
+   split point that leaves at least the configured raw tail. Build a request
+   from the compaction prompt and the range being summarised - the previous
+   summary, if any, plus messages up to the split point - run it through the
+   existing `context::complete` boundary, and store the result as a summary
+   carrying its `inference_id`. The request is assembled from the parts it
+   needs, so nothing is truncated or restored.
    Verify: the recorded compaction inference contains no message newer than
    the split point - the one rule that is not tunable. Compaction fires above
    the threshold and not below. The summary's `covers_to_seq` equals the split
@@ -769,14 +771,16 @@ Ordered so each one builds and is verifiable before the next depends on it.
    boundary; `replay` on both the compaction inference and a later inference
    reconstructs.
 
-### Open questions for the user
+### Nothing is ever removed
 
-- **Which agent does the compacting?** user_declarations.md says "the agent
-  itself is given a prompt directing/describing what to summarise", so the
-  compacting inference runs against the same agent's history and model. Taken
-  literally that is what step 4 does, but it means an NPC's compaction competes
-  for the same model as play. Worth confirming before it matters.
-- **What happens to a summary when its messages are archived?** The
-  declarations ask for archiving old chats by date. A summary references a
-  `covers_to_seq` in a table whose rows may be gone. Not a milestone 4 problem,
-  but the schema decision made here should not make it harder.
+Messages are never deleted, edited or moved by compaction. A summary is a new
+row that changes what future context assembly *selects*, nothing more: the
+database keeps every message, before and between summaries, indefinitely. An
+agent stops seeing history before its newest summary; the developer views and
+replay still reach all of it.
+
+user_declarations.md's "temporarily truncated while it produces the summary,
+then the raw chats since are added back" describes the effect on what the model
+sees, not an operation on stored rows. There is no truncate and no restore -
+the compaction request is simply assembled from the compaction prompt and the
+range being summarised.
