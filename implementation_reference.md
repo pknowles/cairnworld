@@ -49,7 +49,7 @@ when things were built.
   the agent's message history. Pre-1.0 the schema is edited in place rather
   than migrated - changing it invalidates existing database files.
 
-## Dev CLI (design.md: Dev CLI: chat, fork, replay)
+## Dev CLI (design.md: Dev CLI: chat, replay)
 
 - `src/main.rs` - `cairnworld chat [--model <name|path>] [--temperature <f32>]
   [--enable-thinking] [--system <text>] [--database <path>] [--chat-template
@@ -57,7 +57,7 @@ when things were built.
   the agent loop. `cairnworld replay [--model <name|path>] [--database <path>]
   <inference-id>` reconstructs and validates the recorded recipe, displays its
   response or error, and records the replay by calling the same context
-  boundary. `--kind`, `--fork`, and `--prompts` remain later work.
+  boundary. `--kind` remains later work.
 - `src/settings.rs` - `[models.<name>]` entries pair a GGUF path with the chat
   template that file needs, so `--model hermes` carries its template
   automatically. `--model` also accepts a path directly, and `--chat-template`

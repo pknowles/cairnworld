@@ -1,7 +1,8 @@
 # Infrastructure to Bread Thief
 
-Status: in-progress (2026-07-30) - milestones 1-3 complete; milestones 4-9 not
-started. The model choice deferred from milestone 3 is still open.
+Status: in-progress (2026-07-31) - milestones 1-3 complete; milestone 4
+detailed below and ready to implement; milestones 5-9 not started. The model
+choice deferred from milestone 3 is still open.
 
 ## Goal
 
@@ -44,16 +45,20 @@ specified up front.
    the harness, so the comparison moves to a milestone where there is real play
    to measure - most likely 7, once Bread Thief is playable. Keeping three
    working models is the durable result; the choice stays open.
-4. **Compaction + fork.** `summary` table; compaction with artificially low
-   thresholds; `chat --fork`. Verifies: summaries cover the right ranges,
-   reconstruction still holds across compaction, and replaying a stored
-   inference after a prompt edit re-runs it with the new prompt.
+4. **Compaction.** `summary` table; compaction with artificially low
+   thresholds. Verifies: a summary covers exactly the range it was given,
+   reconstruction still holds across compaction, and the live context for an
+   agent becomes newest summary plus the messages after it.
 
-   A `--prompts <dir>` flag was planned here and has been dropped. It was not
-   traceable to user_declarations.md, and it assumed prompts live as files to
-   be substituted in, when they are assembled from stored text and message
-   rows. What the declarations ask for is re-running stored chats after the
-   code or prompts change, which reassembly already does.
+   Two flags planned here have been dropped, neither traceable to
+   user_declarations.md. `--prompts <dir>` assumed prompts live as files to
+   substitute in, when they are assembled from stored text and message rows;
+   the declared feature is re-running a stored inference after the code or
+   prompts change, which reassembly already does. `--fork` copied an agent's
+   history into a sandbox to poke at; the nearest declaration is "agents may
+   want to test features and repro bugs quickly without writing temporary
+   scripts", which is asking for accessible game data under MCP, not a CLI
+   flag. If that need is real it belongs in milestone 9.
 5. **Webserver + UI.** Axum + Leptos, Google OAuth2 login, one world, one
    player agent, websocket chat page. Verifies: a friend can log in from
    another machine and chat against the real model.
@@ -86,8 +91,8 @@ produces a streamed reply.
 - One crate, `cairnworld`. design.md's `llm` layer: the `Backend` trait and
   the mistral.rs implementation. No persistence, no tools, no web server.
 - `cairnworld chat` in its "bare 1:1 conversation" form (see design.md, Dev
-  CLI: chat, fork, replay) - no `--kind` or `--fork` flags yet, since those
-  depend on the agent and store layers.
+  CLI: chat, replay) - no `--kind` flag yet, since that depends on the agent
+  and store layers.
 
 ### Observations (2026-07-26)
 
@@ -671,3 +676,49 @@ Known and unexplained, recorded in experiments/0001:
 - The Llama 3.1 template quotes tool results before the model sees them. A
   corrected template fixes the quoting but changes no measured behaviour, so it
   is not adopted.
+
+## Milestone 4 detail: Compaction
+
+Goal: an agent's history stops growing without bound. Agents are just chat
+history and there will be one per NPC, so this is needed before there are many
+agents, not after.
+
+### Scope
+
+- `summary(id, agent_id, covers_to_seq, content, inference_id)`. The live
+  context for an agent becomes its newest summary plus every message after
+  `covers_to_seq`.
+- A `Summary` recipe segment, so an inference that used a summary reconstructs
+  through the same path as text, tools and messages.
+- Compaction as an ordinary recorded inference: it goes through the same
+  context assembly and is recorded like any other, so it gets an inference
+  view for free.
+- Two configured thresholds beside the existing limits: total tokens before
+  compaction runs, and how much raw tail to keep after the summary.
+- Token counts come from the loaded model's own tokenizer via
+  `Model::tokenize`, not an estimate.
+
+### The one hard rule
+
+user_declarations.md: "for the compaction operation, the LLM should not see
+newer chats than those being compacted". The compacting agent's history is
+truncated at `covers_to_seq` for that inference, and the tail is added back
+afterwards. Everything else here is tunable; this is not.
+
+### Evaluation
+
+Deliberately light. A summary has no ground truth, and an LLM is not
+deterministic, so there is nothing to assert equality against. What can be
+asserted is structural, and what needs judgement is checked by reading two or
+three short synthetic chats:
+
+- Structural, in tests: a summary covers exactly the range it was given; the
+  assembled context after compaction is summary plus tail and nothing else; an
+  inference that used a summary reconstructs hash-equal; compaction fires at
+  the threshold and not before.
+- By reading, over synthetic chats with known content: the summary does not
+  restate the system prompt or the tool definitions, which are sent every time
+  anyway and so are wasted tokens. It keeps what a later turn would need and
+  drops what was transient.
+
+No attempt to score summary quality. That waits for real transcripts.

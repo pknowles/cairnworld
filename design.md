@@ -13,8 +13,7 @@ One rust binary, one sqlite database file per deployment, an embedded LLM. The
 binary has subcommands:
 
 - `cairnworld serve` - run the webserver and game
-- `cairnworld chat` - interactive agent REPL (see "Dev CLI: chat, fork,
-  replay")
+- `cairnworld chat` - interactive agent REPL (see "Dev CLI: chat, replay")
 - `cairnworld replay <inference-id>` - re-run a recorded inference, optionally
   with edited prompts
 - `cairnworld world export|import <file.json>` - world snapshots for checked-in
@@ -354,7 +353,7 @@ exceeds the trigger:
 Compaction happens lazily, checked before assembling a normal inference, so
 there is no background job.
 
-# Dev CLI: chat, fork, replay
+# Dev CLI: chat, replay
 
 The fast iteration loop for prompt and agent work. Everything here is a thin
 frontend over the same `agent`/`store` functions the game uses - no parallel
@@ -369,11 +368,6 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   REPL session is a faithful stand-in for in-game behaviour, not an
   approximation. Rust-side tool code executes for real against the sandbox
   world's state.
-- **Fork:** `cairnworld chat --fork <agent-id> [--at <seq>]` copies an
-  existing agent's history (from any world, up to an optional seq) into a
-  sandbox agent and drops into the REPL at that point. The source world is
-  untouched. This is the shortcut for "get me an agent in exactly the state
-  where it misbehaved, and let me poke it."
 - **Replay:** `cairnworld replay <inference-id>` reassembles the recorded input
   via the reconstruction machinery and re-runs it, printing old and new output
   side by side. Reassembly uses the current code and the current prompt files,
@@ -389,7 +383,7 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   sent next).
 
 Access paths: humans use the stdio REPL; coding agents get the same verbs -
-fork, replay, chat-as-agent, plus the debug-spine queries - through the MCP
+replay, chat-as-agent, plus the debug-spine queries - through the MCP
 server (stdio transport for local Claude Code/Codex; rmcp also offers HTTP if
 a remote agent ever needs it). Same functions underneath, two transports.
 
