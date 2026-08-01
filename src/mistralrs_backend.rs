@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result, ensure};
+use either::Either;
 use mistralrs::{
     CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, Function, GgufModelBuilder,
     Model, RequestBuilder, Response as MrResponse, SamplingParams, TextMessageRole, Tool,
@@ -172,6 +173,17 @@ impl Backend for MistralRsBackend {
                 _ => anyhow::bail!("unexpected response variant from chat stream"),
             }
         }
+    }
+
+    async fn tokens(&self, request: Request) -> Result<usize> {
+        let request =
+            serde_json::to_string(&request).context("serializing request for tokenization")?;
+        Ok(self
+            .model
+            .tokenize(Either::Right(request), None, false, false, None)
+            .await
+            .context("tokenizing assembled request")?
+            .len())
     }
 }
 

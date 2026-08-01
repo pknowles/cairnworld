@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    context,
+    compaction, context,
     llm::{Backend, Content, Message, Response, Sampling},
     settings::Limits,
     store::Store,
@@ -91,6 +91,18 @@ pub async fn complete<B: Backend>(
             .await
             .context("storing agent response")?;
         let Content::ToolCalls(calls) = &response.content else {
+            compaction::after_turn(
+                store,
+                backend,
+                agent_id,
+                static_messages,
+                &definitions,
+                sampling,
+                model,
+                budget.limits,
+            )
+            .await
+            .context("compacting completed chat turn")?;
             return Ok(response);
         };
         for call in calls {
@@ -143,6 +155,10 @@ mod tests {
                 .pop_front()
                 .context("scripted backend received an unexpected inference")
         }
+
+        async fn tokens(&self, request: crate::llm::Request) -> Result<usize> {
+            Ok(request.messages.len() + request.tools.len())
+        }
     }
 
     fn response(content: Content, reasoning: &str) -> Response {
@@ -187,11 +203,11 @@ mod tests {
     }
 
     async fn history(store: &Store, agent: i64) -> Vec<Message> {
-        let segment = store.message_segment(agent).await.unwrap().unwrap();
+        let segments = store.history_segments(agent).await.unwrap();
         store
             .request_for_segments(
                 agent,
-                &[segment],
+                &segments,
                 Sampling {
                     temperature: 0.0,
                     enable_thinking: false,
@@ -423,6 +439,8 @@ mod tests {
         let limits = Limits {
             max_inferences_per_chat: 3,
             max_inferences_total: 64,
+            compact_at_tokens: 32_768,
+            keep_tail_chars: 4_096,
         };
         let repeat = || {
             response(
@@ -472,6 +490,8 @@ mod tests {
         let mut budget = Budget::new(Limits {
             max_inferences_per_chat: 100,
             max_inferences_total: 2,
+            compact_at_tokens: 32_768,
+            keep_tail_chars: 4_096,
         });
         let repeat = || {
             response(

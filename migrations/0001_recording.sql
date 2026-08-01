@@ -37,6 +37,17 @@ CREATE TABLE text (
     content TEXT NOT NULL
 );
 
+-- Compaction never changes message rows. A summary only changes the portion of
+-- an agent's permanent history selected for its next live context.
+CREATE TABLE summary (
+    id INTEGER PRIMARY KEY NOT NULL,
+    agent_id INTEGER NOT NULL REFERENCES agent(id),
+    covers_to_seq INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    inference_id INTEGER NOT NULL REFERENCES inference(id),
+    UNIQUE (agent_id, covers_to_seq)
+);
+
 CREATE TABLE inference (
     id INTEGER PRIMARY KEY NOT NULL,
     agent_id INTEGER NOT NULL REFERENCES agent(id),

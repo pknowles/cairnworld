@@ -1,8 +1,9 @@
 # Infrastructure to Bread Thief
 
-Status: in-progress (2026-07-31) - milestones 1-3 complete; milestone 4
-detailed below and ready to implement; milestones 5-9 not started. The model
-choice deferred from milestone 3 is still open.
+Status: in-progress (2026-08-01) - milestones 1-3 complete; milestone 4 is
+implemented and structurally tested, with its real-model exercise pending a
+local inference stall; milestones 5-9 not started. The model choice deferred
+from milestone 3 is still open.
 
 ## Goal
 

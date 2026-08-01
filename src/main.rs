@@ -1,4 +1,5 @@
 mod agent;
+mod compaction;
 mod context;
 mod llm;
 mod mistralrs_backend;
@@ -244,6 +245,7 @@ async fn run_replay(model: settings::Model, database: &Path, inference_id: i64) 
     )
     .await
     .context("replaying recorded inference")?;
+    let response = response.response;
     println!(
         "\nReplay usage: {} input tokens, {} output tokens",
         response.usage.input_tokens, response.usage.output_tokens

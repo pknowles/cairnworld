@@ -30,10 +30,16 @@ when things were built.
 - `src/context.rs` - the only model-call boundary. It assembles a request from
   stored static prompt text and persisted agent messages, streams through
   the backend, then records either the completed response or the failure using
-  the same reference recipe.
+  the same reference recipe. Its recipe identifies the inference record so a
+  compaction result can refer to the exact request that produced it.
 - `src/agent.rs` - resolves one recorded chat turn: persists each assistant
   response, runs calls from the invocation-local tool list, persists their
-  results, and repeats until final text.
+  results, and repeats until final text. It checks compaction only after that
+  completed turn, never while its history is still being appended.
+- `src/compaction.rs` - triggers one recorded summarisation once a complete
+  live context reaches `compact_at_tokens`. It preserves the newest raw tail
+  within `keep_tail_chars`, sends only the older range (and a previous summary)
+  to the compaction model call, then records the resulting summary.
 - `src/tools.rs` - the local `save` tool and the ordinary invocation-local
   lookup used to derive `ToolDefinition`s and run the matching Rust callback.
 
@@ -41,13 +47,13 @@ when things were built.
 
 - `src/store.rs` and `migrations/0001_recording.sql` - SQLite store, WAL mode,
   identity-only `world`/`agent` rows, ordered `message` history, write-once
-  `text` prompt rows, and `inference` recipes. A recipe refers to static text,
-  a tool-definition segment, and an agent message range; reconstruction rereads
-  those rows, verifies the assembled input against its BLAKE3 hash, and checks
-  stored sampling and usage. An inference contains exactly one response or
-  error, so failed calls preserve their reconstructable input without entering
-  the agent's message history. Pre-1.0 the schema is edited in place rather
-  than migrated - changing it invalidates existing database files.
+  `text` prompt rows, `summary` rows, and `inference` recipes. A recipe refers
+  to static text, tools, a summary, and/or an agent message range;
+  reconstruction rereads those rows and verifies the assembled input against
+  its BLAKE3 hash. The live history selector is exactly newest summary plus
+  messages after its `covers_to_seq`; all older message rows remain intact for
+  replay and debugging. Pre-1.0 the schema is edited in place rather than
+  migrated - changing it invalidates existing database files.
 
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 
@@ -68,5 +74,6 @@ when things were built.
 - `src/settings.rs` - `Settings`, loaded via the `config` crate (toml
   feature only) layering `default.toml` (checked in) under `local.toml`
   (gitignored, per-machine overrides). Holds the `[models.<name>]` entries
-  described above, `model` naming the default among them, and `limits`.
+  described above, `model` naming the default among them, and `limits`,
+  including `compact_at_tokens` and `keep_tail_chars`.
 - Weights are not checked in; `models/` is gitignored.

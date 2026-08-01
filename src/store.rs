@@ -21,6 +21,7 @@ pub struct Store {
 pub enum Segment {
     Text { text: i64, role: Role },
     Tools { text: i64 },
+    Summary { summary: i64 },
     Messages { messages: MessageRange },
 }
 
@@ -74,6 +75,24 @@ struct MessageRow {
     seq: i64,
     role: String,
     content: String,
+}
+
+#[derive(Debug, FromRow)]
+struct SummaryRow {
+    id: i64,
+    agent_id: i64,
+    covers_to_seq: i64,
+    content: String,
+    inference_id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    pub id: i64,
+    pub agent_id: i64,
+    pub covers_to_seq: i64,
+    pub content: String,
+    pub inference_id: i64,
 }
 
 impl Store {
@@ -176,24 +195,104 @@ impl Store {
             .with_context(|| format!("inference references missing text {id}"))
     }
 
-    pub async fn message_segment(&self, agent_id: i64) -> Result<Option<Segment>> {
-        let range = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
-            "SELECT MIN(seq), MAX(seq) FROM message WHERE agent_id = ?",
+    pub async fn store_summary(
+        &self,
+        agent_id: i64,
+        covers_to_seq: i64,
+        content: &str,
+        inference_id: i64,
+    ) -> Result<i64> {
+        let result = sqlx::query(
+            "INSERT INTO summary (agent_id, covers_to_seq, content, inference_id) VALUES (?, ?, ?, ?)",
         )
         .bind(agent_id)
-        .fetch_one(&self.pool)
+        .bind(covers_to_seq)
+        .bind(content)
+        .bind(inference_id)
+        .execute(&self.pool)
         .await
-        .with_context(|| format!("finding message range for agent {agent_id}"))?;
-        Ok(match range {
-            (Some(first_seq), Some(last_seq)) if first_seq <= last_seq => Some(Segment::Messages {
+        .with_context(|| format!("storing summary through message {covers_to_seq} for agent {agent_id}"))?;
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn latest_summary(&self, agent_id: i64) -> Result<Option<Summary>> {
+        let row = sqlx::query_as::<_, SummaryRow>(
+            "SELECT id, agent_id, covers_to_seq, content, inference_id FROM summary \
+             WHERE agent_id = ? ORDER BY covers_to_seq DESC, id DESC LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading latest summary for agent {agent_id}"))?;
+        Ok(row.map(|row| Summary {
+            id: row.id,
+            agent_id: row.agent_id,
+            covers_to_seq: row.covers_to_seq,
+            content: row.content,
+            inference_id: row.inference_id,
+        }))
+    }
+
+    /// The live history is the newest summary followed by every raw message it
+    /// does not cover. Older messages remain stored for replay and debugging.
+    pub async fn history_segments(&self, agent_id: i64) -> Result<Vec<Segment>> {
+        let summary = self.latest_summary(agent_id).await?;
+        let first_seq = summary
+            .as_ref()
+            .map_or(0, |summary| summary.covers_to_seq + 1);
+        let last_seq: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(seq) FROM message WHERE agent_id = ? AND seq >= ?")
+                .bind(agent_id)
+                .bind(first_seq)
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("finding live message range for agent {agent_id}"))?;
+        let mut segments = summary
+            .as_ref()
+            .map(|summary| {
+                vec![Segment::Summary {
+                    summary: summary.id,
+                }]
+            })
+            .unwrap_or_default();
+        if let Some(last_seq) = last_seq {
+            segments.push(Segment::Messages {
                 messages: MessageRange {
                     agent_id,
                     first_seq,
                     last_seq,
                 },
-            }),
-            _ => None,
-        })
+            });
+        }
+        Ok(segments)
+    }
+
+    /// Pick the newest raw suffix whose message payloads fit the requested
+    /// character budget. A single oversized message is kept whole.
+    pub async fn tail_split(&self, agent_id: i64, keep_tail_chars: usize) -> Result<i64> {
+        let covered = self
+            .latest_summary(agent_id)
+            .await?
+            .map_or(-1, |summary| summary.covers_to_seq);
+        let rows = sqlx::query_as::<_, (i64, String)>(
+            "SELECT seq, content FROM message WHERE agent_id = ? AND seq > ? ORDER BY seq DESC",
+        )
+        .bind(agent_id)
+        .bind(covered)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading raw tail for agent {agent_id}"))?;
+        let mut chars = 0;
+        let mut split = rows.first().map_or(covered, |(seq, _)| seq - 1);
+        for (seq, content) in rows {
+            let message_chars = content.chars().count();
+            if chars > 0 && chars + message_chars > keep_tail_chars {
+                break;
+            }
+            chars += message_chars;
+            split = seq - 1;
+        }
+        Ok(split)
     }
 
     pub async fn request_for_segments(
@@ -214,6 +313,23 @@ impl Store {
                         serde_json::from_str(&self.text(*text).await?)
                             .context("deserializing tool definitions")?;
                     tools.extend(definitions);
+                }
+                Segment::Summary { summary } => {
+                    let row = sqlx::query_as::<_, SummaryRow>(
+                        "SELECT id, agent_id, covers_to_seq, content, inference_id FROM summary WHERE id = ?",
+                    )
+                    .bind(summary)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .context("loading summary")?
+                    .with_context(|| format!("inference references missing summary {summary}"))?;
+                    ensure!(
+                        row.agent_id == agent_id,
+                        "inference for agent {agent_id} references summary {} from agent {}",
+                        row.id,
+                        row.agent_id
+                    );
+                    messages.push(Message::text(Role::System, row.content));
                 }
                 Segment::Messages { messages: range } => {
                     ensure!(
@@ -494,11 +610,7 @@ mod tests {
                 text: prompt,
                 role: Role::System,
             },
-            store
-                .message_segment(agent)
-                .await
-                .expect("message range should load")
-                .expect("history should have a range"),
+            store.history_segments(agent).await.unwrap().pop().unwrap(),
         ];
         let request = store
             .request_for_segments(
@@ -662,5 +774,118 @@ mod tests {
         );
         drop(store);
         std::fs::remove_file(path).expect("test database should be removable");
+    }
+
+    #[tokio::test]
+    async fn latest_summary_replaces_only_the_history_it_covers() {
+        let (store, path, agent, segments, request) = store_with_history().await;
+        let inference = store
+            .record_inference(
+                agent,
+                &segments,
+                &request,
+                InferenceOutcome::Response(response()),
+                "test-model",
+                14,
+            )
+            .await
+            .unwrap();
+        let summary = store
+            .store_summary(agent, 0, "The floorboards hide a locked chest.", inference)
+            .await
+            .unwrap();
+        let history = store.history_segments(agent).await.unwrap();
+        assert!(matches!(
+            history.as_slice(),
+            [
+                Segment::Summary { summary: stored },
+                Segment::Messages { messages: MessageRange { first_seq: 1, last_seq: 1, .. } },
+            ] if *stored == summary
+        ));
+        let assembled = store
+            .request_for_segments(
+                agent,
+                &history,
+                Sampling {
+                    temperature: 0.7,
+                    enable_thinking: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(assembled.messages.as_slice(), [
+            Message { role: Role::System, content: MessageContent::Text(summary), .. },
+            Message { role: Role::Assistant, .. },
+        ] if summary == "The floorboards hide a locked chest."));
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn summary_recipe_reconstructs_and_rejects_cross_agent_summary() {
+        let (store, path, agent, segments, request) = store_with_history().await;
+        let source = store
+            .record_inference(
+                agent,
+                &segments,
+                &request,
+                InferenceOutcome::Response(response()),
+                "test-model",
+                14,
+            )
+            .await
+            .unwrap();
+        let summary = store
+            .store_summary(agent, 0, "Earlier events.", source)
+            .await
+            .unwrap();
+        let recipe = vec![Segment::Summary { summary }];
+        let summary_request = store
+            .request_for_segments(
+                agent,
+                &recipe,
+                Sampling {
+                    temperature: 0.7,
+                    enable_thinking: false,
+                },
+            )
+            .await
+            .unwrap();
+        let recorded = store
+            .record_inference(
+                agent,
+                &recipe,
+                &summary_request,
+                InferenceOutcome::Response(response()),
+                "test-model",
+                14,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.reconstruct_inference(recorded).await.unwrap().request,
+            summary_request
+        );
+
+        let world: i64 = sqlx::query_scalar("SELECT world_id FROM agent WHERE id = ?")
+            .bind(agent)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let other = store.create_agent(world, "sandbox", "other").await.unwrap();
+        let error = store
+            .request_for_segments(
+                other,
+                &recipe,
+                Sampling {
+                    temperature: 0.7,
+                    enable_thinking: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("references summary"));
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 }

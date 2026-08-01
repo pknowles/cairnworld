@@ -55,6 +55,10 @@ pub struct Limits {
     /// Inferences one external trigger may run across every agent it reaches,
     /// including recursive agent-to-agent calls.
     pub max_inferences_total: u32,
+    /// Compact an agent after its assembled context reaches this many tokens.
+    pub compact_at_tokens: usize,
+    /// Maximum characters of recent raw history retained after a summary.
+    pub keep_tail_chars: usize,
 }
 
 impl Default for Limits {
@@ -62,6 +66,8 @@ impl Default for Limits {
         Self {
             max_inferences_per_chat: 8,
             max_inferences_total: 64,
+            compact_at_tokens: 16_000,
+            keep_tail_chars: 16_000,
         }
     }
 }
