@@ -695,15 +695,19 @@ agents, not after.
   view for free.
 - Two configured thresholds beside the existing limits: total tokens before
   compaction runs, and how much raw tail to keep after the summary.
+  user_declarations.md specifies the tail as "some character count threshold",
+  so the tail is counted in characters and the trigger in tokens. They measure
+  different things on purpose: the trigger is about fitting the model's
+  context, the tail is about how much recent detail stays exact.
 - Token counts come from the loaded model's own tokenizer via
   `Model::tokenize`, not an estimate.
 
 ### The one hard rule
 
 user_declarations.md: "for the compaction operation, the LLM should not see
-newer chats than those being compacted". The compacting agent's history is
-truncated at `covers_to_seq` for that inference, and the tail is added back
-afterwards. Everything else here is tunable; this is not.
+newer chats than those being compacted". The compaction request is built from
+the range being summarised and nothing newer. Everything else here is tunable;
+this is not.
 
 ### Evaluation
 
@@ -723,6 +727,27 @@ three short synthetic chats:
 
 No attempt to score summary quality. That waits for real transcripts.
 
+### Decisions already made
+
+Do not re-derive these.
+
+- **The compaction prompt is a string constant in the compaction code**, passed
+  as a system message the same way `--system` is today. design.md's `prompts/`
+  directory does not exist yet and is not part of this milestone; one prompt
+  does not justify creating it.
+- **A summary's content is plain text**, stored in the `summary` row, not in
+  `text` and not as a `MessageContent`. It is not a chat message and never
+  appears in the `message` table.
+- **Compaction runs after a turn completes**, not in the middle of an agent
+  loop. Checking the threshold mid-loop would compact a history that is still
+  being appended to.
+- **The split point is a `seq`**, chosen so the messages after it are at least
+  the configured raw tail. If the tail alone already exceeds the token
+  threshold, compaction cannot help and must fail loudly rather than compact
+  nothing or compact the tail.
+- **Compaction uses the same model as the agent.** There is no separate
+  configuration for it in this milestone.
+
 ### Steps
 
 Ordered so each one builds and is verifiable before the next depends on it.
@@ -736,13 +761,14 @@ Ordered so each one builds and is verifiable before the next depends on it.
    cross-agent summary reference fails with context, matching the existing
    checks for the other segment kinds.
 
-2. **Context selects the tail.** `message_segment` currently takes every
-   message for an agent. It becomes the newest summary plus messages after its
-   `covers_to_seq`, which is the live-context rule from design.md's chat
-   schema. An agent with no summary is unchanged.
+2. **Context selects the tail.** `message_segment` returns one `Segment` and
+   takes every message for an agent. It becomes `history_segments`, returning
+   the newest summary and the messages after its `covers_to_seq` - two
+   segments, or one when the agent has no summary yet. This is the live-context
+   rule from design.md's chat schema.
    Verify: with a summary at `covers_to_seq = n`, the assembled request is the
-   summary followed by messages `n+1..`, and nothing earlier. Existing
-   uncompacted histories still assemble as before.
+   summary followed by messages `n+1..`, and nothing earlier. An agent with no
+   summary assembles exactly as before.
 
 3. **Token counting.** `Backend` gains a way to count tokens for an assembled
    request, implemented over `Model::tokenize` so the number is the model's
@@ -779,8 +805,8 @@ database keeps every message, before and between summaries, indefinitely. An
 agent stops seeing history before its newest summary; the developer views and
 replay still reach all of it.
 
-user_declarations.md's "temporarily truncated while it produces the summary,
-then the raw chats since are added back" describes the effect on what the model
-sees, not an operation on stored rows. There is no truncate and no restore -
-the compaction request is simply assembled from the compaction prompt and the
-range being summarised.
+user_declarations.md says the same: "the database keeps every message forever
+and a summary only changes which of them are selected for future context". Its
+Before/After lists are what the model sees, not what is stored. The debug
+viewer is expected to show summaries inline in the full history, which only
+works because none of it is thrown away.

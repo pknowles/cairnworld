@@ -444,15 +444,23 @@ exceed some character count threshold. The ideas being:
 - Keep some raw chat history after the summary as this is likely more important to keep accurate
 
 This must be done with care so that the summary only summarises the portion of
-chats that are compacted (chat_0 through chat_n). I.e. for the compaction
-operation, the LLM should not see newer chats than those being compacted.
-Another way of thinking of this is that its history is temporarily truncated
-while it produces the summary, then the raw chats since are added back. When
-compaction happens, the agent itself is given a prompt directing/describing what
-to summarise. It needs to know what information will always be static and up to
-date, what will be lost and most importantly which information is important to
-keep. Many interactions in the chat are temporary and would not need recording,
-but some are not. This will likely need gameplay testing to optimize.
+chats that are compacted (summary_0, chat_0 through chat_n). I.e. for the
+compaction operation, the LLM should not see newer chats than those being
+compacted.
+
+The Before/After examples above is what the model sees, not what is stored or
+replaced. Nothing is deleted or moved: the database keeps every message forever
+and a summary only changes which of them are selected for future context. For
+the debug viewer it would be convenient to see the summaries inline in the full
+history of all chats, but of course the model would never see this.
+
+Compaction builds a one-off request from the range being compacted plus a
+summarise prompt, and its output is stored as the new summary. The prompt
+directs/describes what to summarise. It needs to implicitly know what
+information will always be static and up to date, what will be lost and most
+importantly which information is important to keep. Many interactions in the
+chat are temporary and would not need recording, but some are not. This will
+likely need gameplay testing to optimize.
 
 ## Notes editing tools
 
@@ -970,7 +978,9 @@ we need code to query and provide the input. We then have unit tests to verify
 the record has been made correctly. These chats will eventually become large. We
 will need a way to extract and archive them by date or age so we don't lose
 everything when we reclaim disk space. Archiving with compression should be
-efficient.
+efficient. Perhaps this could just be a database dump of everything related to a
+game/world. Something for much further down the line when we actually start to
+have too much data in the database.
 
 I have a hunch that sifting through logs for cases where the chat output worked
 particularly well will eventually allow us to fine tune LLM models to produce
