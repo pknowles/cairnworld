@@ -722,3 +722,61 @@ three short synthetic chats:
   drops what was transient.
 
 No attempt to score summary quality. That waits for real transcripts.
+
+### Steps
+
+Ordered so each one builds and is verifiable before the next depends on it.
+
+1. **Schema and the summary segment.** Add `summary` to
+   `migrations/0001_recording.sql` (edited in place, pre-1.0) and
+   `Segment::Summary { summary: i64 }` to the recipe. `request_for_segments`
+   resolves it by reading the row, exactly as it does for text and tools.
+   `store_summary` writes one; `latest_summary` reads the newest for an agent.
+   Verify: a recipe containing a summary reassembles hash-equal; a missing or
+   cross-agent summary reference fails with context, matching the existing
+   checks for the other segment kinds.
+
+2. **Context selects the tail.** `message_segment` currently takes every
+   message for an agent. It becomes the newest summary plus messages after its
+   `covers_to_seq`, which is the live-context rule from design.md's chat
+   schema. An agent with no summary is unchanged.
+   Verify: with a summary at `covers_to_seq = n`, the assembled request is the
+   summary followed by messages `n+1..`, and nothing earlier. Existing
+   uncompacted histories still assemble as before.
+
+3. **Token counting.** `Backend` gains a way to count tokens for an assembled
+   request, implemented over `Model::tokenize` so the number is the model's
+   own, not an estimate. The scripted test backend counts something trivial
+   and deterministic.
+   Verify: a request's count is non-zero and grows with history; the trait is
+   satisfied by both backends.
+
+4. **Compaction itself.** Given an agent over its token threshold, choose the
+   split point that leaves at least the configured raw tail, assemble a
+   compaction request from a compaction prompt plus history truncated at that
+   point, run it through the existing `context::complete` boundary, and store
+   the result as a summary carrying its `inference_id`.
+   Verify: the recorded compaction inference contains no message newer than
+   the split point - the one rule that is not tunable. Compaction fires above
+   the threshold and not below. The summary's `covers_to_seq` equals the split
+   point.
+
+5. **Exercise and read.** Run the REPL with thresholds set low enough that a
+   short conversation compacts, against a real model. Read the resulting
+   summaries.
+   Verify: the summary does not restate the system prompt or the tool
+   definitions; the conversation continues coherently across the compaction
+   boundary; `replay` on both the compaction inference and a later inference
+   reconstructs.
+
+### Open questions for the user
+
+- **Which agent does the compacting?** user_declarations.md says "the agent
+  itself is given a prompt directing/describing what to summarise", so the
+  compacting inference runs against the same agent's history and model. Taken
+  literally that is what step 4 does, but it means an NPC's compaction competes
+  for the same model as play. Worth confirming before it matters.
+- **What happens to a summary when its messages are archived?** The
+  declarations ask for archiving old chats by date. A summary references a
+  `covers_to_seq` in a table whose rows may be gone. Not a milestone 4 problem,
+  but the schema decision made here should not make it harder.
