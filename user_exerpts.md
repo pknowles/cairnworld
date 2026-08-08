@@ -88,3 +88,5 @@ an ordinary surrogate key.
 
 The bounds exist to stop a runaway, so hitting one is a hard error that
 reaches the user - never something an agent can observe and react to.
+
+# Decision Log
