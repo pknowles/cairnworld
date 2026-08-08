@@ -37,8 +37,8 @@ when things were built.
   results, and repeats until final text. It checks compaction only after that
   completed turn, never while its history is still being appended.
 - `src/compaction.rs` - triggers one recorded summarisation once a complete
-  live context reaches `compact_at_tokens`. It preserves the newest raw tail
-  within `keep_tail_chars`, sends only the older range (and a previous summary)
+  live context reaches `compact_at_input_tokens`. It preserves exactly
+  `keep_tail_messages` newest raw rows, sends only the older range (and a previous summary)
   to the compaction model call, then records the resulting summary.
 - `src/tools.rs` - the local `save` tool and the ordinary invocation-local
   lookup used to derive `ToolDefinition`s and run the matching Rust callback.
@@ -75,5 +75,5 @@ when things were built.
   feature only) layering `default.toml` (checked in) under `local.toml`
   (gitignored, per-machine overrides). Holds the `[models.<name>]` entries
   described above, `model` naming the default among them, and `limits`,
-  including `compact_at_tokens` and `keep_tail_chars`.
+  including `compact_at_input_tokens` and `keep_tail_messages`.
 - Weights are not checked in; `models/` is gitignored.

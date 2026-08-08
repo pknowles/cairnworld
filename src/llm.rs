@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 pub trait Backend {
     async fn complete(&self, request: Request, on_token: impl FnMut(&str)) -> Result<Response>;
 
-    /// Count an assembled request with this backend's model tokenizer.
-    async fn tokens(&self, request: Request) -> Result<usize>;
+    /// Count the exact templated input sent to this backend's model.
+    async fn input_tokens(&self, request: Request) -> Result<usize>;
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

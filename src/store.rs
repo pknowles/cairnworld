@@ -267,32 +267,23 @@ impl Store {
         Ok(segments)
     }
 
-    /// Pick the newest raw suffix whose message payloads fit the requested
-    /// character budget. A single oversized message is kept whole.
-    pub async fn tail_split(&self, agent_id: i64, keep_tail_chars: usize) -> Result<i64> {
+    /// Find the newest raw suffix containing exactly `keep_tail_messages` rows,
+    /// or every available row when there are fewer.
+    pub async fn tail_split(&self, agent_id: i64, keep_tail_messages: usize) -> Result<i64> {
         let covered = self
             .latest_summary(agent_id)
             .await?
             .map_or(-1, |summary| summary.covers_to_seq);
-        let rows = sqlx::query_as::<_, (i64, String)>(
-            "SELECT seq, content FROM message WHERE agent_id = ? AND seq > ? ORDER BY seq DESC",
+        let rows = sqlx::query_as::<_, (i64,)>(
+            "SELECT seq FROM message WHERE agent_id = ? AND seq > ? ORDER BY seq DESC LIMIT ?",
         )
         .bind(agent_id)
         .bind(covered)
+        .bind(keep_tail_messages as i64)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading raw tail for agent {agent_id}"))?;
-        let mut chars = 0;
-        let mut split = rows.first().map_or(covered, |(seq, _)| seq - 1);
-        for (seq, content) in rows {
-            let message_chars = content.chars().count();
-            if chars > 0 && chars + message_chars > keep_tail_chars {
-                break;
-            }
-            chars += message_chars;
-            split = seq - 1;
-        }
-        Ok(split)
+        Ok(rows.last().map_or(covered, |(seq,)| seq - 1))
     }
 
     pub async fn request_for_segments(

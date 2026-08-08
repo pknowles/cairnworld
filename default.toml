@@ -26,7 +26,7 @@ max_inferences_per_chat = 8
 # Inferences one player action may run across every agent it reaches,
 # including recursive agent-to-agent calls.
 max_inferences_total = 64
-# An agent's complete assembled context triggers compaction at this size.
-compact_at_tokens = 16000
+# An agent's complete native input triggers compaction at this size.
+compact_at_input_tokens = 16000
 # Recent raw history is retained exactly; older history becomes a summary.
-keep_tail_chars = 16000
+keep_tail_messages = 32

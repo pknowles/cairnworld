@@ -1,9 +1,7 @@
 # Infrastructure to Bread Thief
 
-Status: in-progress (2026-08-01) - milestones 1-3 complete; milestone 4 is
-implemented and structurally tested, with its real-model exercise pending a
-local inference stall; milestones 5-9 not started. The model choice deferred
-from milestone 3 is still open.
+Status: in-progress (2026-08-08) - milestones 1-4 complete; milestones 5-9
+not started. The model choice deferred from milestone 3 is still open.
 
 ## Goal
 
@@ -771,15 +769,16 @@ Ordered so each one builds and is verifiable before the next depends on it.
    summary followed by messages `n+1..`, and nothing earlier. An agent with no
    summary assembles exactly as before.
 
-3. **Token counting.** `Backend` gains a way to count tokens for an assembled
-   request, implemented over `Model::tokenize` so the number is the model's
-   own, not an estimate. The scripted test backend counts something trivial
-   and deterministic.
+3. **Token counting.** `Backend` gains `input_tokens` for the exact rendered
+   native request, implemented through the same model chat-template path as
+   inference, including tools and tool calls. The scripted test backend counts
+   something trivial and deterministic.
    Verify: a request's count is non-zero and grows with history; the trait is
    satisfied by both backends.
 
-4. **Compaction itself.** Given an agent over its token threshold, choose the
-   split point that leaves at least the configured raw tail. Build a request
+4. **Compaction itself.** Given an agent over its exact input-token threshold,
+   choose the split point that leaves exactly the configured number of newest
+   raw message rows. Build a request
    from the compaction prompt and the range being summarised - the previous
    summary, if any, plus messages up to the split point - run it through the
    existing `context::complete` boundary, and store the result as a summary
@@ -788,7 +787,8 @@ Ordered so each one builds and is verifiable before the next depends on it.
    Verify: the recorded compaction inference contains no message newer than
    the split point - the one rule that is not tunable. Compaction fires above
    the threshold and not below. The summary's `covers_to_seq` equals the split
-   point.
+   point. Re-count the complete summary-plus-tail request and fail if it does
+   not fit.
 
 5. **Exercise and read.** Run the REPL with thresholds set low enough that a
    short conversation compacts, against a real model. Read the resulting

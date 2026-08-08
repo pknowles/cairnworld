@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result, ensure};
-use either::Either;
 use mistralrs::{
     CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, Function, GgufModelBuilder,
     Model, RequestBuilder, Response as MrResponse, SamplingParams, TextMessageRole, Tool,
@@ -42,45 +41,49 @@ impl MistralRsBackend {
     }
 }
 
+fn request_builder(request: Request) -> Result<RequestBuilder> {
+    let mut request_builder = RequestBuilder::new();
+    for message in request.messages {
+        match message.content {
+            MessageContent::Text(content) => {
+                let role = match message.role {
+                    Role::System => TextMessageRole::System,
+                    Role::User => TextMessageRole::User,
+                    Role::Assistant => TextMessageRole::Assistant,
+                    Role::Tool => TextMessageRole::Tool,
+                };
+                request_builder = request_builder.add_message(role, content);
+            }
+            MessageContent::ToolCalls(calls) => {
+                request_builder = request_builder.add_message_with_tool_call(
+                    TextMessageRole::Assistant,
+                    "",
+                    calls.into_iter().enumerate().map(to_mistral_call).collect(),
+                )
+            }
+            MessageContent::ToolResult {
+                tool_call_id,
+                content,
+            } => request_builder = request_builder.add_tool_message(content, tool_call_id),
+        }
+    }
+    Ok(request_builder
+        .set_sampling(SamplingParams::neutral())
+        .set_sampler_temperature(request.sampling.temperature as f64)
+        .set_tools(
+            request
+                .tools
+                .iter()
+                .map(to_mistral_tool)
+                .collect::<Result<Vec<_>>>()
+                .context("translating tool definitions for mistral.rs")?,
+        )
+        .enable_thinking(request.sampling.enable_thinking))
+}
+
 impl Backend for MistralRsBackend {
     async fn complete(&self, request: Request, mut on_token: impl FnMut(&str)) -> Result<Response> {
-        let mut request_builder = RequestBuilder::new();
-        for message in request.messages {
-            match message.content {
-                MessageContent::Text(content) => {
-                    let role = match message.role {
-                        Role::System => TextMessageRole::System,
-                        Role::User => TextMessageRole::User,
-                        Role::Assistant => TextMessageRole::Assistant,
-                        Role::Tool => TextMessageRole::Tool,
-                    };
-                    request_builder = request_builder.add_message(role, content);
-                }
-                MessageContent::ToolCalls(calls) => {
-                    request_builder = request_builder.add_message_with_tool_call(
-                        TextMessageRole::Assistant,
-                        "",
-                        calls.into_iter().enumerate().map(to_mistral_call).collect(),
-                    )
-                }
-                MessageContent::ToolResult {
-                    tool_call_id,
-                    content,
-                } => request_builder = request_builder.add_tool_message(content, tool_call_id),
-            }
-        }
-        let request_builder = request_builder
-            .set_sampling(SamplingParams::neutral())
-            .set_sampler_temperature(request.sampling.temperature as f64)
-            .set_tools(
-                request
-                    .tools
-                    .iter()
-                    .map(to_mistral_tool)
-                    .collect::<Result<Vec<_>>>()
-                    .context("translating tool definitions for mistral.rs")?,
-            )
-            .enable_thinking(request.sampling.enable_thinking);
+        let request_builder = request_builder(request)?;
 
         let mut stream = self
             .model
@@ -175,12 +178,10 @@ impl Backend for MistralRsBackend {
         }
     }
 
-    async fn tokens(&self, request: Request) -> Result<usize> {
-        let request =
-            serde_json::to_string(&request).context("serializing request for tokenization")?;
+    async fn input_tokens(&self, request: Request) -> Result<usize> {
         Ok(self
             .model
-            .tokenize(Either::Right(request), None, false, false, None)
+            .tokenize_chat_request(request_builder(request)?)
             .await
             .context("tokenizing assembled request")?
             .len())

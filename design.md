@@ -337,12 +337,13 @@ spine means no extra bookkeeping exists only for debugging.
 
 # Chat compaction
 
-Config: `compact_at_tokens` (total context trigger) and `keep_tail_chars`
-(raw messages preserved after the summary). When an agent's assembled context
+Config: `compact_at_input_tokens` (exact rendered-input trigger) and
+`keep_tail_messages` (exact newest raw rows preserved after the summary). When
+an agent's assembled context
 exceeds the trigger:
 
-1. Choose the cut point `n` such that messages after `n` total under
-   `keep_tail_chars`.
+1. Choose the cut point `n` so exactly `keep_tail_messages` raw messages after
+   `n` remain.
 2. Build a compaction input: role prompt + previous summary + messages up to
    `n` + the compaction instruction (what is static and always provided, what
    will be lost, what matters to keep). Newer messages are excluded - the
@@ -350,8 +351,10 @@ exceeds the trigger:
 3. Run it through the normal recorded inference path; store the `summary` row
    with `covers_to_seq = n`.
 
-Compaction happens lazily, checked before assembling a normal inference, so
-there is no background job.
+The model's chat-template renderer counts the complete native request before
+and after compaction. It happens after a completed turn, so there is no
+background job; failure to reduce the exact input below the configured trigger
+is a hard error.
 
 # Dev CLI: chat, replay
 

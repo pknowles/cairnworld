@@ -90,3 +90,31 @@ The bounds exist to stop a runaway, so hitting one is a hard error that
 reaches the user - never something an agent can observe and react to.
 
 # Decision Log
+
+## 2026-08-08: Exact compaction accounting
+
+> we should not lie in values stored. be super explicit and use the exact right
+> units where there is no trivial conversion to something common.
+
+> how will this work when we don't know how many tokens a given number of tail
+> messages will consume? ... we could linearly scan through, tokenizing messages
+> but that would be rediculous
+
+`compact_at_input_tokens` is the exact token count of the complete native
+chat-template request, including static context, history, tool definitions and
+the generation prompt. It is not a character count, a JSON serialization, or a
+conversion estimate. The model renderer supplies it once to decide whether to
+compact and once afterwards to prove the compacted request fits.
+
+`keep_tail_messages` retains an exact number of persisted raw message rows. It
+does not promise a token budget; the final full-request count is the only valid
+measure of that. This avoids both a false conversion between characters and
+tokens and tokenizing candidate messages one-by-one. If the retained tail and
+summary do not fit, compaction fails loudly rather than claiming it succeeded.
+
+Each recorded inference already stores the model-reported `input_tokens` and
+`output_tokens` for the debug view. Those are factual usage measurements, while
+the compaction trigger is the independently rendered pre-inference input count.
+
+This supersedes the character-tail rule currently recorded in
+`user_declarations.md`; that declaration needs a separate reconciliation.

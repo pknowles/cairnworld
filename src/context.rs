@@ -140,7 +140,7 @@ mod tests {
             anyhow::bail!("connection lost")
         }
 
-        async fn tokens(&self, _request: crate::llm::Request) -> Result<usize> {
+        async fn input_tokens(&self, _request: crate::llm::Request) -> Result<usize> {
             Ok(1)
         }
     }
@@ -162,7 +162,7 @@ mod tests {
             })
         }
 
-        async fn tokens(&self, _request: crate::llm::Request) -> Result<usize> {
+        async fn input_tokens(&self, _request: crate::llm::Request) -> Result<usize> {
             Ok(1)
         }
     }

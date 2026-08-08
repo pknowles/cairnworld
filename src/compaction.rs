@@ -26,6 +26,10 @@ pub async fn after_turn<B: Backend>(
     model: &str,
     limits: Limits,
 ) -> Result<()> {
+    ensure!(
+        limits.keep_tail_messages > 0,
+        "limits.keep_tail_messages must be greater than zero"
+    );
     let history = store
         .history_segments(agent_id)
         .await
@@ -44,10 +48,10 @@ pub async fn after_turn<B: Backend>(
         sampling: sampling.clone(),
     };
     let token_count = backend
-        .tokens(live_request)
+        .input_tokens(live_request)
         .await
         .context("counting live context tokens")?;
-    if token_count < limits.compact_at_tokens {
+    if token_count < limits.compact_at_input_tokens {
         return Ok(());
     }
 
@@ -55,12 +59,13 @@ pub async fn after_turn<B: Backend>(
     let covered = previous
         .as_ref()
         .map_or(-1, |summary| summary.covers_to_seq);
-    let split = store.tail_split(agent_id, limits.keep_tail_chars).await?;
+    let split = store
+        .tail_split(agent_id, limits.keep_tail_messages)
+        .await?;
     ensure!(
         split > covered,
-        "agent {agent_id} reached {} context tokens but its raw tail cannot be compacted; \
-         limits.keep_tail_chars leaves no older message to summarize",
-        token_count
+        "agent {agent_id} reached {token_count} input tokens but its raw tail cannot be compacted; \
+         limits.keep_tail_messages leaves no older message to summarize",
     );
 
     let prompt = store
@@ -83,10 +88,17 @@ pub async fn after_turn<B: Backend>(
             last_seq: split,
         },
     });
-    let completion =
-        context::complete_recipe(store, backend, agent_id, &segments, sampling, model, |_| {})
-            .await
-            .context("running recorded compaction inference")?;
+    let completion = context::complete_recipe(
+        store,
+        backend,
+        agent_id,
+        &segments,
+        sampling.clone(),
+        model,
+        |_| {},
+    )
+    .await
+    .context("running recorded compaction inference")?;
     let Content::Text(content) = completion.response.content else {
         anyhow::bail!("compaction inference returned tool calls instead of summary text");
     };
@@ -94,6 +106,31 @@ pub async fn after_turn<B: Backend>(
         .store_summary(agent_id, split, &content, completion.inference_id)
         .await
         .context("storing compaction result")?;
+    let history = store
+        .history_segments(agent_id)
+        .await
+        .context("selecting compacted live history")?;
+    let history = store
+        .request_for_segments(agent_id, &history, sampling.clone())
+        .await
+        .context("assembling compacted live context")?;
+    let compacted_tokens = backend
+        .input_tokens(Request {
+            messages: static_messages
+                .iter()
+                .cloned()
+                .chain(history.messages)
+                .collect(),
+            tools: tools.to_vec(),
+            sampling,
+        })
+        .await
+        .context("counting compacted context tokens")?;
+    ensure!(
+        compacted_tokens < limits.compact_at_input_tokens,
+        "compaction left agent {agent_id} with {compacted_tokens} input tokens, at or above limits.compact_at_input_tokens ({})",
+        limits.compact_at_input_tokens
+    );
     Ok(())
 }
 
@@ -111,7 +148,7 @@ mod tests {
     struct ScriptedBackend {
         responses: Mutex<VecDeque<Response>>,
         requests: Mutex<Vec<crate::llm::Request>>,
-        tokens: usize,
+        tokens: Mutex<VecDeque<usize>>,
     }
 
     impl Backend for ScriptedBackend {
@@ -128,8 +165,12 @@ mod tests {
                 .context("unexpected compaction inference")
         }
 
-        async fn tokens(&self, _request: crate::llm::Request) -> Result<usize> {
-            Ok(self.tokens)
+        async fn input_tokens(&self, _request: crate::llm::Request) -> Result<usize> {
+            self.tokens
+                .lock()
+                .unwrap()
+                .pop_front()
+                .context("unexpected token count")
         }
     }
 
@@ -175,13 +216,13 @@ mod tests {
         let backend = ScriptedBackend {
             responses: Mutex::new(VecDeque::from([response("durable fact and decision")])),
             requests: Mutex::new(Vec::new()),
-            tokens: 100,
+            tokens: Mutex::new(VecDeque::from([100, 99])),
         };
         let limits = Limits {
             max_inferences_per_chat: 8,
             max_inferences_total: 64,
-            compact_at_tokens: 100,
-            keep_tail_chars: 100,
+            compact_at_input_tokens: 100,
+            keep_tail_messages: 2,
         };
         after_turn(
             &store,
@@ -254,7 +295,7 @@ mod tests {
         let backend = ScriptedBackend {
             responses: Mutex::new(VecDeque::new()),
             requests: Mutex::new(Vec::new()),
-            tokens: 99,
+            tokens: Mutex::new(VecDeque::from([99])),
         };
         after_turn(
             &store,
@@ -270,8 +311,8 @@ mod tests {
             Limits {
                 max_inferences_per_chat: 8,
                 max_inferences_total: 64,
-                compact_at_tokens: 100,
-                keep_tail_chars: 40,
+                compact_at_input_tokens: 100,
+                keep_tail_messages: 2,
             },
         )
         .await

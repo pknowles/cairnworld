@@ -156,7 +156,7 @@ mod tests {
                 .context("scripted backend received an unexpected inference")
         }
 
-        async fn tokens(&self, request: crate::llm::Request) -> Result<usize> {
+        async fn input_tokens(&self, request: crate::llm::Request) -> Result<usize> {
             Ok(request.messages.len() + request.tools.len())
         }
     }
@@ -439,8 +439,8 @@ mod tests {
         let limits = Limits {
             max_inferences_per_chat: 3,
             max_inferences_total: 64,
-            compact_at_tokens: 32_768,
-            keep_tail_chars: 4_096,
+            compact_at_input_tokens: 32_768,
+            keep_tail_messages: 32,
         };
         let repeat = || {
             response(
@@ -490,8 +490,8 @@ mod tests {
         let mut budget = Budget::new(Limits {
             max_inferences_per_chat: 100,
             max_inferences_total: 2,
-            compact_at_tokens: 32_768,
-            keep_tail_chars: 4_096,
+            compact_at_input_tokens: 32_768,
+            keep_tail_messages: 32,
         });
         let repeat = || {
             response(
