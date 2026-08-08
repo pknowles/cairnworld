@@ -284,11 +284,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
     async fn stream_and_final_response_agree() {
-        let model_path = Settings::load()
-            .expect("settings should load")
-            .model
-            .expect("set `model` in local.toml to a local GGUF path to run this test");
-        let backend = MistralRsBackend::load(&model_path, None)
+        let settings = Settings::load().expect("settings should load");
+        let model = settings
+            .model(None)
+            .expect("configure a model in local.toml or default.toml to run this test");
+        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref())
             .await
             .expect("model should load");
 
