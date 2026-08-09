@@ -462,6 +462,19 @@ importantly which information is important to keep. Many interactions in the
 chat are temporary and would not need recording, but some are not. This will
 likely need gameplay testing to optimize.
 
+Compaction likely happens immediately after an agent emits some output rather
+than before, as this is when the token count is first known. It should happen
+semi-asynchronously so that the LLM's result can immediately be used. E.g. if a
+player's agent replies to the player and must immediately compact, the player
+will see the agent's response and can start typing straight away. Obviously the
+agent's chat would block if another call to it comes in before compaction
+completes. Moreover, we expect to run on a single GPU so this would not be async
+with respect to other LLM calls. Ideally we should process all agents chats,
+queueing compactions and only block on compactions on next calls to that agent.
+Doing this means recursive agent calls that all happen to compact after
+returning won't have to finish compaction before the player(s) see the final
+response.
+
 ## Notes editing tools
 
 Much like coding agents editing a file, notes may get bigger than LLMs can be
@@ -945,6 +958,13 @@ LLMs generate tokens over time. Streaming this to the browser would create a
 good user and developer experience, even if the end result requires parsing
 intermediate tool calls.
 
+The main chat may include additional inline messages such as warnings, or roll
+results in developer mode. E.g. if compaction is ever triggered twice in a row,
+this indicates the thresholds are badly set or there is a once-off very large
+message. Rather than emit messages separately to a log, keeping everything
+inline in the one chat gives one unified user interface and preserves ordering
+to make development much easier.
+
 **Polish ideas**
 
 Ideas for the future, after the basics are implemented.
@@ -1090,3 +1110,17 @@ sync point where the GM waits until all players have called ReadyToBegin.
 Players should be warned by their agent only to call this when all players are
 online and have entered the game, otherwise the GM will need to bring them in
 later in the campaign.
+
+**Future idea — associative hierarchical memory:** Add a long-term
+conversational memory layer that stores retired conversation history as embedded
+chunks, searchable automatically via semantic similarity and exact-text
+retrieval. Relevant memories could be injected implicitly from the current user
+message, recent context, or even the assistant’s draft output, allowing the
+model to “stumble upon” past context without explicitly deciding to call a
+memory tool. Over time, frequently related memories could be clustered into
+higher-level episode/concept summaries, forming a RAPTOR-/A-MEM-like
+hierarchical or DAG structure while retaining raw source turns for precise
+recall. Useful search terms: *agent memory, long-term conversational memory,
+associative retrieval, hierarchical RAG, RAPTOR, MemoRAG, A-MEM, episodic
+memory, semantic memory, hybrid vector/BM25 retrieval, recursive summarization,
+memory consolidation, retrieval from generated clues*.

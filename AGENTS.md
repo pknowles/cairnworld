@@ -3,6 +3,14 @@
 This is a multiplayer text-based web-hosted RPG game that is run by LLMs and
 implemented in rust.
 
+Documentation is structured from top level user declarations, through agent
+written design and plans to the actual code. Then an implementation reference
+summarises. This flow can be used to hierarchically compare and validate what
+was done to what was requested but the documents must be maintained. It is also
+important to flow backwards when diversions are made. E.g. when a design
+decision changes, the user may need to be asked to update their declarations to
+match.
+
 # Worktree and git sanitation
 
 Make a note of the git repository state before beginning any work. Do not let
@@ -16,9 +24,12 @@ add -u`, be surgical and explicitly add new files. Use temporary commits rather
 than git stash or copying files as they are far more robust and there is less
 risk of losing anything. Never add temporary changes to uncommitted/dirty files
 as you may lose track of which changes are which. Separate with a temporary
-commit first. Never use `git checkout` to revert changes you think you made.
-Coding agents often screw this up and delete code because they don't realise
-there are other changes in a file they edited.
+commit first.
+
+Never use `git checkout` to undo/revert/restore changes you made to a file.
+Checking out individual files is strictly forbidden. This is very risky as it
+inadvertently deletes and permanently loses code written by others since it is
+not checked in.
 
 Use integrated edit/search tools rather than grep/sed when at all possible.
 
@@ -178,6 +189,14 @@ useful in user_declarations.md. It is natural for design to change over time, so
 if any changes are made that result in contradictions, add a note saying the
 idea was updated, with a date.
 
+This also includes a design decision log, where discussions around alternative
+implementations may be kept. Normally we avoid confounding historical
+discussions in the code because one side is inevitably stale. I.e. git holds
+history and files hold state. This is an exception where the reason for why
+things are the way they are can be recorded for future reference. Make direct
+quotes explicit so it's clear which are your assumptions vs what was actually
+said.
+
 ## design.md
 
 This file contains the high level concepts and ideas of the project and the
@@ -192,12 +211,6 @@ system/feature/approach, just because it was the first idea a coding agent wrote
 down. Every decision must be traceable to a user declaration. If adding a new
 system/framework/abstraction, make sure you have listed ~3 alternatives,
 evaluated each against the coding standards and picked the most appropriate.
-
-## implementation_reference.md
-
-The specific implementation references go here. Consider this an index to both
-reference and detail how components in design.md are realised. It must be kept
-up to date before committing changes.
 
 ## plans/
 
@@ -214,3 +227,9 @@ flow is: user_declarations.md (ground truth) → design.md (desired end state) �
 plans/ (order, detail and status) → implementation_reference.md (index of what
 exists). Naming them with a date prefix may help to know their order and what's
 most recent.
+
+## implementation_reference.md
+
+The specific implementation references go here. Consider this an index to both
+reference and detail how components in design.md are realised. It must be kept
+up to date before committing changes.
