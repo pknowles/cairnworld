@@ -139,10 +139,6 @@ mod tests {
         ) -> Result<Response> {
             anyhow::bail!("connection lost")
         }
-
-        async fn input_tokens(&self, _request: crate::llm::Request) -> Result<usize> {
-            Ok(1)
-        }
     }
 
     impl Backend for StreamingBackend {
@@ -160,10 +156,6 @@ mod tests {
                     output_tokens: 1,
                 },
             })
-        }
-
-        async fn input_tokens(&self, _request: crate::llm::Request) -> Result<usize> {
-            Ok(1)
         }
     }
 

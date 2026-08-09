@@ -130,6 +130,9 @@ composes directly with axum and the world tasks, and migrations are built in
 - `summary(id, agent_id, covers_to_seq, content, inference_id)` - compaction
   products. The live context for an agent is: newest summary + all messages
   with `seq > covers_to_seq`.
+- `chat_notice(id, agent_id, after_message_id, content)` - an inline event in
+  a user/developer chat view. It is deliberately not selected for agent
+  context.
 
 ## Inference records and reconstruction
 
@@ -168,6 +171,7 @@ interesting as successes when debugging prompts and model behaviour, and an
 unrecorded failure is invisible after the fact. A failed output is never fed
 back into an agent's context - it is not a `message`, so context assembly
 never sees it. Dev mode's chat history renders the union of `message` rows
+and non-model-facing `chat_notice` rows in chronological order.
 and failed inferences, so a failure appears inline in the transcript and
 opens into its inference view like any other entry.
 
@@ -337,7 +341,7 @@ spine means no extra bookkeeping exists only for debugging.
 
 # Chat compaction
 
-Config: `compact_at_input_tokens` (exact rendered-input trigger) and
+Config: `compact_at_input_tokens` (reported completed-inference input trigger) and
 `keep_tail_messages` (exact newest raw rows preserved after the summary). When
 an agent's assembled context
 exceeds the trigger:
@@ -351,10 +355,12 @@ exceeds the trigger:
 3. Run it through the normal recorded inference path; store the `summary` row
    with `covers_to_seq = n`.
 
-The model's chat-template renderer counts the complete native request before
-and after compaction. It happens after a completed turn, so there is no
-background job; failure to reduce the exact input below the configured trigger
-is a hard error.
+The trigger uses the model-reported `input_tokens` already recorded for the
+completed inference. It adds no tokenization work and therefore describes the
+input that caused compaction, rather than estimating the newly appended reply.
+Compaction happens after a completed turn, so there is no background job. If
+only the retained tail remains, it records an inline notice and retries after a
+later turn; it never interrupts the game for context pressure alone.
 
 # Dev CLI: chat, replay
 

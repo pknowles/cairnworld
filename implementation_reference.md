@@ -37,7 +37,7 @@ when things were built.
   results, and repeats until final text. It checks compaction only after that
   completed turn, never while its history is still being appended.
 - `src/compaction.rs` - triggers one recorded summarisation once a complete
-  live context reaches `compact_at_input_tokens`. It preserves exactly
+  completed inference reaches `compact_at_input_tokens`. It preserves exactly
   `keep_tail_messages` newest raw rows, sends only the older range (and a previous summary)
   to the compaction model call, then records the resulting summary.
 - `src/tools.rs` - the local `save` tool and the ordinary invocation-local
@@ -46,8 +46,9 @@ when things were built.
 ## Persistence and recording (design.md: Persistence and recording)
 
 - `src/store.rs` and `migrations/0001_recording.sql` - SQLite store, WAL mode,
-  identity-only `world`/`agent` rows, ordered `message` history, write-once
-  `text` prompt rows, `summary` rows, and `inference` recipes. A recipe refers
+  identity-only `world`/`agent` rows, ordered `message` history, inline
+  non-model-facing `chat_notice` rows, write-once `text` prompt rows, `summary`
+  rows, and `inference` recipes. A recipe refers
   to static text, tools, a summary, and/or an agent message range;
   reconstruction rereads those rows and verifies the assembled input against
   its BLAKE3 hash. The live history selector is exactly newest summary plus

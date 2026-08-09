@@ -175,6 +175,35 @@ impl Store {
         Ok(result.last_insert_rowid())
     }
 
+    /// Store an inline chat event without making it part of model context.
+    pub async fn store_chat_notice(
+        &self,
+        agent_id: i64,
+        after_message_id: i64,
+        content: &str,
+    ) -> Result<i64> {
+        sqlx::query_scalar(
+            "INSERT INTO chat_notice (agent_id, after_message_id, content) \
+             SELECT ?, id, ? FROM message WHERE id = ? AND agent_id = ? RETURNING id",
+        )
+        .bind(agent_id)
+        .bind(content)
+        .bind(after_message_id)
+        .bind(agent_id)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("storing chat notice after message {after_message_id}"))
+    }
+
+    #[cfg(test)]
+    pub async fn chat_notice_contents(&self, agent_id: i64) -> Result<Vec<String>> {
+        sqlx::query_scalar("SELECT content FROM chat_notice WHERE agent_id = ? ORDER BY id")
+            .bind(agent_id)
+            .fetch_all(&self.pool)
+            .await
+            .with_context(|| format!("loading chat notices for agent {agent_id}"))
+    }
+
     /// Store one static prompt piece and return the id a recipe refers to.
     /// Rows are never updated, so the reference stays true to what was sent.
     pub async fn store_prompt_text(&self, content: &str) -> Result<i64> {

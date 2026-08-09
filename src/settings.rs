@@ -55,7 +55,7 @@ pub struct Limits {
     /// Inferences one external trigger may run across every agent it reaches,
     /// including recursive agent-to-agent calls.
     pub max_inferences_total: u32,
-    /// Compact an agent after its assembled input reaches this many tokens.
+    /// Compact after a completed inference reports this many input tokens.
     pub compact_at_input_tokens: usize,
     /// Exact number of newest raw messages retained after a summary.
     pub keep_tail_messages: usize,

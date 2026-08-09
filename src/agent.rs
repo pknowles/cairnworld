@@ -83,7 +83,7 @@ pub async fn complete<B: Backend>(
         )
         .await
         .context("running recorded agent inference")?;
-        store
+        let message_id = store
             .append_message(
                 agent_id,
                 &Message::assistant(response.content.clone(), response.reasoning.clone()),
@@ -95,8 +95,8 @@ pub async fn complete<B: Backend>(
                 store,
                 backend,
                 agent_id,
-                static_messages,
-                &definitions,
+                message_id,
+                response.usage.input_tokens,
                 sampling,
                 model,
                 budget.limits,
@@ -154,10 +154,6 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .context("scripted backend received an unexpected inference")
-        }
-
-        async fn input_tokens(&self, request: crate::llm::Request) -> Result<usize> {
-            Ok(request.messages.len() + request.tools.len())
         }
     }
 

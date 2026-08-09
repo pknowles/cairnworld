@@ -29,6 +29,15 @@ CREATE TABLE message (
     UNIQUE (agent_id, seq)
 );
 
+-- Notices are visible alongside chat history but never become model context.
+CREATE TABLE chat_notice (
+    id INTEGER PRIMARY KEY NOT NULL,
+    agent_id INTEGER NOT NULL REFERENCES agent(id),
+    after_message_id INTEGER NOT NULL REFERENCES message(id),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Static prompt pieces an inference referenced: role prompts and the tool
 -- definitions sent with a request. Rows are written once and never updated, so
 -- a recipe referring to one always resolves to the text actually sent.

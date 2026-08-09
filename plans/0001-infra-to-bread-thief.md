@@ -740,10 +740,9 @@ Do not re-derive these.
 - **Compaction runs after a turn completes**, not in the middle of an agent
   loop. Checking the threshold mid-loop would compact a history that is still
   being appended to.
-- **The split point is a `seq`**, chosen so the messages after it are at least
-  the configured raw tail. If the tail alone already exceeds the token
-  threshold, compaction cannot help and must fail loudly rather than compact
-  nothing or compact the tail.
+- **The split point is a `seq`**, chosen so the messages after it are exactly
+  the configured raw tail. If only that tail remains, compaction records an
+  inline notice and tries again after a later completed turn.
 - **Compaction uses the same model as the agent.** There is no separate
   configuration for it in this milestone.
 
@@ -769,12 +768,11 @@ Ordered so each one builds and is verifiable before the next depends on it.
    summary followed by messages `n+1..`, and nothing earlier. An agent with no
    summary assembles exactly as before.
 
-3. **Token counting.** `Backend` gains `input_tokens` for the exact rendered
-   native request, implemented through the same model chat-template path as
-   inference, including tools and tool calls. The scripted test backend counts
-   something trivial and deterministic.
-   Verify: a request's count is non-zero and grows with history; the trait is
-   satisfied by both backends.
+3. **Token accounting.** A completed inference already reports the exact
+   model input-token count; compaction consumes that recorded value rather
+   than tokenizing a second request.
+   Verify: the value is persisted with the inference and compaction adds no
+   tokenizer call.
 
 4. **Compaction itself.** Given an agent over its exact input-token threshold,
    choose the split point that leaves exactly the configured number of newest
@@ -787,8 +785,8 @@ Ordered so each one builds and is verifiable before the next depends on it.
    Verify: the recorded compaction inference contains no message newer than
    the split point - the one rule that is not tunable. Compaction fires above
    the threshold and not below. The summary's `covers_to_seq` equals the split
-   point. Re-count the complete summary-plus-tail request and fail if it does
-   not fit.
+   point. Record an inline, non-model-facing chat notice for each compaction
+   or no-eligible-history condition.
 
 5. **Exercise and read.** Run the REPL with thresholds set low enough that a
    short conversation compacts, against a real model. Read the resulting

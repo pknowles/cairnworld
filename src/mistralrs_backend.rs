@@ -177,15 +177,6 @@ impl Backend for MistralRsBackend {
             }
         }
     }
-
-    async fn input_tokens(&self, request: Request) -> Result<usize> {
-        Ok(self
-            .model
-            .tokenize_chat_request(request_builder(request)?)
-            .await
-            .context("tokenizing assembled request")?
-            .len())
-    }
 }
 
 /// Build the final response from one generation's accumulated parts.

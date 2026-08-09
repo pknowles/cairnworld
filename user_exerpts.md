@@ -100,21 +100,26 @@ reaches the user - never something an agent can observe and react to.
 > messages will consume? ... we could linearly scan through, tokenizing messages
 > but that would be rediculous
 
-`compact_at_input_tokens` is the exact token count of the complete native
-chat-template request, including static context, history, tool definitions and
-the generation prompt. It is not a character count, a JSON serialization, or a
-conversion estimate. The model renderer supplies it once to decide whether to
-compact and once afterwards to prove the compacted request fits.
+`compact_at_input_tokens` is the exact input-token count the model reports for
+the completed inference, including its static context, history, tools and
+generation prompt. It is not a character count, a JSON serialization, or a
+conversion estimate. Compaction reuses this recorded value; it never invokes a
+second tokenizer pass just to decide or verify compaction.
 
 `keep_tail_messages` retains an exact number of persisted raw message rows. It
-does not promise a token budget; the final full-request count is the only valid
-measure of that. This avoids both a false conversion between characters and
-tokens and tokenizing candidate messages one-by-one. If the retained tail and
-summary do not fit, compaction fails loudly rather than claiming it succeeded.
+does not promise a token budget. This avoids both a false conversion between
+characters and tokens and tokenizing candidate messages one-by-one. A later
+turn retries compaction when its recorded input reaches the trigger again.
 
-Each recorded inference already stores the model-reported `input_tokens` and
-`output_tokens` for the debug view. Those are factual usage measurements, while
-the compaction trigger is the independently rendered pre-inference input count.
+Each recorded inference stores the model-reported `input_tokens` and
+`output_tokens` for the debug view. Those are factual usage measurements and
+the compaction trigger. Because the reply is appended after that input was
+measured, the trigger is the threshold that prompts compaction after a turn,
+not a promise that the next context already fits.
+
+An inline, non-model-facing chat notice records every compaction and the case
+where only the retained tail remains. Repeated notices make a bad threshold or
+one-off huge message visible without interrupting play.
 
 This supersedes the character-tail rule currently recorded in
 `user_declarations.md`; that declaration needs a separate reconciliation.
