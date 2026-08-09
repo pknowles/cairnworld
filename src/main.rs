@@ -14,6 +14,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use rustyline::{DefaultEditor, error::ReadlineError};
 
 use llm::{Message, Role, Sampling};
 use mistralrs_backend::MistralRsBackend;
@@ -157,27 +158,27 @@ async fn run_chat(
         .collect::<Vec<_>>();
     let tools = [tools::save()];
 
-    let stdin = std::io::stdin();
-    let mut line = String::new();
+    let mut editor = DefaultEditor::new().context("starting chat line editor")?;
     loop {
-        print!("> ");
-        std::io::stdout().flush().context("flushing stdout")?;
-
-        line.clear();
-        let bytes_read = stdin.read_line(&mut line).context("reading from stdin")?;
-        if bytes_read == 0 {
-            break;
-        }
-        let text = line.trim_end_matches('\n');
+        let line = match editor.readline("> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
+            Err(error) => return Err(error).context("reading chat message"),
+        };
+        let text = line.as_str();
         if text == "/quit" {
             break;
         }
+        editor
+            .add_history_entry(text)
+            .context("saving chat input in line-editor history")?;
 
-        store
+        let user_message = store
             .append_message(agent, &Message::text(Role::User, text))
             .await
             .context("storing chat message")?;
 
+        eprintln!("[model active]");
         // Each REPL turn is one external trigger, so it gets its own budget.
         let mut budget = agent::Budget::new(limits);
         let response = agent::complete(
@@ -205,6 +206,9 @@ async fn run_chat(
             anyhow::bail!("agent loop returned tool calls as its final response");
         };
         println!();
+        for activity in store.developer_activity(agent, user_message).await? {
+            eprintln!("[developer] {activity}");
+        }
     }
 
     Ok(())

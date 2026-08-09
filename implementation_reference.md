@@ -69,6 +69,9 @@ when things were built.
   template that file needs, so `--model hermes` carries its template
   automatically. `--model` also accepts a path directly, and `--chat-template`
   overrides whatever the entry specifies.
+  The interactive editor supports normal terminal history/editing, shows when
+  a model is active, and renders recorded tool activity, compaction summaries,
+  and notices after each turn.
 
 ## Configuration
 

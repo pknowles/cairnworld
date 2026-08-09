@@ -95,6 +95,11 @@ pub struct Summary {
     pub inference_id: i64,
 }
 
+#[derive(Debug, FromRow)]
+struct DeveloperMessageRow {
+    content: String,
+}
+
 impl Store {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -202,6 +207,66 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .with_context(|| format!("loading chat notices for agent {agent_id}"))
+    }
+
+    pub async fn developer_activity(
+        &self,
+        agent_id: i64,
+        after_message_id: i64,
+    ) -> Result<Vec<String>> {
+        let messages = sqlx::query_as::<_, DeveloperMessageRow>(
+            "SELECT content FROM message WHERE agent_id = ? AND id > ? ORDER BY id",
+        )
+        .bind(agent_id)
+        .bind(after_message_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("loading developer chat activity")?;
+        let mut activity = messages
+            .into_iter()
+            .filter_map(
+                |row| match serde_json::from_str::<MessageContent>(&row.content).ok()? {
+                    MessageContent::ToolCalls(calls) => Some(format!(
+                        "tool calls: {}",
+                        serde_json::to_string(&calls).ok()?
+                    )),
+                    MessageContent::ToolResult {
+                        tool_call_id,
+                        content,
+                    } => Some(format!("tool result {tool_call_id}: {content}")),
+                    MessageContent::Text(_) => None,
+                },
+            )
+            .collect::<Vec<_>>();
+        let notices = sqlx::query_scalar::<_, String>(
+            "SELECT content FROM chat_notice WHERE agent_id = ? AND after_message_id > ? ORDER BY id",
+        )
+        .bind(agent_id)
+        .bind(after_message_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("loading chat notices")?;
+        if notices.iter().any(|notice| notice.starts_with("Compacted")) {
+            let summary = sqlx::query_as::<_, SummaryRow>(
+            "SELECT id, agent_id, covers_to_seq, content, inference_id FROM summary WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+            .context("loading latest compaction summary")?;
+            if let Some(summary) = summary {
+                activity.push(format!(
+                    "compaction summary through message {}: {}",
+                    summary.covers_to_seq, summary.content
+                ));
+            }
+        }
+        activity.extend(
+            notices
+                .into_iter()
+                .map(|notice| format!("notice: {notice}")),
+        );
+        Ok(activity)
     }
 
     /// Store one static prompt piece and return the id a recipe refers to.
