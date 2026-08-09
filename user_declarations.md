@@ -867,7 +867,7 @@ can be discovered or learned.
 - Cairn SRD second edition ruleset
 - RMCP
 
-# UI
+# User Interface
 
 ## Landing page
 
@@ -1099,6 +1099,19 @@ Ideas to make the first round of implementation even simpler:
 - The hut and Mara are both in the same Location, so there is no travel between
   them. The location notes will need to specify the hut and Mara are not close
   so the player would need to Move from one place to the other.
+
+# Implementation Directives
+
+## Scheduling
+
+See the note on delaying compaction until the chat turn is complete and then
+compacting while waiting for user(s) to improve responsiveness/latency.
+
+This is designed to run on one machine with one GPU. While mistral.rs does
+support concurrent requests, we probably don't want to overload it. Limiting to
+some fixed concurrency may be a good idea to improve latency and maybe even
+memory access patterns. If we can use mistral.rs directly to do this that'd be
+even better - less code for us to maintain and we get a feature for free.
 
 # TODO
 

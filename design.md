@@ -108,6 +108,17 @@ provenance. A wrapper below the backend cannot do this job: handed an
 already-assembled request, it knows only opaque bytes, and can do no better
 than storing a copy of them.
 
+## Inference scheduling
+
+One loaded mistral.rs model accepts concurrent requests and schedules their
+sequences itself. Cairnworld controls admission policy, not model execution:
+`limits.max_concurrent_inferences` defaults to 4. Foreground player and agent
+requests take priority; deferred work such as compaction uses capacity not
+needed by them. A completed reply is delivered before its deferred work runs.
+When the cap is full, lower-priority work waits rather than increasing player
+latency. This remains a policy setting, so measurement can tune it for the
+available GPU without duplicating the backend scheduler.
+
 # Persistence and recording
 
 ## Store choice
