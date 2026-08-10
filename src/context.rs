@@ -15,7 +15,7 @@ pub async fn complete<B: Backend>(
     tools: &[ToolDefinition],
     sampling: Sampling,
     model: &str,
-    on_token: impl FnMut(&str),
+    on_token: impl FnMut(&str) + Send,
 ) -> Result<Response> {
     let segments = segments(store, agent_id, static_messages, tools).await?;
     Ok(complete_recipe(
@@ -75,7 +75,7 @@ pub async fn complete_recipe<B: Backend>(
     segments: &[Segment],
     sampling: Sampling,
     model: &str,
-    on_token: impl FnMut(&str),
+    on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
     let request = store
         .request_for_segments(agent_id, segments, sampling)
@@ -135,7 +135,7 @@ mod tests {
         async fn complete(
             &self,
             _request: crate::llm::Request,
-            _on_token: impl FnMut(&str),
+            _on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
             anyhow::bail!("connection lost")
         }
@@ -145,7 +145,7 @@ mod tests {
         async fn complete(
             &self,
             _request: crate::llm::Request,
-            mut on_token: impl FnMut(&str),
+            mut on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
             on_token("hello");
             Ok(Response {

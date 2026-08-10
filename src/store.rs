@@ -95,9 +95,22 @@ pub struct Summary {
     pub inference_id: i64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingCompaction {
+    pub agent_id: i64,
+    pub after_message_id: i64,
+    pub input_tokens: usize,
+    pub sampling: Sampling,
+    pub model: String,
+}
+
 #[derive(Debug, FromRow)]
-struct DeveloperMessageRow {
-    content: String,
+struct PendingCompactionRow {
+    agent_id: i64,
+    after_message_id: i64,
+    input_tokens: i64,
+    sampling: String,
+    model: String,
 }
 
 impl Store {
@@ -180,24 +193,158 @@ impl Store {
         Ok(result.last_insert_rowid())
     }
 
-    /// Store an inline chat event without making it part of model context.
-    pub async fn store_chat_notice(
+    /// Append a final assistant reply and its due compaction in one
+    /// transaction, so a reply that was delivered can never lose the work it
+    /// created on process restart.
+    pub async fn append_reply_and_enqueue_compaction(
         &self,
         agent_id: i64,
-        after_message_id: i64,
-        content: &str,
+        message: &Message,
+        input_tokens: usize,
+        compact_at_input_tokens: usize,
+        sampling: &Sampling,
+        model: &str,
     ) -> Result<i64> {
-        sqlx::query_scalar(
-            "INSERT INTO chat_notice (agent_id, after_message_id, content) \
-             SELECT ?, id, ? FROM message WHERE id = ? AND agent_id = ? RETURNING id",
+        let mut transaction = self.pool.begin().await.with_context(|| {
+            format!("starting reply-and-compaction transaction for agent {agent_id}")
+        })?;
+        let seq: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(seq) + 1, 0) FROM message WHERE agent_id = ?")
+                .bind(agent_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .with_context(|| format!("finding next message sequence for agent {agent_id}"))?;
+        let role = serde_json::to_string(&message.role).context("serializing message role")?;
+        let content =
+            serde_json::to_string(&message.content).context("serializing message content")?;
+        let result = sqlx::query(
+            "INSERT INTO message (agent_id, seq, role, content, reasoning) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(agent_id)
+        .bind(seq)
+        .bind(role)
         .bind(content)
-        .bind(after_message_id)
-        .bind(agent_id)
-        .fetch_one(&self.pool)
+        .bind(&message.reasoning)
+        .execute(&mut *transaction)
         .await
-        .with_context(|| format!("storing chat notice after message {after_message_id}"))
+        .with_context(|| format!("appending final reply {seq} for agent {agent_id}"))?;
+        let message_id = result.last_insert_rowid();
+        if input_tokens >= compact_at_input_tokens {
+            sqlx::query(
+                "INSERT INTO pending_compaction (agent_id, after_message_id, input_tokens, sampling, model) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(agent_id)
+            .bind(message_id)
+            .bind(i64::try_from(input_tokens).context("input token count is too large")?)
+            .bind(serde_json::to_string(sampling).context("serializing compaction sampling")?)
+            .bind(model)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("enqueueing compaction for agent {agent_id}"))?;
+        }
+        transaction.commit().await.with_context(|| {
+            format!("committing final reply and compaction for agent {agent_id}")
+        })?;
+        Ok(message_id)
+    }
+
+    pub async fn pending_compactions(&self) -> Result<Vec<PendingCompaction>> {
+        let rows = sqlx::query_as::<_, PendingCompactionRow>(
+            "SELECT agent_id, after_message_id, input_tokens, sampling, model FROM pending_compaction ORDER BY after_message_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("loading pending compactions")?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(PendingCompaction {
+                    agent_id: row.agent_id,
+                    after_message_id: row.after_message_id,
+                    input_tokens: usize::try_from(row.input_tokens)
+                        .context("pending compaction has a negative token count")?,
+                    sampling: serde_json::from_str(&row.sampling)
+                        .context("deserializing pending compaction sampling")?,
+                    model: row.model,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn pending_compaction(&self, agent_id: i64) -> Result<Option<PendingCompaction>> {
+        self.pending_compactions()
+            .await
+            .map(|jobs| jobs.into_iter().find(|job| job.agent_id == agent_id))
+    }
+
+    #[cfg(test)]
+    pub async fn enqueue_compaction_for_test(&self, job: &PendingCompaction) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO pending_compaction (agent_id, after_message_id, input_tokens, sampling, model) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(job.agent_id)
+        .bind(job.after_message_id)
+        .bind(i64::try_from(job.input_tokens).context("input token count is too large")?)
+        .bind(serde_json::to_string(&job.sampling).context("serializing compaction sampling")?)
+        .bind(&job.model)
+        .execute(&self.pool)
+        .await
+        .context("enqueueing test compaction")?;
+        Ok(())
+    }
+
+    /// Make a completed compaction visible and retire exactly its durable job.
+    pub async fn finish_compaction(
+        &self,
+        job: &PendingCompaction,
+        summary: Option<(&str, i64, i64)>,
+        notice: &str,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin().await.with_context(|| {
+            format!(
+                "starting compaction completion transaction for agent {}",
+                job.agent_id
+            )
+        })?;
+        if let Some((content, covers_to_seq, inference_id)) = summary {
+            sqlx::query(
+                "INSERT INTO summary (agent_id, covers_to_seq, content, inference_id) VALUES (?, ?, ?, ?)",
+            )
+            .bind(job.agent_id)
+            .bind(covers_to_seq)
+            .bind(content)
+            .bind(inference_id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("storing compaction result through message {covers_to_seq}"))?;
+        }
+        sqlx::query(
+            "INSERT INTO chat_notice (agent_id, after_message_id, content) VALUES (?, ?, ?)",
+        )
+        .bind(job.agent_id)
+        .bind(job.after_message_id)
+        .bind(notice)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("storing compaction notice for agent {}", job.agent_id))?;
+        let result = sqlx::query(
+            "DELETE FROM pending_compaction WHERE agent_id = ? AND after_message_id = ?",
+        )
+        .bind(job.agent_id)
+        .bind(job.after_message_id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("retiring compaction job for agent {}", job.agent_id))?;
+        ensure!(
+            result.rows_affected() == 1,
+            "compaction job for agent {} changed before it could complete",
+            job.agent_id
+        );
+        transaction.commit().await.with_context(|| {
+            format!(
+                "committing compaction completion for agent {}",
+                job.agent_id
+            )
+        })
     }
 
     #[cfg(test)]
@@ -207,66 +354,6 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .with_context(|| format!("loading chat notices for agent {agent_id}"))
-    }
-
-    pub async fn developer_activity(
-        &self,
-        agent_id: i64,
-        after_message_id: i64,
-    ) -> Result<Vec<String>> {
-        let messages = sqlx::query_as::<_, DeveloperMessageRow>(
-            "SELECT content FROM message WHERE agent_id = ? AND id > ? ORDER BY id",
-        )
-        .bind(agent_id)
-        .bind(after_message_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("loading developer chat activity")?;
-        let mut activity = messages
-            .into_iter()
-            .filter_map(
-                |row| match serde_json::from_str::<MessageContent>(&row.content).ok()? {
-                    MessageContent::ToolCalls(calls) => Some(format!(
-                        "tool calls: {}",
-                        serde_json::to_string(&calls).ok()?
-                    )),
-                    MessageContent::ToolResult {
-                        tool_call_id,
-                        content,
-                    } => Some(format!("tool result {tool_call_id}: {content}")),
-                    MessageContent::Text(_) => None,
-                },
-            )
-            .collect::<Vec<_>>();
-        let notices = sqlx::query_scalar::<_, String>(
-            "SELECT content FROM chat_notice WHERE agent_id = ? AND after_message_id > ? ORDER BY id",
-        )
-        .bind(agent_id)
-        .bind(after_message_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("loading chat notices")?;
-        if notices.iter().any(|notice| notice.starts_with("Compacted")) {
-            let summary = sqlx::query_as::<_, SummaryRow>(
-            "SELECT id, agent_id, covers_to_seq, content, inference_id FROM summary WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
-        )
-        .bind(agent_id)
-        .fetch_optional(&self.pool)
-        .await
-            .context("loading latest compaction summary")?;
-            if let Some(summary) = summary {
-                activity.push(format!(
-                    "compaction summary through message {}: {}",
-                    summary.covers_to_seq, summary.content
-                ));
-            }
-        }
-        activity.extend(
-            notices
-                .into_iter()
-                .map(|notice| format!("notice: {notice}")),
-        );
-        Ok(activity)
     }
 
     /// Store one static prompt piece and return the id a recipe refers to.
@@ -289,6 +376,7 @@ impl Store {
             .with_context(|| format!("inference references missing text {id}"))
     }
 
+    #[cfg(test)]
     pub async fn store_summary(
         &self,
         agent_id: i64,

@@ -2,10 +2,13 @@ use anyhow::{Context, Result, ensure};
 
 use crate::{
     context,
-    llm::{Backend, Content, Role, Sampling},
+    llm::{Backend, Content, Role},
     settings::Limits,
-    store::{MessageRange, Segment, Store},
+    store::{MessageRange, PendingCompaction, Segment, Store},
 };
+
+#[cfg(test)]
+use crate::llm::Sampling;
 
 /// This request only sees the material it replaces. Static role context and
 /// tools are deliberately absent: they are supplied to every normal inference
@@ -15,6 +18,7 @@ const PROMPT: &str = "Summarize this earlier chat for its next model context. Re
 /// Compact once after a completed turn when the complete live request reaches
 /// the configured context limit. No message is deleted; the new summary simply
 /// becomes the first selected history segment on the next turn.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn after_turn<B: Backend>(
     store: &Store,
@@ -26,33 +30,51 @@ pub async fn after_turn<B: Backend>(
     model: &str,
     limits: Limits,
 ) -> Result<()> {
+    if input_tokens < limits.compact_at_input_tokens {
+        return Ok(());
+    }
+    let job = PendingCompaction {
+        agent_id,
+        after_message_id,
+        input_tokens,
+        sampling,
+        model: model.to_string(),
+    };
+    store.enqueue_compaction_for_test(&job).await?;
+    run(store, backend, &job, limits).await
+}
+
+/// Resolve one persisted compaction obligation. Its summary and developer
+/// notice become visible in the same transaction that retires the job.
+pub async fn run<B: Backend>(
+    store: &Store,
+    backend: &B,
+    job: &PendingCompaction,
+    limits: Limits,
+) -> Result<()> {
     ensure!(
         limits.keep_tail_messages > 0,
         "limits.keep_tail_messages must be greater than zero"
     );
-    if input_tokens < limits.compact_at_input_tokens {
-        return Ok(());
-    }
 
-    let previous = store.latest_summary(agent_id).await?;
+    let previous = store.latest_summary(job.agent_id).await?;
     let covered = previous
         .as_ref()
         .map_or(-1, |summary| summary.covers_to_seq);
     let split = store
-        .tail_split(agent_id, limits.keep_tail_messages)
+        .tail_split(job.agent_id, limits.keep_tail_messages)
         .await?;
     if split <= covered {
-        store
-            .store_chat_notice(
-                agent_id,
-                after_message_id,
+        return store
+            .finish_compaction(
+                job,
+                None,
                 &format!(
-                    "Context used {input_tokens} input tokens; no history older than the retained {} messages was eligible for compaction.",
-                    limits.keep_tail_messages
+                    "Context used {} input tokens; no history older than the retained {} messages was eligible for compaction.",
+                    job.input_tokens, limits.keep_tail_messages
                 ),
             )
-            .await?;
-        return Ok(());
+            .await;
     }
 
     let prompt = store
@@ -70,7 +92,7 @@ pub async fn after_turn<B: Backend>(
     }
     segments.push(Segment::Messages {
         messages: MessageRange {
-            agent_id,
+            agent_id: job.agent_id,
             first_seq: covered + 1,
             last_seq: split,
         },
@@ -78,10 +100,10 @@ pub async fn after_turn<B: Backend>(
     let completion = context::complete_recipe(
         store,
         backend,
-        agent_id,
+        job.agent_id,
         &segments,
-        sampling.clone(),
-        model,
+        job.sampling.clone(),
+        &job.model,
         |_| {},
     )
     .await
@@ -90,15 +112,12 @@ pub async fn after_turn<B: Backend>(
         anyhow::bail!("compaction inference returned tool calls instead of summary text");
     };
     store
-        .store_summary(agent_id, split, &content, completion.inference_id)
-        .await
-        .context("storing compaction result")?;
-    store
-        .store_chat_notice(
-            agent_id,
-            after_message_id,
+        .finish_compaction(
+            job,
+            Some((&content, split, completion.inference_id)),
             &format!(
-                "Compacted history after a request used {input_tokens} input tokens; retained the newest {} messages.",
+                "Compacted history after a request used {} input tokens; retained the newest {} messages.",
+                job.input_tokens,
                 limits.keep_tail_messages
             ),
         )
@@ -126,7 +145,7 @@ mod tests {
         async fn complete(
             &self,
             request: crate::llm::Request,
-            _on_token: impl FnMut(&str),
+            _on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
             self.requests.lock().unwrap().push(request);
             self.responses
@@ -181,6 +200,7 @@ mod tests {
             requests: Mutex::new(Vec::new()),
         };
         let limits = Limits {
+            max_concurrent_inferences: 4,
             max_inferences_per_chat: 8,
             max_inferences_total: 64,
             compact_at_input_tokens: 100,
@@ -246,6 +266,7 @@ mod tests {
             store.chat_notice_contents(agent).await.unwrap()[0],
             "Compacted history after a request used 100 input tokens; retained the newest 2 messages."
         );
+        assert!(store.pending_compaction(agent).await.unwrap().is_none());
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
@@ -271,6 +292,7 @@ mod tests {
             },
             "scripted",
             Limits {
+                max_concurrent_inferences: 4,
                 max_inferences_per_chat: 8,
                 max_inferences_total: 64,
                 compact_at_input_tokens: 100,
@@ -281,6 +303,7 @@ mod tests {
         .unwrap();
         assert!(backend.requests.lock().unwrap().is_empty());
         assert!(store.latest_summary(agent).await.unwrap().is_none());
+        assert!(store.pending_compaction(agent).await.unwrap().is_none());
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
@@ -306,6 +329,7 @@ mod tests {
             },
             "scripted",
             Limits {
+                max_concurrent_inferences: 4,
                 max_inferences_per_chat: 8,
                 max_inferences_total: 64,
                 compact_at_input_tokens: 100,
@@ -320,6 +344,7 @@ mod tests {
             store.chat_notice_contents(agent).await.unwrap()[0],
             "Context used 100 input tokens; no history older than the retained 3 messages was eligible for compaction."
         );
+        assert!(store.pending_compaction(agent).await.unwrap().is_none());
         drop(store);
         std::fs::remove_file(path).unwrap();
     }

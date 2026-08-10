@@ -77,3 +77,14 @@ CREATE TABLE inference (
         (output IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL)
     )
 );
+
+-- A final reply that crossed the compaction threshold creates one durable
+-- obligation. It is not derived from current history, so restart cannot lose
+-- work that was already required when the reply was delivered.
+CREATE TABLE pending_compaction (
+    agent_id INTEGER PRIMARY KEY NOT NULL REFERENCES agent(id),
+    after_message_id INTEGER NOT NULL REFERENCES message(id),
+    input_tokens INTEGER NOT NULL,
+    sampling TEXT NOT NULL,
+    model TEXT NOT NULL
+);

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    compaction, context,
+    context,
     llm::{Backend, Content, Message, Response, Sampling},
     settings::Limits,
     store::Store,
@@ -62,8 +62,13 @@ pub async fn complete<B: Backend>(
     tools: &[Tool],
     sampling: Sampling,
     model: &str,
-    mut on_token: impl FnMut(&str),
+    mut on_token: impl FnMut(&str) + Send,
+    mut on_activity: impl FnMut(String),
 ) -> Result<Response> {
+    backend
+        .before_agent(store, agent_id)
+        .await
+        .context("waiting for earlier deferred work for this agent")?;
     let definitions = tools::definitions(tools);
     let mut chat_spent = 0;
     loop {
@@ -83,35 +88,41 @@ pub async fn complete<B: Backend>(
         )
         .await
         .context("running recorded agent inference")?;
-        let message_id = store
+        let Content::ToolCalls(calls) = &response.content else {
+            store
+                .append_reply_and_enqueue_compaction(
+                    agent_id,
+                    &Message::assistant(response.content.clone(), response.reasoning.clone()),
+                    response.usage.input_tokens,
+                    budget.limits.compact_at_input_tokens,
+                    &sampling,
+                    model,
+                )
+                .await
+                .context("storing final agent response and any due compaction")?;
+            backend
+                .after_agent(store, agent_id)
+                .await
+                .context("admitting any due deferred compaction")?;
+            return Ok(response);
+        };
+        store
             .append_message(
                 agent_id,
                 &Message::assistant(response.content.clone(), response.reasoning.clone()),
             )
             .await
             .context("storing agent response")?;
-        let Content::ToolCalls(calls) = &response.content else {
-            compaction::after_turn(
-                store,
-                backend,
-                agent_id,
-                message_id,
-                response.usage.input_tokens,
-                sampling,
-                model,
-                budget.limits,
-            )
-            .await
-            .context("compacting completed chat turn")?;
-            return Ok(response);
-        };
         for call in calls {
+            on_activity(format!("tool call {}: {}", call.name, call.arguments));
             let result = tools::execute(tools, call)
                 .with_context(|| format!("running tool call {}", call.id))?;
+            let activity = format!("tool result {}: {result}", call.id);
             store
                 .append_message(agent_id, &Message::tool_result(call.id.clone(), result))
                 .await
                 .with_context(|| format!("storing result for tool call {}", call.id))?;
+            on_activity(activity);
         }
     }
 }
@@ -146,7 +157,7 @@ mod tests {
         async fn complete(
             &self,
             request: crate::llm::Request,
-            _on_token: impl FnMut(&str),
+            _on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
             self.requests.lock().unwrap().push(request);
             self.responses
@@ -228,6 +239,7 @@ mod tests {
             ),
             response(Content::Text("The beam catches you.".to_string()), ""),
         ]);
+        let mut activity = Vec::new();
         let final_response = complete(
             &store,
             &backend,
@@ -241,6 +253,7 @@ mod tests {
             },
             "scripted",
             |_| {},
+            |event| activity.push(event),
         )
         .await
         .unwrap();
@@ -250,6 +263,12 @@ mod tests {
             Content::Text("The beam catches you.".to_string())
         );
         assert_eq!(store.inference_count().await.unwrap(), 2);
+        assert!(
+            matches!(activity.as_slice(), [call, result]
+                if call.starts_with("tool call save:")
+                    && result.starts_with("tool result save-1:")),
+            "tool activity must be emitted as each call and result occurs: {activity:?}"
+        );
         let requests = backend.requests.lock().unwrap();
         assert_eq!(requests[0].tools, tools::definitions(&[tools::save()]));
         // The second inference must see Rust's verdict, not the model's guess.
@@ -260,7 +279,7 @@ mod tests {
         ] if calls[0].id == "save-1"
             && reasoning.is_empty()
             && tool_call_id == "save-1"
-            && content.contains("does not succeed")));
+            && content.contains("fails")));
         drop(requests);
         let entries = history(&store, agent_id).await;
         // Reasoning is stored on the message but never replayed into context.
@@ -268,7 +287,7 @@ mod tests {
             matches!(&entries[1], Message { content: MessageContent::ToolCalls(_), reasoning, .. } if reasoning.is_empty())
         );
         assert!(
-            matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "save-1" && content.contains("does not succeed"))
+            matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "save-1" && content.contains("fails"))
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
@@ -294,6 +313,7 @@ mod tests {
                 enable_thinking: false,
             },
             "scripted",
+            |_| {},
             |_| {},
         )
         .await
@@ -339,6 +359,7 @@ mod tests {
                 enable_thinking: false,
             },
             "scripted",
+            |_| {},
             |_| {},
         )
         .await
@@ -397,6 +418,7 @@ mod tests {
             },
             "scripted",
             |_| {},
+            |_| {},
         )
         .await
         .unwrap();
@@ -433,6 +455,7 @@ mod tests {
     async fn a_model_that_never_settles_is_stopped_by_the_chat_limit() {
         let (store, path, agent_id) = test_store().await;
         let limits = Limits {
+            max_concurrent_inferences: 4,
             max_inferences_per_chat: 3,
             max_inferences_total: 64,
             compact_at_input_tokens: 32_768,
@@ -463,6 +486,7 @@ mod tests {
             },
             "scripted",
             |_| {},
+            |_| {},
         )
         .await
         .expect_err("an endless tool loop must be stopped");
@@ -484,6 +508,7 @@ mod tests {
     async fn the_total_limit_stops_a_chat_that_is_within_its_own_limit() {
         let (store, path, agent_id) = test_store().await;
         let mut budget = Budget::new(Limits {
+            max_concurrent_inferences: 4,
             max_inferences_per_chat: 100,
             max_inferences_total: 2,
             compact_at_input_tokens: 32_768,
@@ -512,6 +537,7 @@ mod tests {
                 enable_thinking: false,
             },
             "scripted",
+            |_| {},
             |_| {},
         )
         .await

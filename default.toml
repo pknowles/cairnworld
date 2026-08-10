@@ -20,6 +20,9 @@ path = "models/Qwen_Qwen3-8B-Q4_K_M.gguf"
 # Runaway bounds. These stop a loop that is already wrong - hitting one is an
 # error that reaches the user, not something an agent can see and react to.
 [limits]
+# Requests admitted to the loaded model at once. Mistral.rs batches these
+# sequences internally; foreground work is admitted before deferred work.
+max_concurrent_inferences = 4
 # Inferences one chat turn may run before its tool loop is abandoned. A turn
 # needs one inference per tool round trip plus a final reply.
 max_inferences_per_chat = 8

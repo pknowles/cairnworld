@@ -20,11 +20,20 @@ impl MistralRsBackend {
     /// a template with no tool support at all - the Hermes 3 GGUF carries bare
     /// ChatML, which silently drops every tool definition - so the tool surface
     /// is unusable without supplying one (see templates/).
-    pub async fn load(model_id_or_path: &str, chat_template: Option<&Path>) -> Result<Self> {
+    pub async fn load(
+        model_id_or_path: &str,
+        chat_template: Option<&Path>,
+        max_concurrent_inferences: usize,
+    ) -> Result<Self> {
         let (dir, file) = model_id_or_path.rsplit_once('/').context(
             "--model must be a path or repo id containing a GGUF filename, e.g. dir/model.gguf",
         )?;
-        let mut builder = GgufModelBuilder::new(dir, vec![file]);
+        ensure!(
+            max_concurrent_inferences > 0,
+            "limits.max_concurrent_inferences must be greater than zero"
+        );
+        let mut builder =
+            GgufModelBuilder::new(dir, vec![file]).with_max_num_seqs(max_concurrent_inferences);
         if let Some(template) = chat_template {
             ensure!(
                 template.exists(),
@@ -82,7 +91,11 @@ fn request_builder(request: Request) -> Result<RequestBuilder> {
 }
 
 impl Backend for MistralRsBackend {
-    async fn complete(&self, request: Request, mut on_token: impl FnMut(&str)) -> Result<Response> {
+    async fn complete(
+        &self,
+        request: Request,
+        mut on_token: impl FnMut(&str) + Send,
+    ) -> Result<Response> {
         let request_builder = request_builder(request)?;
 
         let mut stream = self
@@ -280,7 +293,7 @@ mod tests {
         let model = settings
             .model(None)
             .expect("configure a model in local.toml or default.toml to run this test");
-        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref())
+        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4)
             .await
             .expect("model should load");
 

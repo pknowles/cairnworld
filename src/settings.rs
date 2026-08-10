@@ -50,6 +50,8 @@ impl Settings {
 /// an agent can see and react to.
 #[derive(Clone, Copy, Deserialize)]
 pub struct Limits {
+    /// Maximum requests admitted to the loaded model at once.
+    pub max_concurrent_inferences: usize,
     /// Inferences one chat turn may run before its tool loop is abandoned.
     pub max_inferences_per_chat: u32,
     /// Inferences one external trigger may run across every agent it reaches,
@@ -64,6 +66,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            max_concurrent_inferences: 4,
             max_inferences_per_chat: 8,
             max_inferences_total: 64,
             compact_at_input_tokens: 16_000,

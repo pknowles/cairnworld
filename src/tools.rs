@@ -117,62 +117,26 @@ enum Attribute {
     Wil,
 }
 
-/// How a resolved save is worded back to the model.
-///
-/// The roll value never appears: it is theatre for the player, and a model
-/// that sees the number treats the outcome as negotiable - observed for real,
-/// where Llama 3.1 re-rolled the same save three times after each failure.
-/// The variants differ in how they separate "the tool call worked" from "the
-/// save did not pass", which is the confusion under test.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SaveWording {
-    /// Bare outcome word.
-    Terse,
-    /// Names the resolution as settled and final.
-    Settled,
-    /// States the call succeeded, then the in-fiction consequence.
-    Outcome,
-}
-
-impl SaveWording {
-    fn render(self, save: &Save, passed: bool) -> String {
-        let who = &save.character;
-        let what = &save.reason;
-        match self {
-            Self::Terse => format!(
-                "{who} {} the save to {what}.",
-                if passed { "passes" } else { "fails" }
-            ),
-            Self::Settled => format!(
-                "Save resolved: {who} {} to {what}. This result is final.",
-                if passed {
-                    "succeeds"
-                } else {
-                    "does not succeed"
-                }
-            ),
-            Self::Outcome => format!(
-                "Save complete. {who} {what}: {}. Narrate what happens next.",
-                if passed {
-                    "they manage it"
-                } else {
-                    "they do not manage it"
-                }
-            ),
-        }
-    }
-}
-
 /// Cairn save: roll d20 under the attribute to succeed; ties fail.
-fn resolve_save(save: &Save, wording: SaveWording) -> String {
+fn resolve_save(save: &Save) -> String {
     let roll = rand::rng().random_range(1..=20);
     let target = i32::from(save.attribute_value) - i32::from(save.difficulty);
-    wording.render(save, i32::from(roll) < target)
+    format!(
+        "{} {} their {:?} save to {}.",
+        save.character,
+        if i32::from(roll) < target {
+            "passes"
+        } else {
+            "fails"
+        },
+        save.attribute,
+        save.reason,
+    )
 }
 
 fn save_arguments(arguments: &str) -> Result<String> {
     let save: Save = serde_json::from_str(arguments).context("parsing save arguments")?;
-    Ok(resolve_save(&save, SaveWording::Settled))
+    Ok(resolve_save(&save))
 }
 
 #[cfg(test)]
@@ -229,71 +193,46 @@ mod tests {
         }
     }
 
-    const WORDINGS: [SaveWording; 3] = [
-        SaveWording::Terse,
-        SaveWording::Settled,
-        SaveWording::Outcome,
-    ];
-
-    /// Did this result report a pass? Every wording must make the two outcomes
-    /// distinguishable without inspecting a roll value.
-    fn reads_as_pass(result: &str, wording: SaveWording) -> bool {
-        match wording {
-            SaveWording::Terse => result.contains("passes"),
-            SaveWording::Settled => !result.contains("does not"),
-            SaveWording::Outcome => !result.contains("do not"),
-        }
-    }
-
     fn parse(json: &str) -> Save {
         serde_json::from_str(json).expect("arguments should parse")
     }
 
     #[test]
-    fn outcomes_follow_the_cairn_rule_in_every_wording() {
+    fn outcomes_follow_the_cairn_rule() {
         // d20 must roll *under* the attribute, so 1 can never pass and 21 can
         // never fail - outcomes fixed by the rules rather than by a seed.
-        for wording in WORDINGS {
-            for _ in 0..32 {
-                let failed = resolve_save(&parse(&arguments(1, 0)), wording);
-                assert!(!reads_as_pass(&failed, wording), "{wording:?}: {failed}");
-                let passed = resolve_save(&parse(&arguments(21, 0)), wording);
-                assert!(reads_as_pass(&passed, wording), "{wording:?}: {passed}");
-                // Difficulty 20 drops an otherwise-certain pass below reach.
-                let hard = resolve_save(&parse(&arguments(21, 20)), wording);
-                assert!(!reads_as_pass(&hard, wording), "{wording:?}: {hard}");
-            }
+        for _ in 0..32 {
+            let failed = resolve_save(&parse(&arguments(1, 0)));
+            assert!(failed.contains("fails"), "{failed}");
+            let passed = resolve_save(&parse(&arguments(21, 0)));
+            assert!(passed.contains("passes"), "{passed}");
+            // Difficulty 20 drops an otherwise-certain pass below reach.
+            let hard = resolve_save(&parse(&arguments(21, 20)));
+            assert!(hard.contains("fails"), "{hard}");
         }
     }
 
     #[test]
-    fn no_wording_reveals_the_roll_value() {
+    fn result_does_not_reveal_the_roll_value() {
         // The number is theatre for the player. A model that sees it treats
         // the outcome as negotiable and re-rolls until it likes the answer.
-        for wording in WORDINGS {
-            for _ in 0..64 {
-                let result = resolve_save(&parse(&arguments(11, 0)), wording);
-                assert!(
-                    !result.chars().any(|c| c.is_ascii_digit()),
-                    "{wording:?} leaked a number: {result}"
-                );
-            }
+        for _ in 0..64 {
+            let result = resolve_save(&parse(&arguments(11, 0)));
+            assert!(
+                !result.chars().any(|c| c.is_ascii_digit()),
+                "result leaked a number: {result}"
+            );
         }
     }
 
     #[test]
-    fn every_wording_names_the_character_from_its_own_call() {
+    fn result_names_the_character_from_its_own_call() {
         // Attribution must come from the arguments, not a fixed or positional
         // assumption, so results cannot be paired with the wrong call.
         let save = parse(
             r#"{"character":"Mara","attribute":"wil","reason":"resist","attribute_value":1}"#,
         );
-        for wording in WORDINGS {
-            assert!(
-                resolve_save(&save, wording).contains("Mara"),
-                "{wording:?} lost the character"
-            );
-        }
+        assert!(resolve_save(&save).contains("Mara"));
     }
 
     #[test]

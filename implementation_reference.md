@@ -34,12 +34,14 @@ when things were built.
   compaction result can refer to the exact request that produced it.
 - `src/agent.rs` - resolves one recorded chat turn: persists each assistant
   response, runs calls from the invocation-local tool list, persists their
-  results, and repeats until final text. It checks compaction only after that
-  completed turn, never while its history is still being appended.
-- `src/compaction.rs` - triggers one recorded summarisation once a complete
-  completed inference reaches `compact_at_input_tokens`. It preserves exactly
-  `keep_tail_messages` newest raw rows, sends only the older range (and a previous summary)
-  to the compaction model call, then records the resulting summary.
+  results, and repeats until final text. A final reply and any due compaction
+  job are committed together.
+- `src/inference.rs` - admits foreground work ahead of deferred compaction,
+  capped by `max_concurrent_inferences`; mistral.rs batches admitted sequences.
+  It resumes pending jobs at startup and keeps same-agent history ordered.
+- `src/compaction.rs` - resolves a persisted compaction job as one recorded
+  summarisation. It preserves exactly `keep_tail_messages` newest raw rows and
+  transactionally writes the summary and inline notice while retiring the job.
 - `src/tools.rs` - the local `save` tool and the ordinary invocation-local
   lookup used to derive `ToolDefinition`s and run the matching Rust callback.
 
@@ -79,5 +81,6 @@ when things were built.
   feature only) layering `default.toml` (checked in) under `local.toml`
   (gitignored, per-machine overrides). Holds the `[models.<name>]` entries
   described above, `model` naming the default among them, and `limits`,
-  including `compact_at_input_tokens` and `keep_tail_messages`.
+  including `max_concurrent_inferences`, `compact_at_input_tokens`, and
+  `keep_tail_messages`.
 - Weights are not checked in; `models/` is gitignored.

@@ -1,6 +1,7 @@
 mod agent;
 mod compaction;
 mod context;
+mod inference;
 mod llm;
 mod mistralrs_backend;
 mod settings;
@@ -16,7 +17,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rustyline::{DefaultEditor, error::ReadlineError};
 
-use llm::{Message, Role, Sampling};
+use inference::InferenceScheduler;
+use llm::{Backend, Message, Role, Sampling};
 use mistralrs_backend::MistralRsBackend;
 use settings::Settings;
 use store::{RecordedOutcome, Store};
@@ -103,6 +105,7 @@ async fn main() -> Result<()> {
                 resolve_model(model.as_deref(), chat_template, &settings)?,
                 Path::new(&database),
                 inference_id,
+                settings.limits,
             )
             .await
         }
@@ -123,11 +126,15 @@ fn resolve_model(
     Ok(model)
 }
 
-async fn backend(model: &settings::Model) -> Result<MistralRsBackend> {
+async fn backend(model: &settings::Model, limits: settings::Limits) -> Result<MistralRsBackend> {
     eprintln!("Loading model from {}...", model.path);
-    MistralRsBackend::load(&model.path, model.chat_template.as_deref())
-        .await
-        .context("failed to load model")
+    MistralRsBackend::load(
+        &model.path,
+        model.chat_template.as_deref(),
+        limits.max_concurrent_inferences,
+    )
+    .await
+    .context("failed to load model")
 }
 
 async fn run_chat(
@@ -149,7 +156,13 @@ async fn run_chat(
         .create_agent(world, "sandbox", "chat")
         .await
         .context("creating chat sandbox agent")?;
-    let backend = backend(&model).await?;
+    let scheduler = InferenceScheduler::new(backend(&model, limits).await?, limits)
+        .context("configuring inference scheduling")?;
+    scheduler
+        .resume(&store)
+        .await
+        .context("resuming deferred compactions")?;
+    let backend = scheduler.foreground();
     eprintln!("Model loaded. Type a message, or /quit to exit.");
 
     let static_messages = system
@@ -166,6 +179,9 @@ async fn run_chat(
             Err(error) => return Err(error).context("reading chat message"),
         };
         let text = line.as_str();
+        if text.is_empty() {
+            continue;
+        }
         if text == "/quit" {
             break;
         }
@@ -173,7 +189,14 @@ async fn run_chat(
             .add_history_entry(text)
             .context("saving chat input in line-editor history")?;
 
-        let user_message = store
+        // Do this before appending the next user row: an earlier compaction
+        // must never see a newer chat message in the history it summarizes.
+        backend
+            .before_agent(&store, agent)
+            .await
+            .context("finishing earlier deferred work for this chat")?;
+
+        store
             .append_message(agent, &Message::text(Role::User, text))
             .await
             .context("storing chat message")?;
@@ -197,6 +220,7 @@ async fn run_chat(
                 print!("{token}");
                 let _ = std::io::stdout().flush();
             },
+            |activity| eprintln!("\n[developer] {activity}"),
         )
         .await
         .context("resolving chat turn")?;
@@ -206,15 +230,17 @@ async fn run_chat(
             anyhow::bail!("agent loop returned tool calls as its final response");
         };
         println!();
-        for activity in store.developer_activity(agent, user_message).await? {
-            eprintln!("[developer] {activity}");
-        }
     }
 
     Ok(())
 }
 
-async fn run_replay(model: settings::Model, database: &Path, inference_id: i64) -> Result<()> {
+async fn run_replay(
+    model: settings::Model,
+    database: &Path,
+    inference_id: i64,
+    limits: settings::Limits,
+) -> Result<()> {
     let store = Store::open(database)
         .await
         .context("opening inference store")?;
@@ -234,7 +260,7 @@ async fn run_replay(model: settings::Model, database: &Path, inference_id: i64) 
         RecordedOutcome::Error(error) => println!("Recorded error:\n{error}"),
     }
     println!("Replayed output:");
-    let backend = backend(&model).await?;
+    let backend = backend(&model, limits).await?;
     let response = context::complete_recipe(
         &store,
         &backend,

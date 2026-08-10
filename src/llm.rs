@@ -1,8 +1,22 @@
+use std::future::Future;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub trait Backend {
-    async fn complete(&self, request: Request, on_token: impl FnMut(&str)) -> Result<Response>;
+    async fn before_agent(&self, _store: &crate::store::Store, _agent_id: i64) -> Result<()> {
+        Ok(())
+    }
+
+    async fn after_agent(&self, _store: &crate::store::Store, _agent_id: i64) -> Result<()> {
+        Ok(())
+    }
+
+    fn complete(
+        &self,
+        request: Request,
+        on_token: impl FnMut(&str) + Send,
+    ) -> impl Future<Output = Result<Response>> + Send;
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
