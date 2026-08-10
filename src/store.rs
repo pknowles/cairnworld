@@ -113,6 +113,22 @@ struct PendingCompactionRow {
     model: String,
 }
 
+impl TryFrom<PendingCompactionRow> for PendingCompaction {
+    type Error = anyhow::Error;
+
+    fn try_from(row: PendingCompactionRow) -> Result<Self> {
+        Ok(Self {
+            agent_id: row.agent_id,
+            after_message_id: row.after_message_id,
+            input_tokens: usize::try_from(row.input_tokens)
+                .context("pending compaction has a negative token count")?,
+            sampling: serde_json::from_str(&row.sampling)
+                .context("deserializing pending compaction sampling")?,
+            model: row.model,
+        })
+    }
+}
+
 impl Store {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -255,25 +271,20 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .context("loading pending compactions")?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(PendingCompaction {
-                    agent_id: row.agent_id,
-                    after_message_id: row.after_message_id,
-                    input_tokens: usize::try_from(row.input_tokens)
-                        .context("pending compaction has a negative token count")?,
-                    sampling: serde_json::from_str(&row.sampling)
-                        .context("deserializing pending compaction sampling")?,
-                    model: row.model,
-                })
-            })
-            .collect()
+        rows.into_iter().map(PendingCompaction::try_from).collect()
     }
 
     pub async fn pending_compaction(&self, agent_id: i64) -> Result<Option<PendingCompaction>> {
-        self.pending_compactions()
-            .await
-            .map(|jobs| jobs.into_iter().find(|job| job.agent_id == agent_id))
+        sqlx::query_as::<_, PendingCompactionRow>(
+            "SELECT agent_id, after_message_id, input_tokens, sampling, model \
+             FROM pending_compaction WHERE agent_id = ?",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading pending compaction for agent {agent_id}"))?
+        .map(PendingCompaction::try_from)
+        .transpose()
     }
 
     #[cfg(test)]
