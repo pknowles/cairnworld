@@ -119,6 +119,15 @@ When the cap is full, lower-priority work waits rather than increasing player
 latency. This remains a policy setting, so measurement can tune it for the
 available GPU without duplicating the backend scheduler.
 
+Deferred work is persisted before it is admitted. Restarting loads unfinished
+jobs again, so a completed reply cannot lose its required compaction merely
+because the server exits. A job records the model and sampling of the turn
+that created it and is written atomically with that reply. Completing a job
+atomically stores its result, its developer-visible notice, and removes the
+job; a crash while it runs leaves it eligible to retry. A later request to the
+same agent cannot overtake its earlier deferred work, while unrelated agents
+continue through available capacity.
+
 # Persistence and recording
 
 ## Store choice
@@ -144,6 +153,10 @@ composes directly with axum and the world tasks, and migrations are built in
 - `chat_notice(id, agent_id, after_message_id, content)` - an inline event in
   a user/developer chat view. It is deliberately not selected for agent
   context.
+- `pending_compaction(agent_id, after_message_id, input_tokens, sampling,
+  model)` - durable deferred work caused by an already completed reply. It is
+  not a derived cache: its presence is the instruction to compact after a
+  restart.
 
 ## Inference records and reconstruction
 

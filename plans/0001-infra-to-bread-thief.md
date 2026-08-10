@@ -1,7 +1,9 @@
 # Infrastructure to Bread Thief
 
-Status: in-progress (2026-08-08) - milestones 1-4 complete; milestones 5-9
-not started. The model choice deferred from milestone 3 is still open.
+Status: in-progress (2026-08-09) - milestones 1-3 complete; Milestone 4's
+durable deferred-compaction/scheduling follow-up is in progress; milestone 5
+planned, not started; milestones 6-9 not started. The model choice deferred
+from milestone 3 is still open.
 
 ## Goal
 
@@ -58,6 +60,9 @@ specified up front.
    want to test features and repro bugs quickly without writing temporary
    scripts", which is asking for accessible game data under MCP, not a CLI
    flag. If that need is real it belongs in milestone 9.
+   The initial synchronous implementation is followed by durable deferred
+   compaction: foreground replies return immediately, persisted jobs survive
+   restart, and priority admission runs them in available model capacity.
 5. **Webserver + UI.** Axum + Leptos, Google OAuth2 login, one world, one
    player agent, websocket chat page. Verifies: a friend can log in from
    another machine and chat against the real model.
@@ -692,14 +697,14 @@ agents, not after.
 - Compaction as an ordinary recorded inference: it goes through the same
   context assembly and is recorded like any other, so it gets an inference
   view for free.
-- Two configured thresholds beside the existing limits: total tokens before
-  compaction runs, and how much raw tail to keep after the summary.
-  user_declarations.md specifies the tail as "some character count threshold",
-  so the tail is counted in characters and the trigger in tokens. They measure
-  different things on purpose: the trigger is about fitting the model's
-  context, the tail is about how much recent detail stays exact.
-- Token counts come from the loaded model's own tokenizer via
-  `Model::tokenize`, not an estimate.
+- Two configured limits beside the existing bounds: the reported input-token
+  count that makes compaction due, and the exact number of newest raw message
+  rows to retain. The latter deliberately names messages rather than a
+  converted character or token budget: it is a truthful user-facing quantity
+  and requires no speculative per-message token accounting.
+- The trigger uses the input-token count reported by the ordinary model
+  inference that just completed. It is deliberately a threshold passed by a
+  regular request, not a pre-flight target and not a second tokenization pass.
 
 ### The one hard rule
 
@@ -796,6 +801,39 @@ Ordered so each one builds and is verifiable before the next depends on it.
    boundary; `replay` on both the compaction inference and a later inference
    reconstructs.
 
+### Deferred scheduling follow-up
+
+The synchronous implementation above establishes compaction's data and
+context invariants. Before the web milestone uses it, complete the following
+replacement so waiting for a summary does not delay a player reply.
+
+1. **Persist intent with the completed reply.** Add one pending-compaction row
+   per agent. Writing an assistant's final text response and inserting its
+   compaction job is one transaction. The job stores the triggering message,
+   its exact reported input-token count, model and sampling. It is only created
+   once the threshold has been passed; jobs are not inferred from current
+   history on restart.
+   Verify: an interrupted process leaves a job that a fresh application
+   instance can load, while a below-threshold reply leaves none.
+2. **Run and finish a persisted job.** The job reconstructs the same eligible
+   compaction range as above. A successful summary, its inline notice, and
+   removal of the job commit together. A job with no older eligible history
+   commits its explanatory inline notice and removal together. A failed model
+   call leaves the job pending and exposes the error to the initiating/developer
+   surface; it is not silently discarded.
+   Verify: a crash-equivalent uncompleted row is retried, and no summary or
+   notice can appear without the corresponding job becoming complete.
+3. **Admission policy.** Mistral.rs retains responsibility for batching its
+   sequences. Cairnworld limits admissions to
+   `limits.max_concurrent_inferences` (default 4): foreground chat work wins
+   capacity; queued compaction is admitted greedily only when foreground work
+   is absent. A later foreground request to an agent with a pending job waits
+   for that agent's earlier compaction, preserving its history order; other
+   agents remain independent.
+   Verify with a controllable backend that foreground work overtakes deferred
+   work, idle capacity runs deferred work, the cap is never exceeded, and a
+   same-agent reply cannot use history before its due compaction.
+
 ### Nothing is ever removed
 
 Messages are never deleted, edited or moved by compaction. A summary is a new
@@ -809,3 +847,214 @@ and a summary only changes which of them are selected for future context". Its
 Before/After lists are what the model sees, not what is stored. The debug
 viewer is expected to show summaries inline in the full history, which only
 works because none of it is thrown away.
+
+## Milestone 5 detail: Webserver + UI
+
+Goal: the same recorded agent loop, reached over a network instead of a
+terminal. A friend logs in with a Google account on another machine and has a
+real chat exchange with the model through a browser. Everything the REPL
+already exercises - context assembly, tools, compaction - is reused verbatim;
+this milestone adds the `web` layer from design.md and nothing to `agent` or
+`store` beyond what serving a browser client requires.
+
+### Scope
+
+Per the plan skeleton and design.md's Web server and UI section: Axum +
+Leptos (SSR + hydration via `cargo-leptos`), Google OAuth2 login, the landing
+page, one world's detail page, and a websocket chat page against one player
+agent. This milestone is the transport and page skeleton, not the full
+world-detail feature set user_declarations.md describes - the cuts below are
+listed with the same weight as the design.md-driven ones, since several of
+them remove behaviour user_declarations.md states directly, not just
+design.md elaboration.
+
+Out of scope, deferred with reasons:
+
+- **Dev mode.** Design.md's split view depends on the sequence spine
+  (milestone 6) and inference/game-object browsing (milestone 8). Building it
+  against a GM-less chat would mean building it twice.
+- **The GM.** design.md's `game` layer (actions, dice, Cairn rules) is
+  milestone 6/7 work. Milestone 5's chat page talks to a bare agent exactly
+  like `cairnworld chat` does today - the `--kind gm|npc|player` role
+  selection design.md describes for the CLI is also not here yet, since there
+  is only one kind of agent to be. This also covers the declared
+  GM-narrated join/leave behaviour (arrival narration, and the 1-minute
+  disconnect timer with consolidated leave narration and the "who else in my
+  party is here?" query) - none of it can exist before the GM does, so it
+  is cut here rather than separately.
+- **can_act / turn gating.** design.md's websocket protocol includes a
+  `can_act` flag for combat/turn-order gating. Nothing produces turns yet
+  (milestone 6), so the flag does not exist; the send button is never
+  greyed out in this milestone.
+- **Streaming token deltas to the browser.** design.md describes pushing
+  partial narration once the model commits to final text. The REPL's
+  `on_token` callback already proves streaming works end to end; wiring it
+  through a websocket is a UI-polish increment on top of a working
+  non-streamed round trip, not a precondition for one. Ship the full-message
+  round trip first (verifiable: a friend gets a reply), add streaming after
+  if the wait is felt in practice.
+- **Invitation links, player roster tree, and shortcut Join buttons.**
+  user_declarations.md (World detail page) declares these as core to the
+  page: unique invite links with optional slot limits, deletable at any
+  time; a tree of joined players and their characters; a Join button per
+  player to enter with their character; the owner removing joined users.
+  None of it exists yet because there is nothing to join *as* - milestone 5
+  has no `character` table (that arrives with milestone 7's game state
+  schema) and no multiplayer concept beyond one owner per world. Building
+  invites onto a single-player world would be built again once characters
+  exist to join with.
+- **World status and the logged-out recap.** user_declarations.md (World
+  detail page) declares an in-progress/complete status and a per-player
+  recap written by that player's agent, generated with deferred priority
+  once 60 seconds have passed since the player last logged out - a durable
+  queued job, not a live in-process timer, so it must survive a server
+  restart. Milestone 5 has no deferred-job queue at all yet (compaction's
+  is the closest precedent, and even that is milestone 4's in-process
+  version); building the recap job now means building the queue twice once
+  a real one exists. Deferred rather than faked with a placeholder that
+  would need rebuilding.
+- **The "Adventurer" auto-created character on join.** user_declarations.md
+  (World detail page) declares that joining a world auto-creates a
+  placeholder-named character, separate from the player's agent, whose
+  stats are filled in through character creation. Milestone 5 has only the
+  `agent` row (the chat entity) - no `character` row, no character
+  creation, since design.md's Game state schema is milestone 7. Step 4 below
+  creates an agent, not a character; this is not the declared join flow, and
+  is called out again there so it is not mistaken for it.
+
+### Steps
+
+Ordered so each is independently buildable and verifiable, and so nothing is
+built against a mocked version of something the next step builds for real.
+
+1. **Axum skeleton + Leptos wiring, no auth, no chat.** `cairnworld serve
+   [--database <path>] [--port <n>]` subcommand in `main.rs`, alongside
+   `chat`/`replay`. `cargo-leptos` project structure (client/server feature
+   split per its axum-integration convention), one Leptos component: a static
+   landing page with placeholder text. `leptos_axum`'s router integration
+   serves it.
+   Verify: `cargo leptos build` and `cargo leptos serve` succeed; the landing
+   page loads in a browser at `localhost:<port>` with hydration active
+   (a trivial client-side interaction, e.g. a counter, proves WASM loaded -
+   deleted once the real page replaces it).
+
+2. **Google OAuth2 login + session.** `openidconnect` for the Google OIDC
+   flow, `tower-sessions` with its sqlite store for the session cookie, both
+   against the existing `Store`'s database file. `world` table gains no
+   columns here; a new `user(id, email)` table is identity-only, matching the
+   `agent` table's existing shape - accounts keyed by email per
+   user_declarations.md, no password storage. Client id/secret and redirect
+   URI come from a gitignored config file per design.md's Auth section, read
+   through the existing `settings.rs` layering.
+   Verify: logging in from a real Google account redirects back
+   authenticated; the session cookie survives a page reload; an unauthenticated
+   request to a page requiring login redirects to `/`; a second browser
+   profile logging in with a different Google account gets a distinct
+   session and `user` row.
+
+3. **Landing page: name, world list, create world.** `/` renders differently
+   logged out (login button only) vs logged in (name field, list of the
+   user's worlds, create-world form with the optional hidden-by-default seed
+   prompt). Leptos server functions back the name change and world creation -
+   no hand-written JSON endpoint, per design.md's stated reason for choosing
+   Leptos. World creation with a seed prompt does not run the Storyteller
+   (that is future work per user_declarations.md's initial proof of concept
+   scope) - it just records the prompt and creates the world row, matching
+   the "hard coded setting, no Storyteller" simplification already adopted
+   for Bread Thief.
+   Verify: creating a world appears in the list without a reload; the name
+   change persists across a session; a fresh account sees an empty world
+   list.
+
+4. **World detail page → the player's agent.** `/world/:id`, reached by
+   clicking a world from the landing page's list per user_declarations.md
+   ("Each world takes them to the world detail page"): world name and a link
+   into `/world/:id/play`. Status, recap, and the invite/roster/Join-button
+   UI are the declared page but are cut per the reasons above, not silently
+   - this step builds only the fragment those cuts leave behind. Visiting
+   `/world/:id/play` for the first time creates a plain `agent` row for that
+   user in that world if one does not already exist (mirrors `run_chat`'s
+   sandbox-agent creation, but keyed by user+world instead of created fresh
+   every run). This is deliberately *not* the declared join flow - there is
+   no invite/Join step (only the world's own owner reaches it in this
+   milestone) and no `character` row is created, only the `agent`; the
+   declared "Adventurer" placeholder character and character creation are
+   milestone 7 work, cut above.
+   Verify: visiting `/world/:id/play` twice for the same user reuses the same
+   agent id (check the row count, not just the UI); a second logged-in user
+   visiting the same world id gets their own distinct agent (a stand-in for
+   multiplayer, not the declared join/roster mechanism).
+
+5. **The chat websocket.** `WS /world/:id/ws`: client sends player text;
+   server runs it through `agent::complete` exactly as `run_chat` does
+   (same static role prompt for now - a single hard-coded "player" prompt,
+   since `--kind` selection does not exist yet - same tools, same store, same
+   `Budget`), and pushes back the finished assistant message once the loop
+   resolves to final text. No token-level streaming yet (deferred above): one
+   assistant message per completed turn, matching design.md's rule that
+   player-facing chat only ever renders resolved narration, trivially
+   satisfied by not streaming at all yet.
+   Verify: two browser sessions (different accounts, or the same account in
+   two tabs against two worlds) each get replies addressed to their own
+   agent's history, never mixed up; killing and reloading the page
+   reconnects and shows prior messages (loaded from the store, not kept in
+   server memory); a message sent while a previous turn is still resolving is
+   either queued or rejected with a visible reason - not silently dropped or
+   raced against the in-flight turn (the world-task-per-event-queue model
+   from design.md's Concurrency section is the natural fit, but a
+   per-agent lock is an acceptable size-appropriate substitute at this
+   milestone since there is no multi-agent recursion yet to make ordering
+   subtle - note this explicitly in the commit if taken, since design.md's
+   world-task queue is still the eventual shape).
+
+6. **Game page: chat history render.** `/world/:id/play` renders the
+   player's existing message history (via the same `Store` reads dev mode
+   will later reuse) plus the live websocket feed, one scrolling column with
+   an input box - matching design.md's stated minimalism ("one big chat
+   history, a box at the bottom to enter text and a send button"). Design.md's
+   Web server and UI section states player-facing chat only ever renders
+   resolved narration, never raw tool-call syntax (no equivalent sentence
+   exists in user_declarations.md itself, which only ever describes what the
+   *player's agent* sees or scrubs, not the browser rendering) - so this
+   step's rendering must already filter to `MessageContent::Text` display
+   only, even though there is no GM yet to make tool calls interesting -
+   getting the filter right now means milestone 6 does not have to retrofit
+   it under time pressure.
+   Verify: reloading the page shows the same history a moment later
+   produces; a manually inserted tool-call message row (test-only, via the
+   store directly) does not render its raw JSON in the page.
+
+7. **Remote smoke test.** Per design.md's Auth section, a real deployment
+   needs only the client secret and db path as configuration - verify that
+   holds by having a friend connect from another machine on the LAN (or a
+   tunnel) using their own Google account, chat, and get replies from the
+   real GPU-loaded model.
+   Verify: this is the milestone's definition of done, not a separate check -
+   see below.
+
+8. **Document and commit.** Update `implementation_reference.md` with the
+   `web` layer entry (routes, auth, session store, the websocket handler)
+   mirroring the existing per-layer entries' style. Run `cargo fmt --check`,
+   `cargo test`, `cargo build --release`, `cargo leptos build --release`.
+   Self-review per AGENTS.md, then commit. If the milestone grew large
+   enough that step 1-2 (skeleton+auth) and step 3-6 (pages+chat) naturally
+   separated into independently-buildable-and-working states, prefer two
+   commits over one - but only if both are independently a working `cargo
+   leptos serve`, per the worktree sanitation rule that every commit must
+   leave the project bisectable.
+
+### Definition of done
+
+- `cairnworld serve` starts the webserver against a real sqlite database and
+  a real GPU-loaded model, with no separate code path from `chat`/`replay`
+  for context assembly, tool execution, or recording.
+- A user neither of the developers has pre-provisioned can log in with their
+  own Google account from a separate machine, create a world, and hold a
+  multi-turn chat exchange with the model, with replies indistinguishable in
+  content from a REPL session against the same model.
+- Every message sent through the websocket is recorded exactly as a REPL
+  message is - reconstructable, replayable, visible to `cairnworld replay`
+  with no special-casing for its origin.
+- No dev-mode, GM, action-approval, or streaming-token code exists yet -
+  their absence is a deliberate scope cut recorded above, not an oversight
+  found in review.

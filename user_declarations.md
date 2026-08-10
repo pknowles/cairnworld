@@ -889,8 +889,10 @@ There is no enforced limit on the number of worlds that can be created.
 The world/campaign is given a name after initialization. Below it is a world
 status of in-progress or complete. Below that is a recap for the current player.
 The recap is written by the player's agent after the player logs out and does
-not return for 60 seconds. It does not persist in the player agent's chat
-history; it's only for the world recap.
+not return for 60 seconds. This is generated with deferred priority, much like a
+chat summary, and if the server goes down the queued job to make a recap
+remains. It does not persist in the player agent's chat history; it's only for
+the world recap.
 
 If the world is complete it will have a short epilogue, describing what each
 player ends up doing. This will be written by the Storyteller. TODO: detail how
