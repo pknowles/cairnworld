@@ -55,11 +55,12 @@ specified up front.
    user_declarations.md. `--prompts <dir>` assumed prompts live as files to
    substitute in, when they are assembled from stored text and message rows;
    the declared feature is re-running a stored inference after the code or
-   prompts change, which reassembly already does. `--fork` copied an agent's
-   history into a sandbox to poke at; the nearest declaration is "agents may
-   want to test features and repro bugs quickly without writing temporary
-   scripts", which is asking for accessible game data under MCP, not a CLI
-   flag. If that need is real it belongs in milestone 9.
+   prompts change, which reassembly already does - deferred to milestone
+   9/8 in plans/deferred.md, not dropped outright. `--fork` (copying an
+   agent's history into a sandbox to poke at) was an unauthorized agent
+   addition: no user_declarations.md passage asked for it, and it does not
+   belong in plans/deferred.md either, since that file is for declared
+   features blocked on a dependency, not invented ones.
    The initial synchronous implementation is followed by durable deferred
    compaction: foreground replies return immediately, persisted jobs survive
    restart, and priority admission runs them in available model capacity.

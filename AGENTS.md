@@ -113,7 +113,8 @@ reviewed and committed, or there is a real blocker.
   simpler if a feature was there. Check that the granularity of the plan is
   appropriate - i.e. we won't need to write extra code just to have an
   intermediate step work and that we won't be implementing too much without
-  modular testing in one big blob.
+  modular testing in one big blob. Check for plans/deferred.md items that should
+  be included/merged into the plan.
 - Implement one complete slice that can be committed. See Worktree and git
   sanitation above. The project must be in a good state at the end so we can git
   bisect. You may need to revisit the plan or implement a little more to achieve
@@ -227,6 +228,21 @@ flow is: user_declarations.md (ground truth) → design.md (desired end state) �
 plans/ (order, detail and status) → implementation_reference.md (index of what
 exists). Naming them with a date prefix may help to know their order and what's
 most recent.
+
+### plans/deferred.md
+
+Sometimes the design changes or agents make mistakes with the implementation
+order. This file contains a list of follow-up items that were at one point
+scheduled for implementation but could not be at the time.
+
+Items here must be deferred due to being blocked. This file is NOT an excuse to
+just do planned work later. Additions here come with maintenance cost.
+
+Each item must include a recommended implementation schedule or trigger so that
+ideas/features don't get lost to time.
+
+Additions due to scope are not allowed unless they are explicitly requested and
+signed off by the user.
 
 ## implementation_reference.md
 
