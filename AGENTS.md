@@ -33,10 +33,10 @@ not checked in.
 
 Use integrated edit/search tools rather than grep/sed when at all possible.
 
-# Pre-commit checklist
+# Post-feature and pre-commit checklist
 
-The following items must have been completed before making a commit. This is a
-hard gate and MUST be followed:
+The following items must have been completed after implementing a feature and
+before making a commit. This is a hard gate and MUST be followed:
 
 1. Documentation must be updated to match the changes
 2. Appropriate testing has been run and passes
@@ -47,9 +47,11 @@ hard gate and MUST be followed:
    - Anything missed or shortcuts taken?
    - Did you follow the rules here and in coding_standards.md and
      prompt_standards.md?
+   - If writing a plan, make sure that it references this checklist and our
+     standards docs.
    - If designing/planning, verify the implementation matches a direct user
      requirement and that there was no better and more straight forward way (see
-     design.md below). Check that the design aligns with the coding standards.
+     design.md below). Check that the design aligns with the standards docs.
      Does the implementation ordering flow so data and dependencies will simply
      already exist when needed or are constructs being introduced unnecessarily
      that would simply not be needed if the ordering were corrected or steps
