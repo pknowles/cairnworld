@@ -136,3 +136,15 @@ the same durable data and component boundaries as the final feature. If it
 would require a temporary relationship or a replacement implementation, merge
 it with its dependencies into one complete vertical slice. Every proposed data
 relationship and component must cite a user declaration before implementation.
+
+## 2026-08-22: Character tool identifiers
+
+> lets keep them numbers only and two digits unless we run out
+
+Character names are not identifiers. A character receives an immutable `charN`
+tool ID with a globally unique numeric suffix. Allocation chooses an unused
+two-digit value from 10 through 99; after that pool is exhausted it widens to
+three digits, and so on. The value is independent of character name and
+creation order.
+
+This is reflected in the Game state section of user_declarations.md.

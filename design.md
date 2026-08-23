@@ -16,8 +16,8 @@ binary has subcommands:
 - `cairnworld chat` - interactive agent REPL (see "Dev CLI: chat, replay")
 - `cairnworld replay <inference-id>` - re-run a recorded inference, optionally
   with edited prompts
-- `cairnworld world export|import <file.json>` - world snapshots for checked-in
-  scenarios and repros
+- `cairnworld import-scenario` / `export-scenario` - reusable checked-in
+  scenario templates
 
 Layers, each depending only on those above it:
 
@@ -91,7 +91,7 @@ no GM measures the harness, so it waits for real play (see plans/).
   Its template quotes tool results and puts tool definitions in the first user
   message alongside the question.
 
-If no single model does both jobs well, different models per agent kind
+If no single model does both jobs well, different models per agent relationship
 (tool-heavy GM vs voice-heavy NPCs) is possible behind the backend trait, but
 is not designed for until evidence demands it. Constrained/JSON-schema
 generation remains a fallback mechanism for weak tool callers.
@@ -142,8 +142,8 @@ composes directly with axum and the world tasks, and migrations are built in
 
 ## Chat schema
 
-- `agent(id, world_id, kind, name)` - one row per agent: each player agent,
-  each location GM, each NPC, the Storyteller, transient Questioners.
+- `agent(id, world_id)` - one row per chat history. Its gameplay role is
+  defined by the relationship that owns it, not a duplicated kind string.
 - `message(id, agent_id, seq, role, content, created_at)` - `content` is
   tagged JSON: plain text, tool calls, or tool results. `seq` orders messages
   per agent.
@@ -230,17 +230,20 @@ retaining the player association and characters; every joined player has a
 player agent; characters can be PCs or NPCs; and the developer view exposes
 the Storyteller, GM, and NPC chats.
 
-- `user` holds unique email and a non-unique display name. Neither display name
-  nor any game relationship affects login identity.
-- `world` records its owner and its setting/state. A `world_member` records one
-  user's access to one world, including its current access state, so removal
-  preserves the association and characters exactly as declared.
-- Every `agent` belongs to a world and is only a chat history. Its game purpose
-  is determined by a relationship that owns it: the world's Storyteller,
-  a member's player agent, a location's GM, or an NPC character's agent.
-  A player character is guided by its membership's player agent; an NPC is
-  played by that NPC character's agent. Locations contain game state and do
-  not own agents beyond their location-scoped GM.
+- `user(id, email, display_name)` holds unique email and a non-unique display
+  name. Neither display name nor any game relationship affects login identity.
+- `world_owner(world_id, user_id)` names the single creator/owner without
+  making a sandbox chat world a partial user world. `world_member(world_id,
+  user_id, access)` records one user's current access to one world; removal
+  changes `access` but retains the association and characters exactly as
+  declared. `member_player_agent(member_id, agent_id)` gives that membership
+  its singular player chat history.
+- Every `agent(id, world_id)` is only a chat history. Its gameplay
+  purpose is determined by a relationship that owns it: `world_storyteller`,
+  `member_player_agent`, `location_gm`, or `npc_agent`. A PC belongs to a
+  membership through `player_character`; an NPC is played through `npc_agent`.
+  Locations contain game state and do not own agents beyond their
+  location-scoped GM.
 
 The relation, rather than a string `agent.kind`, is the source of truth. A
 `kind` can say an agent is a GM without saying which location it governs, allow
@@ -257,6 +260,21 @@ playtest may consolidate them without changing agent histories or player
 identity. It does not pre-decide Storyteller iteration, invitation mechanics,
 or dynamic NPC/location creation beyond the relationships those declared
 features require.
+
+## Character tool identifiers
+
+Every character has an immutable, globally unique numeric `tool_id`, rendered
+to models and tools as `charN`. This `charN` handle is the only character
+identifier sent in an LLM-facing tool argument; names are separate
+player-facing text and may change. Allocation chooses uniformly from the unused
+two-digit range 10 through 99. Once it is exhausted, it chooses from the unused
+three-digit range, and widens again only when required. SQLite's single
+application connection serializes allocation, so selecting from unused values
+cannot collide or require retrying.
+
+The numeric suffix avoids duplicate "Adventurer" and renamed-character
+problems. It also keeps `charN` handles short for small models without exposing
+allocation order.
 
 # Agent loop
 
@@ -432,14 +450,11 @@ frontend over the same `agent`/`store` functions the game uses - no parallel
 implementation - and every inference made here goes through the normal
 recorded path, in a dedicated sandbox world so world telemetry stays clean.
 
-- **`cairnworld chat`** - interactive stdio REPL. In its simplest form it is
-  a bare 1:1 conversation with the model for verifying the backend. Once the
-  agent layer exists it runs as a real agent:
-  `--kind gm|npc|player|storyteller` selects the role prompt and tool set,
-  and the full context assembly and compaction machinery is exercised - so a
-  REPL session is a faithful stand-in for in-game behaviour, not an
-  approximation. Rust-side tool code executes for real against the sandbox
-  world's state.
+- **`cairnworld chat`** - interactive stdio REPL. It remains a bare 1:1
+  conversation for verifying the backend and recording path. Real game play
+  through the terminal targets an existing player membership, so its role,
+  tools, and context come from the same relationships as browser play rather
+  than a `--kind` switch.
 - **Replay:** `cairnworld replay <inference-id>` reassembles the recorded input
   via the reconstruction machinery and re-runs it, printing old and new output
   side by side. Reassembly uses the current code and the current prompt files,

@@ -48,9 +48,15 @@ when things were built.
 ## Persistence and recording (design.md: Persistence and recording)
 
 - `src/store.rs` and `migrations/0001_recording.sql` - SQLite store, WAL mode,
-  identity-only `world`/`agent` rows, ordered `message` history, inline
-  non-model-facing `chat_notice` rows, write-once `text` prompt rows, `summary`
-  rows, and `inference` recipes. A recipe refers
+  identity-only sandbox worlds and chat-history agents; OAuth email identities
+  with non-unique display names; durable world-owner, membership,
+  membership-player-agent, player-character, NPC-agent, and location-GM
+  relationships; world/character/location/path/item/item-type/spell-type data
+  with separate GM and Storyteller JSON notes. `install_scenario` creates the
+  entire initial relationship graph in one transaction and `export_scenario`
+  exports only reusable scenario data, never a player's history or membership.
+  The active-membership lookup is the single player-world authorization
+  boundary. A recipe refers
   to static text, tools, a summary, and/or an agent message range;
   reconstruction rereads those rows and verifies the assembled input against
   its BLAKE3 hash. The live history selector is exactly newest summary plus
@@ -66,7 +72,14 @@ when things were built.
   the agent loop. `cairnworld replay [--model <name|path>] [--database <path>]
   <inference-id>` reconstructs and validates the recorded recipe, displays its
   response or error, and records the replay by calling the same context
-  boundary. `--kind` remains later work.
+  boundary. `cairnworld import-scenario --owner-email <email> --owner-name
+  <name> [--database <path>] <scenario.json>` initializes a fresh scenario
+  world without loading model settings; `export-scenario [--database <path>]
+  <world-id> <output.json>` writes its reusable scenario template. Agent roles
+  come from their game relationships, not a CLI `--kind` switch.
+- `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
+  loader/validator and the checked-in Bread Thief setup: a shared hut location,
+  Mara, Toma, flour and cache items, typed item data, and pre-written notes.
 - `src/settings.rs` - `[models.<name>]` entries pair a GGUF path with the chat
   template that file needs, so `--model hermes` carries its template
   automatically. `--model` also accepts a path directly, and `--chat-template`

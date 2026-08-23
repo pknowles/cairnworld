@@ -368,7 +368,7 @@ mod tests {
         ));
         let store = Store::open(&path).await.unwrap();
         let world = store.create_world("test").await.unwrap();
-        let agent = store.create_agent(world, "sandbox", "test").await.unwrap();
+        let agent = store.create_agent(world).await.unwrap();
         store
             .append_message(agent, &Message::text(Role::User, "older history"))
             .await

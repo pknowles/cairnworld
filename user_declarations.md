@@ -382,6 +382,12 @@ their attributes/equipment/behaviour "as needed" (a common RPG phrase) based on
 the Storyteller's instructions for the encounter. The GM may then narrate the
 look/difficulty. This may need some playtesting.
 
+Can we hide who is a PC and NPC from the GM? This would be the ultimate in
+fairness. Would it make for a better game or not? Not sure. A big concern would
+be not wasting time having the GM make special narrations to NPCs. Maybe the GM
+won't notice if it's only asked to make narrations for some characters. Maybe
+narrations can be the player agents' job?
+
 ## Dynamic Storyteller
 
 These are currently ideas for the future. Not the initial version.
@@ -506,14 +512,14 @@ asking them to make changes.
 
 Game objects
 - Player characters
-  - Name and ID - the ID is generated from the name and used by agents in tool
+  - Name and ID - the ID is charN where N is a small unique number
     calls to uniquely identify the character
   - InCombat, Moved and Acted booleans for combat actions
   - Time
   - Location - both a reference to the location object and a string description within it
   - Character sheet info, including background
 - Non-player characters
-  - Name and ID - the ID is generated from the name and used by agents in tool
+  - Name and ID - the ID is charN where N is a small unique number
     calls to uniquely identify the character
   - InCombat, Moved and Acted booleans for combat actions
   - Description: background, motive, ambition, how they fit into the world,

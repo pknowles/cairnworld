@@ -1,6 +1,6 @@
 # Playable Bread Thief
 
-Status: proposed (2026-08-22).
+Status: in progress (2026-08-22). Slice 1 is complete.
 
 ## Goal
 
@@ -50,11 +50,12 @@ will need one.
    is store-level creation, so it remains independent of Google.
 
    Verify structural invariants through the real store: an email identifies one
-   account while display names may repeat; a removed membership retains its
-   character but cannot select its player agent; joining through valid access
-   produces exactly one player agent and Adventurer; scenario export/import
-   preserves the usable game graph. These are our relationship rules, not
-   assertions that SQL inserted a field.
+   account while display names may repeat; joining through valid access produces
+   exactly one player agent and Adventurer; scenario export/import preserves the
+   usable game graph. These are our relationship rules, not assertions that SQL
+   inserted a field. Owner-driven removal is implemented with the invitation/UI
+   flow in slice 3, where it has a real caller rather than a standalone access
+   mutation API.
 
 2. **Actual Bread Thief agent/action loop.** Replace the sandbox-only REPL path
    with a CLI route to an existing member's player agent. Implement sequences,
@@ -77,13 +78,16 @@ will need one.
    itself. The world event queue serializes player messages, join/leave timers,
    and broadcasts.
 
-   Verify our boundaries: an unauthenticated, removed, or unrelated account
-   cannot read or mutate a world by URL or websocket; two members' browser
-   events select their own player-agent histories; an event arriving while its
-   world is busy is visibly queued and ultimately processed in order; browser
-   history shows resolved player-facing text only. OIDC discovery/exchange,
-   session middleware, SSR/hydration, and websocket framing are exercised in
-   their real integration path, not duplicated with mocks.
+   Every route and websocket resolves the authenticated user's active world
+   membership once, then passes that membership rather than any client-supplied
+   user or agent id into the player event. Verify the resulting boundary: an
+   unauthenticated, removed, or unrelated account cannot read or mutate a world
+   by URL or websocket; two members' browser events select their own
+   player-agent histories; an event arriving while its world is busy is visibly
+   queued and ultimately processed in order; browser history shows resolved
+   player-facing text only. OIDC discovery/exchange, session middleware,
+   SSR/hydration, and websocket framing are exercised in their real integration
+   path, not duplicated with mocks.
 
 4. **Real deployment check and review.** Run the server with the real GPU model;
    a second person logs in with their own Google account from another machine,

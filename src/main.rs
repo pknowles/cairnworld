@@ -4,6 +4,7 @@ mod context;
 mod inference;
 mod llm;
 mod mistralrs_backend;
+mod scenario;
 mod settings;
 mod store;
 mod tools;
@@ -32,6 +33,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize a world from a checked-in scenario JSON file.
+    ImportScenario {
+        /// SQLite database receiving the new world.
+        #[arg(long, default_value = "cairnworld.sqlite")]
+        database: String,
+        /// Scenario JSON to install.
+        scenario: PathBuf,
+        /// Verified-email-shaped development identity that will own the world.
+        #[arg(long)]
+        owner_email: String,
+        /// Initial player-visible profile name. It is not an identity key.
+        #[arg(long)]
+        owner_name: String,
+    },
+    /// Write a world's reusable scenario data as JSON, excluding player state.
+    ExportScenario {
+        /// SQLite database containing the world.
+        #[arg(long, default_value = "cairnworld.sqlite")]
+        database: String,
+        /// World to export.
+        world_id: i64,
+        /// JSON file to create or replace.
+        output: PathBuf,
+    },
     /// Interactive stdio conversation with the model.
     Chat {
         /// Configured model name, e.g. llama, hermes, qwen. A GGUF path also
@@ -75,8 +100,18 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let settings = Settings::load()?;
     match cli.command {
+        Command::ImportScenario {
+            database,
+            scenario,
+            owner_email,
+            owner_name,
+        } => run_import_scenario(Path::new(&database), &scenario, &owner_email, &owner_name).await,
+        Command::ExportScenario {
+            database,
+            world_id,
+            output,
+        } => run_export_scenario(Path::new(&database), world_id, &output).await,
         Command::Chat {
             model,
             temperature,
@@ -85,6 +120,7 @@ async fn main() -> Result<()> {
             database,
             chat_template,
         } => {
+            let settings = Settings::load()?;
             run_chat(
                 resolve_model(model.as_deref(), chat_template, &settings)?,
                 temperature,
@@ -101,6 +137,7 @@ async fn main() -> Result<()> {
             chat_template,
             inference_id,
         } => {
+            let settings = Settings::load()?;
             run_replay(
                 resolve_model(model.as_deref(), chat_template, &settings)?,
                 Path::new(&database),
@@ -110,6 +147,60 @@ async fn main() -> Result<()> {
             .await
         }
     }
+}
+
+async fn run_import_scenario(
+    database: &Path,
+    scenario_path: &Path,
+    owner_email: &str,
+    owner_name: &str,
+) -> Result<()> {
+    let scenario = scenario::Scenario::read(scenario_path)?;
+    let store = Store::open(database)
+        .await
+        .context("opening scenario database")?;
+    let owner = store
+        .find_or_create_user(owner_email, owner_name)
+        .await
+        .context("resolving scenario owner")?;
+    let installed = store
+        .install_scenario(&owner, &scenario)
+        .await
+        .context("installing scenario")?;
+    let member = store
+        .active_member_agent(owner.id, installed.world_id)
+        .await
+        .context("resolving installed player membership")?
+        .context("newly installed world is missing its active owner membership")?;
+    println!(
+        "Installed {} as world {}. {} owns player agent {} for {}.",
+        scenario.name,
+        installed.world_id,
+        owner.display_name,
+        member.agent_id,
+        installed.character_handle
+    );
+    Ok(())
+}
+
+async fn run_export_scenario(database: &Path, world_id: i64, output: &Path) -> Result<()> {
+    let store = Store::open(database)
+        .await
+        .context("opening scenario database")?;
+    let scenario = store
+        .export_scenario(world_id)
+        .await
+        .context("exporting scenario")?;
+    let json = serde_json::to_string_pretty(&scenario).context("serializing scenario JSON")?;
+    std::fs::write(output, format!("{json}\n"))
+        .with_context(|| format!("writing scenario {}", output.display()))?;
+    println!(
+        "Exported {} from world {} to {}.",
+        scenario.name,
+        world_id,
+        output.display()
+    );
+    Ok(())
 }
 
 /// A `--chat-template` on the command line wins over the configured one, so a
@@ -153,7 +244,7 @@ async fn run_chat(
         .await
         .context("creating chat sandbox world")?;
     let agent = store
-        .create_agent(world, "sandbox", "chat")
+        .create_agent(world)
         .await
         .context("creating chat sandbox agent")?;
     let scheduler = InferenceScheduler::new(backend(&model, limits).await?, limits)

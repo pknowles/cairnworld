@@ -180,7 +180,7 @@ mod tests {
 
     async fn agent_with_history(store: &Store) -> i64 {
         let world = store.create_world("test").await.unwrap();
-        let agent = store.create_agent(world, "sandbox", "test").await.unwrap();
+        let agent = store.create_agent(world).await.unwrap();
         for text in ["first durable fact", "middle decision", "newest question"] {
             store
                 .append_message(agent, &Message::text(Role::User, text))

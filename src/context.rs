@@ -161,10 +161,7 @@ mod tests {
 
     async fn test_agent(store: &Store) -> i64 {
         let world = store.create_world("test world").await.unwrap();
-        let agent = store
-            .create_agent(world, "sandbox", "test agent")
-            .await
-            .unwrap();
+        let agent = store.create_agent(world).await.unwrap();
         store
             .append_message(agent, &Message::text(Role::User, "Hello"))
             .await
