@@ -201,10 +201,8 @@ mod tests {
         (store, path, agent)
     }
 
-    fn save_arguments(character: &str) -> String {
-        format!(
-            r#"{{"character":"{character}","attribute":"dex","reason":"dodge","attribute_value":1}}"#
-        )
+    fn test_echo_arguments(text: &str) -> String {
+        format!(r#"{{"text":"{text}"}}"#)
     }
 
     async fn history(store: &Store, agent: i64) -> Vec<Message> {
@@ -229,9 +227,9 @@ mod tests {
         let backend = ScriptedBackend::new([
             response(
                 Content::ToolCalls(vec![ToolCall {
-                    id: "save-1".to_string(),
-                    name: "save".to_string(),
-                    arguments: save_arguments("Rook"),
+                    id: "echo-1".to_string(),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("Rook"),
                 }]),
                 "private scratch work",
             ),
@@ -244,7 +242,7 @@ mod tests {
             &mut Budget::new(Limits::default()),
             agent_id,
             &[],
-            &[tools::save()],
+            &[tools::test_echo()],
             Sampling {
                 temperature: 0.0,
                 enable_thinking: false,
@@ -263,22 +261,21 @@ mod tests {
         assert_eq!(store.inference_count().await.unwrap(), 2);
         assert!(
             matches!(activity.as_slice(), [call, result]
-                if call.starts_with("tool call save:")
-                    && result.starts_with("tool result save-1:")),
+                if call.starts_with("tool call test_echo:")
+                    && result.starts_with("tool result echo-1:")),
             "tool activity must be emitted as each call and result occurs: {activity:?}"
         );
         let requests = backend.requests.lock().unwrap();
-        assert_eq!(requests[0].tools, tools::definitions(&[tools::save()]));
-        // The second inference must see Rust's verdict, not the model's guess.
+        assert_eq!(requests[0].tools, tools::definitions(&[tools::test_echo()]));
+        // The second inference must see the callback result, not the call arguments.
         assert!(matches!(requests[1].messages.as_slice(), [
             Message { content: MessageContent::Text(_), .. },
             Message { content: MessageContent::ToolCalls(calls), reasoning, .. },
             Message { content: MessageContent::ToolResult { tool_call_id, content }, .. },
-        ] if calls[0].id == "save-1"
+        ] if calls[0].id == "echo-1"
             && reasoning.is_empty()
-            && tool_call_id == "save-1"
-            && content.contains("Rook")
-            && (content.contains("passes") || content.contains("fails"))));
+            && tool_call_id == "echo-1"
+            && content == "Rook"));
         drop(requests);
         let entries = history(&store, agent_id).await;
         // Reasoning is stored on the message but never replayed into context.
@@ -287,9 +284,7 @@ mod tests {
         );
         assert!(
             matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content }
-                if tool_call_id == "save-1"
-                    && content.contains("Rook")
-                    && (content.contains("passes") || content.contains("fails")))
+                if tool_call_id == "echo-1" && content == "Rook")
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
@@ -309,7 +304,7 @@ mod tests {
             &mut Budget::new(Limits::default()),
             agent_id,
             &[],
-            &[tools::save()],
+            &[tools::test_echo()],
             Sampling {
                 temperature: 0.0,
                 enable_thinking: false,
@@ -324,11 +319,11 @@ mod tests {
         let recorded = store.reconstruct_inference(1).await.unwrap();
         assert_eq!(
             recorded.request.tools,
-            tools::definitions(&[tools::save()]),
+            tools::definitions(&[tools::test_echo()]),
             "the recorded recipe must rebuild the exact tool list that was sent"
         );
 
-        store.corrupt_text_for_test("\"name\":\"save\"").await;
+        store.corrupt_text_for_test("\"name\":\"test_echo\"").await;
         let error = store
             .reconstruct_inference(1)
             .await
@@ -355,7 +350,7 @@ mod tests {
             &mut Budget::new(Limits::default()),
             agent_id,
             &[],
-            &[tools::save()],
+            &[tools::test_echo()],
             Sampling {
                 temperature: 0.0,
                 enable_thinking: false,
@@ -393,14 +388,14 @@ mod tests {
             response(
                 Content::ToolCalls(vec![
                     ToolCall {
-                        id: "rook-save".to_string(),
-                        name: "save".to_string(),
-                        arguments: save_arguments("Rook"),
+                        id: "rook-echo".to_string(),
+                        name: "test_echo".to_string(),
+                        arguments: test_echo_arguments("Rook"),
                     },
                     ToolCall {
-                        id: "mara-save".to_string(),
-                        name: "save".to_string(),
-                        arguments: save_arguments("Mara"),
+                        id: "mara-echo".to_string(),
+                        name: "test_echo".to_string(),
+                        arguments: test_echo_arguments("Mara"),
                     },
                 ]),
                 "",
@@ -413,7 +408,7 @@ mod tests {
             &mut Budget::new(Limits::default()),
             agent_id,
             &[],
-            &[tools::save()],
+            &[tools::test_echo()],
             Sampling {
                 temperature: 0.0,
                 enable_thinking: false,
@@ -433,9 +428,9 @@ mod tests {
         else {
             panic!("first tool result should be stored");
         };
-        // Each result must name the character from *its own* call, so results
-        // attributed to the wrong call are caught rather than looking plausible.
-        assert_eq!(tool_call_id, "rook-save");
+        // Each result must remain paired with its own call rather than a
+        // positional assumption.
+        assert_eq!(tool_call_id, "rook-echo");
         assert!(content.contains("Rook"), "got {content}");
         let MessageContent::ToolResult {
             tool_call_id,
@@ -444,15 +439,14 @@ mod tests {
         else {
             panic!("second tool result should be stored");
         };
-        assert_eq!(tool_call_id, "mara-save");
+        assert_eq!(tool_call_id, "mara-echo");
         assert!(content.contains("Mara"), "got {content}");
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
 
     /// A model that keeps calling a tool must be stopped by the budget rather
-    /// than looping forever. Observed for real: Llama 3.1 re-rolled the same
-    /// save repeatedly, hoping for a better result.
+    /// than looping forever.
     #[tokio::test]
     async fn a_model_that_never_settles_is_stopped_by_the_chat_limit() {
         let (store, path, agent_id) = test_store().await;
@@ -467,8 +461,8 @@ mod tests {
             response(
                 Content::ToolCalls(vec![ToolCall {
                     id: "again".to_string(),
-                    name: "save".to_string(),
-                    arguments: save_arguments("Rook"),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("Rook"),
                 }]),
                 "",
             )
@@ -481,7 +475,7 @@ mod tests {
             &mut budget,
             agent_id,
             &[],
-            &[tools::save()],
+            &[tools::test_echo()],
             Sampling {
                 temperature: 0.0,
                 enable_thinking: false,
@@ -520,8 +514,8 @@ mod tests {
             response(
                 Content::ToolCalls(vec![ToolCall {
                     id: "again".to_string(),
-                    name: "save".to_string(),
-                    arguments: save_arguments("Rook"),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("Rook"),
                 }]),
                 "",
             )
@@ -533,7 +527,7 @@ mod tests {
             &mut budget,
             agent_id,
             &[],
-            &[tools::save()],
+            &[tools::test_echo()],
             Sampling {
                 temperature: 0.0,
                 enable_thinking: false,

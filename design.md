@@ -450,11 +450,9 @@ frontend over the same `agent`/`store` functions the game uses - no parallel
 implementation - and every inference made here goes through the normal
 recorded path, in a dedicated sandbox world so world telemetry stays clean.
 
-- **`cairnworld chat`** - interactive stdio REPL. It remains a bare 1:1
-  conversation for verifying the backend and recording path. Real game play
-  through the terminal targets an existing player membership, so its role,
-  tools, and context come from the same relationships as browser play rather
-  than a `--kind` switch.
+- **`cairnworld chat`** - interactive stdio REPL for verifying the backend and
+  recording path. It is not a player-game transport. Player interaction uses
+  the web game's authenticated membership and websocket path.
 - **Replay:** `cairnworld replay <inference-id>` reassembles the recorded input
   via the reconstruction machinery and re-runs it, printing old and new output
   side by side. Reassembly uses the current code and the current prompt files,

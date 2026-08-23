@@ -260,7 +260,7 @@ async fn run_chat(
         .into_iter()
         .map(|content| Message::text(Role::System, content))
         .collect::<Vec<_>>();
-    let tools = [tools::save()];
+    let tools: [tools::Tool; 0] = [];
 
     let mut editor = DefaultEditor::new().context("starting chat line editor")?;
     loop {

@@ -42,8 +42,9 @@ when things were built.
 - `src/compaction.rs` - resolves a persisted compaction job as one recorded
   summarisation. It preserves exactly `keep_tail_messages` newest raw rows and
   transactionally writes the summary and inline notice while retiring the job.
-- `src/tools.rs` - the local `save` tool and the ordinary invocation-local
-  lookup used to derive `ToolDefinition`s and run the matching Rust callback.
+- `src/tools.rs` - the ordinary invocation-local lookup used to derive
+  `ToolDefinition`s and run the matching Rust callback. Game tools are added
+  only with their related authenticated game state, never to the sandbox REPL.
 
 ## Persistence and recording (design.md: Persistence and recording)
 
@@ -76,7 +77,7 @@ when things were built.
   <name> [--database <path>] <scenario.json>` initializes a fresh scenario
   world without loading model settings; `export-scenario [--database <path>]
   <world-id> <output.json>` writes its reusable scenario template. Agent roles
-  come from their game relationships, not a CLI `--kind` switch.
+  come from their game relationships, not a `kind` switch.
 - `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
   loader/validator and the checked-in Bread Thief setup: a shared hut location,
   Mara, Toma, flour and cache items, typed item data, and pre-written notes.

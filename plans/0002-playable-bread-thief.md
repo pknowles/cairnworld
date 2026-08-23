@@ -2,13 +2,17 @@
 
 Status: in progress (2026-08-22). Slice 1 is complete.
 
+This plan follows AGENTS.md's implementation-loop and pre-commit checklist,
+coding_standards.md, and prompt_standards.md. Each product interface below is
+traced to user_declarations.md; test boundaries target Cairnworld behavior,
+not framework behavior.
+
 ## Goal
 
 Deliver the first real game vertical slice: a Google-authenticated player can
-create or join a Bread Thief world and play it in a browser. The same durable
-world, agent, action, recording, and websocket path is used by the CLI and by
-the browser; no temporary single-user chat or replacement ownership model is
-introduced.
+create or join a Bread Thief world and play it in a browser. Its durable world,
+agent, action, recording, and websocket path has no temporary single-user chat
+or replacement ownership model.
 
 ## Trace to declarations
 
@@ -56,29 +60,19 @@ will need one.
    exactly one player agent and Adventurer; scenario export/import preserves the
    usable game graph. These are our relationship rules, not assertions that SQL
    inserted a field. Owner-driven removal is implemented with the invitation/UI
-   flow in slice 3, where it has a real caller rather than a standalone access
-   mutation API.
+   flow in slice 2, where it has a real caller rather than a standalone access
+   mutation API in slice 1.
 
-2. **Actual Bread Thief agent/action loop.** Replace the sandbox-only REPL path
-   with a CLI route to an existing member's player agent. Implement sequences,
-   player-to-location-GM calls, the declared action boundary, and the minimal
-   Bread Thief actions and Cairn stat rolls. NPC and GM histories are the real
-   related agents from slice 1. This is the first playable end-to-end state and
-   establishes the recorded path before adding a browser transport.
-
-   Verify with the real scenario: the player can reach every declared ending;
-   invalid/stale action approval cannot execute a different action; an action
-   forwarded through the GM records one tree of inferences/actions and replay
-   reconstructs each inference. Run representative real-model play through the
-   CLI; use a scripted backend only to force otherwise impractical outcomes such
-   as a delayed GM reply or a rejected approval.
-
-3. **Web transport and identity.** Add Axum + Leptos SSR/hydration, Google OIDC,
+2. **Web-playable Bread Thief.** Add Axum + Leptos SSR/hydration, Google OIDC,
    SQLite-backed sessions, landing/world-detail/game pages, invitation creation
-   and acceptance, and the websocket. Browser message handling invokes the
-   exact slice-2 player event; it neither assembles context nor performs actions
-   itself. The world event queue serializes player messages, join/leave timers,
-   and broadcasts.
+   and acceptance, and the websocket together with the player/GM game service
+   it invokes. On first entry, the membership's player agent opens the declared
+   character-creation conversation. Its declared roll tools persist Rust-made
+   rolls; player-to-location-GM calls use action IDs and approved stored
+   arguments. NPC and GM histories are the real related agents from slice 1.
+   Browser handling supplies the authenticated membership to this one service;
+   it neither assembles context nor performs actions itself. The world event
+   queue serializes player messages, join/leave timers, and broadcasts.
 
    Every route and websocket resolves the authenticated user's active world
    membership once, then passes that membership rather than any client-supplied
@@ -91,7 +85,7 @@ will need one.
    SSR/hydration, and websocket framing are exercised in their real integration
    path, not duplicated with mocks.
 
-4. **Real deployment check and review.** Run the server with the real GPU model;
+3. **Real deployment check and review.** Run the server with the real GPU model;
    a second person logs in with their own Google account from another machine,
    joins via an invite, and completes a multi-turn Bread Thief play session.
    Confirm reload/reconnect uses the stored history and `replay` reconstructs
