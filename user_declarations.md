@@ -171,15 +171,23 @@ For each NPCs location and path, the Questioner concept is again executed to add
 detail to each. The Questioner is given the world summary and the seed prompt
 provided by the Storyteller.
 
+Introducing randomness in LLMs is difficult. One thing I'm tempted to try is
+injecting a pile of random nouns, adjectives (and maybe a few numbers in
+different scales) into the prompt that may trigger more variance without relying
+on LLM "temperature" to do all the work. They would simply be declared as random
+items to draw from. Maybe it'd just confuse the LLM but worth checking.
+
 ## Character creation
 
 When player characters first enter the world, character creation begins
 immediately. The player's agent must guide players through creating a character
 with a rich background but must communicate with the Storyteller agent, which
-has an agenda. The Storyteller's goal is to make the player relevant to the
-world setting, connecting them to events, items, locations and NPCs. It must
-also avoid the same connections as other players. The Storyteller again works
-with the Questioner to promote richer ideas for setting and story integration.
+has an agenda. This would be a system prompt so the player is immediately met
+with an intro, questions to answer and decisions to make. The Storyteller's goal
+is to make the player relevant to the world setting, connecting them to events,
+items, locations and NPCs. It must also avoid the same connections as other
+players. The Storyteller again works with the Questioner to promote richer ideas
+for setting and story integration.
 
 I'm not sure exactly how this interaction will be implemented. We'll have to
 experiment with a few ideas and see which gives the best results. My first idea

@@ -542,8 +542,11 @@ Storyteller initialization output and tools.)
 
 ## Character creation (TODO)
 
-Player agent guiding Cairn character creation; Storyteller background
-negotiation with spoiler scrubbing; the ReadyToBegin/RollOmens sync point.
+The player agent opens the first chat with its character-creation prompt and
+guides the player through Cairn creation. The later full flow includes
+Storyteller background negotiation with spoiler scrubbing and the
+ReadyToBegin/RollOmens sync point. Bread Thief initially keeps the same
+player-agent-led conversation while omitting Storyteller negotiation.
 (Character creation; TODO section of user_declarations.md.)
 
 ## Encounter difficulty (TODO)

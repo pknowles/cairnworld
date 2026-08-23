@@ -80,9 +80,6 @@ when things were built.
 - `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
   loader/validator and the checked-in Bread Thief setup: a shared hut location,
   Mara, Toma, flour and cache items, typed item data, and pre-written notes.
-- `src/game.rs` - Cairn 2e stat-roll-only Adventurer creation: 1d6 HP and 3d6
-  each for STR, DEX, and WIL. Background and equipment selection remains part
-  of the later player-agent creation conversation.
 - `src/settings.rs` - `[models.<name>]` entries pair a GGUF path with the chat
   template that file needs, so `--model hermes` carries its template
   automatically. `--model` also accepts a path directly, and `--chat-template`

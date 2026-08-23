@@ -148,3 +148,13 @@ three digits, and so on. The value is independent of character name and
 creation order.
 
 This is reflected in the Game state section of user_declarations.md.
+
+## 2026-08-22: Character creation opens proactively
+
+> The player's agent would already be given a system prompt telling it to guide
+> the player through character creation. It would speak first.
+
+An imported or newly joined Adventurer is blank. The player agent initiates the
+ordinary chat-based creation conversation and, when appropriate, calls the
+declared creation roll tools. Rust performs and persists each roll; the player
+does not issue a special character-creation command.

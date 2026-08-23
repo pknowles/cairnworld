@@ -45,10 +45,10 @@ will need one.
 1. **World topology and scenario data.** Implement the user, owner,
    membership/access, player-agent, character/NPC-agent, location/GM, item and
    path data required by Bread Thief; import/export the checked-in scenario;
-   create the owner membership and Adventurer through the same join operation
-   that invitations will use. The initial Adventurer has its Cairn stat rolls;
-   background/equipment interaction remains with the player-agent flow. The
-   only account bootstrap needed for this slice is store-level creation, so it
+   create the owner membership and blank Adventurer through the same join
+   operation that invitations will use. The player agent later opens the
+   character-creation conversation and uses the declared roll tools; the only
+   account bootstrap needed for this slice is store-level creation, so it
    remains independent of Google.
 
    Verify structural invariants through the real store: an email identifies one
