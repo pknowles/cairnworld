@@ -8,6 +8,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
+use crate::game::CharacterSheet;
 use crate::llm::{
     Message, MessageContent, Request, Response, Role, Sampling, ToolDefinition, Usage,
 };
@@ -635,7 +636,8 @@ impl Store {
             .execute(&mut **transaction)
             .await
             .with_context(|| format!("linking player agent for world {world_id}"))?;
-        let sheet = serde_json::json!({});
+        let sheet = serde_json::to_value(CharacterSheet::roll_adventurer())
+            .context("serializing Adventurer character sheet")?;
         let notes = Notes::default();
         let character_id = Self::insert_character(
             transaction,
@@ -1482,6 +1484,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_character, "Adventurer");
+        let adventurer_sheet: CharacterSheet = serde_json::from_str(
+            &sqlx::query_scalar::<_, String>(
+                "SELECT character.sheet FROM player_character \
+                 JOIN character ON character.id = player_character.character_id \
+                 WHERE player_character.member_id = ?",
+            )
+            .bind(installed.member.member_id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert!((1..=6).contains(&adventurer_sheet.hp));
+        assert!((3..=18).contains(&adventurer_sheet.str));
+        assert!((3..=18).contains(&adventurer_sheet.dex));
+        assert!((3..=18).contains(&adventurer_sheet.wil));
         let location_gms: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM location_gm \
              JOIN location ON location.id = location_gm.location_id WHERE location.world_id = ?",

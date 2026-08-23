@@ -117,14 +117,15 @@ enum Attribute {
     Wil,
 }
 
-/// Cairn save: roll d20 under the attribute to succeed; ties fail.
+/// Cairn 2e save: roll equal to or under the attribute to succeed, except a 1
+/// always succeeds and a 20 always fails.
 fn resolve_save(save: &Save) -> String {
     let roll = rand::rng().random_range(1..=20);
     let target = i32::from(save.attribute_value) - i32::from(save.difficulty);
     format!(
         "{} {} their {:?} save to {}.",
         save.character,
-        if i32::from(roll) < target {
+        if passes_save(roll, target) {
             "passes"
         } else {
             "fails"
@@ -132,6 +133,10 @@ fn resolve_save(save: &Save) -> String {
         save.attribute,
         save.reason,
     )
+}
+
+fn passes_save(roll: u8, target: i32) -> bool {
+    roll == 1 || (roll != 20 && i32::from(roll) <= target)
 }
 
 fn save_arguments(arguments: &str) -> Result<String> {
@@ -199,17 +204,10 @@ mod tests {
 
     #[test]
     fn outcomes_follow_the_cairn_rule() {
-        // d20 must roll *under* the attribute, so 1 can never pass and 21 can
-        // never fail - outcomes fixed by the rules rather than by a seed.
-        for _ in 0..32 {
-            let failed = resolve_save(&parse(&arguments(1, 0)));
-            assert!(failed.contains("fails"), "{failed}");
-            let passed = resolve_save(&parse(&arguments(21, 0)));
-            assert!(passed.contains("passes"), "{passed}");
-            // Difficulty 20 drops an otherwise-certain pass below reach.
-            let hard = resolve_save(&parse(&arguments(21, 20)));
-            assert!(hard.contains("fails"), "{hard}");
-        }
+        assert!(passes_save(1, 0), "a natural 1 always succeeds");
+        assert!(passes_save(12, 12), "an equal attribute save succeeds");
+        assert!(!passes_save(13, 12), "a result above the attribute fails");
+        assert!(!passes_save(20, 21), "a natural 20 always fails");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod agent;
 mod compaction;
 mod context;
+mod game;
 mod inference;
 mod llm;
 mod mistralrs_backend;

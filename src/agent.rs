@@ -201,9 +201,7 @@ mod tests {
         (store, path, agent)
     }
 
-    /// A save the character cannot pass: d20 must roll *under* the attribute,
-    /// so an attribute of 1 always fails. Fixed by the Cairn rules, not a seed.
-    fn certain_failure(character: &str) -> String {
+    fn save_arguments(character: &str) -> String {
         format!(
             r#"{{"character":"{character}","attribute":"dex","reason":"dodge","attribute_value":1}}"#
         )
@@ -233,7 +231,7 @@ mod tests {
                 Content::ToolCalls(vec![ToolCall {
                     id: "save-1".to_string(),
                     name: "save".to_string(),
-                    arguments: certain_failure("Rook"),
+                    arguments: save_arguments("Rook"),
                 }]),
                 "private scratch work",
             ),
@@ -279,7 +277,8 @@ mod tests {
         ] if calls[0].id == "save-1"
             && reasoning.is_empty()
             && tool_call_id == "save-1"
-            && content.contains("fails")));
+            && content.contains("Rook")
+            && (content.contains("passes") || content.contains("fails"))));
         drop(requests);
         let entries = history(&store, agent_id).await;
         // Reasoning is stored on the message but never replayed into context.
@@ -287,7 +286,10 @@ mod tests {
             matches!(&entries[1], Message { content: MessageContent::ToolCalls(_), reasoning, .. } if reasoning.is_empty())
         );
         assert!(
-            matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "save-1" && content.contains("fails"))
+            matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content }
+                if tool_call_id == "save-1"
+                    && content.contains("Rook")
+                    && (content.contains("passes") || content.contains("fails")))
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
@@ -393,12 +395,12 @@ mod tests {
                     ToolCall {
                         id: "rook-save".to_string(),
                         name: "save".to_string(),
-                        arguments: certain_failure("Rook"),
+                        arguments: save_arguments("Rook"),
                     },
                     ToolCall {
                         id: "mara-save".to_string(),
                         name: "save".to_string(),
-                        arguments: certain_failure("Mara"),
+                        arguments: save_arguments("Mara"),
                     },
                 ]),
                 "",
@@ -466,7 +468,7 @@ mod tests {
                 Content::ToolCalls(vec![ToolCall {
                     id: "again".to_string(),
                     name: "save".to_string(),
-                    arguments: certain_failure("Rook"),
+                    arguments: save_arguments("Rook"),
                 }]),
                 "",
             )
@@ -519,7 +521,7 @@ mod tests {
                 Content::ToolCalls(vec![ToolCall {
                     id: "again".to_string(),
                     name: "save".to_string(),
-                    arguments: certain_failure("Rook"),
+                    arguments: save_arguments("Rook"),
                 }]),
                 "",
             )

@@ -46,8 +46,10 @@ will need one.
    membership/access, player-agent, character/NPC-agent, location/GM, item and
    path data required by Bread Thief; import/export the checked-in scenario;
    create the owner membership and Adventurer through the same join operation
-   that invitations will use. The only account bootstrap needed for this slice
-   is store-level creation, so it remains independent of Google.
+   that invitations will use. The initial Adventurer has its Cairn stat rolls;
+   background/equipment interaction remains with the player-agent flow. The
+   only account bootstrap needed for this slice is store-level creation, so it
+   remains independent of Google.
 
    Verify structural invariants through the real store: an email identifies one
    account while display names may repeat; joining through valid access produces
