@@ -296,14 +296,16 @@ agents.
 Single GM vs multiple? If we had one, or rather a single chat history for it,
 this might cause contextual confusion if many players travel to separate
 locations. So far the GM seems to resolve local interaction, which by name is at
-a location. So we will technically have multiple GMs. The text here may refer to
-one, but it's always implied to be the one for the character's location. The GM
-manages sub-location dynamic state and arbitrates character interaction as per
-the game rules. One possible pitfall is when characters move from one location
-to another, the GM in the new location would not have their recent context.
-Given the GM should provide the Storyteller with frequent encounter summaries,
-this may not be a problem - i.e. the new location's GM still has enough context
-to do its job. Easy to change later too.
+a location. So we could technically have multiple GMs. The text here would then
+refer to one, but it'd be implied to be the one for the character's location -
+any PC or NPC. The GM would then manage dynamic state at its location and
+arbitrates character interaction as per the game rules. One possible pitfall is
+when characters move from one location to another, the GM in the new location
+would not have their recent context. Given the GM should provide the Storyteller
+with frequent encounter summaries, this may not be a problem - i.e. the new
+location's GM still has enough context to do its job. Easy to change later too.
+I don't know if this will work, so it will need playtesting. Easy enough to
+consolidate GMs if it isn't useful.
 
 The following are a few examples that should serve to define the interface. In
 the simplest form, a player might wants to attack an NPC. They say that to their

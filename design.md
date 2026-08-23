@@ -220,14 +220,53 @@ Notes are stored as key/value pairs per object, per the "actually this sounds
 pretty solid" option in user_declarations.md: the editing tool overwrites a
 whole value by key, avoiding line-range or paragraph-index fragility.
 
+## World identity and agent topology
+
+This is the durable ownership graph behind the landing page, world detail page,
+and agent calls. It follows user_declarations.md's User Interface: accounts are
+keyed only by email; players may change a non-unique display name; a world has
+one owner; invitation acceptance grants and owner removal revokes access while
+retaining the player association and characters; every joined player has a
+player agent; characters can be PCs or NPCs; and the developer view exposes
+the Storyteller, GM, and NPC chats.
+
+- `user` holds unique email and a non-unique display name. Neither display name
+  nor any game relationship affects login identity.
+- `world` records its owner and its setting/state. A `world_member` records one
+  user's access to one world, including its current access state, so removal
+  preserves the association and characters exactly as declared.
+- Every `agent` belongs to a world and is only a chat history. Its game purpose
+  is determined by a relationship that owns it: the world's Storyteller,
+  a member's player agent, a location's GM, or an NPC character's agent.
+  A player character is guided by its membership's player agent; an NPC is
+  played by that NPC character's agent. Locations contain game state and do
+  not own agents beyond their location-scoped GM.
+
+The relation, rather than a string `agent.kind`, is the source of truth. A
+`kind` can say an agent is a GM without saying which location it governs, allow
+two GMs for one location, or leave a labelled agent unused. Putting nullable
+role foreign keys on `agent` has the inverse problem: it makes mutually
+exclusive ownership implicit and permits invalid combinations. Small explicit
+relationship tables (one Storyteller per world and one GM per location) own
+real game data, make cardinality constraints direct, and avoid construction
+cycles: create a world, its agents, then their relationships in one transaction.
+
+This accommodates the declaration's open, playtestable design: there may be a
+GM for each location, including locations occupied by PCs or NPCs; a later
+playtest may consolidate them without changing agent histories or player
+identity. It does not pre-decide Storyteller iteration, invitation mechanics,
+or dynamic NPC/location creation beyond the relationships those declared
+features require.
+
 # Agent loop
 
 ## Context assembly
 
 Every inference input is assembled fresh, in this order:
 
-1. Role prompt - static per agent kind, versioned in the repo as plain text
-   files (`prompts/`), loaded at startup, recorded in `text`.
+1. Role prompt - static for the relationship the agent is serving, versioned in
+   the repo as plain text files (`prompts/`), loaded at startup, recorded in
+   `text`.
 2. Context packet - current dynamic state this agent is entitled to see,
    rebuilt each time: e.g. for a GM, its location description, characters
    present with sheets, GM notes, visible Storyteller notes. Never appended to
@@ -254,8 +293,8 @@ Structural rules, enforced in rust:
 ## Tools
 
 A tool is one visible operation: its name, short description, JSON schema, and
- the Rust code that validates and performs it. Each agent kind builds its own
- fixed tool list from the features it offers. When an agent loop needs to find
+the Rust code that validates and performs it. Each agent relationship builds
+its own fixed tool list from the features it offers. When an agent loop needs to find
  an operation by the model-supplied name, it uses that list directly as a small
  lookup table; there is no central tool registry, manager, or service with a
  separate lifetime. Two mechanics from user_declarations.md shape the tools:

@@ -123,3 +123,16 @@ one-off huge message visible without interrupting play.
 
 This supersedes the character-tail rule currently recorded in
 `user_declarations.md`; that declaration needs a separate reconciliation.
+
+## 2026-08-22: Build only durable vertical slices
+
+> as long as there is minimal effort to make something work inbetween steps -
+> just consolidate steps if this is the case. and the final result of course
+> must be traced back to the top level user declarations to verify no spruious
+> features were added
+
+An intermediate increment may expose an incomplete feature only when it uses
+the same durable data and component boundaries as the final feature. If it
+would require a temporary relationship or a replacement implementation, merge
+it with its dependencies into one complete vertical slice. Every proposed data
+relationship and component must cite a user declaration before implementation.
