@@ -66,6 +66,7 @@ server.on("upgrade", (request, socket) => {
     "",
     "",
   ].join("\r\n"));
+  socket.write(websocketText('{"type":"history","entries":[{"role":"assistant","text":"The kettle whistles."}]}'));
   socket.write(websocketText('{"type":"can_act","value":true}'));
 });
 
@@ -96,9 +97,9 @@ async function checkPlayerChat() {
       browser.on("close", resolve);
     });
     const input = stdout.match(/<input[^>]*name="text"[^>]*>/)?.[0];
-    if (status !== 0 || !input || input.includes("disabled")) {
+    if (status !== 0 || !input || input.includes("disabled") || !stdout.includes("The kettle whistles.")) {
       throw new Error(
-        `compiled player chat did not enable its input after a can_act event:\n${stderr}\n${stdout}`,
+        `compiled player chat did not render its server history and enable input after readiness:\n${stderr}\n${stdout}`,
       );
     }
   } finally {

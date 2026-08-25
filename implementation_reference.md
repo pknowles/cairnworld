@@ -110,9 +110,9 @@ when things were built.
   proactively, and gives the agent a static entry event so tool-capable Llama
   templates have a valid first user turn without displaying or persisting a
   fake player message. The ordinary agent loop executes any creation-roll
-  calls and returns only its final text to the WebSocket. Subsequent player
-  messages expose creation or location-action tools according to durable
-  character state.
+  calls and stores its final text. A reconnect waits for that durable event
+  rather than creating another one; subsequent player messages expose creation
+  or location-action tools according to durable character state.
 - `src/web.rs` - `cairnworld serve`'s Axum routes. Google OIDC discovers and
   exchanges through `openidconnect`; SQLite-backed `tower-sessions` holds the
   verified account id. The landing page updates only a non-unique display
@@ -120,8 +120,9 @@ when things were built.
   resolve access through `Store` rather than trusting a client user or agent
   id. The authenticated `/world/:id/play` route loads that membership's
   durable player-visible history, while its websocket passes the same resolved
-  membership into `Game` for each player message. It sends typed entry,
-  readiness, and error events, and serves the `cargo-leptos` browser package
+  membership into `Game` for each player message. On every connection it sends
+  an authoritative typed history snapshot, then readiness; later entries and
+  errors are typed events. It serves the `cargo-leptos` browser package
   at `/pkg` plus checked-in artwork at `/media`. Browser pages use one valid
   document shell with viewport metadata, stylesheet and, only where needed,
   hydration scripts. `.cargo/config.toml` gives Leptos one Cargo-wide WASM

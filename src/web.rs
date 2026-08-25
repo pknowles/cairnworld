@@ -29,7 +29,7 @@ use tower_sessions_sqlx_store::{SqliteStore, sqlx::SqlitePool};
 
 use crate::{
     game::Game,
-    llm::Content,
+    llm::{Backend, Content},
     mistralrs_backend::MistralRsBackend,
     scenario::Scenario,
     settings,
@@ -510,7 +510,8 @@ async fn game_socket(
         GameAvailability::Ready(game) => game,
         GameAvailability::Failed(error) => return Err(WebError::unavailable(error)),
     };
-    Ok(websocket.on_upgrade(move |socket| play(socket, game, member)))
+    let store = app.store.clone();
+    Ok(websocket.on_upgrade(move |socket| play(socket, game, member, store)))
 }
 
 async fn active_member(
@@ -549,8 +550,13 @@ async fn session_user(
         })
 }
 
-async fn play(socket: WebSocket, game: Arc<Game<MistralRsBackend>>, member: MemberAgent) {
-    if let Err(error) = play_connection(socket, game, member).await {
+async fn play(
+    socket: WebSocket,
+    game: Arc<Game<MistralRsBackend>>,
+    member: MemberAgent,
+    store: Store,
+) {
+    if let Err(error) = play_connection(socket, game, member, store).await {
         tracing::error!(error = %format!("{error:#}"), "player chat websocket ended with an error");
     }
 }
@@ -559,6 +565,7 @@ async fn play_connection(
     mut socket: WebSocket,
     game: Arc<Game<MistralRsBackend>>,
     member: MemberAgent,
+    store: Store,
 ) -> Result<()> {
     tracing::info!(
         world_id = member.world_id,
@@ -578,35 +585,8 @@ async fn play_connection(
             return Ok(());
         }
     };
-    tracing::info!(
-        world_id = member.world_id,
-        user_id = member.user_id,
-        "starting player agent opening turn"
-    );
-    match game.enter(member.clone()).await {
-        Ok(Some(response)) => match response.content {
-            Content::Text(text) => {
-                send_event(
-                    &mut socket,
-                    &ServerEvent::Entry {
-                        role: ChatRole::Assistant,
-                        text,
-                    },
-                )
-                .await?;
-            }
-            Content::ToolCalls(_) => {
-                send_event(
-                    &mut socket,
-                    &ServerEvent::Error {
-                        message: "The player agent did not finish opening the conversation.".into(),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-        },
-        Ok(None) => {}
+    match ensure_opening(&game, member.clone()).await {
+        Ok(()) => {}
         Err(error) => {
             send_event(
                 &mut socket,
@@ -618,6 +598,13 @@ async fn play_connection(
             return Ok(());
         }
     }
+    send_event(
+        &mut socket,
+        &ServerEvent::History {
+            entries: player_chat_entries(store.player_chat(&member).await?),
+        },
+    )
+    .await?;
     send_event(&mut socket, &ServerEvent::CanAct { value: true }).await?;
     tracing::info!(
         world_id = member.world_id,
@@ -678,6 +665,33 @@ async fn play_connection(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             }
         }
+    }
+}
+
+/// Wait for the one durable opening turn, if this blank Adventurer has not
+/// already received it. A reconnect is only a viewer and never creates a
+/// second game event.
+async fn ensure_opening<B>(game: &Arc<Game<B>>, member: MemberAgent) -> Result<()>
+where
+    B: Backend + Send + Sync + 'static,
+{
+    tracing::info!(
+        world_id = member.world_id,
+        user_id = member.user_id,
+        "starting player agent opening turn"
+    );
+    match game
+        .enter(member)
+        .await
+        .context("opening player-agent conversation")?
+    {
+        Some(response) => match response.content {
+            Content::Text(_) => Ok(()),
+            Content::ToolCalls(_) => {
+                anyhow::bail!("player agent did not finish opening the conversation")
+            }
+        },
+        None => Ok(()),
     }
 }
 
@@ -833,7 +847,19 @@ fn InvitationPage(token: String, user: Option<crate::store::User>) -> impl IntoV
 
 #[component]
 fn GamePage(world_id: i64, history: Vec<PlayerChatEntry>) -> impl IntoView {
-    let history = history
+    let history = player_chat_entries(history);
+    view! {
+        <main class="min-h-dvh bg-base-200 p-3 sm:p-6">
+            <section class="mx-auto flex h-[calc(100dvh-1.5rem)] max-w-5xl flex-col rounded-box bg-base-100 shadow-xl sm:h-[calc(100dvh-3rem)]">
+                <header class="navbar border-b border-base-300 px-4"><h1 class="text-xl font-semibold">"Cairnworld"</h1><span class="ml-auto badge badge-primary badge-outline">"Adventure chat"</span></header>
+                <div class="flex min-h-0 flex-1 flex-col p-3 sm:p-5"><PlayerChat world_id history/></div>
+            </section>
+        </main>
+    }
+}
+
+fn player_chat_entries(history: Vec<PlayerChatEntry>) -> Vec<ChatEntry> {
+    history
         .into_iter()
         .map(|entry| ChatEntry {
             role: match entry.role {
@@ -844,15 +870,7 @@ fn GamePage(world_id: i64, history: Vec<PlayerChatEntry>) -> impl IntoView {
             },
             text: entry.text,
         })
-        .collect();
-    view! {
-        <main class="min-h-dvh bg-base-200 p-3 sm:p-6">
-            <section class="mx-auto flex h-[calc(100dvh-1.5rem)] max-w-5xl flex-col rounded-box bg-base-100 shadow-xl sm:h-[calc(100dvh-3rem)]">
-                <header class="navbar border-b border-base-300 px-4"><h1 class="text-xl font-semibold">"Cairnworld"</h1><span class="ml-auto badge badge-primary badge-outline">"Adventure chat"</span></header>
-                <div class="flex min-h-0 flex-1 flex-col p-3 sm:p-5"><PlayerChat world_id history/></div>
-            </section>
-        </main>
-    }
+        .collect()
 }
 
 #[component]
@@ -958,6 +976,23 @@ mod tests {
             serde_json::from_str(r#"{"type":"message","text":"I take the flour sack."}"#).unwrap();
         assert!(
             matches!(client, ClientEvent::Message { text } if text == "I take the flour sack.")
+        );
+    }
+
+    #[test]
+    fn socket_history_is_an_authoritative_player_chat_snapshot() {
+        let event = ServerEvent::History {
+            entries: vec![ChatEntry {
+                role: ChatRole::Assistant,
+                text: "The kettle whistles.".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "history",
+                "entries": [{"role": "assistant", "text": "The kettle whistles."}],
+            })
         );
     }
 }

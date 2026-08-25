@@ -20,6 +20,7 @@ pub enum ClientEvent {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    History { entries: Vec<ChatEntry> },
     Entry { role: ChatRole, text: String },
     CanAct { value: bool },
     Error { message: String },
@@ -274,6 +275,7 @@ fn connect_player_chat(
                 }
             };
             match serde_json::from_str::<ServerEvent>(&text) {
+                Ok(ServerEvent::History { entries: history }) => entries.set(history),
                 Ok(ServerEvent::Entry { role, text }) => on_message_entries.update(|entries| {
                     entries.push(ChatEntry { role, text });
                 }),

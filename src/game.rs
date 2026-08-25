@@ -251,6 +251,15 @@ where
         if ready {
             return Ok(None);
         }
+        if !self
+            .store
+            .history_segments(member.agent_id)
+            .await
+            .context("checking whether character creation already opened")?
+            .is_empty()
+        {
+            return Ok(None);
+        }
         let sequence = self
             .store
             .begin_sequence(member.world_id, "player entered world")
@@ -875,7 +884,7 @@ mod tests {
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
-        let (backend, requests) = ScriptedBackend::recording([
+        let (backend, recorded_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "hp-1".into(),
                 name: "roll_hit_protection".into(),
@@ -897,11 +906,11 @@ mod tests {
             },
         ));
 
-        let response = game.enter(installed.member).await.unwrap().unwrap();
+        let response = game.enter(installed.member.clone()).await.unwrap().unwrap();
         assert!(
             matches!(response.content, Content::Text(text) if text == "Welcome. Let us make your Adventurer.")
         );
-        let requests = requests.lock().unwrap();
+        let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(matches!(
             requests[0].messages.as_slice(),
@@ -931,6 +940,11 @@ mod tests {
             requests[1].messages
         );
         drop(requests);
+        assert!(
+            game.enter(installed.member).await.unwrap().is_none(),
+            "reconnecting after the opening turn must not start a second character-creation conversation"
+        );
+        assert_eq!(recorded_requests.lock().unwrap().len(), 2);
         drop(game);
         drop(store);
         std::fs::remove_file(path).unwrap();
