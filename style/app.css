@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@plugin "daisyui" {
+  themes: forest --default;
+}
+
+@layer base {
+  body {
+    min-width: 320px;
+  }
+}

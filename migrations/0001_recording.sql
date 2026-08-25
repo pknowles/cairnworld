@@ -42,6 +42,17 @@ CREATE TABLE world_member (
     UNIQUE (world_id, user_id)
 );
 
+-- An invitation is a revocable capability to activate a membership. It does
+-- not become an enduring relationship after acceptance: membership is the
+-- relationship, while deleting this row immediately makes its link unusable.
+CREATE TABLE world_invitation (
+    token TEXT PRIMARY KEY NOT NULL,
+    world_id INTEGER NOT NULL REFERENCES world(id),
+    max_uses INTEGER CHECK (max_uses IS NULL OR max_uses > 0),
+    uses INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+    CHECK (max_uses IS NULL OR uses <= max_uses)
+);
+
 CREATE TABLE agent (
     id INTEGER PRIMARY KEY NOT NULL,
     world_id INTEGER NOT NULL REFERENCES world(id)
@@ -178,6 +189,16 @@ CREATE TABLE message (
     UNIQUE (agent_id, seq)
 );
 
+-- One row for every external game trigger. Inferences and actions reference
+-- this tree root so an entire player event can be reconstructed without
+-- duplicating its inputs or outputs.
+CREATE TABLE sequence (
+    id INTEGER PRIMARY KEY NOT NULL,
+    world_id INTEGER NOT NULL REFERENCES world(id),
+    trigger TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Notices are visible alongside chat history but never become model context.
 CREATE TABLE chat_notice (
     id INTEGER PRIMARY KEY NOT NULL,
@@ -209,6 +230,8 @@ CREATE TABLE summary (
 CREATE TABLE inference (
     id INTEGER PRIMARY KEY NOT NULL,
     agent_id INTEGER NOT NULL REFERENCES agent(id),
+    sequence_id INTEGER REFERENCES sequence(id),
+    parent_inference_id INTEGER REFERENCES inference(id),
     segments TEXT NOT NULL,
     sampling TEXT NOT NULL,
     output TEXT,
@@ -225,6 +248,32 @@ CREATE TABLE inference (
         OR
         (output IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL)
     )
+);
+
+-- Character-action arguments are validated once, retained while the location
+-- GM arbitrates, then executed from this row after approval. The world-local
+-- id is the value the GM sees; it never has to reproduce model-supplied JSON.
+CREATE TABLE pending_action (
+    world_id INTEGER NOT NULL REFERENCES world(id),
+    id INTEGER NOT NULL,
+    sequence_id INTEGER NOT NULL REFERENCES sequence(id),
+    inference_id INTEGER NOT NULL REFERENCES inference(id),
+    character_id INTEGER NOT NULL REFERENCES character(id),
+    location_gm_agent_id INTEGER NOT NULL REFERENCES agent(id),
+    tool TEXT NOT NULL,
+    args TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (world_id, id)
+);
+
+CREATE TABLE action (
+    id INTEGER PRIMARY KEY NOT NULL,
+    sequence_id INTEGER NOT NULL REFERENCES sequence(id),
+    inference_id INTEGER REFERENCES inference(id),
+    tool TEXT NOT NULL,
+    args TEXT NOT NULL,
+    result TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- A final reply that crossed the compaction threshold creates one durable

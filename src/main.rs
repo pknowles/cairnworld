@@ -1,6 +1,7 @@
 mod agent;
 mod compaction;
 mod context;
+mod game;
 mod inference;
 mod llm;
 mod mistralrs_backend;
@@ -8,10 +9,12 @@ mod scenario;
 mod settings;
 mod store;
 mod tools;
+mod web;
 
 use std::{
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -93,11 +96,20 @@ enum Command {
         /// Inference record ID to reconstruct and re-run.
         inference_id: i64,
     },
+    /// Serve the OAuth-only browser interface.
+    Serve {
+        /// SQLite database holding game and session data.
+        #[arg(long, default_value = "cairnworld.sqlite")]
+        database: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let filter = std::env::var("RUST_LOG")
+        .map(|filter| format!("{filter},cairnworld=info"))
+        .unwrap_or_else(|_| "warn,cairnworld=info".to_string());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let cli = Cli::parse();
     match cli.command {
@@ -145,6 +157,30 @@ async fn main() -> Result<()> {
                 settings.limits,
             )
             .await
+        }
+        Command::Serve { database } => {
+            let settings = Settings::load()?;
+            let web = settings.web()?;
+            let store = Store::open(&database)
+                .await
+                .context("opening web database")?;
+            let model = resolve_model(None, None, &settings)?;
+            let game = web::GameLoad::loading();
+            let loading_game = game.clone();
+            let loading_store = store.clone();
+            let limits = settings.limits;
+            tokio::spawn(async move {
+                tracing::info!(model = %model.path, "starting game model load");
+                let result = load_game(loading_store, model, limits).await;
+                match &result {
+                    Ok(_) => tracing::info!("game model is ready"),
+                    Err(error) => {
+                        tracing::error!(error = %format!("{error:#}"), "game model failed to load")
+                    }
+                }
+                loading_game.finish(result).await;
+            });
+            web::serve(store, web, game).await
         }
     }
 }
@@ -218,14 +254,43 @@ fn resolve_model(
 }
 
 async fn backend(model: &settings::Model, limits: settings::Limits) -> Result<MistralRsBackend> {
-    eprintln!("Loading model from {}...", model.path);
-    MistralRsBackend::load(
-        &model.path,
-        model.chat_template.as_deref(),
-        limits.max_concurrent_inferences,
-    )
+    let path = model.path.clone();
+    let chat_template = model.chat_template.clone();
+    let max_concurrent_inferences = limits.max_concurrent_inferences;
+    tracing::info!(model = %path, "loading model");
+    tokio::task::spawn_blocking(move || {
+        tokio::runtime::Handle::current().block_on(MistralRsBackend::load(
+            &path,
+            chat_template.as_deref(),
+            max_concurrent_inferences,
+        ))
+    })
     .await
+    .context("model loader task ended unexpectedly")?
     .context("failed to load model")
+}
+
+async fn load_game(
+    store: Store,
+    model: settings::Model,
+    limits: settings::Limits,
+) -> Result<Arc<game::Game<MistralRsBackend>>> {
+    let scheduler = InferenceScheduler::new(backend(&model, limits).await?, limits)
+        .context("configuring inference scheduling")?;
+    scheduler
+        .resume(&store)
+        .await
+        .context("resuming deferred compactions")?;
+    Ok(Arc::new(game::Game::new(
+        store,
+        scheduler.foreground(),
+        limits,
+        model.path,
+        Sampling {
+            temperature: 1.0,
+            enable_thinking: false,
+        },
+    )))
 }
 
 async fn run_chat(

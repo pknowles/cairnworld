@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use mistralrs::{
@@ -25,6 +25,13 @@ impl MistralRsBackend {
         chat_template: Option<&Path>,
         max_concurrent_inferences: usize,
     ) -> Result<Self> {
+        let started = Instant::now();
+        tracing::info!(
+            model = model_id_or_path,
+            chat_template = chat_template.map(|path| path.display().to_string()),
+            max_concurrent_inferences,
+            "starting game model load"
+        );
         let (dir, file) = model_id_or_path.rsplit_once('/').context(
             "--model must be a path or repo id containing a GGUF filename, e.g. dir/model.gguf",
         )?;
@@ -45,7 +52,20 @@ impl MistralRsBackend {
         let model = builder
             .build()
             .await
+            .inspect_err(|error| {
+                tracing::error!(
+                    model = model_id_or_path,
+                    elapsed = ?started.elapsed(),
+                    error = %error,
+                    "game model failed to load"
+                )
+            })
             .with_context(|| format!("loading GGUF model from {model_id_or_path}"))?;
+        tracing::info!(
+            model = model_id_or_path,
+            elapsed = ?started.elapsed(),
+            "game model load completed"
+        );
         Ok(Self { model })
     }
 }
@@ -96,12 +116,23 @@ impl Backend for MistralRsBackend {
         request: Request,
         mut on_token: impl FnMut(&str) + Send,
     ) -> Result<Response> {
+        let started = Instant::now();
+        tracing::info!(
+            messages = request.messages.len(),
+            tools = request.tools.len(),
+            temperature = request.sampling.temperature,
+            thinking = request.sampling.enable_thinking,
+            "starting model inference"
+        );
         let request_builder = request_builder(request)?;
 
         let mut stream = self
             .model
             .stream_chat_request(request_builder)
             .await
+            .inspect_err(|error| {
+                tracing::error!(error = %error, elapsed = ?started.elapsed(), "model inference could not start")
+            })
             .context("starting streamed inference")?;
 
         // The streaming path never emits a terminal `Response::Done`; the
@@ -115,11 +146,16 @@ impl Backend for MistralRsBackend {
             input_tokens: 0,
             output_tokens: 0,
         };
+        let mut streaming = false;
         loop {
-            let chunk = stream
-                .next()
-                .await
-                .context("inference stream ended without a final chunk")?;
+            let Some(chunk) = stream.next().await else {
+                tracing::error!(elapsed = ?started.elapsed(), "model inference stream ended without a final chunk");
+                anyhow::bail!("inference stream ended without a final chunk");
+            };
+            if !streaming {
+                streaming = true;
+                tracing::info!(elapsed = ?started.elapsed(), "model inference began streaming");
+            }
             match chunk {
                 MrResponse::Chunk(ChatCompletionChunkResponse {
                     choices,
@@ -172,21 +208,34 @@ impl Backend for MistralRsBackend {
                         };
                     }
                     if finished {
-                        return Ok(assemble(
+                        let response = assemble(
                             content,
                             reasoning,
                             tool_calls.into_values().collect(),
                             usage,
-                        ));
+                        );
+                        tracing::info!(
+                            elapsed = ?started.elapsed(),
+                            input_tokens = response.usage.input_tokens,
+                            output_tokens = response.usage.output_tokens,
+                            tool_calls = matches!(&response.content, Content::ToolCalls(calls) if !calls.is_empty()),
+                            "model inference completed"
+                        );
+                        return Ok(response);
                     }
                 }
                 MrResponse::ModelError(message, _) => {
+                    tracing::error!(elapsed = ?started.elapsed(), %message, "model reported an inference error");
                     anyhow::bail!("model error during inference: {message}")
                 }
                 MrResponse::InternalError(error) | MrResponse::ValidationError(error) => {
+                    tracing::error!(elapsed = ?started.elapsed(), %error, "model inference stream error");
                     return Err(anyhow::anyhow!(error).context("inference stream error"));
                 }
-                _ => anyhow::bail!("unexpected response variant from chat stream"),
+                _ => {
+                    tracing::error!(elapsed = ?started.elapsed(), "model returned an unexpected chat stream response");
+                    anyhow::bail!("unexpected response variant from chat stream")
+                }
             }
         }
     }
@@ -283,12 +332,20 @@ fn append_tool_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{Message, Sampling};
+    use crate::llm::{Message, Sampling, ToolDefinition};
     use crate::settings::Settings;
+
+    fn show_inference_lifecycle() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("cairnworld=info")
+            .with_test_writer()
+            .try_init();
+    }
 
     #[tokio::test]
     #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
     async fn stream_and_final_response_agree() {
+        show_inference_lifecycle();
         let settings = Settings::load().expect("settings should load");
         let model = settings
             .model(None)
@@ -321,6 +378,40 @@ mod tests {
         assert!(!streamed.is_empty());
         assert!(!final_text.is_empty());
         assert_eq!(streamed, final_text);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
+    async fn opening_turn_with_tools_has_a_valid_chat_template_shape() {
+        show_inference_lifecycle();
+        let settings = Settings::load().expect("settings should load");
+        let model = settings
+            .model(None)
+            .expect("configure a model in local.toml or default.toml to run this test");
+        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4)
+            .await
+            .expect("model should load");
+        let request = Request {
+            messages: vec![
+                Message::text(Role::System, "You are the player's guide."),
+                Message::text(
+                    Role::User,
+                    "The player has entered the world. Begin character creation by speaking directly to them.",
+                ),
+            ],
+            tools: vec![ToolDefinition {
+                name: "roll_hit_protection".into(),
+                description: "Roll starting Hit Protection.".into(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            sampling: Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+        };
+        backend.complete(request, |_| {}).await.expect(
+            "opening request must reach the configured model without a chat-template error",
+        );
     }
 
     #[test]

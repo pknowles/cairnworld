@@ -1,0 +1,938 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex},
+};
+
+use anyhow::{Context, Result, ensure};
+use schemars::{JsonSchema, schema_for};
+use serde::Deserialize;
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+
+use crate::{
+    agent::{self, Budget, CallContext},
+    inference::ScheduledBackend,
+    llm::{Backend, Content, Message, Response, Role, Sampling, ToolDefinition},
+    settings::Limits,
+    store::{MemberAgent, PendingAction, Store},
+    tools::{Tool, ToolFuture},
+};
+
+/// The one game service that a browser event will invoke. It derives the player
+/// history from a previously authenticated membership; no tool accepts a
+/// client-selected agent or character id.
+pub struct Game<B> {
+    store: Store,
+    backend: ScheduledBackend<B>,
+    limits: Limits,
+    model: String,
+    sampling: Sampling,
+    worlds: Mutex<HashMap<i64, WorldEvents>>,
+}
+
+#[derive(Clone)]
+struct WorldEvents {
+    sender: mpsc::Sender<WorldEvent>,
+    broadcasts: Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
+}
+
+type Narrations = Arc<StdMutex<Vec<(i64, String)>>>;
+
+enum WorldEvent {
+    PlayerMessage {
+        member: MemberAgent,
+        text: String,
+        reply: oneshot::Sender<Result<Response>>,
+    },
+    Enter {
+        member: MemberAgent,
+        reply: oneshot::Sender<Result<Option<Response>>>,
+    },
+}
+
+impl<B> Game<B>
+where
+    B: Backend + Send + Sync + 'static,
+{
+    pub fn new(
+        store: Store,
+        backend: ScheduledBackend<B>,
+        limits: Limits,
+        model: String,
+        sampling: Sampling,
+    ) -> Self {
+        Self {
+            store,
+            backend,
+            limits,
+            model,
+            sampling,
+            worlds: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Queue a player message behind all earlier events in this world.
+    pub async fn player_message(
+        self: &Arc<Self>,
+        member: MemberAgent,
+        text: &str,
+    ) -> Result<Response> {
+        let world = self.world_events(member.world_id).await;
+        let (reply, receive) = oneshot::channel();
+        world
+            .sender
+            .send(WorldEvent::PlayerMessage {
+                member,
+                text: text.to_string(),
+                reply,
+            })
+            .await
+            .context("queueing player message")?;
+        receive
+            .await
+            .context("world stopped processing player message")?
+    }
+
+    /// Queue opening a world behind all earlier events in that world.
+    pub async fn enter(self: &Arc<Self>, member: MemberAgent) -> Result<Option<Response>> {
+        let world = self.world_events(member.world_id).await;
+        let (reply, receive) = oneshot::channel();
+        world
+            .sender
+            .send(WorldEvent::Enter { member, reply })
+            .await
+            .context("queueing world entry")?;
+        receive
+            .await
+            .context("world stopped processing world entry")?
+    }
+
+    /// Subscribe a connected browser to live narration from the member's
+    /// current location. World processing remains serialized across locations.
+    pub async fn subscribe(
+        self: &Arc<Self>,
+        member: &MemberAgent,
+    ) -> Result<broadcast::Receiver<String>> {
+        let location_id = self.store.member_location_id(member).await?;
+        Ok(location_broadcast(
+            &self.world_events(member.world_id).await.broadcasts,
+            location_id,
+        )
+        .await
+        .subscribe())
+    }
+
+    async fn world_events(self: &Arc<Self>, world_id: i64) -> WorldEvents {
+        let mut worlds = self.worlds.lock().await;
+        if let Some(world) = worlds.get(&world_id) {
+            return world.clone();
+        }
+        let (sender, receiver) = mpsc::channel(64);
+        let world = WorldEvents {
+            sender,
+            broadcasts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        worlds.insert(world_id, world.clone());
+        drop(worlds);
+        let game = Arc::clone(self);
+        let broadcasts = Arc::clone(&world.broadcasts);
+        tokio::spawn(async move { game.process_world(receiver, broadcasts).await });
+        world
+    }
+
+    async fn process_world(
+        self: Arc<Self>,
+        mut events: mpsc::Receiver<WorldEvent>,
+        broadcasts: Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
+    ) {
+        while let Some(event) = events.recv().await {
+            match event {
+                WorldEvent::PlayerMessage {
+                    member,
+                    text,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        self.resolve_player_message(member, &text, &broadcasts)
+                            .await,
+                    );
+                }
+                WorldEvent::Enter { member, reply } => {
+                    let _ = reply.send(self.resolve_enter(member).await);
+                }
+            }
+        }
+    }
+
+    /// Resolve one player message through its membership-owned player agent.
+    async fn resolve_player_message(
+        self: &Arc<Self>,
+        member: MemberAgent,
+        text: &str,
+        broadcasts: &Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
+    ) -> Result<Response> {
+        let sequence = self
+            .store
+            .begin_sequence(member.world_id, "player message")
+            .await
+            .context("starting player message sequence")?;
+        self.store
+            .append_message(member.agent_id, &Message::text(Role::User, text))
+            .await
+            .context("storing player message")?;
+        let ready = self
+            .store
+            .is_ready_to_begin(&member)
+            .await
+            .context("checking character creation state")?;
+        let budget = Budget::new(self.limits);
+        let call = CallContext::root(Some(sequence.id));
+        let narrations = Arc::new(StdMutex::new(Vec::new()));
+        let tools = if ready {
+            let location_id = self.store.member_location_id(&member).await?;
+            self.action_tools(
+                member.clone(),
+                sequence.id,
+                location_id,
+                budget.clone(),
+                call.clone(),
+                Arc::clone(&narrations),
+            )
+        } else {
+            self.creation_tools(member.clone(), sequence.id)
+        };
+        let prompt = self.player_prompt(&member, ready).await?;
+        let response = agent::complete_with_call_context(
+            &self.store,
+            &self.backend,
+            &budget,
+            member.agent_id,
+            &call,
+            &[prompt],
+            &tools,
+            self.sampling.clone(),
+            &self.model,
+            |_| {},
+            |_| {},
+        )
+        .await
+        .context("resolving player agent")?;
+        ensure!(
+            matches!(response.content, Content::Text(_)),
+            "player agent did not settle after its action"
+        );
+        let narrations = std::mem::take(
+            &mut *narrations
+                .lock()
+                .expect("resolved narrations collection poisoned"),
+        );
+        for (location_id, narration) in narrations {
+            self.store
+                .append_location_narration(member.world_id, location_id, &narration)
+                .await
+                .context("storing resolved location narration")?;
+            // No active browser at this location is a normal state; the
+            // narration has already been persisted for the next page load.
+            let _ = location_broadcast(broadcasts, location_id)
+                .await
+                .send(narration);
+        }
+        Ok(response)
+    }
+
+    /// The player agent starts the character-creation conversation when the
+    /// browser opens a new Adventurer, before the player needs a special
+    /// command. It has exactly the tools appropriate to its current phase.
+    async fn resolve_enter(self: &Arc<Self>, member: MemberAgent) -> Result<Option<Response>> {
+        let ready = self
+            .store
+            .is_ready_to_begin(&member)
+            .await
+            .context("checking character creation state")?;
+        if ready {
+            return Ok(None);
+        }
+        let sequence = self
+            .store
+            .begin_sequence(member.world_id, "player entered world")
+            .await?;
+        let budget = Budget::new(self.limits);
+        let call = CallContext::root(Some(sequence.id));
+        let tools = self.creation_tools(member.clone(), sequence.id);
+        let prompt = self.player_prompt(&member, false).await?;
+        // This is the game event that starts the agent's first turn. It is
+        // deliberately static context, not a player-visible or durable chat
+        // message: the agent must speak first, while tool-capable templates
+        // still require a user turn before their tool declarations.
+        let entered = Message::text(
+            Role::User,
+            "The player has entered the world. Begin character creation by speaking directly to them.",
+        );
+        let response = agent::complete_with_call_context(
+            &self.store,
+            &self.backend,
+            &budget,
+            member.agent_id,
+            &call,
+            &[prompt, entered],
+            &tools,
+            self.sampling.clone(),
+            &self.model,
+            |_| {},
+            |_| {},
+        )
+        .await
+        .context("opening player-agent conversation")?;
+        ensure!(
+            matches!(response.content, Content::Text(_)),
+            "player agent did not settle while opening the conversation"
+        );
+        Ok(Some(response))
+    }
+
+    async fn player_prompt(&self, member: &MemberAgent, ready: bool) -> Result<Message> {
+        let text = if ready {
+            let scene = serde_json::to_string(
+                &self
+                    .store
+                    .player_scene(member)
+                    .await
+                    .context("loading player scene for prompt")?,
+            )
+            .context("serializing player scene for prompt")?;
+            format!(
+                "Guide the player through the current scene. Use a declared action tool when the player asks their character to look or speak. The following is the current player-visible scene, derived from the world state; do not invent items, people, or facts outside it:\n{scene}"
+            )
+        } else {
+            "Speak first and guide the player through their Adventurer's Cairn character creation. The roll tools make the real, durable results; use them when the player is ready to roll. Once Hit Protection and attributes are rolled, call ready_to_begin when the player has finished creation.".to_string()
+        };
+        Ok(Message::text(Role::System, text))
+    }
+
+    fn creation_tools(self: &Arc<Self>, member: MemberAgent, sequence_id: i64) -> Vec<Tool> {
+        let game = Arc::clone(self);
+        let hp_member = member.clone();
+        let hit_protection = Tool::new(
+            ToolDefinition {
+                name: "roll_hit_protection".to_string(),
+                description: "Roll the Adventurer's starting 1d6 Hit Protection.".to_string(),
+                schema: serde_json::to_value(schema_for!(NoArguments))
+                    .expect("empty tool schema should serialize"),
+            },
+            move |arguments, inference_id| {
+                let game = Arc::clone(&game);
+                let member = hp_member.clone();
+                let arguments = arguments.to_string();
+                Box::pin(async move {
+                    parse_no_arguments(&arguments)?;
+                    Ok(format!(
+                        "Hit Protection: {}",
+                        game.store
+                            .roll_hit_protection(&member, sequence_id, Some(inference_id))
+                            .await?
+                    ))
+                }) as ToolFuture
+            },
+        );
+        let game = Arc::clone(self);
+        let attributes_member = member.clone();
+        let attributes = Tool::new(
+            ToolDefinition {
+                name: "roll_attributes".to_string(),
+                description: "Roll the Adventurer's STR, DEX, and WIL as 3d6 each.".to_string(),
+                schema: serde_json::to_value(schema_for!(NoArguments))
+                    .expect("empty tool schema should serialize"),
+            },
+            move |arguments, inference_id| {
+                let game = Arc::clone(&game);
+                let member = attributes_member.clone();
+                let arguments = arguments.to_string();
+                Box::pin(async move {
+                    parse_no_arguments(&arguments)?;
+                    let (str, dex, wil) = game
+                        .store
+                        .roll_attributes(&member, sequence_id, Some(inference_id))
+                        .await?;
+                    Ok(format!("Attributes: STR {str}, DEX {dex}, WIL {wil}"))
+                }) as ToolFuture
+            },
+        );
+        let game = Arc::clone(self);
+        let ready_member = member;
+        let ready = Tool::new(
+            ToolDefinition {
+                name: "ready_to_begin".to_string(),
+                description: "Mark character creation complete after the required rolls."
+                    .to_string(),
+                schema: serde_json::to_value(schema_for!(NoArguments))
+                    .expect("empty tool schema should serialize"),
+            },
+            move |arguments, inference_id| {
+                let game = Arc::clone(&game);
+                let member = ready_member.clone();
+                let arguments = arguments.to_string();
+                Box::pin(async move {
+                    parse_no_arguments(&arguments)?;
+                    game.store
+                        .ready_to_begin(&member, sequence_id, Some(inference_id))
+                        .await?;
+                    Ok("Character creation is complete.".to_string())
+                }) as ToolFuture
+            },
+        );
+        vec![hit_protection, attributes, ready]
+    }
+
+    fn action_tools(
+        self: &Arc<Self>,
+        member: MemberAgent,
+        sequence_id: i64,
+        location_id: i64,
+        budget: Budget,
+        call: CallContext,
+        narrations: Narrations,
+    ) -> Vec<Tool> {
+        vec![
+            self.action_tool(
+                member.clone(),
+                sequence_id,
+                "look",
+                "Examine or ask about something in the current scene.",
+                serde_json::to_value(schema_for!(CharacterAction))
+                    .expect("character action schema should serialize"),
+                validate_character_action,
+                location_id,
+                budget.clone(),
+                call.clone(),
+                Arc::clone(&narrations),
+            ),
+            self.action_tool(
+                member.clone(),
+                sequence_id,
+                "say",
+                "Speak words your character says in the current scene.",
+                serde_json::to_value(schema_for!(CharacterAction))
+                    .expect("character action schema should serialize"),
+                validate_character_action,
+                location_id,
+                budget.clone(),
+                call.clone(),
+                Arc::clone(&narrations),
+            ),
+            self.action_tool(
+                member,
+                sequence_id,
+                "take",
+                "Take one named item currently visible in the scene. The GM must approve it before Rust transfers the item.",
+                serde_json::to_value(schema_for!(TakeAction))
+                    .expect("take action schema should serialize"),
+                validate_take_action,
+                location_id,
+                budget,
+                call,
+                narrations,
+            ),
+        ]
+    }
+
+    fn action_tool(
+        self: &Arc<Self>,
+        member: MemberAgent,
+        sequence_id: i64,
+        tool_name: &'static str,
+        description: &'static str,
+        schema: serde_json::Value,
+        validate: fn(&str) -> Result<()>,
+        location_id: i64,
+        budget: Budget,
+        call: CallContext,
+        narrations: Narrations,
+    ) -> Tool {
+        let game = Arc::clone(self);
+        Tool::new(
+            ToolDefinition {
+                name: tool_name.to_string(),
+                description: description.to_string(),
+                schema,
+            },
+            move |arguments, inference_id| {
+                let game = Arc::clone(&game);
+                let member = member.clone();
+                let arguments = arguments.to_string();
+                let budget = budget.clone();
+                let call = call.clone();
+                let narrations = Arc::clone(&narrations);
+                Box::pin(async move {
+                    validate(&arguments)?;
+                    let pending = game
+                        .store
+                        .create_pending_action(
+                            &member,
+                            sequence_id,
+                            inference_id,
+                            tool_name,
+                            &arguments,
+                        )
+                        .await
+                        .with_context(|| format!("submitting {tool_name} to location GM"))?;
+                    game.arbitrate(pending, location_id, budget, call, narrations)
+                        .await
+                }) as ToolFuture
+            },
+        )
+    }
+
+    async fn arbitrate(
+        self: &Arc<Self>,
+        pending: PendingAction,
+        location_id: i64,
+        budget: Budget,
+        call: CallContext,
+        narrations: Narrations,
+    ) -> Result<String> {
+        let game = Arc::clone(self);
+        let action_id = pending.id;
+        let approval_pending = pending.clone();
+        let gm_tool = Tool::new(
+            ToolDefinition {
+                name: "approve_action".to_string(),
+                description:
+                    "Approve the presented action by its id after judging its visible arguments."
+                        .to_string(),
+                schema: serde_json::to_value(schema_for!(ApproveAction))
+                    .expect("approval schema should serialize"),
+            },
+            move |arguments, inference_id| {
+                let game = Arc::clone(&game);
+                let arguments = arguments.to_string();
+                Box::pin(async move {
+                    let approval: ApproveAction =
+                        serde_json::from_str(&arguments).context("parsing action approval")?;
+                    ensure!(
+                        approval.action_id == action_id,
+                        "GM approved action {} but was presented action {action_id}",
+                        approval.action_id
+                    );
+                    game.store
+                        .resolve_pending_action(
+                            approval_pending.location_gm_agent_id,
+                            approval_pending.world_id,
+                            action_id,
+                            inference_id,
+                            "approved",
+                        )
+                        .await
+                        .with_context(|| format!("approving action {action_id}"))?;
+                    Ok(format!("Action {action_id} approved."))
+                }) as ToolFuture
+            },
+        );
+        let game = Arc::clone(self);
+        let reject_tool = Tool::new(
+            ToolDefinition {
+                name: "reject_action".to_string(),
+                description:
+                    "Reject the presented action by its id and give the player a concise reason."
+                        .to_string(),
+                schema: serde_json::to_value(schema_for!(RejectAction))
+                    .expect("rejection schema should serialize"),
+            },
+            move |arguments, inference_id| {
+                let game = Arc::clone(&game);
+                let arguments = arguments.to_string();
+                Box::pin(async move {
+                    let rejection: RejectAction =
+                        serde_json::from_str(&arguments).context("parsing action rejection")?;
+                    ensure!(
+                        rejection.action_id == action_id,
+                        "GM rejected action {} but was presented action {action_id}",
+                        rejection.action_id
+                    );
+                    ensure!(
+                        !rejection.reason.trim().is_empty(),
+                        "GM rejection reason is empty"
+                    );
+                    game.store
+                        .resolve_pending_action(
+                            pending.location_gm_agent_id,
+                            pending.world_id,
+                            action_id,
+                            inference_id,
+                            &format!("rejected: {}", rejection.reason),
+                        )
+                        .await
+                        .with_context(|| format!("rejecting action {action_id}"))?;
+                    Ok(format!("Action {action_id} rejected: {}", rejection.reason))
+                }) as ToolFuture
+            },
+        );
+        let scene = serde_json::to_string(
+            &self
+                .store
+                .gm_scene(pending.world_id, pending.location_gm_agent_id)
+                .await
+                .context("loading location GM scene for prompt")?,
+        )
+        .context("serializing location GM scene for prompt")?;
+        let static_message = Message::text(
+            Role::System,
+            format!(
+                "You arbitrate this location. The durable scene packet is {scene}. Action {action_id} is a `{}` request with arguments {}. Judge it from that packet, call approve_action with its id if it can happen, then narrate the outcome.",
+                pending.tool, pending.args,
+            ),
+        );
+        let response = agent::complete_with_call_context(
+            &self.store,
+            &self.backend,
+            &budget,
+            pending.location_gm_agent_id,
+            &call.child(pending.inference_id),
+            &[static_message],
+            &[gm_tool, reject_tool],
+            self.sampling.clone(),
+            &self.model,
+            |_| {},
+            |_| {},
+        )
+        .await
+        .with_context(|| format!("arbitrating action {action_id}"))?;
+        let Content::Text(narration) = response.content else {
+            anyhow::bail!("GM did not settle after action {action_id}");
+        };
+        ensure!(
+            !self
+                .store
+                .has_pending_action(pending.world_id, action_id)
+                .await
+                .context("checking GM action resolution")?,
+            "GM narrated action {action_id} without approving or rejecting it"
+        );
+        narrations
+            .lock()
+            .expect("resolved narrations collection poisoned")
+            .push((location_id, narration.clone()));
+        Ok(narration)
+    }
+}
+
+async fn location_broadcast(
+    broadcasts: &Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
+    location_id: i64,
+) -> broadcast::Sender<String> {
+    let mut broadcasts = broadcasts.lock().await;
+    broadcasts
+        .entry(location_id)
+        .or_insert_with(|| broadcast::channel(64).0)
+        .clone()
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CharacterAction {
+    /// What the character attempts or says.
+    description: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TakeAction {
+    /// The exact item name from the current scene.
+    item: String,
+}
+
+fn validate_character_action(arguments: &str) -> Result<()> {
+    let action: CharacterAction =
+        serde_json::from_str(arguments).context("parsing character action arguments")?;
+    ensure!(
+        !action.description.trim().is_empty(),
+        "action description is empty"
+    );
+    Ok(())
+}
+
+fn validate_take_action(arguments: &str) -> Result<()> {
+    let action: TakeAction =
+        serde_json::from_str(arguments).context("parsing take action arguments")?;
+    ensure!(!action.item.trim().is_empty(), "item name is empty");
+    Ok(())
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NoArguments {}
+
+fn parse_no_arguments(arguments: &str) -> Result<()> {
+    serde_json::from_str::<NoArguments>(arguments).context("parsing empty tool arguments")?;
+    Ok(())
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ApproveAction {
+    /// The visible action id to approve.
+    action_id: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RejectAction {
+    /// The visible action id to reject.
+    action_id: i64,
+    /// Why the action cannot happen as requested.
+    reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        sync::Mutex,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+    use crate::{
+        inference::InferenceScheduler,
+        llm::{Response, ToolCall, Usage},
+        scenario::Scenario,
+    };
+
+    struct ScriptedBackend {
+        responses: Mutex<VecDeque<Response>>,
+        requests: Arc<Mutex<Vec<crate::llm::Request>>>,
+    }
+
+    impl ScriptedBackend {
+        fn new(responses: impl IntoIterator<Item = Response>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                requests: Arc::new(Mutex::new(vec![])),
+            }
+        }
+
+        fn recording(
+            responses: impl IntoIterator<Item = Response>,
+        ) -> (Self, Arc<Mutex<Vec<crate::llm::Request>>>) {
+            let requests = Arc::new(Mutex::new(vec![]));
+            (
+                Self {
+                    responses: Mutex::new(responses.into_iter().collect()),
+                    requests: Arc::clone(&requests),
+                },
+                requests,
+            )
+        }
+    }
+
+    impl Backend for ScriptedBackend {
+        async fn complete(
+            &self,
+            request: crate::llm::Request,
+            _on_token: impl FnMut(&str) + Send,
+        ) -> Result<Response> {
+            self.requests.lock().unwrap().push(request);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .context("scripted backend received an unexpected inference")
+        }
+    }
+
+    fn response(content: Content) -> Response {
+        Response {
+            content,
+            reasoning: String::new(),
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn player_take_is_approved_by_its_location_gm_and_transferred_by_rust() {
+        let path = std::env::temp_dir().join(format!(
+            "cairnworld-game-test-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let creation = store
+            .begin_sequence(installed.world_id, "creation test")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .ready_to_begin(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        let backend = InferenceScheduler::new(
+            ScriptedBackend::new([
+                response(Content::ToolCalls(vec![ToolCall {
+                    id: "take-1".into(),
+                    name: "take".into(),
+                    arguments: r#"{"item":"flour sack"}"#.into(),
+                }])),
+                response(Content::ToolCalls(vec![ToolCall {
+                    id: "approve-1".into(),
+                    name: "approve_action".into(),
+                    arguments: r#"{"action_id":1}"#.into(),
+                }])),
+                response(Content::Text(
+                    "You lift the flour sack while Toma watches.".into(),
+                )),
+                response(Content::Text(String::new())),
+            ]),
+            Limits::default(),
+        )
+        .unwrap();
+        let game = Arc::new(Game::new(
+            store.clone(),
+            backend.foreground(),
+            Limits::default(),
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+        ));
+        let mut broadcasts = game.subscribe(&installed.member).await.unwrap();
+        let (actions_before, pending_before) = store.action_counts().await.unwrap();
+        game.player_message(installed.member.clone(), "I take the flour sack.")
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), broadcasts.recv())
+                .await
+                .expect("GM narration was not broadcast")
+                .expect("world broadcast channel closed"),
+            "You lift the flour sack while Toma watches."
+        );
+        let (actions, pending) = store.action_counts().await.unwrap();
+        assert_eq!(actions, actions_before + 1);
+        assert_eq!(pending, pending_before);
+        assert!(
+            store
+                .player_chat(&installed.member)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| {
+                    entry.role == Role::System
+                        && entry.text == "You lift the flour sack while Toma watches."
+                }),
+            "the broadcast narration must be durable for a browser reload"
+        );
+        let player_inference = store.reconstruct_inference(1).await.unwrap();
+        let gm_inference = store.reconstruct_inference(2).await.unwrap();
+        assert_eq!(player_inference.sequence_id, Some(creation.id + 1));
+        assert_eq!(player_inference.parent_inference_id, None);
+        assert_eq!(gm_inference.sequence_id, player_inference.sequence_id);
+        assert_eq!(gm_inference.parent_inference_id, Some(player_inference.id));
+        drop(game);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn opening_turn_gives_the_template_a_user_event_before_tools() {
+        let path = std::env::temp_dir().join(format!(
+            "cairnworld-opening-test-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("opening@example.test", "Opening")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let (backend, requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "hp-1".into(),
+                name: "roll_hit_protection".into(),
+                arguments: "{}".into(),
+            }])),
+            response(Content::Text(
+                "Welcome. Let us make your Adventurer.".into(),
+            )),
+        ]);
+        let scheduler = InferenceScheduler::new(backend, Limits::default()).unwrap();
+        let game = Arc::new(Game::new(
+            store.clone(),
+            scheduler.foreground(),
+            Limits::default(),
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+        ));
+
+        let response = game.enter(installed.member).await.unwrap().unwrap();
+        assert!(
+            matches!(response.content, Content::Text(text) if text == "Welcome. Let us make your Adventurer.")
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            requests[0].messages.as_slice(),
+            [
+                Message {
+                    role: Role::System,
+                    ..
+                },
+                Message {
+                    role: Role::User,
+                    ..
+                },
+            ]
+        ));
+        assert!(!requests[0].tools.is_empty());
+        assert!(
+            matches!(
+                requests[1].messages.as_slice(),
+                [
+                    Message { role: Role::System, .. },
+                    Message { role: Role::User, .. },
+                    Message { content: crate::llm::MessageContent::ToolCalls(calls), .. },
+                    Message { content: crate::llm::MessageContent::ToolResult { tool_call_id, .. }, .. },
+                ] if calls[0].name == "roll_hit_protection" && tool_call_id == "hp-1"
+            ),
+            "opening follow-up must carry the completed roll into the agent context: {:?}",
+            requests[1].messages
+        );
+        drop(requests);
+        drop(game);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+}

@@ -11,6 +11,18 @@ pub struct Settings {
     pub models: BTreeMap<String, Model>,
     #[serde(default)]
     pub limits: Limits,
+    pub web: Option<Web>,
+}
+
+/// Deployment configuration for the OAuth-only browser interface. It is
+/// optional in shared configuration because the model REPL has no web
+/// dependency, but `serve` requires every field.
+#[derive(Clone, Deserialize)]
+pub struct Web {
+    pub bind: String,
+    pub google_client_id: String,
+    pub google_client_secret: String,
+    pub google_redirect_url: String,
 }
 
 /// A model and everything needed to talk to it. The chat template travels with
@@ -42,6 +54,12 @@ impl Settings {
             path: name.to_string(),
             chat_template: None,
         })
+    }
+
+    pub fn web(&self) -> Result<&Web> {
+        self.web.as_ref().context(
+            "missing [web] configuration; `serve` requires bind, google_client_id, google_client_secret, and google_redirect_url",
+        )
     }
 }
 

@@ -161,12 +161,13 @@ where
         self.admit_deferred(store.clone(), agent_id).await;
         loop {
             let changed = self.changed.notified();
-            let mut state = self.state.lock().expect("scheduler state poisoned");
-            if let Some(error) = state.failures.remove(&agent_id) {
-                anyhow::bail!("deferred compaction for agent {agent_id} failed: {error}");
-            }
-            let inactive = !state.deferred_agents.contains(&agent_id);
-            drop(state);
+            let inactive = {
+                let mut state = self.state.lock().expect("scheduler state poisoned");
+                if let Some(error) = state.failures.remove(&agent_id) {
+                    anyhow::bail!("deferred compaction for agent {agent_id} failed: {error}");
+                }
+                !state.deferred_agents.contains(&agent_id)
+            };
             if inactive {
                 if store.pending_compaction(agent_id).await?.is_none() {
                     return Ok(());

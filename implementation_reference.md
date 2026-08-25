@@ -11,6 +11,10 @@ when things were built.
   implementation of `Backend`. Loads a GGUF model via `GgufModelBuilder`
   (`cuda` feature). `complete` drives `on_token` from
   `Model::stream_chat_request`'s `Chunk`s and assembles the final
+  response. It logs model loading and inference lifecycle (request submitted,
+  first stream chunk, completion or exact stream/model failure) with elapsed
+  time and non-sensitive request counts, so a hung or failed model boundary is
+  visible immediately.
   `Response`/`Usage` from the accumulated chunks - `stream_chat_request`
   never emits a terminal `Response::Done` (that variant is only sent on the
   non-streaming `send_chat_request` path), so there is nothing to read back.
@@ -98,3 +102,55 @@ when things were built.
   including `max_concurrent_inferences`, `compact_at_input_tokens`, and
   `keep_tail_messages`.
 - Weights are not checked in; `models/` is gitignored.
+
+## Web play (design.md: Web server and UI; Auth)
+
+- `src/game.rs` - the membership-scoped game service used by browser events.
+  It serializes each world's events, opens a blank Adventurer's player agent
+  proactively, and gives the agent a static entry event so tool-capable Llama
+  templates have a valid first user turn without displaying or persisting a
+  fake player message. The ordinary agent loop executes any creation-roll
+  calls and returns only its final text to the WebSocket. Subsequent player
+  messages expose creation or location-action tools according to durable
+  character state.
+- `src/web.rs` - `cairnworld serve`'s Axum routes. Google OIDC discovers and
+  exchanges through `openidconnect`; SQLite-backed `tower-sessions` holds the
+  verified account id. The landing page updates only a non-unique display
+  name; identity remains the verified email. Landing, world, invitation, and membership routes all
+  resolve access through `Store` rather than trusting a client user or agent
+  id. The authenticated `/world/:id/play` route loads that membership's
+  durable player-visible history, while its websocket passes the same resolved
+  membership into `Game` for each player message. It sends typed entry,
+  readiness, and error events, and serves the `cargo-leptos` browser package
+  at `/pkg` plus checked-in artwork at `/media`. Browser pages use one valid
+  document shell with viewport metadata, stylesheet and, only where needed,
+  hydration scripts. `.cargo/config.toml` gives Leptos one Cargo-wide WASM
+  output name, so a normal `cargo run` hydration script requests the package
+  that `cargo-leptos` actually emits.
+- `src/lib.rs` exports Leptos's required islands `hydrate()` entrypoint, which
+  initializes the island hydrator before the generated loader invokes each
+  island. `scripts/check_hydration.cjs` runs the compiled loading island in
+  headless Chrome against a local ready response, while
+  `scripts/check_player_chat.cjs` opens the compiled chat island's WebSocket
+  and verifies a typed ready event enables the rendered input. Neither needs
+  OAuth or a model.
+- `src/ui.rs` and `src/lib.rs` - the shared, serializable browser chat event
+  types and the small Leptos island used by the game page. SSR receives the
+  initial durable transcript; Leptos hydrates that same island in WASM and
+  owns the input, send state, websocket transport, and rendering of player,
+  agent, narration, and visible error entries. This is the sole browser chat
+  implementation; the page contains no parallel handwritten JavaScript loop.
+  The loading island displays the complete server startup error when available
+  rather than hiding it behind an HTTP status.
+- `style/app.css`, `package.json`, and `package-lock.json` - Tailwind CSS 4
+  with daisyUI's maintained component/theme layer. The default `forest` theme
+  establishes the dark palette; the shared Leptos markup uses responsive
+  layout primitives for the landing, management and chat pages. The chat's
+  bounded central workspace leaves the page structure extensible for future
+  developer inspection panels without inventing one early. `npm run
+  build:frontend` runs the WASM package build followed by the stylesheet build,
+  ensuring cargo-leptos's default blank CSS output cannot overwrite
+  `/pkg/cairnworld.css`.
+- `Cargo.toml` - separates server (`ssr`) dependencies from the WASM
+  `hydrate` target. `cargo-leptos build` builds both targets and emits the
+  package consumed by the game-page hydration script.

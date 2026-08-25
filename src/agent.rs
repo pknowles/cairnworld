@@ -1,4 +1,6 @@
-use anyhow::{Context, Result, bail};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
     context,
@@ -12,42 +14,110 @@ use crate::{
 /// reaches so recursive calls draw from the same total. Exhausting either
 /// bound is a hard error: the bounds only ever fire on a loop that is already
 /// wrong, so the failure must reach the user rather than an agent.
-pub struct Budget {
+struct BudgetState {
     limits: Limits,
     total_spent: u32,
+}
+
+/// Inference budget for one external trigger. Clones share the same counter so
+/// a nested GM or NPC call cannot reset the trigger-wide limit.
+#[derive(Clone)]
+pub struct Budget {
+    state: Arc<Mutex<BudgetState>>,
 }
 
 impl Budget {
     pub fn new(limits: Limits) -> Self {
         Self {
-            limits,
-            total_spent: 0,
+            state: Arc::new(Mutex::new(BudgetState {
+                limits,
+                total_spent: 0,
+            })),
         }
     }
 
     /// Charge one inference against the whole trigger and the current chat.
-    fn spend(&mut self, chat_spent: u32) -> Result<()> {
-        if chat_spent >= self.limits.max_inferences_per_chat {
+    fn spend(&self, chat_spent: u32) -> Result<()> {
+        let mut state = self.state.lock().expect("inference budget poisoned");
+        if chat_spent >= state.limits.max_inferences_per_chat {
             bail!(
                 "chat reached its limit of {} inferences without settling on a reply \
                  (limits.max_inferences_per_chat)",
-                self.limits.max_inferences_per_chat
+                state.limits.max_inferences_per_chat
             );
         }
-        if self.total_spent >= self.limits.max_inferences_total {
+        if state.total_spent >= state.limits.max_inferences_total {
             bail!(
                 "this action reached its limit of {} inferences across all agents \
                  (limits.max_inferences_total)",
-                self.limits.max_inferences_total
+                state.limits.max_inferences_total
             );
         }
-        self.total_spent += 1;
+        state.total_spent += 1;
         Ok(())
+    }
+
+    fn limits(&self) -> Limits {
+        self.state.lock().expect("inference budget poisoned").limits
     }
 
     #[cfg(test)]
     pub fn total_spent(&self) -> u32 {
-        self.total_spent
+        self.state
+            .lock()
+            .expect("inference budget poisoned")
+            .total_spent
+    }
+}
+
+/// Per-trigger provenance shared by every nested agent call.
+#[derive(Clone)]
+pub struct CallContext {
+    sequence_id: Option<i64>,
+    parent_inference_id: Option<i64>,
+    agents: Arc<Mutex<Vec<i64>>>,
+}
+
+impl CallContext {
+    pub fn root(sequence_id: Option<i64>) -> Self {
+        Self {
+            sequence_id,
+            parent_inference_id: None,
+            agents: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn child(&self, parent_inference_id: i64) -> Self {
+        Self {
+            sequence_id: self.sequence_id,
+            parent_inference_id: Some(parent_inference_id),
+            agents: Arc::clone(&self.agents),
+        }
+    }
+
+    fn enter(&self, agent_id: i64) -> Result<ActiveAgent> {
+        let mut agents = self.agents.lock().expect("agent call stack poisoned");
+        ensure!(
+            !agents.contains(&agent_id),
+            "agent {agent_id} would recursively call itself"
+        );
+        agents.push(agent_id);
+        Ok(ActiveAgent {
+            agents: Arc::clone(&self.agents),
+            agent_id,
+        })
+    }
+}
+
+struct ActiveAgent {
+    agents: Arc<Mutex<Vec<i64>>>,
+    agent_id: i64,
+}
+
+impl Drop for ActiveAgent {
+    fn drop(&mut self) {
+        let removed = self.agents.lock().expect("agent call stack poisoned").pop();
+        debug_assert_eq!(removed, Some(self.agent_id));
     }
 }
 
@@ -56,8 +126,41 @@ impl Budget {
 pub async fn complete<B: Backend>(
     store: &Store,
     backend: &B,
-    budget: &mut Budget,
+    budget: &Budget,
     agent_id: i64,
+    static_messages: &[Message],
+    tools: &[Tool],
+    sampling: Sampling,
+    model: &str,
+    on_token: impl FnMut(&str) + Send,
+    on_activity: impl FnMut(String),
+) -> Result<Response> {
+    let call = CallContext::root(None);
+    complete_with_call_context(
+        store,
+        backend,
+        budget,
+        agent_id,
+        &call,
+        static_messages,
+        tools,
+        sampling,
+        model,
+        on_token,
+        on_activity,
+    )
+    .await
+}
+
+/// Resolve a turn while retaining its external sequence and, for a nested
+/// agent call, the inference that caused it.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_with_call_context<B: Backend>(
+    store: &Store,
+    backend: &B,
+    budget: &Budget,
+    agent_id: i64,
+    call: &CallContext,
     static_messages: &[Message],
     tools: &[Tool],
     sampling: Sampling,
@@ -65,6 +168,7 @@ pub async fn complete<B: Backend>(
     mut on_token: impl FnMut(&str) + Send,
     mut on_activity: impl FnMut(String),
 ) -> Result<Response> {
+    let _active = call.enter(agent_id)?;
     backend
         .before_agent(store, agent_id)
         .await
@@ -76,10 +180,12 @@ pub async fn complete<B: Backend>(
             .spend(chat_spent)
             .context("resolving this chat turn")?;
         chat_spent += 1;
-        let response = context::complete(
+        let completion = context::complete_recorded_with_call_context(
             store,
             backend,
             agent_id,
+            call.sequence_id,
+            call.parent_inference_id,
             static_messages,
             &definitions,
             sampling.clone(),
@@ -88,13 +194,14 @@ pub async fn complete<B: Backend>(
         )
         .await
         .context("running recorded agent inference")?;
+        let response = completion.response;
         let Content::ToolCalls(calls) = &response.content else {
             store
                 .append_reply_and_enqueue_compaction(
                     agent_id,
                     &Message::assistant(response.content.clone(), response.reasoning.clone()),
                     response.usage.input_tokens,
-                    budget.limits.compact_at_input_tokens,
+                    budget.limits().compact_at_input_tokens,
                     &sampling,
                     model,
                 )
@@ -115,7 +222,8 @@ pub async fn complete<B: Backend>(
             .context("storing agent response")?;
         for call in calls {
             on_activity(format!("tool call {}: {}", call.name, call.arguments));
-            let result = tools::execute(tools, call)
+            let result = tools::execute(tools, call, completion.inference_id)
+                .await
                 .with_context(|| format!("running tool call {}", call.id))?;
             let activity = format!("tool result {}: {result}", call.id);
             store
@@ -543,5 +651,29 @@ mod tests {
         assert!(message.contains("max_inferences_total"), "got {message}");
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn nested_calls_share_one_budget() {
+        let budget = Budget::new(Limits::default());
+        let nested = budget.clone();
+        budget.spend(0).unwrap();
+        nested.spend(0).unwrap();
+        assert_eq!(budget.total_spent(), 2);
+    }
+
+    #[test]
+    fn call_context_rejects_an_agent_already_on_the_call_stack() {
+        let call = CallContext::root(Some(12));
+        let active = call.enter(4).unwrap();
+        let error = match call.child(99).enter(4) {
+            Ok(_) => panic!("an agent must not recursively invoke itself"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("recursively call itself"));
+        drop(active);
+        call.child(99)
+            .enter(4)
+            .expect("the agent is callable again after its prior turn ends");
     }
 }

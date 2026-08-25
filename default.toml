@@ -33,3 +33,12 @@ max_inferences_total = 64
 compact_at_input_tokens = 16000
 # Recent raw history is retained exactly; older history becomes a summary.
 keep_tail_messages = 32
+
+# Browser serving is deliberately configured only in local.toml: Google OAuth
+# credentials are machine/deployment secrets. `cairnworld serve` fails with a
+# clear message until all fields are set.
+# [web]
+# bind = "127.0.0.1:3000"
+# google_client_id = "..."
+# google_client_secret = "..."
+# google_redirect_url = "http://localhost:3000/auth/google/callback"

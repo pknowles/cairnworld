@@ -7,7 +7,8 @@ use crate::{
     store::{InferenceOutcome, Segment, Store},
 };
 
-pub async fn complete<B: Backend>(
+#[cfg(test)]
+pub async fn complete_recorded<B: Backend>(
     store: &Store,
     backend: &B,
     agent_id: i64,
@@ -16,13 +17,50 @@ pub async fn complete<B: Backend>(
     sampling: Sampling,
     model: &str,
     on_token: impl FnMut(&str) + Send,
-) -> Result<Response> {
-    let segments = segments(store, agent_id, static_messages, tools).await?;
-    Ok(complete_recipe(
-        store, backend, agent_id, &segments, sampling, model, on_token,
+) -> Result<Completion> {
+    complete_recorded_with_call_context(
+        store,
+        backend,
+        agent_id,
+        None,
+        None,
+        static_messages,
+        tools,
+        sampling,
+        model,
+        on_token,
     )
-    .await?
-    .response)
+    .await
+}
+
+/// As [`complete_recorded`], while attaching an inference to its external
+/// event and (for an agent-to-agent call) the inference that requested it.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_recorded_with_call_context<B: Backend>(
+    store: &Store,
+    backend: &B,
+    agent_id: i64,
+    sequence_id: Option<i64>,
+    parent_inference_id: Option<i64>,
+    static_messages: &[Message],
+    tools: &[ToolDefinition],
+    sampling: Sampling,
+    model: &str,
+    on_token: impl FnMut(&str) + Send,
+) -> Result<Completion> {
+    let segments = segments(store, agent_id, static_messages, tools).await?;
+    complete_recipe_with_call_context(
+        store,
+        backend,
+        agent_id,
+        sequence_id,
+        parent_inference_id,
+        &segments,
+        sampling,
+        model,
+        on_token,
+    )
+    .await
 }
 
 pub async fn segments(
@@ -63,6 +101,7 @@ pub async fn segments(
     Ok(segments)
 }
 
+#[derive(Debug)]
 pub struct Completion {
     pub response: Response,
     pub inference_id: i64,
@@ -77,6 +116,24 @@ pub async fn complete_recipe<B: Backend>(
     model: &str,
     on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
+    complete_recipe_with_call_context(
+        store, backend, agent_id, None, None, segments, sampling, model, on_token,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_recipe_with_call_context<B: Backend>(
+    store: &Store,
+    backend: &B,
+    agent_id: i64,
+    sequence_id: Option<i64>,
+    parent_inference_id: Option<i64>,
+    segments: &[Segment],
+    sampling: Sampling,
+    model: &str,
+    on_token: impl FnMut(&str) + Send,
+) -> Result<Completion> {
     let request = store
         .request_for_segments(agent_id, segments, sampling)
         .await
@@ -85,8 +142,10 @@ pub async fn complete_recipe<B: Backend>(
     match backend.complete(request.clone(), on_token).await {
         Ok(response) => {
             let inference_id = store
-                .record_inference(
+                .record_inference_with_call_context(
                     agent_id,
+                    sequence_id,
+                    parent_inference_id,
                     segments,
                     &request,
                     InferenceOutcome::Response(response.clone()),
@@ -103,8 +162,10 @@ pub async fn complete_recipe<B: Backend>(
         }
         Err(error) => {
             store
-                .record_inference(
+                .record_inference_with_call_context(
                     agent_id,
+                    sequence_id,
+                    parent_inference_id,
                     segments,
                     &request,
                     InferenceOutcome::Error(format!("{error:#}")),
@@ -182,7 +243,7 @@ mod tests {
         let store = Store::open(&path).await.expect("store should open");
         let agent = test_agent(&store).await;
         let mut streamed = String::new();
-        let response = complete(
+        let response = complete_recorded(
             &store,
             &StreamingBackend,
             agent,
@@ -196,7 +257,8 @@ mod tests {
             |token| streamed.push_str(token),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .response;
         assert_eq!(streamed, "hello");
         assert_eq!(response.content, Content::Text("hello".to_string()));
         let recorded = store.reconstruct_inference(1).await.unwrap();
@@ -219,7 +281,7 @@ mod tests {
         let store = Store::open(&path).await.expect("store should open");
         let agent = test_agent(&store).await;
 
-        let error = complete(
+        let error = complete_recorded(
             &store,
             &FailingBackend,
             agent,

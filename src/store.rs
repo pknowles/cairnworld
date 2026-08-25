@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, ensure};
-use rand::Rng;
+use rand::{Rng, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use sqlx::{
     FromRow, Sqlite, SqlitePool, Transaction,
@@ -31,6 +31,146 @@ pub struct MemberAgent {
     pub world_id: i64,
     pub user_id: i64,
     pub agent_id: i64,
+}
+
+#[derive(Clone, Debug, FromRow, PartialEq)]
+pub struct Invitation {
+    pub token: String,
+    pub world_id: i64,
+    pub max_uses: Option<i64>,
+    pub uses: i64,
+}
+
+#[derive(Clone, Debug, FromRow, PartialEq)]
+pub struct World {
+    pub id: i64,
+    pub name: String,
+    pub owner_id: i64,
+}
+
+#[derive(Clone, Debug, FromRow, PartialEq)]
+pub struct WorldMember {
+    pub user_id: i64,
+    pub display_name: String,
+    pub access: String,
+    pub character_name: String,
+}
+
+/// A text entry safe to render in the player-facing chat. Tool calls and tool
+/// results remain in the durable agent history but never cross this boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerChatEntry {
+    pub role: Role,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sequence {
+    pub id: i64,
+    pub world_id: i64,
+    pub trigger: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAction {
+    pub world_id: i64,
+    pub id: i64,
+    pub sequence_id: i64,
+    pub inference_id: i64,
+    pub character_id: i64,
+    pub location_gm_agent_id: i64,
+    pub tool: String,
+    pub args: String,
+}
+
+/// Player-visible state at the member's current location. It is derived from
+/// the relationship graph rather than accepted from the browser or a model.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PlayerScene {
+    pub character_name: String,
+    pub character_description: String,
+    pub sheet: serde_json::Value,
+    pub location_name: String,
+    pub location_description: String,
+    pub items: Vec<SceneItem>,
+    pub inventory: Vec<SceneItem>,
+    pub npcs: Vec<SceneNpc>,
+}
+
+#[derive(Clone, Debug, FromRow, PartialEq, Serialize)]
+pub struct SceneItem {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, FromRow, PartialEq, Serialize)]
+pub struct SceneNpc {
+    pub name: String,
+    pub description: String,
+}
+
+/// The location GM's durable scene packet. GM-only notes stay out of the
+/// player packet even though both are assembled from the same world state.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GmScene {
+    pub location_name: String,
+    pub location_description: String,
+    pub gm_notes: serde_json::Value,
+    pub items: Vec<SceneItem>,
+    pub npcs: Vec<GmSceneNpc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GmSceneNpc {
+    pub name: String,
+    pub description: String,
+    pub background: String,
+    pub motive: String,
+    pub ambition: String,
+    pub gm_notes: serde_json::Value,
+}
+
+#[derive(FromRow)]
+struct GmSceneNpcRow {
+    name: String,
+    description: String,
+    background: String,
+    motive: String,
+    ambition: String,
+    gm_notes: String,
+}
+
+#[derive(Debug, FromRow)]
+struct PendingActionRow {
+    world_id: i64,
+    id: i64,
+    sequence_id: i64,
+    inference_id: i64,
+    character_id: i64,
+    location_gm_agent_id: i64,
+    tool: String,
+    args: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TakeItemArguments {
+    item: String,
+}
+
+impl From<PendingActionRow> for PendingAction {
+    fn from(row: PendingActionRow) -> Self {
+        Self {
+            world_id: row.world_id,
+            id: row.id,
+            sequence_id: row.sequence_id,
+            inference_id: row.inference_id,
+            character_id: row.character_id,
+            location_gm_agent_id: row.location_gm_agent_id,
+            tool: row.tool,
+            args: row.args,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +236,8 @@ pub enum RecordedOutcome {
 pub struct RecordedInference {
     pub id: i64,
     pub agent_id: i64,
+    pub sequence_id: Option<i64>,
+    pub parent_inference_id: Option<i64>,
     pub segments: Vec<Segment>,
     pub request: Request,
     pub outcome: RecordedOutcome,
@@ -107,6 +249,8 @@ pub struct RecordedInference {
 struct InferenceRow {
     id: i64,
     agent_id: i64,
+    sequence_id: Option<i64>,
+    parent_inference_id: Option<i64>,
     segments: String,
     sampling: String,
     output: Option<String>,
@@ -204,6 +348,13 @@ impl Store {
         Ok(Self { pool })
     }
 
+    /// Sessions and game records intentionally share SQLite's durability and
+    /// process lifetime. The session crate owns its session tables; Store owns
+    /// every Cairnworld table.
+    pub fn pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
     pub async fn create_world(&self, name: &str) -> Result<i64> {
         let result = sqlx::query("INSERT INTO world (name) VALUES (?)")
             .bind(name)
@@ -222,6 +373,190 @@ impl Store {
         Ok(result.last_insert_rowid())
     }
 
+    /// Create a revocable, unguessable invitation as the world's owner. A
+    /// membership remains the only long-lived access relationship.
+    pub async fn create_invitation(
+        &self,
+        owner_id: i64,
+        world_id: i64,
+        max_uses: Option<i64>,
+    ) -> Result<Invitation> {
+        if let Some(max_uses) = max_uses {
+            ensure!(max_uses > 0, "an invitation use limit must be positive");
+        }
+        let owns: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?")
+                .bind(world_id)
+                .bind(owner_id)
+                .fetch_optional(&self.pool)
+                .await
+                .with_context(|| format!("checking ownership of world {world_id}"))?;
+        ensure!(
+            owns.is_some(),
+            "user {owner_id} does not own world {world_id}"
+        );
+        let token = rand::rng()
+            .sample_iter(Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect::<String>();
+        sqlx::query("INSERT INTO world_invitation (token, world_id, max_uses) VALUES (?, ?, ?)")
+            .bind(&token)
+            .bind(world_id)
+            .bind(max_uses)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("creating invitation for world {world_id}"))?;
+        Ok(Invitation {
+            token,
+            world_id,
+            max_uses,
+            uses: 0,
+        })
+    }
+
+    /// Accept a live invitation. Existing memberships regain access rather
+    /// than silently creating a second player history or Adventurer.
+    pub async fn accept_invitation(&self, user: &User, token: &str) -> Result<MemberAgent> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting invitation acceptance")?;
+        let invitation: Invitation = sqlx::query_as(
+            "SELECT token, world_id, max_uses, uses FROM world_invitation WHERE token = ?",
+        )
+        .bind(token)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading invitation")?
+        .with_context(|| format!("invitation `{token}` does not exist or was revoked"))?;
+        let existing: Option<MemberAgent> = sqlx::query_as(
+            "SELECT member.id AS member_id, member.world_id, member.user_id, player.agent_id \
+             FROM world_member AS member \
+             JOIN member_player_agent AS player ON player.member_id = member.id \
+             WHERE member.world_id = ? AND member.user_id = ?",
+        )
+        .bind(invitation.world_id)
+        .bind(user.id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading existing invitation membership")?;
+        if let Some(member) = existing {
+            sqlx::query(
+                "UPDATE world_member SET access = 'active' WHERE id = ? AND access = 'removed'",
+            )
+            .bind(member.member_id)
+            .execute(&mut *transaction)
+            .await
+            .context("restoring invitation membership")?;
+            transaction
+                .commit()
+                .await
+                .context("committing returning member")?;
+            return Ok(member);
+        }
+        let consumed = sqlx::query(
+            "UPDATE world_invitation SET uses = uses + 1 \
+             WHERE token = ? AND (max_uses IS NULL OR uses < max_uses)",
+        )
+        .bind(token)
+        .execute(&mut *transaction)
+        .await
+        .context("consuming invitation slot")?
+        .rows_affected();
+        ensure!(consumed == 1, "invitation `{token}` has no remaining slots");
+        let starting_location_id: i64 = sqlx::query_scalar(
+            "SELECT character_location.location_id FROM world_owner \
+             JOIN world_member ON world_member.world_id = world_owner.world_id \
+               AND world_member.user_id = world_owner.user_id \
+             JOIN player_character ON player_character.member_id = world_member.id \
+             JOIN character_location ON character_location.character_id = player_character.character_id \
+             WHERE world_owner.world_id = ?",
+        )
+        .bind(invitation.world_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("finding invitation world starting location")?
+        .with_context(|| format!("world {} has no owner Adventurer location", invitation.world_id))?;
+        let joined = Self::join_world(
+            &mut transaction,
+            user,
+            invitation.world_id,
+            starting_location_id,
+        )
+        .await
+        .context("creating invited player membership")?;
+        transaction
+            .commit()
+            .await
+            .context("committing invitation acceptance")?;
+        Ok(MemberAgent {
+            member_id: joined.member_id,
+            world_id: invitation.world_id,
+            user_id: user.id,
+            agent_id: joined.agent_id,
+        })
+    }
+
+    pub async fn revoke_invitation(&self, owner_id: i64, world_id: i64, token: &str) -> Result<()> {
+        let result = sqlx::query(
+            "DELETE FROM world_invitation WHERE token = ? AND world_id = ? \
+             AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+        )
+        .bind(token)
+        .bind(world_id)
+        .bind(world_id)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("revoking invitation `{token}` for world {world_id}"))?;
+        ensure!(
+            result.rows_affected() == 1,
+            "invitation `{token}` is not owned by user {owner_id} in world {world_id}"
+        );
+        Ok(())
+    }
+
+    /// An owner may revoke a member's current access without deleting the
+    /// membership, player history, or character it owns.
+    pub async fn remove_member(&self, owner_id: i64, world_id: i64, user_id: i64) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE world_member SET access = 'removed' WHERE world_id = ? AND user_id = ? \
+             AND access = 'active' AND user_id != (SELECT user_id FROM world_owner WHERE world_id = ?) \
+             AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+        )
+        .bind(world_id)
+        .bind(user_id)
+        .bind(world_id)
+        .bind(world_id)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("removing user {user_id} from world {world_id}"))?;
+        ensure!(
+            result.rows_affected() == 1,
+            "user {user_id} is not an active removable member of world {world_id} owned by user {owner_id}"
+        );
+        Ok(())
+    }
+
+    /// Start one externally visible event. All work it triggers carries this
+    /// id, including recursive agent calls and their tool executions.
+    pub async fn begin_sequence(&self, world_id: i64, trigger: &str) -> Result<Sequence> {
+        let result = sqlx::query("INSERT INTO sequence (world_id, trigger) VALUES (?, ?)")
+            .bind(world_id)
+            .bind(trigger)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("starting {trigger} sequence in world {world_id}"))?;
+        Ok(Sequence {
+            id: result.last_insert_rowid(),
+            world_id,
+            trigger: trigger.to_string(),
+        })
+    }
+
     /// Create an account only when its verified OAuth email is first seen.
     /// Display names deliberately participate in neither identity nor lookup.
     pub async fn find_or_create_user(&self, email: &str, display_name: &str) -> Result<User> {
@@ -238,6 +573,79 @@ impl Store {
             .fetch_one(&self.pool)
             .await
             .with_context(|| format!("loading user for {email}"))
+    }
+
+    pub async fn user(&self, user_id: i64) -> Result<Option<User>> {
+        sqlx::query_as("SELECT id, email, display_name FROM user WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("loading user {user_id}"))
+    }
+
+    /// Change presentation only; OAuth email remains the account identity.
+    pub async fn rename_user(&self, user_id: i64, display_name: &str) -> Result<User> {
+        sqlx::query("UPDATE user SET display_name = ? WHERE id = ?")
+            .bind(display_name)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("updating display name for user {user_id}"))?;
+        self.user(user_id)
+            .await?
+            .with_context(|| format!("display-name update references missing user {user_id}"))
+    }
+
+    pub async fn owned_worlds(&self, owner_id: i64) -> Result<Vec<World>> {
+        sqlx::query_as(
+            "SELECT world.id, world.name, world_owner.user_id AS owner_id FROM world \
+             JOIN world_owner ON world_owner.world_id = world.id \
+             WHERE world_owner.user_id = ? ORDER BY world.id",
+        )
+        .bind(owner_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading worlds owned by user {owner_id}"))
+    }
+
+    pub async fn world(&self, world_id: i64) -> Result<Option<World>> {
+        sqlx::query_as(
+            "SELECT world.id, world.name, world_owner.user_id AS owner_id FROM world \
+             JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
+        )
+        .bind(world_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading world {world_id}"))
+    }
+
+    pub async fn world_members(&self, world_id: i64) -> Result<Vec<WorldMember>> {
+        sqlx::query_as(
+            "SELECT member.user_id, user.display_name, member.access, character.name AS character_name \
+             FROM world_member AS member \
+             JOIN user ON user.id = member.user_id \
+             JOIN player_character ON player_character.member_id = member.id \
+             JOIN character ON character.id = player_character.character_id \
+             WHERE member.world_id = ? ORDER BY member.id",
+        )
+        .bind(world_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading members of world {world_id}"))
+    }
+
+    pub async fn invitations(&self, owner_id: i64, world_id: i64) -> Result<Vec<Invitation>> {
+        sqlx::query_as(
+            "SELECT invitation.token, invitation.world_id, invitation.max_uses, invitation.uses \
+             FROM world_invitation AS invitation JOIN world_owner \
+             ON world_owner.world_id = invitation.world_id \
+             WHERE invitation.world_id = ? AND world_owner.user_id = ? ORDER BY invitation.rowid",
+        )
+        .bind(world_id)
+        .bind(owner_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading invitations for world {world_id}"))
     }
 
     /// Install a checked-in scenario and join its owner in one transaction.
@@ -459,6 +867,606 @@ impl Store {
         })
     }
 
+    /// Load exactly the player-visible state for the member's current location.
+    /// It rechecks the membership relation so a stale browser connection cannot
+    /// retain a scene after its access has been removed.
+    pub async fn player_scene(&self, member: &MemberAgent) -> Result<PlayerScene> {
+        let (character_id, character_name, character_description, sheet, location_id, location_name, location_description):
+            (i64, String, String, String, i64, String, String) = sqlx::query_as(
+            "SELECT character.id, character.name, character.description, character.sheet, location.id, location.name, location.description \
+             FROM world_member AS member \
+             JOIN player_character ON player_character.member_id = member.id \
+             JOIN character ON character.id = player_character.character_id \
+             JOIN character_location ON character_location.character_id = character.id \
+             JOIN location ON location.id = character_location.location_id \
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND member.access = 'active'",
+        )
+        .bind(member.member_id)
+        .bind(member.world_id)
+        .bind(member.user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("loading player scene")?
+        .with_context(|| format!("member {} has no active placed character", member.member_id))?;
+        let items = Self::location_items(&self.pool, location_id).await?;
+        let npcs = Self::location_npcs(&self.pool, location_id).await?;
+        Ok(PlayerScene {
+            character_name,
+            character_description,
+            sheet: serde_json::from_str(&sheet).context("decoding player character sheet")?,
+            location_name,
+            location_description,
+            items,
+            inventory: Self::character_items(&self.pool, character_id).await?,
+            npcs,
+        })
+    }
+
+    /// Resolve the active member's current location without exposing an
+    /// internal database id in the model-facing scene packet.
+    pub async fn member_location_id(&self, member: &MemberAgent) -> Result<i64> {
+        sqlx::query_scalar(
+            "SELECT character_location.location_id FROM world_member AS member \
+             JOIN player_character ON player_character.member_id = member.id \
+             JOIN character_location ON character_location.character_id = player_character.character_id \
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND member.access = 'active'",
+        )
+        .bind(member.member_id)
+        .bind(member.world_id)
+        .bind(member.user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("loading member location")?
+        .with_context(|| format!("member {} has no active location", member.member_id))
+    }
+
+    /// Load the text-only portion of one active membership's player-agent
+    /// history in durable message order. This is used by the game page on
+    /// every reload; it does not rely on a websocket's in-memory lifetime.
+    pub async fn player_chat(&self, member: &MemberAgent) -> Result<Vec<PlayerChatEntry>> {
+        let active: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM world_member AS member \
+             JOIN member_player_agent ON member_player_agent.member_id = member.id \
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
+             AND member_player_agent.agent_id = ? AND member.access = 'active'",
+        )
+        .bind(member.member_id)
+        .bind(member.world_id)
+        .bind(member.user_id)
+        .bind(member.agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("checking active player chat membership")?;
+        ensure!(
+            active.is_some(),
+            "member {} has no active player chat in world {}",
+            member.member_id,
+            member.world_id
+        );
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT message.role, message.content FROM world_member AS member \
+             JOIN member_player_agent ON member_player_agent.member_id = member.id \
+             JOIN message ON message.agent_id = member_player_agent.agent_id \
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
+             AND member.access = 'active' ORDER BY message.id",
+        )
+        .bind(member.member_id)
+        .bind(member.world_id)
+        .bind(member.user_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("loading player chat history")?;
+        let entries: Vec<Option<PlayerChatEntry>> = rows
+            .into_iter()
+            .map(|(role, content)| {
+                let role = serde_json::from_str(&role).context("decoding player chat role")?;
+                let content =
+                    serde_json::from_str(&content).context("decoding player chat content")?;
+                let MessageContent::Text(text) = content else {
+                    return Ok(None);
+                };
+                if role == Role::Assistant && text.is_empty() {
+                    return Ok(None);
+                }
+                Ok(matches!(role, Role::User | Role::Assistant | Role::System)
+                    .then_some(PlayerChatEntry { role, text }))
+            })
+            .collect::<Result<_>>()?;
+        Ok(entries.into_iter().flatten().collect())
+    }
+
+    /// Persist a resolved location narration in every active player-agent
+    /// history currently at that location. Call this only after the triggering
+    /// player agent has settled, so its tool-call/result sequence stays intact.
+    pub async fn append_location_narration(
+        &self,
+        world_id: i64,
+        location_id: i64,
+        narration: &str,
+    ) -> Result<()> {
+        let agents: Vec<i64> = sqlx::query_scalar(
+            "SELECT member_player_agent.agent_id FROM world_member \
+             JOIN member_player_agent ON member_player_agent.member_id = world_member.id \
+             JOIN player_character ON player_character.member_id = world_member.id \
+             JOIN character_location ON character_location.character_id = player_character.character_id \
+             WHERE world_member.world_id = ? AND world_member.access = 'active' \
+             AND character_location.location_id = ? ORDER BY member_player_agent.agent_id",
+        )
+        .bind(world_id)
+        .bind(location_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("finding active player agents at narrated location")?;
+        for agent_id in agents {
+            self.append_message(agent_id, &Message::text(Role::System, narration))
+                .await
+                .with_context(|| {
+                    format!("storing location narration for player agent {agent_id}")
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Load the context a location GM may use to judge one action. This is
+    /// addressed through the location-GM relation, never a model-provided
+    /// location id.
+    pub async fn gm_scene(&self, world_id: i64, agent_id: i64) -> Result<GmScene> {
+        let (location_id, location_name, location_description, gm_notes): (
+            i64,
+            String,
+            String,
+            String,
+        ) = sqlx::query_as(
+            "SELECT location.id, location.name, location.description, location.gm_notes \
+             FROM location_gm JOIN location ON location.id = location_gm.location_id \
+             WHERE location_gm.agent_id = ? AND location.world_id = ?",
+        )
+        .bind(agent_id)
+        .bind(world_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("loading location GM scene")?
+        .with_context(|| format!("agent {agent_id} is not a GM in world {world_id}"))?;
+        Ok(GmScene {
+            location_name,
+            location_description,
+            gm_notes: serde_json::from_str(&gm_notes).context("decoding location GM notes")?,
+            items: Self::location_items(&self.pool, location_id).await?,
+            npcs: Self::location_gm_npcs(&self.pool, location_id).await?,
+        })
+    }
+
+    async fn location_items(pool: &SqlitePool, location_id: i64) -> Result<Vec<SceneItem>> {
+        sqlx::query_as(
+            "SELECT item.name, item.description FROM item_location \
+             JOIN item ON item.id = item_location.item_id \
+             WHERE item_location.location_id = ? ORDER BY item.id",
+        )
+        .bind(location_id)
+        .fetch_all(pool)
+        .await
+        .context("loading location items")
+    }
+
+    async fn character_items(pool: &SqlitePool, character_id: i64) -> Result<Vec<SceneItem>> {
+        sqlx::query_as(
+            "SELECT item.name, item.description FROM item_character \
+             JOIN item ON item.id = item_character.item_id \
+             WHERE item_character.character_id = ? ORDER BY item.id",
+        )
+        .bind(character_id)
+        .fetch_all(pool)
+        .await
+        .context("loading character inventory")
+    }
+
+    async fn location_npcs(pool: &SqlitePool, location_id: i64) -> Result<Vec<SceneNpc>> {
+        sqlx::query_as(
+            "SELECT character.name, character.description FROM character_location \
+             JOIN character ON character.id = character_location.character_id \
+             WHERE character_location.location_id = ? AND character.role = 'npc' ORDER BY character.id",
+        )
+        .bind(location_id)
+        .fetch_all(pool)
+        .await
+        .context("loading location NPCs")
+    }
+
+    async fn location_gm_npcs(pool: &SqlitePool, location_id: i64) -> Result<Vec<GmSceneNpc>> {
+        let rows: Vec<GmSceneNpcRow> = sqlx::query_as(
+            "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.gm_notes \
+             FROM character_location JOIN character ON character.id = character_location.character_id \
+             WHERE character_location.location_id = ? AND character.role = 'npc' ORDER BY character.id",
+        )
+        .bind(location_id)
+        .fetch_all(pool)
+        .await
+        .context("loading location GM NPCs")?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(GmSceneNpc {
+                    name: row.name,
+                    description: row.description,
+                    background: row.background,
+                    motive: row.motive,
+                    ambition: row.ambition,
+                    gm_notes: serde_json::from_str(&row.gm_notes)
+                        .context("decoding NPC GM notes")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Roll the Adventurer's starting Hit Protection once. Repeating a tool
+    /// call returns the durable result instead of offering a reroll.
+    pub async fn roll_hit_protection(
+        &self,
+        member: &MemberAgent,
+        sequence_id: i64,
+        inference_id: Option<i64>,
+    ) -> Result<i64> {
+        let mut transaction = self.pool.begin().await.context("starting HP roll")?;
+        let (character_id, sheet): (i64, String) = Self::member_sheet(&mut transaction, member)
+            .await
+            .context("loading Adventurer for HP roll")?;
+        let mut sheet: serde_json::Value =
+            serde_json::from_str(&sheet).context("decoding Adventurer sheet")?;
+        if let Some(hp) = sheet.get("hp").and_then(serde_json::Value::as_i64) {
+            transaction
+                .commit()
+                .await
+                .context("committing existing HP roll")?;
+            return Ok(hp);
+        }
+        let hp = rand::rng().random_range(1..=6);
+        sheet["hp"] = serde_json::json!(hp);
+        Self::store_sheet(&mut transaction, character_id, &sheet).await?;
+        Self::record_action(
+            &mut transaction,
+            sequence_id,
+            inference_id,
+            "roll_hit_protection",
+            "{}",
+            &format!(r#"{{"hp":{hp}}}"#),
+        )
+        .await?;
+        transaction.commit().await.context("committing HP roll")?;
+        Ok(hp)
+    }
+
+    /// Roll STR, DEX, and WIL in order, once, using Cairn's 3d6 rule.
+    pub async fn roll_attributes(
+        &self,
+        member: &MemberAgent,
+        sequence_id: i64,
+        inference_id: Option<i64>,
+    ) -> Result<(i64, i64, i64)> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting attribute rolls")?;
+        let (character_id, sheet): (i64, String) = Self::member_sheet(&mut transaction, member)
+            .await
+            .context("loading Adventurer for attribute rolls")?;
+        let mut sheet: serde_json::Value =
+            serde_json::from_str(&sheet).context("decoding Adventurer sheet")?;
+        let values = ["str", "dex", "wil"]
+            .map(|attribute| sheet.get(attribute).and_then(serde_json::Value::as_i64));
+        if let [Some(strength), Some(dexterity), Some(will)] = values {
+            transaction
+                .commit()
+                .await
+                .context("committing existing attribute rolls")?;
+            return Ok((strength, dexterity, will));
+        }
+        ensure!(
+            values.iter().all(Option::is_none),
+            "Adventurer has a partial attribute roll"
+        );
+        let (strength, dexterity, will) = {
+            let mut rng = rand::rng();
+            let mut roll = || (0..3).map(|_| rng.random_range(1..=6)).sum::<i64>();
+            (roll(), roll(), roll())
+        };
+        sheet["str"] = serde_json::json!(strength);
+        sheet["dex"] = serde_json::json!(dexterity);
+        sheet["wil"] = serde_json::json!(will);
+        Self::store_sheet(&mut transaction, character_id, &sheet).await?;
+        Self::record_action(
+            &mut transaction,
+            sequence_id,
+            inference_id,
+            "roll_attributes",
+            "{}",
+            &format!(r#"{{"str":{strength},"dex":{dexterity},"wil":{will}}}"#),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .context("committing attribute rolls")?;
+        Ok((strength, dexterity, will))
+    }
+
+    pub async fn ready_to_begin(
+        &self,
+        member: &MemberAgent,
+        sequence_id: i64,
+        inference_id: Option<i64>,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin().await.context("starting ready-to-begin")?;
+        let (character_id, sheet): (i64, String) = Self::member_sheet(&mut transaction, member)
+            .await
+            .context("loading Adventurer to mark ready")?;
+        let mut sheet: serde_json::Value =
+            serde_json::from_str(&sheet).context("decoding Adventurer sheet")?;
+        ensure!(
+            sheet
+                .get("hp")
+                .and_then(serde_json::Value::as_i64)
+                .is_some()
+                && ["str", "dex", "wil"].iter().all(|attribute| sheet
+                    .get(*attribute)
+                    .and_then(serde_json::Value::as_i64)
+                    .is_some()),
+            "Adventurer must roll Hit Protection and all attributes before beginning"
+        );
+        sheet["ready"] = serde_json::json!(true);
+        Self::store_sheet(&mut transaction, character_id, &sheet).await?;
+        Self::record_action(
+            &mut transaction,
+            sequence_id,
+            inference_id,
+            "ready_to_begin",
+            "{}",
+            r#"{"ready":true}"#,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .context("committing ready-to-begin")
+    }
+
+    pub async fn is_ready_to_begin(&self, member: &MemberAgent) -> Result<bool> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("checking Adventurer readiness")?;
+        let (_, sheet) = Self::member_sheet(&mut transaction, member).await?;
+        transaction
+            .commit()
+            .await
+            .context("committing Adventurer readiness check")?;
+        Ok(serde_json::from_str::<serde_json::Value>(&sheet)
+            .context("decoding Adventurer sheet")?
+            .get("ready")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// Retain a validated character action and assign the next world-local id
+    /// before forwarding it to the location GM. The caller supplies only an
+    /// already-resolved membership; this lookup determines its character and
+    /// GM, so neither can be selected by model or browser input.
+    pub async fn create_pending_action(
+        &self,
+        member: &MemberAgent,
+        sequence_id: i64,
+        inference_id: i64,
+        tool: &str,
+        args: &str,
+    ) -> Result<PendingAction> {
+        let mut transaction = self.pool.begin().await.with_context(|| {
+            format!(
+                "starting pending {tool} action for member {}",
+                member.member_id
+            )
+        })?;
+        let (character_id, location_gm_agent_id): (i64, i64) = sqlx::query_as(
+            "SELECT character.id, location_gm.agent_id \
+             FROM world_member AS member \
+             JOIN member_player_agent AS player ON player.member_id = member.id \
+             JOIN player_character ON player_character.member_id = member.id \
+             JOIN character ON character.id = player_character.character_id \
+             JOIN character_location ON character_location.character_id = character.id \
+             JOIN location_gm ON location_gm.location_id = character_location.location_id \
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
+               AND member.access = 'active' AND player.agent_id = ?",
+        )
+        .bind(member.member_id)
+        .bind(member.world_id)
+        .bind(member.user_id)
+        .bind(member.agent_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("resolving action character and location GM")?
+        .context("active membership has no playable character and location GM")?;
+        let sequence_matches: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM sequence WHERE id = ? AND world_id = ?")
+                .bind(sequence_id)
+                .bind(member.world_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .context("checking action sequence world")?;
+        ensure!(
+            sequence_matches.is_some(),
+            "sequence {sequence_id} is not in world {}",
+            member.world_id
+        );
+        let action_id: i64 = sqlx::query_scalar(
+            "UPDATE world SET next_action_id = next_action_id + 1 WHERE id = ? \
+             RETURNING next_action_id",
+        )
+        .bind(member.world_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .with_context(|| format!("allocating action id in world {}", member.world_id))?;
+        sqlx::query(
+            "INSERT INTO pending_action \
+             (world_id, id, sequence_id, inference_id, character_id, location_gm_agent_id, tool, args) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(member.world_id)
+        .bind(action_id)
+        .bind(sequence_id)
+        .bind(inference_id)
+        .bind(character_id)
+        .bind(location_gm_agent_id)
+        .bind(tool)
+        .bind(args)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("storing pending {tool} action {action_id}"))?;
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("committing pending {tool} action {action_id}"))?;
+        Ok(PendingAction {
+            world_id: member.world_id,
+            id: action_id,
+            sequence_id,
+            inference_id,
+            character_id,
+            location_gm_agent_id,
+            tool: tool.to_string(),
+            args: args.to_string(),
+        })
+    }
+
+    /// Resolve an action only from the GM relationship it was assigned to.
+    /// Moving it into the immutable action log and retiring the pending row are
+    /// one transaction, so a later call cannot approve it twice.
+    pub async fn resolve_pending_action(
+        &self,
+        location_gm_agent_id: i64,
+        world_id: i64,
+        action_id: i64,
+        inference_id: i64,
+        result: &str,
+    ) -> Result<PendingAction> {
+        let mut transaction = self.pool.begin().await.with_context(|| {
+            format!("resolving action {action_id} through GM {location_gm_agent_id}")
+        })?;
+        let action: PendingAction = sqlx::query_as::<_, PendingActionRow>(
+            "SELECT world_id, id, sequence_id, inference_id, character_id, location_gm_agent_id, tool, args \
+             FROM pending_action WHERE world_id = ? AND id = ? AND location_gm_agent_id = ?",
+        )
+        .bind(world_id)
+        .bind(action_id)
+        .bind(location_gm_agent_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading pending action for location GM")?
+        .map(Into::into)
+        .with_context(|| {
+            format!(
+                "action {action_id} is not pending for location GM {location_gm_agent_id} in world {world_id}"
+            )
+        })?;
+        let result = if result == "approved" {
+            Self::execute_approved_action(&mut transaction, &action).await?
+        } else {
+            result.to_string()
+        };
+        sqlx::query(
+            "INSERT INTO action (sequence_id, inference_id, tool, args, result) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(action.sequence_id)
+        .bind(inference_id)
+        .bind(&action.tool)
+        .bind(&action.args)
+        .bind(&result)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("recording resolved action {action_id}"))?;
+        let deleted = sqlx::query(
+            "DELETE FROM pending_action WHERE world_id = ? AND id = ? AND location_gm_agent_id = ?",
+        )
+        .bind(world_id)
+        .bind(action_id)
+        .bind(location_gm_agent_id)
+        .execute(&mut *transaction)
+        .await
+        .context("retiring resolved pending action")?
+        .rows_affected();
+        ensure!(
+            deleted == 1,
+            "pending action {action_id} changed while resolving"
+        );
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("committing resolved action {action_id}"))?;
+        Ok(action)
+    }
+
+    /// Apply the compact set of stateful actions from their durable pending
+    /// rows. The GM never supplies an item or character id: the action's
+    /// validated arguments and its membership-owned actor are the only input.
+    async fn execute_approved_action(
+        transaction: &mut Transaction<'_, Sqlite>,
+        action: &PendingAction,
+    ) -> Result<String> {
+        match action.tool.as_str() {
+            "look" | "say" => Ok("approved".to_string()),
+            "take" => {
+                let arguments: TakeItemArguments = serde_json::from_str(&action.args)
+                    .context("parsing stored take action arguments")?;
+                ensure!(
+                    !arguments.item.trim().is_empty(),
+                    "stored take action has an empty item name"
+                );
+                let item_ids: Vec<i64> = sqlx::query_scalar(
+                    "SELECT item.id FROM item \
+                     JOIN item_location ON item_location.item_id = item.id \
+                     JOIN character_location ON character_location.location_id = item_location.location_id \
+                     WHERE item.world_id = ? AND item.name = ? AND character_location.character_id = ?",
+                )
+                .bind(action.world_id)
+                .bind(&arguments.item)
+                .bind(action.character_id)
+                .fetch_all(&mut **transaction)
+                .await
+                .context("finding requested item at acting character's location")?;
+                ensure!(
+                    item_ids.len() == 1,
+                    "item `{}` is not uniquely available at the acting character's location",
+                    arguments.item
+                );
+                let item_id = item_ids[0];
+                let removed = sqlx::query("DELETE FROM item_location WHERE item_id = ?")
+                    .bind(item_id)
+                    .execute(&mut **transaction)
+                    .await
+                    .context("removing item from its location")?
+                    .rows_affected();
+                ensure!(removed == 1, "item {item_id} changed before transfer");
+                sqlx::query("INSERT INTO item_character (item_id, character_id) VALUES (?, ?)")
+                    .bind(item_id)
+                    .bind(action.character_id)
+                    .execute(&mut **transaction)
+                    .await
+                    .context("transferring item to acting character")?;
+                Ok(format!("approved: {} transferred", arguments.item))
+            }
+            tool => anyhow::bail!("approved action has unsupported tool `{tool}`"),
+        }
+    }
+
+    pub async fn has_pending_action(&self, world_id: i64, action_id: i64) -> Result<bool> {
+        let found: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM pending_action WHERE world_id = ? AND id = ?")
+                .bind(world_id)
+                .bind(action_id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("checking whether action remains pending")?;
+        Ok(found.is_some())
+    }
+
     /// Export static scenario data without player-specific memberships,
     /// characters, histories, or allocated handles. The result can initialize
     /// another fresh world rather than copying a particular playthrough.
@@ -676,6 +1684,57 @@ impl Store {
             agent_id,
             character_tool_id,
         })
+    }
+
+    async fn member_sheet(
+        transaction: &mut Transaction<'_, Sqlite>,
+        member: &MemberAgent,
+    ) -> Result<(i64, String)> {
+        sqlx::query_as(
+            "SELECT character.id, character.sheet FROM world_member AS member \
+             JOIN member_player_agent AS player ON player.member_id = member.id \
+             JOIN player_character ON player_character.member_id = member.id \
+             JOIN character ON character.id = player_character.character_id \
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
+               AND member.access = 'active' AND player.agent_id = ?",
+        )
+        .bind(member.member_id)
+        .bind(member.world_id)
+        .bind(member.user_id)
+        .bind(member.agent_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .context("resolving active Adventurer sheet")?
+        .context("active membership has no Adventurer")
+    }
+
+    async fn record_action(
+        transaction: &mut Transaction<'_, Sqlite>,
+        sequence_id: i64,
+        inference_id: Option<i64>,
+        tool: &str,
+        args: &str,
+        result: &str,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO action (sequence_id, inference_id, tool, args, result) VALUES (?, ?, ?, ?, ?)")
+            .bind(sequence_id).bind(inference_id).bind(tool).bind(args).bind(result)
+            .execute(&mut **transaction).await
+            .with_context(|| format!("recording {tool} action"))?;
+        Ok(())
+    }
+
+    async fn store_sheet(
+        transaction: &mut Transaction<'_, Sqlite>,
+        character_id: i64,
+        sheet: &serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query("UPDATE character SET sheet = ? WHERE id = ?")
+            .bind(serde_json::to_string(sheet).context("encoding Adventurer sheet")?)
+            .bind(character_id)
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| format!("storing Adventurer sheet for character {character_id}"))?;
+        Ok(())
     }
 
     async fn insert_character(
@@ -1144,9 +2203,34 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
     pub async fn record_inference(
         &self,
         agent_id: i64,
+        segments: &[Segment],
+        request: &Request,
+        outcome: InferenceOutcome,
+        model: &str,
+        duration_ms: u64,
+    ) -> Result<i64> {
+        self.record_inference_with_call_context(
+            agent_id,
+            None,
+            None,
+            segments,
+            request,
+            outcome,
+            model,
+            duration_ms,
+        )
+        .await
+    }
+
+    pub async fn record_inference_with_call_context(
+        &self,
+        agent_id: i64,
+        sequence_id: Option<i64>,
+        parent_inference_id: Option<i64>,
         segments: &[Segment],
         request: &Request,
         outcome: InferenceOutcome,
@@ -1178,10 +2262,12 @@ impl Store {
         };
         let result = sqlx::query(
             "INSERT INTO inference \
-             (agent_id, segments, sampling, output, error, input_hash, input_tokens, output_tokens, duration_ms, model) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (agent_id, sequence_id, parent_inference_id, segments, sampling, output, error, input_hash, input_tokens, output_tokens, duration_ms, model) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(agent_id)
+        .bind(sequence_id)
+        .bind(parent_inference_id)
         .bind(segments)
         .bind(sampling)
         .bind(output)
@@ -1199,7 +2285,7 @@ impl Store {
 
     pub async fn reconstruct_inference(&self, id: i64) -> Result<RecordedInference> {
         let row = sqlx::query_as::<_, InferenceRow>(
-            "SELECT id, agent_id, segments, sampling, output, error, input_hash, input_tokens, output_tokens, duration_ms, model \
+            "SELECT id, agent_id, sequence_id, parent_inference_id, segments, sampling, output, error, input_hash, input_tokens, output_tokens, duration_ms, model \
              FROM inference WHERE id = ?",
         )
         .bind(id)
@@ -1248,6 +2334,8 @@ impl Store {
         Ok(RecordedInference {
             id: row.id,
             agent_id: row.agent_id,
+            sequence_id: row.sequence_id,
+            parent_inference_id: row.parent_inference_id,
             segments,
             request,
             outcome,
@@ -1280,6 +2368,19 @@ impl Store {
             .await
             .context("counting inference rows")
     }
+
+    #[cfg(test)]
+    pub(crate) async fn action_counts(&self) -> Result<(i64, i64)> {
+        let actions = sqlx::query_scalar("SELECT COUNT(*) FROM action")
+            .fetch_one(&self.pool)
+            .await
+            .context("counting resolved actions")?;
+        let pending = sqlx::query_scalar("SELECT COUNT(*) FROM pending_action")
+            .fetch_one(&self.pool)
+            .await
+            .context("counting pending actions")?;
+        Ok((actions, pending))
+    }
 }
 
 #[cfg(test)]
@@ -1287,7 +2388,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::llm::Content;
+    use crate::llm::{Content, ToolCall};
 
     fn database_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1417,6 +2518,21 @@ mod tests {
             alex_one_returning.display_name, "Alex",
             "a later login must not overwrite a player-selected display name"
         );
+        let renamed = store
+            .rename_user(alex_one.id, "Alex the Bold")
+            .await
+            .unwrap();
+        assert_eq!(renamed.email, "alex.one@example.test");
+        assert_eq!(renamed.display_name, "Alex the Bold");
+        assert_eq!(
+            store
+                .find_or_create_user("alex.one@example.test", "Different Google name")
+                .await
+                .unwrap()
+                .display_name,
+            "Alex the Bold",
+            "a player-selected display name survives later OAuth logins"
+        );
 
         let first = store
             .install_scenario(&alex_one, &test_scenario("first world"))
@@ -1451,6 +2567,235 @@ mod tests {
             "a world id alone must never select another user's player agent"
         );
 
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn player_chat_reloads_only_renderable_text_from_its_active_history() {
+        let path = database_path();
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("history@example.test", "History")
+            .await
+            .unwrap();
+        let installed = store
+            .install_scenario(&owner, &test_scenario("history"))
+            .await
+            .unwrap();
+        store
+            .append_message(
+                installed.member.agent_id,
+                &Message::text(Role::User, "Look around."),
+            )
+            .await
+            .unwrap();
+        store
+            .append_message(
+                installed.member.agent_id,
+                &Message::assistant(
+                    Content::ToolCalls(vec![ToolCall {
+                        id: "call-1".into(),
+                        name: "look".into(),
+                        arguments: r#"{"description":"around"}"#.into(),
+                    }]),
+                    String::new(),
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .append_message(
+                installed.member.agent_id,
+                &Message::tool_result("call-1".into(), "GM result".into()),
+            )
+            .await
+            .unwrap();
+        store
+            .append_message(
+                installed.member.agent_id,
+                &Message::assistant(Content::Text("The hut is quiet.".into()), String::new()),
+            )
+            .await
+            .unwrap();
+        store
+            .append_message(
+                installed.member.agent_id,
+                &Message::text(Role::System, "Toma watches from the doorway."),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.player_chat(&installed.member).await.unwrap(),
+            vec![
+                PlayerChatEntry {
+                    role: Role::User,
+                    text: "Look around.".into(),
+                },
+                PlayerChatEntry {
+                    role: Role::Assistant,
+                    text: "The hut is quiet.".into(),
+                },
+                PlayerChatEntry {
+                    role: Role::System,
+                    text: "Toma watches from the doorway.".into(),
+                },
+            ],
+            "reloadable player chat must not leak raw tool syntax"
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invitations_only_grant_the_invited_world_and_preserve_one_player_history() {
+        let path = database_path();
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("owner@example.test", "Owner")
+            .await
+            .unwrap();
+        let invited = store
+            .find_or_create_user("invited@example.test", "Invited")
+            .await
+            .unwrap();
+        let outsider = store
+            .find_or_create_user("outsider@example.test", "Outsider")
+            .await
+            .unwrap();
+        let world = store
+            .install_scenario(&owner, &test_scenario("invited world"))
+            .await
+            .unwrap();
+        let other_world = store
+            .install_scenario(&owner, &test_scenario("other world"))
+            .await
+            .unwrap();
+        let invite = store
+            .create_invitation(owner.id, world.world_id, Some(1))
+            .await
+            .unwrap();
+        let member = store
+            .accept_invitation(&invited, &invite.token)
+            .await
+            .unwrap();
+        assert_eq!(member.world_id, world.world_id);
+        assert_eq!(
+            store
+                .active_member_agent(invited.id, other_world.world_id)
+                .await
+                .unwrap(),
+            None,
+            "an invite must not select or expose another world"
+        );
+        assert!(
+            store
+                .accept_invitation(&outsider, &invite.token)
+                .await
+                .is_err(),
+            "the configured slot limit must be enforced when two people race to join"
+        );
+        store
+            .remove_member(owner.id, world.world_id, invited.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .active_member_agent(invited.id, world.world_id)
+                .await
+                .unwrap(),
+            None,
+            "a removed member must no longer resolve to a playable history"
+        );
+        let restored = store
+            .accept_invitation(&invited, &invite.token)
+            .await
+            .unwrap();
+        assert_eq!(
+            restored, member,
+            "rejoining restores the original player history"
+        );
+        assert!(
+            store
+                .remove_member(owner.id, world.world_id, owner.id)
+                .await
+                .is_err(),
+            "the owner relationship cannot be converted into a removed membership"
+        );
+        store
+            .revoke_invitation(owner.id, world.world_id, &invite.token)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .accept_invitation(&outsider, &invite.token)
+                .await
+                .is_err(),
+            "a revoked link must not grant access"
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn character_creation_rolls_are_durable_and_ready_requires_them() {
+        let path = database_path();
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("roller@example.test", "Roller")
+            .await
+            .unwrap();
+        let installed = store
+            .install_scenario(&owner, &test_scenario("creation"))
+            .await
+            .unwrap();
+        let sequence = store
+            .begin_sequence(installed.world_id, "creation test")
+            .await
+            .unwrap();
+        assert!(
+            store
+                .ready_to_begin(&installed.member, sequence.id, None)
+                .await
+                .is_err(),
+            "a blank Adventurer must not skip the required rolls"
+        );
+        let hp = store
+            .roll_hit_protection(&installed.member, sequence.id, None)
+            .await
+            .unwrap();
+        assert!((1..=6).contains(&hp));
+        assert_eq!(
+            store
+                .roll_hit_protection(&installed.member, sequence.id, None)
+                .await
+                .unwrap(),
+            hp,
+            "repeating a tool call must not create a player-selectable reroll"
+        );
+        let attributes = store
+            .roll_attributes(&installed.member, sequence.id, None)
+            .await
+            .unwrap();
+        assert!(
+            [attributes.0, attributes.1, attributes.2]
+                .iter()
+                .all(|value| (3..=18).contains(value))
+        );
+        assert_eq!(
+            store
+                .roll_attributes(&installed.member, sequence.id, None)
+                .await
+                .unwrap(),
+            attributes,
+            "a second attribute call returns the same character sheet"
+        );
+        store
+            .ready_to_begin(&installed.member, sequence.id, None)
+            .await
+            .unwrap();
+        assert!(store.is_ready_to_begin(&installed.member).await.unwrap());
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
@@ -1512,11 +2857,285 @@ mod tests {
             placed_items, 2,
             "the flour and cache can be found in the world"
         );
+        let player_scene = store.player_scene(&installed.member).await.unwrap();
+        assert_eq!(player_scene.character_name, "Adventurer");
+        assert_eq!(player_scene.location_name, "charcoal hut");
+        assert!(player_scene.inventory.is_empty());
+        assert_eq!(
+            player_scene
+                .items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["flour sack", "emergency cache"],
+            "the player context must be derived from their actual location"
+        );
+        assert_eq!(
+            player_scene
+                .npcs
+                .iter()
+                .map(|npc| npc.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Mara", "Toma"]
+        );
+        let gm_agent_id: i64 = sqlx::query_scalar(
+            "SELECT location_gm.agent_id FROM location_gm \
+             JOIN location ON location.id = location_gm.location_id WHERE location.world_id = ?",
+        )
+        .bind(installed.world_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let gm_scene = store
+            .gm_scene(installed.world_id, gm_agent_id)
+            .await
+            .unwrap();
+        assert_eq!(gm_scene.location_name, player_scene.location_name);
+        assert!(gm_scene.gm_notes.get("interior").is_some());
+        let toma = gm_scene.npcs.iter().find(|npc| npc.name == "Toma").unwrap();
+        assert!(toma.motive.contains("imprisonment"));
+        assert!(toma.gm_notes.get("beliefs").is_some());
         assert_eq!(
             store.export_scenario(installed.world_id).await.unwrap(),
             scenario,
             "exported JSON must recreate the same scenario graph in a fresh world"
         );
+
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_actions_keep_the_validated_call_for_its_location_gm() {
+        let path = database_path();
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let sequence = store
+            .begin_sequence(installed.world_id, "player message")
+            .await
+            .unwrap();
+        let request = Request {
+            messages: vec![],
+            tools: vec![],
+            sampling: Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+        };
+        let inference_id = store
+            .record_inference_with_call_context(
+                installed.member.agent_id,
+                Some(sequence.id),
+                None,
+                &[],
+                &request,
+                InferenceOutcome::Response(response()),
+                "scripted",
+                0,
+            )
+            .await
+            .unwrap();
+        let args = r#"{"description":"look through the rear window"}"#;
+        let action = store
+            .create_pending_action(&installed.member, sequence.id, inference_id, "look", args)
+            .await
+            .unwrap();
+        assert_eq!(action.id, 1);
+        assert_eq!(action.tool, "look");
+        assert_eq!(action.args, args);
+        assert_eq!(action.sequence_id, sequence.id);
+        let location_gm: i64 = sqlx::query_scalar(
+            "SELECT location_gm.agent_id FROM player_character \
+             JOIN character_location ON character_location.character_id = player_character.character_id \
+             JOIN location_gm ON location_gm.location_id = character_location.location_id \
+             WHERE player_character.member_id = ?",
+        )
+        .bind(installed.member.member_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(action.location_gm_agent_id, location_gm);
+
+        let error = store
+            .resolve_pending_action(
+                installed.member.agent_id,
+                installed.world_id,
+                action.id,
+                inference_id,
+                "approved",
+            )
+            .await
+            .expect_err("a player agent cannot resolve its own action");
+        assert!(format!("{error:#}").contains("is not pending for location GM"));
+        let resolved = store
+            .resolve_pending_action(
+                location_gm,
+                installed.world_id,
+                action.id,
+                inference_id,
+                "approved",
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved, action);
+        let recorded_result: String =
+            sqlx::query_scalar("SELECT result FROM action WHERE sequence_id = ? AND tool = 'look'")
+                .bind(sequence.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded_result, "approved");
+
+        let other_world = store.create_world("other").await.unwrap();
+        let other_sequence = store
+            .begin_sequence(other_world, "player message")
+            .await
+            .unwrap();
+        let error = store
+            .create_pending_action(
+                &installed.member,
+                other_sequence.id,
+                inference_id,
+                "look",
+                args,
+            )
+            .await
+            .expect_err("an action cannot borrow a sequence from another world");
+        assert!(format!("{error:#}").contains("is not in world"));
+        let next_action_id: i64 =
+            sqlx::query_scalar("SELECT next_action_id FROM world WHERE id = ?")
+                .bind(installed.world_id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            next_action_id, 1,
+            "a rejected request consumes no action id"
+        );
+
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn approved_take_transfers_one_available_item_exactly_once() {
+        let path = database_path();
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("taker@example.test", "Taker")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let sequence = store
+            .begin_sequence(installed.world_id, "player message")
+            .await
+            .unwrap();
+        let request = Request {
+            messages: vec![],
+            tools: vec![],
+            sampling: Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+        };
+        let inference_id = store
+            .record_inference_with_call_context(
+                installed.member.agent_id,
+                Some(sequence.id),
+                None,
+                &[],
+                &request,
+                InferenceOutcome::Response(response()),
+                "scripted",
+                0,
+            )
+            .await
+            .unwrap();
+        let action = store
+            .create_pending_action(
+                &installed.member,
+                sequence.id,
+                inference_id,
+                "take",
+                r#"{"item":"flour sack"}"#,
+            )
+            .await
+            .unwrap();
+        store
+            .resolve_pending_action(
+                action.location_gm_agent_id,
+                installed.world_id,
+                action.id,
+                inference_id,
+                "approved",
+            )
+            .await
+            .unwrap();
+        let locations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM item_location JOIN item ON item.id = item_location.item_id \
+             WHERE item.world_id = ? AND item.name = 'flour sack'",
+        )
+        .bind(installed.world_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let holders: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM item_character JOIN item ON item.id = item_character.item_id \
+             WHERE item.world_id = ? AND item.name = 'flour sack'",
+        )
+        .bind(installed.world_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(locations, 0);
+        assert_eq!(holders, 1, "approval must transfer, not duplicate, flour");
+        assert_eq!(
+            store
+                .player_scene(&installed.member)
+                .await
+                .unwrap()
+                .inventory
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["flour sack"]
+        );
+        assert!(
+            store
+                .resolve_pending_action(
+                    action.location_gm_agent_id,
+                    installed.world_id,
+                    action.id,
+                    inference_id,
+                    "approved",
+                )
+                .await
+                .is_err(),
+            "a resolved action must not execute its transfer twice"
+        );
+        let holders_after_retry: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM item_character JOIN item ON item.id = item_character.item_id \
+             WHERE item.world_id = ? AND item.name = 'flour sack'",
+        )
+        .bind(installed.world_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(holders_after_retry, 1);
 
         drop(store);
         std::fs::remove_file(path).unwrap();
