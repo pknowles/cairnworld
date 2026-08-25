@@ -110,9 +110,11 @@ when things were built.
   proactively, and gives the agent a static entry event so tool-capable Llama
   templates have a valid first user turn without displaying or persisting a
   fake player message. The ordinary agent loop executes any creation-roll
-  calls and stores its final text. A reconnect waits for that durable event
-  rather than creating another one; subsequent player messages expose creation
-  or location-action tools according to durable character state.
+  calls and stores its final text. The first viewer starts one server-owned
+  opening operation per membership; concurrent reconnects wait on that same
+  operation, then view its durable result rather than queueing game work.
+  Subsequent player messages expose creation or location-action tools according
+  to durable character state.
 - `src/web.rs` - `cairnworld serve`'s Axum routes. Google OIDC discovers and
   exchanges through `openidconnect`; SQLite-backed `tower-sessions` holds the
   verified account id. The landing page updates only a non-unique display

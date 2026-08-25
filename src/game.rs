@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 use crate::{
     agent::{self, Budget, CallContext},
@@ -27,6 +27,14 @@ pub struct Game<B> {
     model: String,
     sampling: Sampling,
     worlds: Mutex<HashMap<i64, WorldEvents>>,
+    openings: Mutex<HashMap<i64, watch::Receiver<OpeningState>>>,
+}
+
+#[derive(Clone, Debug)]
+enum OpeningState {
+    Pending,
+    Ready,
+    Failed(String),
 }
 
 #[derive(Clone)]
@@ -67,6 +75,7 @@ where
             model,
             sampling,
             worlds: Mutex::new(HashMap::new()),
+            openings: Mutex::new(HashMap::new()),
         }
     }
 
@@ -104,6 +113,52 @@ where
         receive
             .await
             .context("world stopped processing world entry")?
+    }
+
+    /// Wait for the one server-owned opening turn for a blank Adventurer.
+    /// Multiple viewers share this operation; only its first observer queues
+    /// game work. Once the player agent has a durable reply, reconnects return
+    /// immediately and merely view that history.
+    pub async fn wait_for_opening(self: &Arc<Self>, member: MemberAgent) -> Result<()> {
+        if self.opening_complete(&member).await? {
+            return Ok(());
+        }
+        let member_id = member.member_id;
+        let mut receiver = {
+            let mut openings = self.openings.lock().await;
+            if let Some(receiver) = openings.get(&member_id) {
+                receiver.clone()
+            } else {
+                let (sender, receiver) = watch::channel(OpeningState::Pending);
+                openings.insert(member_id, receiver.clone());
+                let game = Arc::clone(self);
+                tokio::spawn(async move {
+                    tracing::info!(
+                        world_id = member.world_id,
+                        user_id = member.user_id,
+                        "starting server-owned player agent opening turn"
+                    );
+                    let state = match game.enter(member).await {
+                        Ok(_) => OpeningState::Ready,
+                        Err(error) => OpeningState::Failed(format!("{error:#}")),
+                    };
+                    let _ = sender.send(state);
+                    game.openings.lock().await.remove(&member_id);
+                });
+                receiver
+            }
+        };
+        loop {
+            let state = receiver.borrow_and_update().clone();
+            match state {
+                OpeningState::Pending => receiver
+                    .changed()
+                    .await
+                    .context("opening player agent ended before completing")?,
+                OpeningState::Ready => return Ok(()),
+                OpeningState::Failed(error) => anyhow::bail!(error),
+            }
+        }
     }
 
     /// Subscribe a connected browser to live narration from the member's
@@ -251,13 +306,7 @@ where
         if ready {
             return Ok(None);
         }
-        if !self
-            .store
-            .history_segments(member.agent_id)
-            .await
-            .context("checking whether character creation already opened")?
-            .is_empty()
-        {
+        if self.opening_complete(&member).await? {
             return Ok(None);
         }
         let sequence = self
@@ -296,6 +345,16 @@ where
             "player agent did not settle while opening the conversation"
         );
         Ok(Some(response))
+    }
+
+    async fn opening_complete(&self, member: &MemberAgent) -> Result<bool> {
+        Ok(self
+            .store
+            .player_chat(member)
+            .await
+            .context("checking durable player-agent opening reply")?
+            .iter()
+            .any(|entry| entry.role == Role::Assistant))
     }
 
     async fn player_prompt(&self, member: &MemberAgent, ready: bool) -> Result<Message> {
@@ -694,7 +753,10 @@ struct RejectAction {
 mod tests {
     use std::{
         collections::VecDeque,
-        sync::Mutex,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -756,6 +818,87 @@ mod tests {
                 output_tokens: 1,
             },
         }
+    }
+
+    struct DelayedBackend {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl DelayedBackend {
+        fn new() -> (
+            Self,
+            Arc<tokio::sync::Notify>,
+            Arc<tokio::sync::Notify>,
+            Arc<AtomicUsize>,
+        ) {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let requests = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    started: Arc::clone(&started),
+                    release: Arc::clone(&release),
+                    requests: Arc::clone(&requests),
+                },
+                started,
+                release,
+                requests,
+            )
+        }
+    }
+
+    impl Backend for DelayedBackend {
+        async fn complete(
+            &self,
+            _request: crate::llm::Request,
+            _on_token: impl FnMut(&str) + Send,
+        ) -> Result<Response> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(response(Content::Text("Welcome.".into())))
+        }
+    }
+
+    async fn blank_opening_game<B>(
+        backend: B,
+    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, MemberAgent)
+    where
+        B: Backend + Send + Sync + 'static,
+    {
+        let path = std::env::temp_dir().join(format!(
+            "cairnworld-opening-test-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("opening@example.test", "Opening")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let scheduler = InferenceScheduler::new(backend, Limits::default()).unwrap();
+        let game = Arc::new(Game::new(
+            store.clone(),
+            scheduler.foreground(),
+            Limits::default(),
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+        ));
+        (game, store, path, installed.member)
     }
 
     #[tokio::test]
@@ -865,25 +1008,6 @@ mod tests {
 
     #[tokio::test]
     async fn opening_turn_gives_the_template_a_user_event_before_tools() {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-opening-test-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.unwrap();
-        let owner = store
-            .find_or_create_user("opening@example.test", "Opening")
-            .await
-            .unwrap();
-        let scenario = Scenario::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
-        ))
-        .unwrap();
-        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
         let (backend, recorded_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "hp-1".into(),
@@ -894,19 +1018,9 @@ mod tests {
                 "Welcome. Let us make your Adventurer.".into(),
             )),
         ]);
-        let scheduler = InferenceScheduler::new(backend, Limits::default()).unwrap();
-        let game = Arc::new(Game::new(
-            store.clone(),
-            scheduler.foreground(),
-            Limits::default(),
-            "scripted".into(),
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-        ));
+        let (game, store, path, member) = blank_opening_game(backend).await;
 
-        let response = game.enter(installed.member.clone()).await.unwrap().unwrap();
+        let response = game.enter(member.clone()).await.unwrap().unwrap();
         assert!(
             matches!(response.content, Content::Text(text) if text == "Welcome. Let us make your Adventurer.")
         );
@@ -941,10 +1055,81 @@ mod tests {
         );
         drop(requests);
         assert!(
-            game.enter(installed.member).await.unwrap().is_none(),
+            game.enter(member).await.unwrap().is_none(),
             "reconnecting after the opening turn must not start a second character-creation conversation"
         );
         assert_eq!(recorded_requests.lock().unwrap().len(), 2);
+        drop(game);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_viewers_share_one_server_owned_opening() {
+        let (backend, started, release, requests) = DelayedBackend::new();
+        let (game, store, path, member) = blank_opening_game(backend).await;
+        let first_game = Arc::clone(&game);
+        let first_member = member.clone();
+        let first = tokio::spawn(async move { first_game.wait_for_opening(first_member).await });
+        started.notified().await;
+
+        let second_game = Arc::clone(&game);
+        let second_member = member.clone();
+        let second = tokio::spawn(async move { second_game.wait_for_opening(second_member).await });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "a second viewer must observe the existing opening, not invoke the model"
+        );
+
+        release.notify_waiters();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(
+            !store
+                .history_segments(member.agent_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the shared opening must finish with durable player-agent history"
+        );
+        drop(game);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_partial_opening_is_resumed_until_a_reply_is_durable() {
+        let (backend, requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "bad-1".into(),
+                name: "not_a_creation_tool".into(),
+                arguments: "{}".into(),
+            }])),
+            response(Content::Text(
+                "Welcome. Let us make your Adventurer.".into(),
+            )),
+        ]);
+        let (game, store, path, member) = blank_opening_game(backend).await;
+
+        assert!(
+            game.wait_for_opening(member.clone()).await.is_err(),
+            "a failed tool call must fail the opening rather than look complete"
+        );
+        assert!(store.player_chat(&member).await.unwrap().is_empty());
+        game.wait_for_opening(member.clone()).await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert!(
+            store
+                .player_chat(&member)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.role == Role::Assistant),
+            "a later opening must persist the reply that makes reconnects viewers only"
+        );
         drop(game);
         drop(store);
         std::fs::remove_file(path).unwrap();

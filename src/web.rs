@@ -678,21 +678,9 @@ where
     tracing::info!(
         world_id = member.world_id,
         user_id = member.user_id,
-        "starting player agent opening turn"
+        "waiting for server-owned player agent opening turn"
     );
-    match game
-        .enter(member)
-        .await
-        .context("opening player-agent conversation")?
-    {
-        Some(response) => match response.content {
-            Content::Text(_) => Ok(()),
-            Content::ToolCalls(_) => {
-                anyhow::bail!("player agent did not finish opening the conversation")
-            }
-        },
-        None => Ok(()),
-    }
+    game.wait_for_opening(member).await
 }
 
 async fn send_ready_broadcasts(
