@@ -121,59 +121,46 @@ impl Drop for ActiveAgent {
     }
 }
 
+/// All durable inputs for one agent completion. The callbacks that surface its
+/// live output remain invocation-local rather than becoming persisted state.
+pub struct Turn<'a> {
+    pub agent_id: i64,
+    pub static_messages: &'a [Message],
+    pub tools: &'a [Tool],
+    pub sampling: Sampling,
+    pub model: &'a str,
+}
+
 /// Resolve one chat turn, recording every model response and tool result in order.
-#[allow(clippy::too_many_arguments)]
 pub async fn complete<B: Backend>(
     store: &Store,
     backend: &B,
     budget: &Budget,
-    agent_id: i64,
-    static_messages: &[Message],
-    tools: &[Tool],
-    sampling: Sampling,
-    model: &str,
+    turn: Turn<'_>,
     on_token: impl FnMut(&str) + Send,
     on_activity: impl FnMut(String),
 ) -> Result<Response> {
     let call = CallContext::root(None);
-    complete_with_call_context(
-        store,
-        backend,
-        budget,
-        agent_id,
-        &call,
-        static_messages,
-        tools,
-        sampling,
-        model,
-        on_token,
-        on_activity,
-    )
-    .await
+    complete_with_call_context(store, backend, budget, turn, &call, on_token, on_activity).await
 }
 
 /// Resolve a turn while retaining its external sequence and, for a nested
 /// agent call, the inference that caused it.
-#[allow(clippy::too_many_arguments)]
 pub async fn complete_with_call_context<B: Backend>(
     store: &Store,
     backend: &B,
     budget: &Budget,
-    agent_id: i64,
+    turn: Turn<'_>,
     call: &CallContext,
-    static_messages: &[Message],
-    tools: &[Tool],
-    sampling: Sampling,
-    model: &str,
     mut on_token: impl FnMut(&str) + Send,
     mut on_activity: impl FnMut(String),
 ) -> Result<Response> {
-    let _active = call.enter(agent_id)?;
+    let _active = call.enter(turn.agent_id)?;
     backend
-        .before_agent(store, agent_id)
+        .before_agent(store, turn.agent_id)
         .await
         .context("waiting for earlier deferred work for this agent")?;
-    let definitions = tools::definitions(tools);
+    let definitions = tools::definitions(turn.tools);
     let mut chat_spent = 0;
     loop {
         budget
@@ -184,13 +171,13 @@ pub async fn complete_with_call_context<B: Backend>(
             store,
             backend,
             context::RecordedCompletion {
-                agent_id,
+                agent_id: turn.agent_id,
                 sequence_id: call.sequence_id,
                 parent_inference_id: call.parent_inference_id,
-                static_messages,
+                static_messages: turn.static_messages,
                 tools: &definitions,
-                sampling: sampling.clone(),
-                model,
+                sampling: turn.sampling.clone(),
+                model: turn.model,
             },
             &mut on_token,
         )
@@ -200,36 +187,39 @@ pub async fn complete_with_call_context<B: Backend>(
         let Content::ToolCalls(calls) = &response.content else {
             store
                 .append_reply_and_enqueue_compaction(
-                    agent_id,
+                    turn.agent_id,
                     &Message::assistant(response.content.clone(), response.reasoning.clone()),
                     response.usage.input_tokens,
                     budget.limits().compact_at_input_tokens,
-                    &sampling,
-                    model,
+                    &turn.sampling,
+                    turn.model,
                 )
                 .await
                 .context("storing final agent response and any due compaction")?;
             backend
-                .after_agent(store, agent_id)
+                .after_agent(store, turn.agent_id)
                 .await
                 .context("admitting any due deferred compaction")?;
             return Ok(response);
         };
         store
             .append_message(
-                agent_id,
+                turn.agent_id,
                 &Message::assistant(response.content.clone(), response.reasoning.clone()),
             )
             .await
             .context("storing agent response")?;
         for call in calls {
             on_activity(format!("tool call {}: {}", call.name, call.arguments));
-            let result = tools::execute(tools, call, completion.inference_id)
+            let result = tools::execute(turn.tools, call, completion.inference_id)
                 .await
                 .with_context(|| format!("running tool call {}", call.id))?;
             let activity = format!("tool result {}: {result}", call.id);
             store
-                .append_message(agent_id, &Message::tool_result(call.id.clone(), result))
+                .append_message(
+                    turn.agent_id,
+                    &Message::tool_result(call.id.clone(), result),
+                )
                 .await
                 .with_context(|| format!("storing result for tool call {}", call.id))?;
             on_activity(activity);
@@ -311,6 +301,19 @@ mod tests {
         (store, path, agent)
     }
 
+    fn scripted_turn<'a>(agent_id: i64, tools: &'a [Tool]) -> Turn<'a> {
+        Turn {
+            agent_id,
+            static_messages: &[],
+            tools,
+            sampling: Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+            model: "scripted",
+        }
+    }
+
     fn test_echo_arguments(text: &str) -> String {
         format!(r#"{{"text":"{text}"}}"#)
     }
@@ -350,14 +353,7 @@ mod tests {
             &store,
             &backend,
             &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::test_echo()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |event| activity.push(event),
         )
@@ -412,14 +408,7 @@ mod tests {
             &store,
             &backend,
             &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::test_echo()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -458,14 +447,7 @@ mod tests {
             &store,
             &backend,
             &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::test_echo()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -516,14 +498,7 @@ mod tests {
             &store,
             &backend,
             &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::test_echo()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -583,14 +558,7 @@ mod tests {
             &store,
             &backend,
             &mut budget,
-            agent_id,
-            &[],
-            &[tools::test_echo()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -635,14 +603,7 @@ mod tests {
             &store,
             &backend,
             &mut budget,
-            agent_id,
-            &[],
-            &[tools::test_echo()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )

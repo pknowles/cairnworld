@@ -19,29 +19,29 @@ const PROMPT: &str = "Summarize this earlier chat for its next model context. Re
 /// the configured context limit. No message is deleted; the new summary simply
 /// becomes the first selected history segment on the next turn.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub async fn after_turn<B: Backend>(
-    store: &Store,
-    backend: &B,
+struct CompletedTurn<'a> {
     agent_id: i64,
     after_message_id: i64,
     input_tokens: usize,
     sampling: Sampling,
-    model: &str,
+    model: &'a str,
     limits: Limits,
-) -> Result<()> {
-    if input_tokens < limits.compact_at_input_tokens {
+}
+
+#[cfg(test)]
+async fn after_turn<B: Backend>(store: &Store, backend: &B, turn: CompletedTurn<'_>) -> Result<()> {
+    if turn.input_tokens < turn.limits.compact_at_input_tokens {
         return Ok(());
     }
     let job = PendingCompaction {
-        agent_id,
-        after_message_id,
-        input_tokens,
-        sampling,
-        model: model.to_string(),
+        agent_id: turn.agent_id,
+        after_message_id: turn.after_message_id,
+        input_tokens: turn.input_tokens,
+        sampling: turn.sampling,
+        model: turn.model.to_string(),
     };
     store.enqueue_compaction_for_test(&job).await?;
-    run(store, backend, &job, limits).await
+    run(store, backend, &job, turn.limits).await
 }
 
 /// Resolve one persisted compaction obligation. Its summary and developer
@@ -213,15 +213,17 @@ mod tests {
         after_turn(
             &store,
             &backend,
-            agent,
-            3,
-            100,
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
+            CompletedTurn {
+                agent_id: agent,
+                after_message_id: 3,
+                input_tokens: 100,
+                sampling: Sampling {
+                    temperature: 0.0,
+                    enable_thinking: false,
+                },
+                model: "scripted",
+                limits,
             },
-            "scripted",
-            limits,
         )
         .await
         .unwrap();
@@ -287,20 +289,22 @@ mod tests {
         after_turn(
             &store,
             &backend,
-            agent,
-            3,
-            99,
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
-            Limits {
-                max_concurrent_inferences: 4,
-                max_inferences_per_chat: 8,
-                max_inferences_total: 64,
-                compact_at_input_tokens: 100,
-                keep_tail_messages: 2,
+            CompletedTurn {
+                agent_id: agent,
+                after_message_id: 3,
+                input_tokens: 99,
+                sampling: Sampling {
+                    temperature: 0.0,
+                    enable_thinking: false,
+                },
+                model: "scripted",
+                limits: Limits {
+                    max_concurrent_inferences: 4,
+                    max_inferences_per_chat: 8,
+                    max_inferences_total: 64,
+                    compact_at_input_tokens: 100,
+                    keep_tail_messages: 2,
+                },
             },
         )
         .await
@@ -324,20 +328,22 @@ mod tests {
         after_turn(
             &store,
             &backend,
-            agent,
-            3,
-            100,
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
-            Limits {
-                max_concurrent_inferences: 4,
-                max_inferences_per_chat: 8,
-                max_inferences_total: 64,
-                compact_at_input_tokens: 100,
-                keep_tail_messages: 3,
+            CompletedTurn {
+                agent_id: agent,
+                after_message_id: 3,
+                input_tokens: 100,
+                sampling: Sampling {
+                    temperature: 0.0,
+                    enable_thinking: false,
+                },
+                model: "scripted",
+                limits: Limits {
+                    max_concurrent_inferences: 4,
+                    max_inferences_per_chat: 8,
+                    max_inferences_total: 64,
+                    compact_at_input_tokens: 100,
+                    keep_tail_messages: 3,
+                },
             },
         )
         .await

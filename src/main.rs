@@ -391,14 +391,16 @@ async fn run_chat(
             &store,
             &backend,
             &budget,
-            agent,
-            &static_messages,
-            &tools,
-            Sampling {
-                temperature,
-                enable_thinking,
+            agent::Turn {
+                agent_id: agent,
+                static_messages: &static_messages,
+                tools: &tools,
+                sampling: Sampling {
+                    temperature,
+                    enable_thinking,
+                },
+                model: &model.path,
             },
-            &model.path,
             |token| {
                 print!("{token}");
                 let _ = std::io::stdout().flush();

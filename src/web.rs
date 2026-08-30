@@ -40,7 +40,6 @@ const USER_ID: &str = "user_id";
 const OAUTH_STATE: &str = "oauth_state";
 const OAUTH_NONCE: &str = "oauth_nonce";
 const OAUTH_VERIFIER: &str = "oauth_verifier";
-
 type GoogleClient = CoreClient<
     EndpointSet,
     EndpointNotSet,
@@ -730,7 +729,16 @@ fn Page(title: &'static str, hydrate: bool, children: Children) -> impl IntoView
                 <link rel="stylesheet" href="/pkg/cairnworld.css"/>
                 {move || hydration.clone().map(|options| view! { <HydrationScripts options islands=true/> })}
             </head>
-            <body>{children()}</body>
+            <body>
+                {move || hydrate.then(|| view! {
+                    <noscript>
+                        <p class="alert alert-error m-4">
+                            "Cairnworld's live chat requires JavaScript. Enable it and reload this page."
+                        </p>
+                    </noscript>
+                })}
+                {children()}
+            </body>
         </html>
     }
 }
@@ -944,6 +952,12 @@ mod tests {
         let html = render_page("Cairnworld", true, view! { <GameLoadingPage/> });
         assert!(html.contains("/pkg/cairnworld.wasm"));
         assert!(!html.contains("/pkg/cairnworld_bg.wasm"));
+    }
+
+    #[test]
+    fn hydrated_page_explains_when_the_live_chat_cannot_start_without_javascript() {
+        let html = render_page("Cairnworld", true, view! { <GameLoadingPage/> });
+        assert!(html.contains("Cairnworld's live chat requires JavaScript"));
     }
 
     #[test]

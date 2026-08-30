@@ -156,7 +156,8 @@ when things were built.
   developer inspection panels without inventing one early. `npm run
   build:frontend` runs the WASM package build followed by the stylesheet build,
   ensuring cargo-leptos's default blank CSS output cannot overwrite
-  `/pkg/cairnworld.css`.
+  `/pkg/cairnworld.css`. Hydrated pages explain that live chat requires
+  JavaScript when it is disabled.
 - `Cargo.toml` - separates server (`ssr`) dependencies from the WASM
   `hydrate` target. `cargo-leptos build` builds both targets and emits the
   package consumed by the game-page hydration script.
