@@ -112,12 +112,15 @@ than storing a copy of them.
 
 One loaded mistral.rs model accepts concurrent requests and schedules their
 sequences itself. Cairnworld controls admission policy, not model execution:
-`limits.max_concurrent_inferences` defaults to 4. Foreground player and agent
-requests take priority; deferred work such as compaction uses capacity not
-needed by them. A completed reply is delivered before its deferred work runs.
-When the cap is full, lower-priority work waits rather than increasing player
-latency. This remains a policy setting, so measurement can tune it for the
-available GPU without duplicating the backend scheduler.
+`limits.max_concurrent_inferences` defaults to 4. The existing
+`compact_at_input_tokens` policy remains the input threshold. The paged KV
+cache reserves that threshold plus the fixed `max_completion_tokens` output
+reservation for every admitted sequence at model load. Foreground player and
+agent requests take priority; deferred work such as compaction uses capacity
+not needed by them. A completed reply is delivered before its deferred work
+runs. When the cap is full, lower-priority work waits rather than increasing
+player latency. This remains a policy setting, so measurement can tune it for
+the available GPU without duplicating the backend scheduler.
 
 Deferred work is persisted before it is admitted. Restarting loads unfinished
 jobs again, so a completed reply cannot lose its required compaction merely
@@ -422,8 +425,10 @@ spine means no extra bookkeeping exists only for debugging.
 
 # Chat compaction
 
-Config: `compact_at_input_tokens` (reported completed-inference input trigger) and
-`keep_tail_messages` (exact newest raw rows preserved after the summary). When
+Config: `compact_at_input_tokens` (reported completed-inference input trigger),
+`max_completion_tokens` (the fixed reply reservation), and `keep_tail_messages`
+(exact newest raw rows preserved after the summary). The fixed per-inference
+context is derived as `compact_at_input_tokens + max_completion_tokens`. When
 an agent's assembled context
 exceeds the trigger:
 

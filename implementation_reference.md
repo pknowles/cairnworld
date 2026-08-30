@@ -104,9 +104,17 @@ when things were built.
   feature only) layering `default.toml` (checked in) under `local.toml`
   (gitignored, per-machine overrides). Holds the `[models.<name>]` entries
   described above, `model` naming the default among them, and `limits`,
-  including `max_concurrent_inferences`, `compact_at_input_tokens`, and
-  `keep_tail_messages`.
+  including `max_concurrent_inferences`, `compact_at_input_tokens`,
+  `max_completion_tokens`, and `keep_tail_messages`. The context capacity
+  is derived from the compaction trigger plus completion reservation, creating
+  the fixed paged KV-cache reservation. Model startup logs the configured token
+  pool, CUDA memory before and after allocation, and their allocation delta;
+  every inference logs its token capacity and actual
+  input/output token use for the developer inference view.
 - Weights are not checked in; `models/` is gitignored.
+- Cargo's development profile keeps Cairnworld debuggable while compiling its
+  dependencies optimized without debug information. This keeps unchanged local
+  runs fast and avoids duplicating dependency symbols in every test binary.
 
 ## Web play (design.md: Web server and UI; Auth)
 

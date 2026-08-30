@@ -280,13 +280,12 @@ async fn backend(
 ) -> Result<MistralRsBackend> {
     let path = model.path.clone();
     let chat_template = model.chat_template.clone();
-    let max_concurrent_inferences = limits.max_concurrent_inferences;
     tracing::info!(model = %path, "loading model");
     tokio::task::spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(MistralRsBackend::load(
             &path,
             chat_template.as_deref(),
-            max_concurrent_inferences,
+            limits,
             allow_cpu,
         ))
     })

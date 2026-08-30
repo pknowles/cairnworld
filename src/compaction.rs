@@ -208,6 +208,7 @@ mod tests {
             max_inferences_per_chat: 8,
             max_inferences_total: 64,
             compact_at_input_tokens: 100,
+            max_completion_tokens: 10,
             keep_tail_messages: 2,
         };
         after_turn(
@@ -303,6 +304,7 @@ mod tests {
                     max_inferences_per_chat: 8,
                     max_inferences_total: 64,
                     compact_at_input_tokens: 100,
+                    max_completion_tokens: 10,
                     keep_tail_messages: 2,
                 },
             },
@@ -342,6 +344,7 @@ mod tests {
                     max_inferences_per_chat: 8,
                     max_inferences_total: 64,
                     compact_at_input_tokens: 100,
+                    max_completion_tokens: 10,
                     keep_tail_messages: 3,
                 },
             },

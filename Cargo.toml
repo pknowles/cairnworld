@@ -47,3 +47,11 @@ bin-features = ["ssr"]
 lib-features = ["hydrate"]
 site-root = "target/site"
 site-pkg-dir = "pkg"
+
+# Keep Cairnworld's own source debuggable while compiling the inference stack
+# at production speed. Dependencies otherwise inherit Cargo's slow, full-debug
+# development profile; their symbols account for most of target/ without
+# improving Cairnworld's error reports.
+[profile.dev.package."*"]
+opt-level = 3
+debug = 0

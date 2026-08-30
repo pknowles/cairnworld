@@ -1182,7 +1182,7 @@ mod tests {
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
-            settings.limits.max_concurrent_inferences,
+            settings.limits,
             false,
         )
         .await

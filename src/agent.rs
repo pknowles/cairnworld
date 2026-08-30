@@ -540,6 +540,7 @@ mod tests {
             max_inferences_per_chat: 3,
             max_inferences_total: 64,
             compact_at_input_tokens: 32_768,
+            max_completion_tokens: 1_024,
             keep_tail_messages: 32,
         };
         let repeat = || {
@@ -586,6 +587,7 @@ mod tests {
             max_inferences_per_chat: 100,
             max_inferences_total: 2,
             compact_at_input_tokens: 32_768,
+            max_completion_tokens: 1_024,
             keep_tail_messages: 32,
         });
         let repeat = || {

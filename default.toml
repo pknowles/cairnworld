@@ -41,8 +41,13 @@ max_inferences_per_chat = 8
 # Inferences one player action may run across every agent it reaches,
 # including recursive agent-to-agent calls.
 max_inferences_total = 64
-# A completed inference's reported input triggers compaction at this size.
+# A completed inference's reported input triggers compaction at this size. The
+# paged KV cache reserves this plus max_completion_tokens for every admitted
+# inference, so this existing context policy directly sets VRAM use.
 compact_at_input_tokens = 16000
+# Maximum tokens emitted by one inference, including tool calls. It is a fixed
+# reservation in addition to compact_at_input_tokens, not an unbounded VRAM use.
+max_completion_tokens = 1024
 # Recent raw history is retained exactly; older history becomes a summary.
 keep_tail_messages = 32
 

@@ -11,10 +11,7 @@ const island = packageSource.match(/export function (PlayerChat_\d+)/)?.[1];
 if (!island) throw new Error("generated package does not export the PlayerChat island");
 
 const page = `<!doctype html>
-<leptos-island data-component="${island}" data-props='{"world_id":1,"history":[]}'>
-  <ol id="chat" aria-live="polite"></ol>
-  <form id="message"><input name="text" autocomplete="off" disabled><button type="submit" disabled>Send</button></form>
-</leptos-island>
+<leptos-island data-component="${island}" data-props='{"world_id":1,"history":[]}'><ol id="chat" aria-live="polite"></ol><form id="message"><input name="text" autocomplete="off" disabled><button type="submit" disabled>Send</button></form></leptos-island>
 <script type="module">
   const app = await import("/pkg/cairnworld.js");
   await app.default({module_or_path: "/pkg/cairnworld.wasm"});
@@ -53,6 +50,8 @@ const server = createServer((request, response) => {
   response.end("not found");
 });
 
+let socketError;
+
 server.on("upgrade", (request, socket) => {
   if (request.url !== "/world/1/ws" || !request.headers["sec-websocket-key"]) {
     socket.destroy();
@@ -68,6 +67,9 @@ server.on("upgrade", (request, socket) => {
   ].join("\r\n"));
   socket.write(websocketText('{"type":"history","entries":[{"role":"assistant","text":"The kettle whistles."}]}'));
   socket.write(websocketText('{"type":"can_act","value":true}'));
+  socket.on("error", (error) => {
+    if (error.code !== "ECONNRESET") socketError = error;
+  });
 });
 
 async function checkPlayerChat() {
@@ -81,6 +83,7 @@ async function checkPlayerChat() {
         "--headless",
         "--no-sandbox",
         "--disable-gpu",
+        "--enable-logging=stderr",
         "--virtual-time-budget=1000",
         `--user-data-dir=${profile}`,
         "--dump-dom",
@@ -96,6 +99,7 @@ async function checkPlayerChat() {
       browser.on("error", reject);
       browser.on("close", resolve);
     });
+    if (socketError) throw socketError;
     const input = stdout.match(/<input[^>]*name="text"[^>]*>/)?.[0];
     if (status !== 0 || !input || input.includes("disabled") || !stdout.includes("The kettle whistles.")) {
       throw new Error(

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 #[derive(Deserialize, Default)]
@@ -67,6 +67,7 @@ impl Settings {
 /// hitting one is a hard error that propagates to the user - never something
 /// an agent can see and react to.
 #[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     /// Maximum requests admitted to the loaded model at once.
     pub max_concurrent_inferences: usize,
@@ -77,6 +78,9 @@ pub struct Limits {
     pub max_inferences_total: u32,
     /// Compact after a completed inference reports this many input tokens.
     pub compact_at_input_tokens: usize,
+    /// Token capacity reserved after compaction's input trigger for one
+    /// completion. Together they define the fixed per-inference context.
+    pub max_completion_tokens: usize,
     /// Exact number of newest raw messages retained after a summary.
     pub keep_tail_messages: usize,
 }
@@ -88,8 +92,61 @@ impl Default for Limits {
             max_inferences_per_chat: 8,
             max_inferences_total: 64,
             compact_at_input_tokens: 16_000,
+            max_completion_tokens: 1_024,
             keep_tail_messages: 32,
         }
+    }
+}
+
+impl Limits {
+    /// Validate the one runtime policy before a model is loaded. A paged cache
+    /// is shared by every admitted sequence, so its capacity is the per-turn
+    /// context multiplied by the concurrency cap.
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            self.max_concurrent_inferences > 0,
+            "limits.max_concurrent_inferences must be greater than zero"
+        );
+        ensure!(
+            self.max_inferences_per_chat > 0,
+            "limits.max_inferences_per_chat must be greater than zero"
+        );
+        ensure!(
+            self.max_inferences_total > 0,
+            "limits.max_inferences_total must be greater than zero"
+        );
+        ensure!(
+            self.compact_at_input_tokens > 0,
+            "limits.compact_at_input_tokens must be greater than zero"
+        );
+        ensure!(
+            self.max_completion_tokens > 0,
+            "limits.max_completion_tokens must be greater than zero"
+        );
+        ensure!(
+            self.keep_tail_messages > 0,
+            "limits.keep_tail_messages must be greater than zero"
+        );
+        self.cache_context_tokens()?;
+        Ok(())
+    }
+
+    /// Fixed complete context capacity implied by the existing compaction
+    /// policy and the bounded completion reservation.
+    pub fn context_tokens(self) -> Result<usize> {
+        self.compact_at_input_tokens
+            .checked_add(self.max_completion_tokens)
+            .context("limits.compact_at_input_tokens plus limits.max_completion_tokens overflowed")
+    }
+
+    /// Total token pool required by paged attention for every simultaneously
+    /// admitted inference to use its complete configured context.
+    pub fn cache_context_tokens(self) -> Result<usize> {
+        self.context_tokens()?
+            .checked_mul(self.max_concurrent_inferences)
+            .context(
+                "derived per-inference context multiplied by limits.max_concurrent_inferences overflowed",
+            )
     }
 }
 
@@ -102,5 +159,40 @@ impl Settings {
             .context("loading default.toml and local.toml")?
             .try_deserialize()
             .context("parsing configuration")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Limits;
+
+    #[test]
+    fn compaction_policy_reserves_each_admitted_inference() {
+        let limits = Limits {
+            max_concurrent_inferences: 3,
+            max_inferences_per_chat: 1,
+            max_inferences_total: 1,
+            compact_at_input_tokens: 800,
+            max_completion_tokens: 200,
+            keep_tail_messages: 1,
+        };
+
+        limits.validate().unwrap();
+        assert_eq!(limits.context_tokens().unwrap(), 1_000);
+        assert_eq!(limits.cache_context_tokens().unwrap(), 3_000);
+    }
+
+    #[test]
+    fn compaction_policy_rejects_context_capacity_overflow() {
+        let limits = Limits {
+            max_concurrent_inferences: 1,
+            max_inferences_per_chat: 1,
+            max_inferences_total: 1,
+            compact_at_input_tokens: usize::MAX,
+            max_completion_tokens: 1,
+            keep_tail_messages: 1,
+        };
+
+        assert!(limits.validate().is_err());
     }
 }

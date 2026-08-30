@@ -3,17 +3,20 @@ use std::{collections::BTreeMap, path::Path, time::Instant};
 use anyhow::{Context, Result, ensure};
 use mistralrs::{
     CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, DeviceLayerMapMetadata,
-    DeviceMapMetadata, DeviceMapSetting, Function, GgufModelBuilder, Model, RequestBuilder,
-    Response as MrResponse, SamplingParams, TextMessageRole, Tool, ToolCallResponse, ToolCallType,
-    ToolType,
+    DeviceMapMetadata, DeviceMapSetting, Function, GgufModelBuilder, MemoryGpuConfig, Model,
+    PagedAttentionMetaBuilder, RequestBuilder, Response as MrResponse, SamplingParams,
+    TextMessageRole, Tool, ToolCallResponse, ToolCallType, ToolType, best_device,
 };
 
 use crate::llm::{
     Backend, Content, MessageContent, Request, Response, Role, ToolCall, ToolDefinition, Usage,
 };
+use crate::settings::Limits;
 
 pub struct MistralRsBackend {
     model: Model,
+    context_tokens: usize,
+    max_completion_tokens: usize,
 }
 
 impl MistralRsBackend {
@@ -24,25 +27,41 @@ impl MistralRsBackend {
     pub async fn load(
         model_id_or_path: &str,
         chat_template: Option<&Path>,
-        max_concurrent_inferences: usize,
+        limits: Limits,
         allow_cpu: bool,
     ) -> Result<Self> {
         let started = Instant::now();
+        limits.validate()?;
+        let context_tokens = limits.context_tokens()?;
+        let cache_context_tokens = limits.cache_context_tokens()?;
         tracing::info!(
             model = model_id_or_path,
             chat_template = chat_template.map(|path| path.display().to_string()),
-            max_concurrent_inferences,
+            max_concurrent_inferences = limits.max_concurrent_inferences,
+            context_tokens_per_inference = context_tokens,
+            max_completion_tokens = limits.max_completion_tokens,
+            cache_context_tokens,
             "starting game model load"
         );
         let (dir, file) = model_id_or_path.rsplit_once('/').context(
             "--model must be a path or repo id containing a GGUF filename, e.g. dir/model.gguf",
         )?;
+        let gpu_used_before_mib = if allow_cpu {
+            0
+        } else {
+            log_gpu_memory("before model load")?
+        };
         ensure!(
-            max_concurrent_inferences > 0,
-            "limits.max_concurrent_inferences must be greater than zero"
+            mistralrs::paged_attn_supported(),
+            "this mistral.rs build does not support PagedAttention, which Cairnworld requires for fixed VRAM allocation"
         );
-        let mut builder =
-            GgufModelBuilder::new(dir, vec![file]).with_max_num_seqs(max_concurrent_inferences);
+        let paged_attention = PagedAttentionMetaBuilder::default()
+            .with_gpu_memory(MemoryGpuConfig::ContextSize(cache_context_tokens))
+            .build()
+            .context("configuring fixed paged KV-cache capacity")?;
+        let mut builder = GgufModelBuilder::new(dir, vec![file])
+            .with_max_num_seqs(limits.max_concurrent_inferences)
+            .with_paged_attn(paged_attention);
         if !allow_cpu {
             builder = builder.with_device_mapping(DeviceMapSetting::Map(
                 DeviceMapMetadata::from_num_device_layers(vec![DeviceLayerMapMetadata {
@@ -79,16 +98,48 @@ impl MistralRsBackend {
                     )
                 }
             })?;
+        if !allow_cpu {
+            let gpu_used_after_mib = log_gpu_memory("after model load")?;
+            tracing::info!(
+                allocated_mib = gpu_used_after_mib.saturating_sub(gpu_used_before_mib),
+                "fixed model and KV-cache GPU allocation"
+            );
+        }
         tracing::info!(
             model = model_id_or_path,
             elapsed = ?started.elapsed(),
             "game model load completed"
         );
-        Ok(Self { model })
+        Ok(Self {
+            model,
+            context_tokens,
+            max_completion_tokens: limits.max_completion_tokens,
+        })
     }
 }
 
-fn request_builder(request: Request) -> Result<RequestBuilder> {
+fn log_gpu_memory(phase: &str) -> Result<usize> {
+    let device = best_device(false).context("selecting CUDA device for model telemetry")?;
+    let memory = mistralrs::core::MemoryUsage
+        .query(&device)
+        .context("querying CUDA memory for model telemetry")?;
+    let total_mib = memory.total() / (1024 * 1024);
+    let available_mib = memory.available() / (1024 * 1024);
+    anyhow::ensure!(
+        !matches!(device, mistralrs::Device::Cpu),
+        "CUDA is unavailable; the model must fit entirely in GPU memory (use --allow-cpu only for explicit CPU/GPU execution)"
+    );
+    tracing::info!(
+        phase,
+        total_mib,
+        available_mib,
+        used_mib = total_mib.saturating_sub(available_mib),
+        "CUDA memory telemetry"
+    );
+    Ok(total_mib.saturating_sub(available_mib))
+}
+
+fn request_builder(request: Request, max_completion_tokens: usize) -> Result<RequestBuilder> {
     let mut request_builder = RequestBuilder::new();
     for message in request.messages {
         match message.content {
@@ -117,6 +168,7 @@ fn request_builder(request: Request) -> Result<RequestBuilder> {
     Ok(request_builder
         .set_sampling(SamplingParams::neutral())
         .set_sampler_temperature(request.sampling.temperature as f64)
+        .set_sampler_max_len(max_completion_tokens)
         .set_tools(
             request
                 .tools
@@ -138,11 +190,13 @@ impl Backend for MistralRsBackend {
         tracing::info!(
             messages = request.messages.len(),
             tools = request.tools.len(),
+            context_tokens = self.context_tokens,
+            max_completion_tokens = self.max_completion_tokens,
             temperature = request.sampling.temperature,
             thinking = request.sampling.enable_thinking,
             "starting model inference"
         );
-        let request_builder = request_builder(request)?;
+        let request_builder = request_builder(request, self.max_completion_tokens)?;
 
         let mut stream = self
             .model
@@ -368,9 +422,14 @@ mod tests {
         let model = settings
             .model(None)
             .expect("configure a model in local.toml or default.toml to run this test");
-        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4, false)
-            .await
-            .expect("model should load");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .expect("model should load");
 
         let request = Request {
             messages: vec![Message::text(
@@ -406,9 +465,14 @@ mod tests {
         let model = settings
             .model(None)
             .expect("configure a model in local.toml or default.toml to run this test");
-        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4, false)
-            .await
-            .expect("model should load");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .expect("model should load");
         let request = Request {
             messages: vec![
                 Message::text(Role::System, "You are the player's guide."),
