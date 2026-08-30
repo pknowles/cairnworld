@@ -309,9 +309,9 @@ where
 
     /// The player agent starts the character-creation conversation when the
     /// browser opens a new Adventurer, before the player needs a special
-    /// command. Rolling is not yet an available action: the agent first asks
-    /// the player when they are ready, then the next player event exposes the
-    /// creation tools.
+    /// command. Its complete creation interface is visible from the start;
+    /// the agent uses the conversation to wait for the player's choice to
+    /// roll.
     async fn resolve_enter(self: &Arc<Self>, member: MemberAgent) -> Result<Option<Response>> {
         let ready = self
             .store
@@ -330,15 +330,15 @@ where
             .await?;
         let budget = Budget::new(self.limits);
         let call = CallContext::root(Some(sequence.id));
-        let tools = [];
+        let tools = self.creation_tools(member.clone(), sequence.id);
         let prompt = self.player_prompt(&member, false).await?;
         // This is the game event that starts the agent's first turn. It is
         // deliberately static context, not a player-visible or durable chat
         // message: the agent must speak first, while tool-capable templates
-        // still require a user turn before their tool declarations.
+        // require a user message before their declarations.
         let entered = Message::text(
             Role::User,
-            "The player has entered the world. Begin character creation by speaking directly to them.",
+            "The player has entered the world and has not chosen to roll yet. Speak directly to them.",
         );
         let response = agent::complete_with_call_context(
             &self.store,
@@ -386,7 +386,7 @@ where
                 "Guide the player through the current scene. Use a declared action tool when the player asks their character to look or speak. The following is the current player-visible scene, derived from the world state; do not invent items, people, or facts outside it:\n{scene}"
             )
         } else {
-            "Speak first and guide the player through their Adventurer's Cairn character creation. The roll tools make the real, durable results; use them when the player is ready to roll. Once Hit Protection and attributes are rolled, call ready_to_begin when the player has finished creation.".to_string()
+            "Speak first and guide the player through their Adventurer's Cairn character creation. The roll tools make the real, durable results. Wait for the player to choose to roll before using them. Once Hit Protection and attributes are rolled, call ready_to_begin when the player has finished creation.".to_string()
         };
         Ok(Message::text(Role::System, text))
     }
@@ -1039,7 +1039,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_turn_speaks_before_creation_tools_are_available() {
+    async fn opening_turn_speaks_with_the_complete_creation_interface() {
         let (backend, recorded_requests) = ScriptedBackend::recording([response(Content::Text(
             "Welcome. Let us make your Adventurer.".into(),
         ))]);
@@ -1064,7 +1064,15 @@ mod tests {
                 },
             ]
         ));
-        assert!(requests[0].tools.is_empty());
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["roll_hit_protection", "roll_attributes", "ready_to_begin"],
+            "the agent must see its real creation interface while deciding whether to roll"
+        );
         drop(requests);
         assert!(
             game.enter(member).await.unwrap().is_none(),
@@ -1186,11 +1194,34 @@ mod tests {
         game.wait_for_opening(member.clone())
             .await
             .expect("the real opening must complete");
-        assert!(
+        assert_eq!(
             store
-                .player_chat(&member)
+                .inference_count()
                 .await
-                .expect("opening history should load")
+                .expect("opening inference count should load"),
+            1,
+            "the real opening must wait for the player instead of calling a creation tool"
+        );
+        let opening = store
+            .reconstruct_inference(1)
+            .await
+            .expect("opening inference should reconstruct");
+        assert_eq!(
+            opening
+                .request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["roll_hit_protection", "roll_attributes", "ready_to_begin"],
+            "the real opening must present the model's complete creation interface"
+        );
+        let player_chat = store
+            .player_chat(&member)
+            .await
+            .expect("opening history should load");
+        assert!(
+            player_chat
                 .iter()
                 .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
             "the completed opening must leave a player-visible assistant reply"
