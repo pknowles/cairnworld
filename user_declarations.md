@@ -1131,6 +1131,19 @@ some fixed concurrency may be a good idea to improve latency and maybe even
 memory access patterns. If we can use mistral.rs directly to do this that'd be
 even better - less code for us to maintain and we get a feature for free.
 
+## Memory Usage
+
+LLMs are big and VRAM intensive. Much like any video game, we should not do any
+dynamic allocation so that once launched successfully we can be confident the
+server won't crash due to OOM. It would be nice if we could have our
+conversation compaction limit guide this initial allocation as I expect our
+chosen input and output size for the model will contribute significantly to
+memory requirements. I'd like to see the amounts allocated. This should be
+printed during initial allocation. It would be interesting to see the
+conversation's memory usage breakdown in the developer's inference view too.
+I.e. to guide balancing allocations, context, system/tool prompts, conversation
+history size, output size limit etc.
+
 # TODO
 
 How will experience and character growth happen?

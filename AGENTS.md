@@ -43,6 +43,9 @@ before making a commit. This is a hard gate and MUST be followed:
 3. Prompt/context/model-facing changes have been exercised through the real chat
    path, including presenting edge case chats and evaluating related use-cases
 4. Self-review performed:
+   - Did you "fix" any guesses? I.e. did you make changes without verifying the
+     fix was the one required and that it actually fixed the issue? If you did,
+     it's likely the "fix" needs reverting as it was made on false assumptions.
    - Did you do everything agreed upon?
    - Anything missed or shortcuts taken?
    - Did you follow the rules here and in coding_standards.md and

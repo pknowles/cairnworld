@@ -72,6 +72,11 @@ it can be useful to add the rationale from there to the comments. Then the plan
 is no longer needed after implementing since the code has both intent and
 implementation.
 
+## Rust
+
+Never use 'unsafe', warnings must be errors. Using 'allow(...)' and relaxing
+settings in toml is strictly forbidden.
+
 # Testing
 
 ## Philosophy
