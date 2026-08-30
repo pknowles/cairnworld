@@ -4,60 +4,44 @@ use anyhow::{Context, Result};
 
 use crate::{
     llm::{Backend, Message, MessageContent, Response, Sampling, ToolDefinition},
-    store::{InferenceOutcome, Segment, Store},
+    store::{InferenceOutcome, InferenceRecord, Segment, Store},
 };
 
-#[cfg(test)]
+/// Everything required to record one agent inference from its visible context.
+pub struct RecordedCompletion<'a> {
+    pub agent_id: i64,
+    pub sequence_id: Option<i64>,
+    pub parent_inference_id: Option<i64>,
+    pub static_messages: &'a [Message],
+    pub tools: &'a [ToolDefinition],
+    pub sampling: Sampling,
+    pub model: &'a str,
+}
+
 pub async fn complete_recorded<B: Backend>(
     store: &Store,
     backend: &B,
-    agent_id: i64,
-    static_messages: &[Message],
-    tools: &[ToolDefinition],
-    sampling: Sampling,
-    model: &str,
+    completion: RecordedCompletion<'_>,
     on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
-    complete_recorded_with_call_context(
+    let segments = segments(
         store,
-        backend,
-        agent_id,
-        None,
-        None,
-        static_messages,
-        tools,
-        sampling,
-        model,
-        on_token,
+        completion.agent_id,
+        completion.static_messages,
+        completion.tools,
     )
-    .await
-}
-
-/// As [`complete_recorded`], while attaching an inference to its external
-/// event and (for an agent-to-agent call) the inference that requested it.
-#[allow(clippy::too_many_arguments)]
-pub async fn complete_recorded_with_call_context<B: Backend>(
-    store: &Store,
-    backend: &B,
-    agent_id: i64,
-    sequence_id: Option<i64>,
-    parent_inference_id: Option<i64>,
-    static_messages: &[Message],
-    tools: &[ToolDefinition],
-    sampling: Sampling,
-    model: &str,
-    on_token: impl FnMut(&str) + Send,
-) -> Result<Completion> {
-    let segments = segments(store, agent_id, static_messages, tools).await?;
-    complete_recipe_with_call_context(
+    .await?;
+    complete_recipe(
         store,
         backend,
-        agent_id,
-        sequence_id,
-        parent_inference_id,
-        &segments,
-        sampling,
-        model,
+        RecipeCompletion {
+            agent_id: completion.agent_id,
+            sequence_id: completion.sequence_id,
+            parent_inference_id: completion.parent_inference_id,
+            segments: &segments,
+            sampling: completion.sampling,
+            model: completion.model,
+        },
         on_token,
     )
     .await
@@ -107,52 +91,45 @@ pub struct Completion {
     pub inference_id: i64,
 }
 
+/// Everything required to record one inference from already assembled segments.
+pub struct RecipeCompletion<'a> {
+    pub agent_id: i64,
+    pub sequence_id: Option<i64>,
+    pub parent_inference_id: Option<i64>,
+    pub segments: &'a [Segment],
+    pub sampling: Sampling,
+    pub model: &'a str,
+}
+
 pub async fn complete_recipe<B: Backend>(
     store: &Store,
     backend: &B,
-    agent_id: i64,
-    segments: &[Segment],
-    sampling: Sampling,
-    model: &str,
-    on_token: impl FnMut(&str) + Send,
-) -> Result<Completion> {
-    complete_recipe_with_call_context(
-        store, backend, agent_id, None, None, segments, sampling, model, on_token,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn complete_recipe_with_call_context<B: Backend>(
-    store: &Store,
-    backend: &B,
-    agent_id: i64,
-    sequence_id: Option<i64>,
-    parent_inference_id: Option<i64>,
-    segments: &[Segment],
-    sampling: Sampling,
-    model: &str,
+    completion: RecipeCompletion<'_>,
     on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
     let request = store
-        .request_for_segments(agent_id, segments, sampling)
+        .request_for_segments(
+            completion.agent_id,
+            completion.segments,
+            completion.sampling,
+        )
         .await
         .context("assembling inference request")?;
     let started_at = Instant::now();
     match backend.complete(request.clone(), on_token).await {
         Ok(response) => {
             let inference_id = store
-                .record_inference_with_call_context(
-                    agent_id,
-                    sequence_id,
-                    parent_inference_id,
-                    segments,
-                    &request,
-                    InferenceOutcome::Response(response.clone()),
-                    model,
-                    u64::try_from(started_at.elapsed().as_millis())
+                .record(InferenceRecord {
+                    agent_id: completion.agent_id,
+                    sequence_id: completion.sequence_id,
+                    parent_inference_id: completion.parent_inference_id,
+                    segments: completion.segments,
+                    request: &request,
+                    outcome: InferenceOutcome::Response(response.clone()),
+                    model: completion.model,
+                    duration_ms: u64::try_from(started_at.elapsed().as_millis())
                         .context("inference duration exceeds supported range")?,
-                )
+                })
                 .await
                 .context("recording completed inference")?;
             Ok(Completion {
@@ -162,17 +139,17 @@ pub async fn complete_recipe_with_call_context<B: Backend>(
         }
         Err(error) => {
             store
-                .record_inference_with_call_context(
-                    agent_id,
-                    sequence_id,
-                    parent_inference_id,
-                    segments,
-                    &request,
-                    InferenceOutcome::Error(format!("{error:#}")),
-                    model,
-                    u64::try_from(started_at.elapsed().as_millis())
+                .record(InferenceRecord {
+                    agent_id: completion.agent_id,
+                    sequence_id: completion.sequence_id,
+                    parent_inference_id: completion.parent_inference_id,
+                    segments: completion.segments,
+                    request: &request,
+                    outcome: InferenceOutcome::Error(format!("{error:#}")),
+                    model: completion.model,
+                    duration_ms: u64::try_from(started_at.elapsed().as_millis())
                         .context("inference duration exceeds supported range")?,
-                )
+                })
                 .await
                 .with_context(|| format!("recording failed inference: {error:#}"))?;
             Err(error).context("running inference")
@@ -246,14 +223,18 @@ mod tests {
         let response = complete_recorded(
             &store,
             &StreamingBackend,
-            agent,
-            &[Message::text(Role::System, "Be concise.")],
-            &[],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
+            RecordedCompletion {
+                agent_id: agent,
+                sequence_id: None,
+                parent_inference_id: None,
+                static_messages: &[Message::text(Role::System, "Be concise.")],
+                tools: &[],
+                sampling: Sampling {
+                    temperature: 0.0,
+                    enable_thinking: false,
+                },
+                model: "streaming-model",
             },
-            "streaming-model",
             |token| streamed.push_str(token),
         )
         .await
@@ -284,14 +265,18 @@ mod tests {
         let error = complete_recorded(
             &store,
             &FailingBackend,
-            agent,
-            &[],
-            &[],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
+            RecordedCompletion {
+                agent_id: agent,
+                sequence_id: None,
+                parent_inference_id: None,
+                static_messages: &[],
+                tools: &[],
+                sampling: Sampling {
+                    temperature: 0.0,
+                    enable_thinking: false,
+                },
+                model: "failing-model",
             },
-            "failing-model",
             |_| {},
         )
         .await

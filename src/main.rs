@@ -81,6 +81,9 @@ enum Command {
         /// Chat template overriding both the GGUF's and the configured one.
         #[arg(long)]
         chat_template: Option<PathBuf>,
+        /// Permit a model that does not fit entirely in GPU memory.
+        #[arg(long)]
+        allow_cpu: bool,
     },
     /// Re-run one recorded inference after validating its reconstructed input.
     Replay {
@@ -93,6 +96,9 @@ enum Command {
         /// Chat template overriding the one in the GGUF.
         #[arg(long)]
         chat_template: Option<PathBuf>,
+        /// Permit a model that does not fit entirely in GPU memory.
+        #[arg(long)]
+        allow_cpu: bool,
         /// Inference record ID to reconstruct and re-run.
         inference_id: i64,
     },
@@ -101,6 +107,12 @@ enum Command {
         /// SQLite database holding game and session data.
         #[arg(long, default_value = "cairnworld.sqlite")]
         database: String,
+        /// Configured model name or GGUF path. Falls back to `model` in settings.
+        #[arg(long)]
+        model: Option<String>,
+        /// Permit a model that does not fit entirely in GPU memory.
+        #[arg(long)]
+        allow_cpu: bool,
     },
 }
 
@@ -131,6 +143,7 @@ async fn main() -> Result<()> {
             system,
             database,
             chat_template,
+            allow_cpu,
         } => {
             let settings = Settings::load()?;
             run_chat(
@@ -140,6 +153,7 @@ async fn main() -> Result<()> {
                 system,
                 Path::new(&database),
                 settings.limits,
+                allow_cpu,
             )
             .await
         }
@@ -147,6 +161,7 @@ async fn main() -> Result<()> {
             database,
             model,
             chat_template,
+            allow_cpu,
             inference_id,
         } => {
             let settings = Settings::load()?;
@@ -155,23 +170,28 @@ async fn main() -> Result<()> {
                 Path::new(&database),
                 inference_id,
                 settings.limits,
+                allow_cpu,
             )
             .await
         }
-        Command::Serve { database } => {
+        Command::Serve {
+            database,
+            model,
+            allow_cpu,
+        } => {
             let settings = Settings::load()?;
             let web = settings.web()?;
             let store = Store::open(&database)
                 .await
                 .context("opening web database")?;
-            let model = resolve_model(None, None, &settings)?;
+            let model = resolve_model(model.as_deref(), None, &settings)?;
             let game = web::GameLoad::loading();
             let loading_game = game.clone();
             let loading_store = store.clone();
             let limits = settings.limits;
             tokio::spawn(async move {
                 tracing::info!(model = %model.path, "starting game model load");
-                let result = load_game(loading_store, model, limits).await;
+                let result = load_game(loading_store, model, limits, allow_cpu).await;
                 match &result {
                     Ok(_) => tracing::info!("game model is ready"),
                     Err(error) => {
@@ -253,7 +273,11 @@ fn resolve_model(
     Ok(model)
 }
 
-async fn backend(model: &settings::Model, limits: settings::Limits) -> Result<MistralRsBackend> {
+async fn backend(
+    model: &settings::Model,
+    limits: settings::Limits,
+    allow_cpu: bool,
+) -> Result<MistralRsBackend> {
     let path = model.path.clone();
     let chat_template = model.chat_template.clone();
     let max_concurrent_inferences = limits.max_concurrent_inferences;
@@ -263,6 +287,7 @@ async fn backend(model: &settings::Model, limits: settings::Limits) -> Result<Mi
             &path,
             chat_template.as_deref(),
             max_concurrent_inferences,
+            allow_cpu,
         ))
     })
     .await
@@ -274,8 +299,9 @@ async fn load_game(
     store: Store,
     model: settings::Model,
     limits: settings::Limits,
+    allow_cpu: bool,
 ) -> Result<Arc<game::Game<MistralRsBackend>>> {
-    let scheduler = InferenceScheduler::new(backend(&model, limits).await?, limits)
+    let scheduler = InferenceScheduler::new(backend(&model, limits, allow_cpu).await?, limits)
         .context("configuring inference scheduling")?;
     scheduler
         .resume(&store)
@@ -300,6 +326,7 @@ async fn run_chat(
     system: Option<String>,
     database: &Path,
     limits: settings::Limits,
+    allow_cpu: bool,
 ) -> Result<()> {
     let store = Store::open(database)
         .await
@@ -312,7 +339,7 @@ async fn run_chat(
         .create_agent(world)
         .await
         .context("creating chat sandbox agent")?;
-    let scheduler = InferenceScheduler::new(backend(&model, limits).await?, limits)
+    let scheduler = InferenceScheduler::new(backend(&model, limits, allow_cpu).await?, limits)
         .context("configuring inference scheduling")?;
     scheduler
         .resume(&store)
@@ -359,11 +386,11 @@ async fn run_chat(
 
         eprintln!("[model active]");
         // Each REPL turn is one external trigger, so it gets its own budget.
-        let mut budget = agent::Budget::new(limits);
+        let budget = agent::Budget::new(limits);
         let response = agent::complete(
             &store,
             &backend,
-            &mut budget,
+            &budget,
             agent,
             &static_messages,
             &tools,
@@ -396,6 +423,7 @@ async fn run_replay(
     database: &Path,
     inference_id: i64,
     limits: settings::Limits,
+    allow_cpu: bool,
 ) -> Result<()> {
     let store = Store::open(database)
         .await
@@ -416,14 +444,18 @@ async fn run_replay(
         RecordedOutcome::Error(error) => println!("Recorded error:\n{error}"),
     }
     println!("Replayed output:");
-    let backend = backend(&model, limits).await?;
+    let backend = backend(&model, limits, allow_cpu).await?;
     let response = context::complete_recipe(
         &store,
         &backend,
-        recorded.agent_id,
-        &recorded.segments,
-        recorded.request.sampling,
-        &model.path,
+        context::RecipeCompletion {
+            agent_id: recorded.agent_id,
+            sequence_id: None,
+            parent_inference_id: None,
+            segments: &recorded.segments,
+            sampling: recorded.request.sampling,
+            model: &model.path,
+        },
         |token| {
             print!("{token}");
             let _ = std::io::stdout().flush();

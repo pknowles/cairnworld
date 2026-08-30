@@ -8,9 +8,11 @@ use serde::Deserialize;
 
 use crate::llm::{ToolCall, ToolDefinition};
 
+type ToolExecution = dyn Fn(&str, i64) -> ToolFuture + Send + Sync;
+
 pub struct Tool {
     definition: ToolDefinition,
-    execute: Arc<dyn Fn(&str, i64) -> ToolFuture + Send + Sync>,
+    execute: Arc<ToolExecution>,
 }
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;

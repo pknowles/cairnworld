@@ -2,9 +2,10 @@ use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use mistralrs::{
-    CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, Function, GgufModelBuilder,
-    Model, RequestBuilder, Response as MrResponse, SamplingParams, TextMessageRole, Tool,
-    ToolCallResponse, ToolCallType, ToolType,
+    CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, DeviceLayerMapMetadata,
+    DeviceMapMetadata, DeviceMapSetting, Function, GgufModelBuilder, Model, RequestBuilder,
+    Response as MrResponse, SamplingParams, TextMessageRole, Tool, ToolCallResponse, ToolCallType,
+    ToolType,
 };
 
 use crate::llm::{
@@ -24,6 +25,7 @@ impl MistralRsBackend {
         model_id_or_path: &str,
         chat_template: Option<&Path>,
         max_concurrent_inferences: usize,
+        allow_cpu: bool,
     ) -> Result<Self> {
         let started = Instant::now();
         tracing::info!(
@@ -41,6 +43,14 @@ impl MistralRsBackend {
         );
         let mut builder =
             GgufModelBuilder::new(dir, vec![file]).with_max_num_seqs(max_concurrent_inferences);
+        if !allow_cpu {
+            builder = builder.with_device_mapping(DeviceMapSetting::Map(
+                DeviceMapMetadata::from_num_device_layers(vec![DeviceLayerMapMetadata {
+                    ordinal: 0,
+                    layers: usize::MAX,
+                }]),
+            ));
+        }
         if let Some(template) = chat_template {
             ensure!(
                 template.exists(),
@@ -60,7 +70,15 @@ impl MistralRsBackend {
                     "game model failed to load"
                 )
             })
-            .with_context(|| format!("loading GGUF model from {model_id_or_path}"))?;
+            .with_context(|| {
+                if allow_cpu {
+                    format!("loading GGUF model from {model_id_or_path}")
+                } else {
+                    format!(
+                        "loading GGUF model from {model_id_or_path}; the model must fit entirely in GPU memory (use --allow-cpu only for explicit CPU/GPU execution)"
+                    )
+                }
+            })?;
         tracing::info!(
             model = model_id_or_path,
             elapsed = ?started.elapsed(),
@@ -350,7 +368,7 @@ mod tests {
         let model = settings
             .model(None)
             .expect("configure a model in local.toml or default.toml to run this test");
-        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4)
+        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4, false)
             .await
             .expect("model should load");
 
@@ -388,7 +406,7 @@ mod tests {
         let model = settings
             .model(None)
             .expect("configure a model in local.toml or default.toml to run this test");
-        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4)
+        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4, false)
             .await
             .expect("model should load");
         let request = Request {

@@ -100,10 +100,14 @@ pub async fn run<B: Backend>(
     let completion = context::complete_recipe(
         store,
         backend,
-        job.agent_id,
-        &segments,
-        job.sampling.clone(),
-        &job.model,
+        context::RecipeCompletion {
+            agent_id: job.agent_id,
+            sequence_id: None,
+            parent_inference_id: None,
+            segments: &segments,
+            sampling: job.sampling.clone(),
+            model: &job.model,
+        },
         |_| {},
     )
     .await

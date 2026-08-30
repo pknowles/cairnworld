@@ -13,7 +13,7 @@ starting the server:
 ```sh
 npm install
 npm run build:frontend
-cargo run -- serve --database /path/to/cairnworld.sqlite
+cargo run -- serve --database /path/to/cairnworld.sqlite --model dev-qwen3
 ```
 
 `local.toml` must provide the `[web]` Google OAuth values declared in

@@ -74,7 +74,10 @@ when things were built.
 - `src/main.rs` - `cairnworld chat [--model <name|path>] [--temperature <f32>]
   [--enable-thinking] [--system <text>] [--database <path>] [--chat-template
   <path>]` creates a sandbox world and agent, then resolves each turn through
-  the agent loop. `cairnworld replay [--model <name|path>] [--database <path>]
+  the agent loop. `chat`, `replay`, and `serve` require the selected GGUF to
+  fit entirely on the GPU; `--allow-cpu` explicitly permits a CPU/GPU split.
+  `serve [--model <name|path>]` shares the same selection path. `cairnworld
+  replay [--model <name|path>] [--database <path>]
   <inference-id>` reconstructs and validates the recorded recipe, displays its
   response or error, and records the replay by calling the same context
   boundary. `cairnworld import-scenario --owner-email <email> --owner-name

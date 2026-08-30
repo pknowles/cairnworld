@@ -180,16 +180,18 @@ pub async fn complete_with_call_context<B: Backend>(
             .spend(chat_spent)
             .context("resolving this chat turn")?;
         chat_spent += 1;
-        let completion = context::complete_recorded_with_call_context(
+        let completion = context::complete_recorded(
             store,
             backend,
-            agent_id,
-            call.sequence_id,
-            call.parent_inference_id,
-            static_messages,
-            &definitions,
-            sampling.clone(),
-            model,
+            context::RecordedCompletion {
+                agent_id,
+                sequence_id: call.sequence_id,
+                parent_inference_id: call.parent_inference_id,
+                static_messages,
+                tools: &definitions,
+                sampling: sampling.clone(),
+                model,
+            },
             &mut on_token,
         )
         .await

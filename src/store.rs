@@ -226,6 +226,18 @@ pub enum InferenceOutcome {
     Error(String),
 }
 
+/// The complete durable record of one model invocation.
+pub struct InferenceRecord<'a> {
+    pub agent_id: i64,
+    pub sequence_id: Option<i64>,
+    pub parent_inference_id: Option<i64>,
+    pub segments: &'a [Segment],
+    pub request: &'a Request,
+    pub outcome: InferenceOutcome,
+    pub model: &'a str,
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum RecordedOutcome {
     Response(Response),
@@ -2203,49 +2215,17 @@ impl Store {
         })
     }
 
-    #[cfg(test)]
-    pub async fn record_inference(
-        &self,
-        agent_id: i64,
-        segments: &[Segment],
-        request: &Request,
-        outcome: InferenceOutcome,
-        model: &str,
-        duration_ms: u64,
-    ) -> Result<i64> {
-        self.record_inference_with_call_context(
-            agent_id,
-            None,
-            None,
-            segments,
-            request,
-            outcome,
-            model,
-            duration_ms,
-        )
-        .await
-    }
-
-    pub async fn record_inference_with_call_context(
-        &self,
-        agent_id: i64,
-        sequence_id: Option<i64>,
-        parent_inference_id: Option<i64>,
-        segments: &[Segment],
-        request: &Request,
-        outcome: InferenceOutcome,
-        model: &str,
-        duration_ms: u64,
-    ) -> Result<i64> {
-        let segments = serde_json::to_string(segments).context("serializing inference segments")?;
-        let sampling =
-            serde_json::to_string(&request.sampling).context("serializing inference sampling")?;
-        let input =
-            serde_json::to_vec(request).context("serializing assembled inference request")?;
+    pub async fn record(&self, record: InferenceRecord<'_>) -> Result<i64> {
+        let segments =
+            serde_json::to_string(record.segments).context("serializing inference segments")?;
+        let sampling = serde_json::to_string(&record.request.sampling)
+            .context("serializing inference sampling")?;
+        let input = serde_json::to_vec(record.request)
+            .context("serializing assembled inference request")?;
         let input_hash = blake3::hash(&input).to_hex().to_string();
         let duration_ms =
-            i64::try_from(duration_ms).context("inference duration exceeds SQLite range")?;
-        let (output, error, input_tokens, output_tokens) = match outcome {
+            i64::try_from(record.duration_ms).context("inference duration exceeds SQLite range")?;
+        let (output, error, input_tokens, output_tokens) = match record.outcome {
             InferenceOutcome::Response(response) => (
                 Some(serde_json::to_string(&response).context("serializing inference output")?),
                 None,
@@ -2265,9 +2245,9 @@ impl Store {
              (agent_id, sequence_id, parent_inference_id, segments, sampling, output, error, input_hash, input_tokens, output_tokens, duration_ms, model) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(agent_id)
-        .bind(sequence_id)
-        .bind(parent_inference_id)
+        .bind(record.agent_id)
+        .bind(record.sequence_id)
+        .bind(record.parent_inference_id)
         .bind(segments)
         .bind(sampling)
         .bind(output)
@@ -2276,11 +2256,34 @@ impl Store {
         .bind(input_tokens)
         .bind(output_tokens)
         .bind(duration_ms)
-        .bind(model)
+        .bind(record.model)
         .execute(&self.pool)
         .await
         .context("storing inference record")?;
         Ok(result.last_insert_rowid())
+    }
+
+    #[cfg(test)]
+    pub async fn record_inference(
+        &self,
+        agent_id: i64,
+        segments: &[Segment],
+        request: &Request,
+        outcome: InferenceOutcome,
+        model: &str,
+        duration_ms: u64,
+    ) -> Result<i64> {
+        self.record(InferenceRecord {
+            agent_id,
+            sequence_id: None,
+            parent_inference_id: None,
+            segments,
+            request,
+            outcome,
+            model,
+            duration_ms,
+        })
+        .await
     }
 
     pub async fn reconstruct_inference(&self, id: i64) -> Result<RecordedInference> {
@@ -2932,16 +2935,16 @@ mod tests {
             },
         };
         let inference_id = store
-            .record_inference_with_call_context(
-                installed.member.agent_id,
-                Some(sequence.id),
-                None,
-                &[],
-                &request,
-                InferenceOutcome::Response(response()),
-                "scripted",
-                0,
-            )
+            .record(InferenceRecord {
+                agent_id: installed.member.agent_id,
+                sequence_id: Some(sequence.id),
+                parent_inference_id: None,
+                segments: &[],
+                request: &request,
+                outcome: InferenceOutcome::Response(response()),
+                model: "scripted",
+                duration_ms: 0,
+            })
             .await
             .unwrap();
         let args = r#"{"description":"look through the rear window"}"#;
@@ -3053,16 +3056,16 @@ mod tests {
             },
         };
         let inference_id = store
-            .record_inference_with_call_context(
-                installed.member.agent_id,
-                Some(sequence.id),
-                None,
-                &[],
-                &request,
-                InferenceOutcome::Response(response()),
-                "scripted",
-                0,
-            )
+            .record(InferenceRecord {
+                agent_id: installed.member.agent_id,
+                sequence_id: Some(sequence.id),
+                parent_inference_id: None,
+                segments: &[],
+                request: &request,
+                outcome: InferenceOutcome::Response(response()),
+                model: "scripted",
+                duration_ms: 0,
+            })
             .await
             .unwrap();
         let action = store
