@@ -386,7 +386,7 @@ where
                 "Guide the player through the current scene. Use a declared action tool when the player asks their character to look or speak. The following is the current player-visible scene, derived from the world state; do not invent items, people, or facts outside it:\n{scene}"
             )
         } else {
-            "Speak first and guide the player through their Adventurer's Cairn character creation. The roll tools make the real, durable results. Wait for the player to choose to roll before using them. Once Hit Protection and attributes are rolled, call ready_to_begin when the player has finished creation.".to_string()
+            "Speak first and guide the player through their Adventurer's Cairn character creation. Character creation requires Hit Protection first, then attributes. Introduce the next required step in short thematic language, and wait until the player is ready before using its roll tool. The roll tools make the real, durable results. Once Hit Protection and attributes are rolled, call ready_to_begin when the player has finished creation.".to_string()
         };
         Ok(Message::text(Role::System, text))
     }
