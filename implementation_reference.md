@@ -24,10 +24,12 @@ when things were built.
   the shared types, and applies the recorded `enable_thinking` setting. Tools
   are sent with `strict`, constraining generation to the argument schema.
 - `third_party/mistral.rs` - submodule of https://github.com/pknowles/mistral.rs,
-  depended on by path. It carries one fix absent upstream: Qwen3 GGUF inference
+  depended on by path. It carries fixes absent upstream: Qwen3 GGUF inference
   omits the device move before the final norm that the Llama path performs, so
-  any CPU/GPU layer split fails in rms-norm. Clone with `--recurse-submodules`,
-  or run `git submodule update --init` in an existing checkout.
+  any CPU/GPU layer split fails in rms-norm; its Qwen tool grammar now defines
+  the generic parameter rule required by zero-argument tools. Clone with
+  `--recurse-submodules`, or run `git submodule update --init` in an existing
+  checkout.
 - `templates/hermes-tools.jinja` - the Hermes 3 GGUF ships a bare ChatML
   template that silently drops tool definitions, so its tool surface is unusable
   without it. `[models.hermes]` supplies it automatically.
