@@ -151,10 +151,10 @@ when things were built.
   and verifies a typed ready event enables the rendered input. Neither needs
   OAuth or a model.
 - `src/ui.rs` and `src/lib.rs` - the shared, serializable browser chat event
-  types and the small Leptos island used by the game page. SSR receives the
-  initial durable transcript; Leptos hydrates that same island in WASM and
-  owns the input, send state, websocket transport, and rendering of player,
-  agent, narration, and visible error entries. This is the sole browser chat
+  types and the small Leptos island used by the game page. The server projects
+  the durable transcript into the island as opaque children; WASM hydrates only
+  live input, transport, and subsequent entries. This keeps SSR history and
+  browser state from competing during hydration. This is the sole browser chat
   implementation; the page contains no parallel handwritten JavaScript loop.
   The loading island displays the complete server startup error when available
   rather than hiding it behind an HTTP status.

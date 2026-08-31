@@ -671,6 +671,7 @@ dependencies = [
  "clap",
  "config",
  "either",
+ "hydration_context",
  "leptos",
  "leptos_axum",
  "mistralrs",

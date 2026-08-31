@@ -20,7 +20,6 @@ pub enum ClientEvent {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
-    History { entries: Vec<ChatEntry> },
     Entry { role: ChatRole, text: String },
     CanAct { value: bool },
     Error { message: String },
@@ -120,10 +119,10 @@ fn wait_for_game(message: RwSignal<String>) {
 }
 
 #[island]
-pub fn PlayerChat(world_id: i64, history: Vec<ChatEntry>) -> impl IntoView {
+pub fn PlayerChat(world_id: i64, children: Children) -> impl IntoView {
     #[cfg(not(feature = "hydrate"))]
     let _ = world_id;
-    let entries = RwSignal::new(history);
+    let entries = RwSignal::new(Vec::<ChatEntry>::new());
     let can_act = RwSignal::new(false);
     let input = NodeRef::<leptos::html::Input>::new();
 
@@ -173,6 +172,7 @@ pub fn PlayerChat(world_id: i64, history: Vec<ChatEntry>) -> impl IntoView {
 
     view! {
         <ol id="chat" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-1 py-4" aria-live="polite">
+            {children()}
             {move || entries.get().into_iter().map(|entry| {
                 let class = match entry.role {
                     ChatRole::User => "chat chat-end",
@@ -195,6 +195,24 @@ pub fn PlayerChat(world_id: i64, history: Vec<ChatEntry>) -> impl IntoView {
     }
 }
 
+#[component]
+pub fn ChatTranscript(history: Vec<ChatEntry>) -> impl IntoView {
+    history.into_iter().map(|entry| {
+        let class = match entry.role {
+            ChatRole::User => "chat chat-end",
+            ChatRole::Assistant => "chat chat-start",
+            ChatRole::Narration => "rounded-box bg-base-200 px-4 py-3 text-sm text-base-content/80",
+            ChatRole::Notice => "alert alert-warning text-sm",
+        };
+        let bubble = match entry.role {
+            ChatRole::User => "chat-bubble chat-bubble-primary",
+            ChatRole::Assistant => "chat-bubble",
+            ChatRole::Narration | ChatRole::Notice => "",
+        };
+        view! { <li class=class data-role=chat_role_name(entry.role)><div class=bubble>{entry.text}</div></li> }
+    }).collect_view()
+}
+
 pub fn chat_role_name(role: ChatRole) -> &'static str {
     match role {
         ChatRole::User => "user",
@@ -212,101 +230,97 @@ fn connect_player_chat(
 ) -> Rc<RefCell<Option<WebSocket>>> {
     let socket = Rc::new(RefCell::new(None));
     let socket_for_connection = socket.clone();
-    {
-        let Some(window) = web_sys::window() else {
+    let Some(window) = web_sys::window() else {
+        add_notice(
+            entries,
+            "Could not open chat: no browser window is available.".into(),
+        );
+        return socket;
+    };
+    let location = window.location();
+    let scheme = if location.protocol().ok().as_deref() == Some("https:") {
+        "wss"
+    } else {
+        "ws"
+    };
+    let host = match location.host() {
+        Ok(host) => host,
+        Err(_) => {
             add_notice(
                 entries,
-                "Could not open chat: no browser window is available.".into(),
+                "Could not determine the browser host for chat.".into(),
             );
             return socket;
-        };
-        let location = window.location();
-        let scheme = if location.protocol().ok().as_deref() == Some("https:") {
-            "wss"
-        } else {
-            "ws"
-        };
-        let host = match location.host() {
-            Ok(host) => host,
-            Err(_) => {
-                add_notice(
-                    entries,
-                    "Could not determine the browser host for chat.".into(),
-                );
-                return socket;
-            }
-        };
-        let url = format!("{scheme}://{host}/world/{world_id}/ws");
-        let socket = match WebSocket::new(&url) {
-            Ok(socket) => socket,
-            Err(error) => {
-                add_notice(
-                    entries,
-                    format!("Could not open chat connection: {error:?}"),
-                );
-                return socket;
-            }
-        };
-
-        let on_open_entries = entries;
-        let on_open = Closure::<dyn FnMut(Event)>::new(move |_| {
+        }
+    };
+    let url = format!("{scheme}://{host}/world/{world_id}/ws");
+    let websocket = match WebSocket::new(&url) {
+        Ok(socket) => socket,
+        Err(error) => {
             add_notice(
-                on_open_entries,
-                "Connected. Your guide is preparing the opening message…".into(),
+                entries,
+                format!("Could not open chat connection: {error:?}"),
             );
-        });
-        socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
-        on_open.forget();
+            return socket;
+        }
+    };
 
-        let on_message_entries = entries;
-        let on_message_can_act = can_act;
-        let on_message = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
-            let Some(message) = event.dyn_ref::<MessageEvent>() else {
-                return;
-            };
-            let text: String = match message.data().as_string() {
-                Some(text) => text,
-                None => {
-                    add_notice(
-                        on_message_entries,
-                        "Chat server sent a non-text message.".into(),
-                    );
-                    return;
-                }
-            };
-            match serde_json::from_str::<ServerEvent>(&text) {
-                Ok(ServerEvent::History { entries: history }) => entries.set(history),
-                Ok(ServerEvent::Entry { role, text }) => on_message_entries.update(|entries| {
-                    entries.push(ChatEntry { role, text });
-                }),
-                Ok(ServerEvent::CanAct { value }) => on_message_can_act.set(value),
-                Ok(ServerEvent::Error { message }) => add_notice(on_message_entries, message),
-                Err(error) => add_notice(
+    let on_open_entries = entries;
+    let on_open = Closure::<dyn FnMut(Event)>::new(move |_| {
+        add_notice(
+            on_open_entries,
+            "Connected. Your guide is preparing the opening message…".into(),
+        );
+    });
+    websocket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    on_open.forget();
+
+    let on_message_entries = entries;
+    let on_message_can_act = can_act;
+    let on_message = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        let Some(message) = event.dyn_ref::<MessageEvent>() else {
+            return;
+        };
+        let text: String = match message.data().as_string() {
+            Some(text) => text,
+            None => {
+                add_notice(
                     on_message_entries,
-                    format!("Chat server sent an invalid message: {error}"),
-                ),
+                    "Chat server sent a non-text message.".into(),
+                );
+                return;
             }
-        });
-        socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-        // The browser owns this callback until the document unloads with its
-        // WebSocket. wasm-bindgen otherwise drops it as this function returns.
-        on_message.forget();
+        };
+        match serde_json::from_str::<ServerEvent>(&text) {
+            Ok(ServerEvent::Entry { role, text }) => on_message_entries.update(|entries| {
+                entries.push(ChatEntry { role, text });
+            }),
+            Ok(ServerEvent::CanAct { value }) => on_message_can_act.set(value),
+            Ok(ServerEvent::Error { message }) => add_notice(on_message_entries, message),
+            Err(error) => add_notice(
+                on_message_entries,
+                format!("Chat server sent an invalid message: {error}"),
+            ),
+        }
+    });
+    websocket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    // The browser owns this callback until the document unloads with its
+    // WebSocket. wasm-bindgen otherwise drops it as this function returns.
+    on_message.forget();
 
-        let on_close_entries = entries;
-        let on_close_can_act = can_act;
-        let on_close = Closure::<dyn FnMut(Event)>::new(move |_| {
-            on_close_can_act.set(false);
-            add_notice(
-                on_close_entries,
-                "Connection closed. Reload to reconnect.".into(),
-            );
-        });
-        socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
-        on_close.forget();
+    let on_close_entries = entries;
+    let on_close_can_act = can_act;
+    let on_close = Closure::<dyn FnMut(Event)>::new(move |_| {
+        on_close_can_act.set(false);
+        add_notice(
+            on_close_entries,
+            "Connection closed. Reload to reconnect.".into(),
+        );
+    });
+    websocket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+    on_close.forget();
 
-        *socket_for_connection.borrow_mut() = Some(socket);
-    }
-
+    *socket_for_connection.borrow_mut() = Some(websocket);
     socket
 }
 

@@ -11,7 +11,10 @@ use axum::{
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
 };
-use cairnworld::ui::{ChatEntry, ChatRole, ClientEvent, GameLoading, PlayerChat, ServerEvent};
+use cairnworld::ui::{
+    ChatEntry, ChatRole, ChatTranscript, ClientEvent, GameLoading, PlayerChat, ServerEvent,
+};
+use hydration_context::SsrSharedContext;
 use leptos::prelude::*;
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet,
@@ -241,7 +244,7 @@ async fn landing(State(app): State<App>, session: Session) -> Result<Html<String
     Ok(Html(render_page(
         "Cairnworld",
         false,
-        view! { <Landing user=user worlds=worlds/> },
+        move || view! { <Landing user=user worlds=worlds/> },
     )))
 }
 
@@ -397,7 +400,7 @@ async fn world_detail(
     Ok(Html(render_page(
         "Cairnworld",
         false,
-        view! { <WorldDetail world=world members=members invitations=invitations viewer_id=member.user_id/> },
+        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=member.user_id/> },
     )))
 }
 
@@ -448,7 +451,7 @@ async fn invitation_page(
     Ok(Html(render_page(
         "Cairnworld invitation",
         false,
-        view! { <InvitationPage token=token user=user/> },
+        move || view! { <InvitationPage token=token user=user/> },
     )))
 }
 
@@ -469,13 +472,15 @@ async fn game_page(
 ) -> Result<Html<String>, WebError> {
     let member = active_member(&app.store, &session, world_id).await?;
     Ok(Html(match app.game.availability().await {
-        GameAvailability::Loading => render_page("Cairnworld", true, view! { <GameLoadingPage/> }),
+        GameAvailability::Loading => {
+            render_page("Cairnworld", true, || view! { <GameLoadingPage/> })
+        }
         GameAvailability::Ready(_) => {
             let history = app.store.player_chat(&member).await?;
             render_page(
                 "Cairnworld",
                 true,
-                view! { <GamePage world_id=member.world_id history=history/> },
+                move || view! { <GamePage world_id=member.world_id history=history/> },
             )
         }
         GameAvailability::Failed(error) => return Err(WebError::unavailable(error)),
@@ -509,8 +514,7 @@ async fn game_socket(
         GameAvailability::Ready(game) => game,
         GameAvailability::Failed(error) => return Err(WebError::unavailable(error)),
     };
-    let store = app.store.clone();
-    Ok(websocket.on_upgrade(move |socket| play(socket, game, member, store)))
+    Ok(websocket.on_upgrade(move |socket| play(socket, game, member)))
 }
 
 async fn active_member(
@@ -549,13 +553,8 @@ async fn session_user(
         })
 }
 
-async fn play(
-    socket: WebSocket,
-    game: Arc<Game<MistralRsBackend>>,
-    member: MemberAgent,
-    store: Store,
-) {
-    if let Err(error) = play_connection(socket, game, member, store).await {
+async fn play(socket: WebSocket, game: Arc<Game<MistralRsBackend>>, member: MemberAgent) {
+    if let Err(error) = play_connection(socket, game, member).await {
         tracing::error!(error = %format!("{error:#}"), "player chat websocket ended with an error");
     }
 }
@@ -564,7 +563,6 @@ async fn play_connection(
     mut socket: WebSocket,
     game: Arc<Game<MistralRsBackend>>,
     member: MemberAgent,
-    store: Store,
 ) -> Result<()> {
     tracing::info!(
         world_id = member.world_id,
@@ -597,13 +595,6 @@ async fn play_connection(
             return Ok(());
         }
     }
-    send_event(
-        &mut socket,
-        &ServerEvent::History {
-            entries: player_chat_entries(store.player_chat(&member).await?),
-        },
-    )
-    .await?;
     send_event(&mut socket, &ServerEvent::CanAct { value: true }).await?;
     tracing::info!(
         world_id = member.world_id,
@@ -751,11 +742,14 @@ fn hydration_options() -> LeptosOptions {
         .build()
 }
 
-fn render_page(title: &'static str, hydrate: bool, content: impl IntoView + 'static) -> String {
-    format!(
-        "<!doctype html>{}",
-        view! { <Page title hydrate>{content}</Page> }.to_html()
-    )
+fn render_page<IV: IntoView + 'static>(
+    title: &'static str,
+    hydrate: bool,
+    content: impl FnOnce() -> IV + Send + 'static,
+) -> String {
+    let owner = Owner::new_root(Some(Arc::new(SsrSharedContext::new())));
+    let content = owner.with(|| view! { <Page title hydrate>{content()}</Page> }.to_html());
+    format!("<!doctype html>{}", content)
 }
 
 #[component]
@@ -848,7 +842,7 @@ fn GamePage(world_id: i64, history: Vec<PlayerChatEntry>) -> impl IntoView {
         <main class="min-h-dvh bg-base-200 p-3 sm:p-6">
             <section class="mx-auto flex h-[calc(100dvh-1.5rem)] max-w-5xl flex-col rounded-box bg-base-100 shadow-xl sm:h-[calc(100dvh-3rem)]">
                 <header class="navbar border-b border-base-300 px-4"><h1 class="text-xl font-semibold">"Cairnworld"</h1><span class="ml-auto badge badge-primary badge-outline">"Adventure chat"</span></header>
-                <div class="flex min-h-0 flex-1 flex-col p-3 sm:p-5"><PlayerChat world_id history/></div>
+                <div class="flex min-h-0 flex-1 flex-col p-3 sm:p-5"><PlayerChat world_id><ChatTranscript history/></PlayerChat></div>
             </section>
         </main>
     }
@@ -934,13 +928,12 @@ mod tests {
 
     #[test]
     fn game_page_renders_durable_chat_entries_with_their_visible_roles() {
-        let html = view! {
-            <GamePage world_id=7 history=vec![
+        let html = render_page("Cairnworld", true, || {
+            view! { <GamePage world_id=7 history=vec![
                 PlayerChatEntry { role: crate::llm::Role::User, text: "I look around.".into() },
                 PlayerChatEntry { role: crate::llm::Role::System, text: "Toma watches.".into() },
-            ]/>
-        }
-        .to_html();
+            ]/> }
+        });
         assert!(html.contains("I look around."));
         assert!(html.contains("Toma watches."));
         assert!(html.contains("data-role=\"user\""));
@@ -949,14 +942,14 @@ mod tests {
 
     #[test]
     fn hydrated_pages_load_the_wasm_file_emitted_by_cargo_leptos() {
-        let html = render_page("Cairnworld", true, view! { <GameLoadingPage/> });
+        let html = render_page("Cairnworld", true, || view! { <GameLoadingPage/> });
         assert!(html.contains("/pkg/cairnworld.wasm"));
         assert!(!html.contains("/pkg/cairnworld_bg.wasm"));
     }
 
     #[test]
     fn hydrated_page_explains_when_the_live_chat_cannot_start_without_javascript() {
-        let html = render_page("Cairnworld", true, view! { <GameLoadingPage/> });
+        let html = render_page("Cairnworld", true, || view! { <GameLoadingPage/> });
         assert!(html.contains("Cairnworld's live chat requires JavaScript"));
     }
 
@@ -978,23 +971,6 @@ mod tests {
             serde_json::from_str(r#"{"type":"message","text":"I take the flour sack."}"#).unwrap();
         assert!(
             matches!(client, ClientEvent::Message { text } if text == "I take the flour sack.")
-        );
-    }
-
-    #[test]
-    fn socket_history_is_an_authoritative_player_chat_snapshot() {
-        let event = ServerEvent::History {
-            entries: vec![ChatEntry {
-                role: ChatRole::Assistant,
-                text: "The kettle whistles.".into(),
-            }],
-        };
-        assert_eq!(
-            serde_json::to_value(event).unwrap(),
-            serde_json::json!({
-                "type": "history",
-                "entries": [{"role": "assistant", "text": "The kettle whistles."}],
-            })
         );
     }
 }

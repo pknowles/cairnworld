@@ -11,7 +11,7 @@ const island = packageSource.match(/export function (PlayerChat_\d+)/)?.[1];
 if (!island) throw new Error("generated package does not export the PlayerChat island");
 
 const page = `<!doctype html>
-<leptos-island data-component="${island}" data-props='{"world_id":1,"history":[]}'><ol id="chat" aria-live="polite"></ol><form id="message"><input name="text" autocomplete="off" disabled><button type="submit" disabled>Send</button></form></leptos-island>
+<leptos-island data-component="${island}" data-props='{"world_id":1}'><ol id="chat" aria-live="polite"><leptos-children><li data-role="assistant" class="chat chat-start"><div class="chat-bubble">The kettle whistles.</div></li></leptos-children></ol><form id="message"><input name="text" autocomplete="off" disabled><button type="submit" disabled>Send</button></form></leptos-island>
 <script type="module">
   const app = await import("/pkg/cairnworld.js");
   await app.default({module_or_path: "/pkg/cairnworld.wasm"});
@@ -65,8 +65,8 @@ server.on("upgrade", (request, socket) => {
     "",
     "",
   ].join("\r\n"));
-  socket.write(websocketText('{"type":"history","entries":[{"role":"assistant","text":"The kettle whistles."}]}'));
   socket.write(websocketText('{"type":"can_act","value":true}'));
+  socket.write(websocketText('{"type":"entry","role":"assistant","text":"Mara nods."}'));
   socket.on("error", (error) => {
     if (error.code !== "ECONNRESET") socketError = error;
   });
@@ -101,7 +101,7 @@ async function checkPlayerChat() {
     });
     if (socketError) throw socketError;
     const input = stdout.match(/<input[^>]*name="text"[^>]*>/)?.[0];
-    if (status !== 0 || !input || input.includes("disabled") || !stdout.includes("The kettle whistles.")) {
+    if (status !== 0 || !input || input.includes("disabled") || !stdout.includes("The kettle whistles.") || !stdout.includes("Mara nods.")) {
       throw new Error(
         `compiled player chat did not render its server history and enable input after readiness:\n${stderr}\n${stdout}`,
       );
