@@ -444,15 +444,36 @@ exceed some character count threshold. The ideas being:
 - Keep some raw chat history after the summary as this is likely more important to keep accurate
 
 This must be done with care so that the summary only summarises the portion of
-chats that are compacted (chat_0 through chat_n). I.e. for the compaction
-operation, the LLM should not see newer chats than those being compacted.
-Another way of thinking of this is that its history is temporarily truncated
-while it produces the summary, then the raw chats since are added back. When
-compaction happens, the agent itself is given a prompt directing/describing what
-to summarise. It needs to know what information will always be static and up to
-date, what will be lost and most importantly which information is important to
-keep. Many interactions in the chat are temporary and would not need recording,
-but some are not. This will likely need gameplay testing to optimize.
+chats that are compacted (summary_0, chat_0 through chat_n). I.e. for the
+compaction operation, the LLM should not see newer chats than those being
+compacted.
+
+The Before/After examples above is what the model sees, not what is stored or
+replaced. Nothing is deleted or moved: the database keeps every message forever
+and a summary only changes which of them are selected for future context. For
+the debug viewer it would be convenient to see the summaries inline in the full
+history of all chats, but of course the model would never see this.
+
+Compaction builds a one-off request from the range being compacted plus a
+summarise prompt, and its output is stored as the new summary. The prompt
+directs/describes what to summarise. It needs to implicitly know what
+information will always be static and up to date, what will be lost and most
+importantly which information is important to keep. Many interactions in the
+chat are temporary and would not need recording, but some are not. This will
+likely need gameplay testing to optimize.
+
+Compaction likely happens immediately after an agent emits some output rather
+than before, as this is when the token count is first known. It should happen
+semi-asynchronously so that the LLM's result can immediately be used. E.g. if a
+player's agent replies to the player and must immediately compact, the player
+will see the agent's response and can start typing straight away. Obviously the
+agent's chat would block if another call to it comes in before compaction
+completes. Moreover, we expect to run on a single GPU so this would not be async
+with respect to other LLM calls. Ideally we should process all agents chats,
+queueing compactions and only block on compactions on next calls to that agent.
+Doing this means recursive agent calls that all happen to compact after
+returning won't have to finish compaction before the player(s) see the final
+response.
 
 ## Notes editing tools
 
@@ -846,7 +867,7 @@ can be discovered or learned.
 - Cairn SRD second edition ruleset
 - RMCP
 
-# UI
+# User Interface
 
 ## Landing page
 
@@ -868,8 +889,10 @@ There is no enforced limit on the number of worlds that can be created.
 The world/campaign is given a name after initialization. Below it is a world
 status of in-progress or complete. Below that is a recap for the current player.
 The recap is written by the player's agent after the player logs out and does
-not return for 60 seconds. It does not persist in the player agent's chat
-history; it's only for the world recap.
+not return for 60 seconds. This is generated with deferred priority, much like a
+chat summary, and if the server goes down the queued job to make a recap
+remains. It does not persist in the player agent's chat history; it's only for
+the world recap.
 
 If the world is complete it will have a short epilogue, describing what each
 player ends up doing. This will be written by the Storyteller. TODO: detail how
@@ -937,6 +960,13 @@ LLMs generate tokens over time. Streaming this to the browser would create a
 good user and developer experience, even if the end result requires parsing
 intermediate tool calls.
 
+The main chat may include additional inline messages such as warnings, or roll
+results in developer mode. E.g. if compaction is ever triggered twice in a row,
+this indicates the thresholds are badly set or there is a once-off very large
+message. Rather than emit messages separately to a log, keeping everything
+inline in the one chat gives one unified user interface and preserves ordering
+to make development much easier.
+
 **Polish ideas**
 
 Ideas for the future, after the basics are implemented.
@@ -970,7 +1000,9 @@ we need code to query and provide the input. We then have unit tests to verify
 the record has been made correctly. These chats will eventually become large. We
 will need a way to extract and archive them by date or age so we don't lose
 everything when we reclaim disk space. Archiving with compression should be
-efficient.
+efficient. Perhaps this could just be a database dump of everything related to a
+game/world. Something for much further down the line when we actually start to
+have too much data in the database.
 
 I have a hunch that sifting through logs for cases where the chat output worked
 particularly well will eventually allow us to fine tune LLM models to produce
@@ -1070,6 +1102,19 @@ Ideas to make the first round of implementation even simpler:
   them. The location notes will need to specify the hut and Mara are not close
   so the player would need to Move from one place to the other.
 
+# Implementation Directives
+
+## Scheduling
+
+See the note on delaying compaction until the chat turn is complete and then
+compacting while waiting for user(s) to improve responsiveness/latency.
+
+This is designed to run on one machine with one GPU. While mistral.rs does
+support concurrent requests, we probably don't want to overload it. Limiting to
+some fixed concurrency may be a good idea to improve latency and maybe even
+memory access patterns. If we can use mistral.rs directly to do this that'd be
+even better - less code for us to maintain and we get a feature for free.
+
 # TODO
 
 How will experience and character growth happen?
@@ -1080,3 +1125,17 @@ sync point where the GM waits until all players have called ReadyToBegin.
 Players should be warned by their agent only to call this when all players are
 online and have entered the game, otherwise the GM will need to bring them in
 later in the campaign.
+
+**Future idea — associative hierarchical memory:** Add a long-term
+conversational memory layer that stores retired conversation history as embedded
+chunks, searchable automatically via semantic similarity and exact-text
+retrieval. Relevant memories could be injected implicitly from the current user
+message, recent context, or even the assistant’s draft output, allowing the
+model to “stumble upon” past context without explicitly deciding to call a
+memory tool. Over time, frequently related memories could be clustered into
+higher-level episode/concept summaries, forming a RAPTOR-/A-MEM-like
+hierarchical or DAG structure while retaining raw source turns for precise
+recall. Useful search terms: *agent memory, long-term conversational memory,
+associative retrieval, hierarchical RAG, RAPTOR, MemoRAG, A-MEM, episodic
+memory, semantic memory, hybrid vector/BM25 retrieval, recursive summarization,
+memory consolidation, retrieval from generated clues*.

@@ -15,8 +15,22 @@ pub async fn complete<B: Backend>(
     tools: &[ToolDefinition],
     sampling: Sampling,
     model: &str,
-    on_token: impl FnMut(&str),
+    on_token: impl FnMut(&str) + Send,
 ) -> Result<Response> {
+    let segments = segments(store, agent_id, static_messages, tools).await?;
+    Ok(complete_recipe(
+        store, backend, agent_id, &segments, sampling, model, on_token,
+    )
+    .await?
+    .response)
+}
+
+pub async fn segments(
+    store: &Store,
+    agent_id: i64,
+    static_messages: &[Message],
+    tools: &[ToolDefinition],
+) -> Result<Vec<Segment>> {
     let mut segments = Vec::new();
     for message in static_messages {
         let MessageContent::Text(content) = &message.content else {
@@ -40,17 +54,18 @@ pub async fn complete<B: Backend>(
                 .context("storing tool definitions")?,
         });
     }
-    if let Some(messages) = store
-        .message_segment(agent_id)
-        .await
-        .context("assembling agent message context")?
-    {
-        segments.push(messages);
-    }
-    complete_recipe(
-        store, backend, agent_id, &segments, sampling, model, on_token,
-    )
-    .await
+    segments.extend(
+        store
+            .history_segments(agent_id)
+            .await
+            .context("assembling agent message context")?,
+    );
+    Ok(segments)
+}
+
+pub struct Completion {
+    pub response: Response,
+    pub inference_id: i64,
 }
 
 pub async fn complete_recipe<B: Backend>(
@@ -60,8 +75,8 @@ pub async fn complete_recipe<B: Backend>(
     segments: &[Segment],
     sampling: Sampling,
     model: &str,
-    on_token: impl FnMut(&str),
-) -> Result<Response> {
+    on_token: impl FnMut(&str) + Send,
+) -> Result<Completion> {
     let request = store
         .request_for_segments(agent_id, segments, sampling)
         .await
@@ -69,7 +84,7 @@ pub async fn complete_recipe<B: Backend>(
     let started_at = Instant::now();
     match backend.complete(request.clone(), on_token).await {
         Ok(response) => {
-            store
+            let inference_id = store
                 .record_inference(
                     agent_id,
                     segments,
@@ -81,7 +96,10 @@ pub async fn complete_recipe<B: Backend>(
                 )
                 .await
                 .context("recording completed inference")?;
-            Ok(response)
+            Ok(Completion {
+                response,
+                inference_id,
+            })
         }
         Err(error) => {
             store
@@ -117,7 +135,7 @@ mod tests {
         async fn complete(
             &self,
             _request: crate::llm::Request,
-            _on_token: impl FnMut(&str),
+            _on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
             anyhow::bail!("connection lost")
         }
@@ -127,7 +145,7 @@ mod tests {
         async fn complete(
             &self,
             _request: crate::llm::Request,
-            mut on_token: impl FnMut(&str),
+            mut on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
             on_token("hello");
             Ok(Response {

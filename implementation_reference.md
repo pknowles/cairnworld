@@ -30,26 +30,35 @@ when things were built.
 - `src/context.rs` - the only model-call boundary. It assembles a request from
   stored static prompt text and persisted agent messages, streams through
   the backend, then records either the completed response or the failure using
-  the same reference recipe.
+  the same reference recipe. Its recipe identifies the inference record so a
+  compaction result can refer to the exact request that produced it.
 - `src/agent.rs` - resolves one recorded chat turn: persists each assistant
   response, runs calls from the invocation-local tool list, persists their
-  results, and repeats until final text.
+  results, and repeats until final text. A final reply and any due compaction
+  job are committed together.
+- `src/inference.rs` - admits foreground work ahead of deferred compaction,
+  capped by `max_concurrent_inferences`; mistral.rs batches admitted sequences.
+  It resumes pending jobs at startup and keeps same-agent history ordered.
+- `src/compaction.rs` - resolves a persisted compaction job as one recorded
+  summarisation. It preserves exactly `keep_tail_messages` newest raw rows and
+  transactionally writes the summary and inline notice while retiring the job.
 - `src/tools.rs` - the local `save` tool and the ordinary invocation-local
   lookup used to derive `ToolDefinition`s and run the matching Rust callback.
 
 ## Persistence and recording (design.md: Persistence and recording)
 
 - `src/store.rs` and `migrations/0001_recording.sql` - SQLite store, WAL mode,
-  identity-only `world`/`agent` rows, ordered `message` history, write-once
-  `text` prompt rows, and `inference` recipes. A recipe refers to static text,
-  a tool-definition segment, and an agent message range; reconstruction rereads
-  those rows, verifies the assembled input against its BLAKE3 hash, and checks
-  stored sampling and usage. An inference contains exactly one response or
-  error, so failed calls preserve their reconstructable input without entering
-  the agent's message history. Pre-1.0 the schema is edited in place rather
-  than migrated - changing it invalidates existing database files.
+  identity-only `world`/`agent` rows, ordered `message` history, inline
+  non-model-facing `chat_notice` rows, write-once `text` prompt rows, `summary`
+  rows, and `inference` recipes. A recipe refers
+  to static text, tools, a summary, and/or an agent message range;
+  reconstruction rereads those rows and verifies the assembled input against
+  its BLAKE3 hash. The live history selector is exactly newest summary plus
+  messages after its `covers_to_seq`; all older message rows remain intact for
+  replay and debugging. Pre-1.0 the schema is edited in place rather than
+  migrated - changing it invalidates existing database files.
 
-## Dev CLI (design.md: Dev CLI: chat, fork, replay)
+## Dev CLI (design.md: Dev CLI: chat, replay)
 
 - `src/main.rs` - `cairnworld chat [--model <name|path>] [--temperature <f32>]
   [--enable-thinking] [--system <text>] [--database <path>] [--chat-template
@@ -57,16 +66,21 @@ when things were built.
   the agent loop. `cairnworld replay [--model <name|path>] [--database <path>]
   <inference-id>` reconstructs and validates the recorded recipe, displays its
   response or error, and records the replay by calling the same context
-  boundary. `--kind`, `--fork`, and `--prompts` remain later work.
+  boundary. `--kind` remains later work.
 - `src/settings.rs` - `[models.<name>]` entries pair a GGUF path with the chat
   template that file needs, so `--model hermes` carries its template
   automatically. `--model` also accepts a path directly, and `--chat-template`
   overrides whatever the entry specifies.
+  The interactive editor supports normal terminal history/editing, shows when
+  a model is active, and renders recorded tool activity, compaction summaries,
+  and notices after each turn.
 
 ## Configuration
 
 - `src/settings.rs` - `Settings`, loaded via the `config` crate (toml
   feature only) layering `default.toml` (checked in) under `local.toml`
   (gitignored, per-machine overrides). Holds the `[models.<name>]` entries
-  described above, `model` naming the default among them, and `limits`.
+  described above, `model` naming the default among them, and `limits`,
+  including `max_concurrent_inferences`, `compact_at_input_tokens`, and
+  `keep_tail_messages`.
 - Weights are not checked in; `models/` is gitignored.

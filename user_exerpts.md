@@ -88,3 +88,38 @@ an ordinary surrogate key.
 
 The bounds exist to stop a runaway, so hitting one is a hard error that
 reaches the user - never something an agent can observe and react to.
+
+# Decision Log
+
+## 2026-08-08: Exact compaction accounting
+
+> we should not lie in values stored. be super explicit and use the exact right
+> units where there is no trivial conversion to something common.
+
+> how will this work when we don't know how many tokens a given number of tail
+> messages will consume? ... we could linearly scan through, tokenizing messages
+> but that would be rediculous
+
+`compact_at_input_tokens` is the exact input-token count the model reports for
+the completed inference, including its static context, history, tools and
+generation prompt. It is not a character count, a JSON serialization, or a
+conversion estimate. Compaction reuses this recorded value; it never invokes a
+second tokenizer pass just to decide or verify compaction.
+
+`keep_tail_messages` retains an exact number of persisted raw message rows. It
+does not promise a token budget. This avoids both a false conversion between
+characters and tokens and tokenizing candidate messages one-by-one. A later
+turn retries compaction when its recorded input reaches the trigger again.
+
+Each recorded inference stores the model-reported `input_tokens` and
+`output_tokens` for the debug view. Those are factual usage measurements and
+the compaction trigger. Because the reply is appended after that input was
+measured, the trigger is the threshold that prompts compaction after a turn,
+not a promise that the next context already fits.
+
+An inline, non-model-facing chat notice records every compaction and the case
+where only the retained tail remains. Repeated notices make a bad threshold or
+one-off huge message visible without interrupting play.
+
+This supersedes the character-tail rule currently recorded in
+`user_declarations.md`; that declaration needs a separate reconciliation.

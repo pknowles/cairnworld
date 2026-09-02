@@ -13,8 +13,7 @@ One rust binary, one sqlite database file per deployment, an embedded LLM. The
 binary has subcommands:
 
 - `cairnworld serve` - run the webserver and game
-- `cairnworld chat` - interactive agent REPL (see "Dev CLI: chat, fork,
-  replay")
+- `cairnworld chat` - interactive agent REPL (see "Dev CLI: chat, replay")
 - `cairnworld replay <inference-id>` - re-run a recorded inference, optionally
   with edited prompts
 - `cairnworld world export|import <file.json>` - world snapshots for checked-in
@@ -109,6 +108,26 @@ provenance. A wrapper below the backend cannot do this job: handed an
 already-assembled request, it knows only opaque bytes, and can do no better
 than storing a copy of them.
 
+## Inference scheduling
+
+One loaded mistral.rs model accepts concurrent requests and schedules their
+sequences itself. Cairnworld controls admission policy, not model execution:
+`limits.max_concurrent_inferences` defaults to 4. Foreground player and agent
+requests take priority; deferred work such as compaction uses capacity not
+needed by them. A completed reply is delivered before its deferred work runs.
+When the cap is full, lower-priority work waits rather than increasing player
+latency. This remains a policy setting, so measurement can tune it for the
+available GPU without duplicating the backend scheduler.
+
+Deferred work is persisted before it is admitted. Restarting loads unfinished
+jobs again, so a completed reply cannot lose its required compaction merely
+because the server exits. A job records the model and sampling of the turn
+that created it and is written atomically with that reply. Completing a job
+atomically stores its result, its developer-visible notice, and removes the
+job; a crash while it runs leaves it eligible to retry. A later request to the
+same agent cannot overtake its earlier deferred work, while unrelated agents
+continue through available capacity.
+
 # Persistence and recording
 
 ## Store choice
@@ -131,6 +150,13 @@ composes directly with axum and the world tasks, and migrations are built in
 - `summary(id, agent_id, covers_to_seq, content, inference_id)` - compaction
   products. The live context for an agent is: newest summary + all messages
   with `seq > covers_to_seq`.
+- `chat_notice(id, agent_id, after_message_id, content)` - an inline event in
+  a user/developer chat view. It is deliberately not selected for agent
+  context.
+- `pending_compaction(agent_id, after_message_id, input_tokens, sampling,
+  model)` - durable deferred work caused by an already completed reply. It is
+  not a derived cache: its presence is the instruction to compact after a
+  restart.
 
 ## Inference records and reconstruction
 
@@ -169,6 +195,7 @@ interesting as successes when debugging prompts and model behaviour, and an
 unrecorded failure is invisible after the fact. A failed output is never fed
 back into an agent's context - it is not a `message`, so context assembly
 never sees it. Dev mode's chat history renders the union of `message` rows
+and non-model-facing `chat_notice` rows in chronological order.
 and failed inferences, so a failure appears inline in the transcript and
 opens into its inference view like any other entry.
 
@@ -338,12 +365,13 @@ spine means no extra bookkeeping exists only for debugging.
 
 # Chat compaction
 
-Config: `compact_at_tokens` (total context trigger) and `keep_tail_chars`
-(raw messages preserved after the summary). When an agent's assembled context
+Config: `compact_at_input_tokens` (reported completed-inference input trigger) and
+`keep_tail_messages` (exact newest raw rows preserved after the summary). When
+an agent's assembled context
 exceeds the trigger:
 
-1. Choose the cut point `n` such that messages after `n` total under
-   `keep_tail_chars`.
+1. Choose the cut point `n` so exactly `keep_tail_messages` raw messages after
+   `n` remain.
 2. Build a compaction input: role prompt + previous summary + messages up to
    `n` + the compaction instruction (what is static and always provided, what
    will be lost, what matters to keep). Newer messages are excluded - the
@@ -351,10 +379,14 @@ exceeds the trigger:
 3. Run it through the normal recorded inference path; store the `summary` row
    with `covers_to_seq = n`.
 
-Compaction happens lazily, checked before assembling a normal inference, so
-there is no background job.
+The trigger uses the model-reported `input_tokens` already recorded for the
+completed inference. It adds no tokenization work and therefore describes the
+input that caused compaction, rather than estimating the newly appended reply.
+Compaction happens after a completed turn, so there is no background job. If
+only the retained tail remains, it records an inline notice and retries after a
+later turn; it never interrupts the game for context pressure alone.
 
-# Dev CLI: chat, fork, replay
+# Dev CLI: chat, replay
 
 The fast iteration loop for prompt and agent work. Everything here is a thin
 frontend over the same `agent`/`store` functions the game uses - no parallel
@@ -369,11 +401,6 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   REPL session is a faithful stand-in for in-game behaviour, not an
   approximation. Rust-side tool code executes for real against the sandbox
   world's state.
-- **Fork:** `cairnworld chat --fork <agent-id> [--at <seq>]` copies an
-  existing agent's history (from any world, up to an optional seq) into a
-  sandbox agent and drops into the REPL at that point. The source world is
-  untouched. This is the shortcut for "get me an agent in exactly the state
-  where it misbehaved, and let me poke it."
 - **Replay:** `cairnworld replay <inference-id>` reassembles the recorded input
   via the reconstruction machinery and re-runs it, printing old and new output
   side by side. Reassembly uses the current code and the current prompt files,
@@ -389,7 +416,7 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   sent next).
 
 Access paths: humans use the stdio REPL; coding agents get the same verbs -
-fork, replay, chat-as-agent, plus the debug-spine queries - through the MCP
+replay, chat-as-agent, plus the debug-spine queries - through the MCP
 server (stdio transport for local Claude Code/Codex; rmcp also offers HTTP if
 a remote agent ever needs it). Same functions underneath, two transports.
 

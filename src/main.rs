@@ -1,5 +1,7 @@
 mod agent;
+mod compaction;
 mod context;
+mod inference;
 mod llm;
 mod mistralrs_backend;
 mod settings;
@@ -13,8 +15,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use rustyline::{DefaultEditor, error::ReadlineError};
 
-use llm::{Message, Role, Sampling};
+use inference::InferenceScheduler;
+use llm::{Backend, Message, Role, Sampling};
 use mistralrs_backend::MistralRsBackend;
 use settings::Settings;
 use store::{RecordedOutcome, Store};
@@ -101,6 +105,7 @@ async fn main() -> Result<()> {
                 resolve_model(model.as_deref(), chat_template, &settings)?,
                 Path::new(&database),
                 inference_id,
+                settings.limits,
             )
             .await
         }
@@ -121,11 +126,15 @@ fn resolve_model(
     Ok(model)
 }
 
-async fn backend(model: &settings::Model) -> Result<MistralRsBackend> {
+async fn backend(model: &settings::Model, limits: settings::Limits) -> Result<MistralRsBackend> {
     eprintln!("Loading model from {}...", model.path);
-    MistralRsBackend::load(&model.path, model.chat_template.as_deref())
-        .await
-        .context("failed to load model")
+    MistralRsBackend::load(
+        &model.path,
+        model.chat_template.as_deref(),
+        limits.max_concurrent_inferences,
+    )
+    .await
+    .context("failed to load model")
 }
 
 async fn run_chat(
@@ -147,7 +156,13 @@ async fn run_chat(
         .create_agent(world, "sandbox", "chat")
         .await
         .context("creating chat sandbox agent")?;
-    let backend = backend(&model).await?;
+    let scheduler = InferenceScheduler::new(backend(&model, limits).await?, limits)
+        .context("configuring inference scheduling")?;
+    scheduler
+        .resume(&store)
+        .await
+        .context("resuming deferred compactions")?;
+    let backend = scheduler.foreground();
     eprintln!("Model loaded. Type a message, or /quit to exit.");
 
     let static_messages = system
@@ -156,27 +171,37 @@ async fn run_chat(
         .collect::<Vec<_>>();
     let tools = [tools::save()];
 
-    let stdin = std::io::stdin();
-    let mut line = String::new();
+    let mut editor = DefaultEditor::new().context("starting chat line editor")?;
     loop {
-        print!("> ");
-        std::io::stdout().flush().context("flushing stdout")?;
-
-        line.clear();
-        let bytes_read = stdin.read_line(&mut line).context("reading from stdin")?;
-        if bytes_read == 0 {
-            break;
+        let line = match editor.readline("> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => break,
+            Err(error) => return Err(error).context("reading chat message"),
+        };
+        let text = line.as_str();
+        if text.is_empty() {
+            continue;
         }
-        let text = line.trim_end_matches('\n');
         if text == "/quit" {
             break;
         }
+        editor
+            .add_history_entry(text)
+            .context("saving chat input in line-editor history")?;
+
+        // Do this before appending the next user row: an earlier compaction
+        // must never see a newer chat message in the history it summarizes.
+        backend
+            .before_agent(&store, agent)
+            .await
+            .context("finishing earlier deferred work for this chat")?;
 
         store
             .append_message(agent, &Message::text(Role::User, text))
             .await
             .context("storing chat message")?;
 
+        eprintln!("[model active]");
         // Each REPL turn is one external trigger, so it gets its own budget.
         let mut budget = agent::Budget::new(limits);
         let response = agent::complete(
@@ -195,6 +220,7 @@ async fn run_chat(
                 print!("{token}");
                 let _ = std::io::stdout().flush();
             },
+            |activity| eprintln!("\n[developer] {activity}"),
         )
         .await
         .context("resolving chat turn")?;
@@ -209,7 +235,12 @@ async fn run_chat(
     Ok(())
 }
 
-async fn run_replay(model: settings::Model, database: &Path, inference_id: i64) -> Result<()> {
+async fn run_replay(
+    model: settings::Model,
+    database: &Path,
+    inference_id: i64,
+    limits: settings::Limits,
+) -> Result<()> {
     let store = Store::open(database)
         .await
         .context("opening inference store")?;
@@ -229,7 +260,7 @@ async fn run_replay(model: settings::Model, database: &Path, inference_id: i64) 
         RecordedOutcome::Error(error) => println!("Recorded error:\n{error}"),
     }
     println!("Replayed output:");
-    let backend = backend(&model).await?;
+    let backend = backend(&model, limits).await?;
     let response = context::complete_recipe(
         &store,
         &backend,
@@ -244,6 +275,7 @@ async fn run_replay(model: settings::Model, database: &Path, inference_id: i64) 
     )
     .await
     .context("replaying recorded inference")?;
+    let response = response.response;
     println!(
         "\nReplay usage: {} input tokens, {} output tokens",
         response.usage.input_tokens, response.usage.output_tokens

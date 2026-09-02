@@ -20,11 +20,20 @@ impl MistralRsBackend {
     /// a template with no tool support at all - the Hermes 3 GGUF carries bare
     /// ChatML, which silently drops every tool definition - so the tool surface
     /// is unusable without supplying one (see templates/).
-    pub async fn load(model_id_or_path: &str, chat_template: Option<&Path>) -> Result<Self> {
+    pub async fn load(
+        model_id_or_path: &str,
+        chat_template: Option<&Path>,
+        max_concurrent_inferences: usize,
+    ) -> Result<Self> {
         let (dir, file) = model_id_or_path.rsplit_once('/').context(
             "--model must be a path or repo id containing a GGUF filename, e.g. dir/model.gguf",
         )?;
-        let mut builder = GgufModelBuilder::new(dir, vec![file]);
+        ensure!(
+            max_concurrent_inferences > 0,
+            "limits.max_concurrent_inferences must be greater than zero"
+        );
+        let mut builder =
+            GgufModelBuilder::new(dir, vec![file]).with_max_num_seqs(max_concurrent_inferences);
         if let Some(template) = chat_template {
             ensure!(
                 template.exists(),
@@ -41,45 +50,53 @@ impl MistralRsBackend {
     }
 }
 
-impl Backend for MistralRsBackend {
-    async fn complete(&self, request: Request, mut on_token: impl FnMut(&str)) -> Result<Response> {
-        let mut request_builder = RequestBuilder::new();
-        for message in request.messages {
-            match message.content {
-                MessageContent::Text(content) => {
-                    let role = match message.role {
-                        Role::System => TextMessageRole::System,
-                        Role::User => TextMessageRole::User,
-                        Role::Assistant => TextMessageRole::Assistant,
-                        Role::Tool => TextMessageRole::Tool,
-                    };
-                    request_builder = request_builder.add_message(role, content);
-                }
-                MessageContent::ToolCalls(calls) => {
-                    request_builder = request_builder.add_message_with_tool_call(
-                        TextMessageRole::Assistant,
-                        "",
-                        calls.into_iter().enumerate().map(to_mistral_call).collect(),
-                    )
-                }
-                MessageContent::ToolResult {
-                    tool_call_id,
-                    content,
-                } => request_builder = request_builder.add_tool_message(content, tool_call_id),
+fn request_builder(request: Request) -> Result<RequestBuilder> {
+    let mut request_builder = RequestBuilder::new();
+    for message in request.messages {
+        match message.content {
+            MessageContent::Text(content) => {
+                let role = match message.role {
+                    Role::System => TextMessageRole::System,
+                    Role::User => TextMessageRole::User,
+                    Role::Assistant => TextMessageRole::Assistant,
+                    Role::Tool => TextMessageRole::Tool,
+                };
+                request_builder = request_builder.add_message(role, content);
             }
+            MessageContent::ToolCalls(calls) => {
+                request_builder = request_builder.add_message_with_tool_call(
+                    TextMessageRole::Assistant,
+                    "",
+                    calls.into_iter().enumerate().map(to_mistral_call).collect(),
+                )
+            }
+            MessageContent::ToolResult {
+                tool_call_id,
+                content,
+            } => request_builder = request_builder.add_tool_message(content, tool_call_id),
         }
-        let request_builder = request_builder
-            .set_sampling(SamplingParams::neutral())
-            .set_sampler_temperature(request.sampling.temperature as f64)
-            .set_tools(
-                request
-                    .tools
-                    .iter()
-                    .map(to_mistral_tool)
-                    .collect::<Result<Vec<_>>>()
-                    .context("translating tool definitions for mistral.rs")?,
-            )
-            .enable_thinking(request.sampling.enable_thinking);
+    }
+    Ok(request_builder
+        .set_sampling(SamplingParams::neutral())
+        .set_sampler_temperature(request.sampling.temperature as f64)
+        .set_tools(
+            request
+                .tools
+                .iter()
+                .map(to_mistral_tool)
+                .collect::<Result<Vec<_>>>()
+                .context("translating tool definitions for mistral.rs")?,
+        )
+        .enable_thinking(request.sampling.enable_thinking))
+}
+
+impl Backend for MistralRsBackend {
+    async fn complete(
+        &self,
+        request: Request,
+        mut on_token: impl FnMut(&str) + Send,
+    ) -> Result<Response> {
+        let request_builder = request_builder(request)?;
 
         let mut stream = self
             .model
@@ -272,11 +289,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
     async fn stream_and_final_response_agree() {
-        let model_path = Settings::load()
-            .expect("settings should load")
-            .model
-            .expect("set `model` in local.toml to a local GGUF path to run this test");
-        let backend = MistralRsBackend::load(&model_path, None)
+        let settings = Settings::load().expect("settings should load");
+        let model = settings
+            .model(None)
+            .expect("configure a model in local.toml or default.toml to run this test");
+        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4)
             .await
             .expect("model should load");
 
