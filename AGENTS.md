@@ -33,23 +33,28 @@ not checked in.
 
 Use integrated edit/search tools rather than grep/sed when at all possible.
 
-# Pre-commit checklist
+# Post-feature and pre-commit checklist
 
-The following items must have been completed before making a commit. This is a
-hard gate and MUST be followed:
+The following items must have been completed after implementing a feature and
+before making a commit. This is a hard gate and MUST be followed:
 
 1. Documentation must be updated to match the changes
 2. Appropriate testing has been run and passes
 3. Prompt/context/model-facing changes have been exercised through the real chat
    path, including presenting edge case chats and evaluating related use-cases
 4. Self-review performed:
+   - Did you "fix" any guesses? I.e. did you make changes without verifying the
+     fix was the one required and that it actually fixed the issue? If you did,
+     it's likely the "fix" needs reverting as it was made on false assumptions.
    - Did you do everything agreed upon?
    - Anything missed or shortcuts taken?
    - Did you follow the rules here and in coding_standards.md and
      prompt_standards.md?
+   - If writing a plan, make sure that it references this checklist and our
+     standards docs.
    - If designing/planning, verify the implementation matches a direct user
      requirement and that there was no better and more straight forward way (see
-     design.md below). Check that the design aligns with the coding standards.
+     design.md below). Check that the design aligns with the standards docs.
      Does the implementation ordering flow so data and dependencies will simply
      already exist when needed or are constructs being introduced unnecessarily
      that would simply not be needed if the ordering were corrected or steps
@@ -113,7 +118,8 @@ reviewed and committed, or there is a real blocker.
   simpler if a feature was there. Check that the granularity of the plan is
   appropriate - i.e. we won't need to write extra code just to have an
   intermediate step work and that we won't be implementing too much without
-  modular testing in one big blob.
+  modular testing in one big blob. Check for plans/deferred.md items that should
+  be included/merged into the plan.
 - Implement one complete slice that can be committed. See Worktree and git
   sanitation above. The project must be in a good state at the end so we can git
   bisect. You may need to revisit the plan or implement a little more to achieve
@@ -227,6 +233,21 @@ flow is: user_declarations.md (ground truth) → design.md (desired end state) �
 plans/ (order, detail and status) → implementation_reference.md (index of what
 exists). Naming them with a date prefix may help to know their order and what's
 most recent.
+
+### plans/deferred.md
+
+Sometimes the design changes or agents make mistakes with the implementation
+order. This file contains a list of follow-up items that were at one point
+scheduled for implementation but could not be at the time.
+
+Items here must be deferred due to being blocked. This file is NOT an excuse to
+just do planned work later. Additions here come with maintenance cost.
+
+Each item must include a recommended implementation schedule or trigger so that
+ideas/features don't get lost to time.
+
+Additions due to scope are not allowed unless they are explicitly requested and
+signed off by the user.
 
 ## implementation_reference.md
 

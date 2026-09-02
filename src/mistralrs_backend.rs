@@ -1,18 +1,23 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use mistralrs::{
-    CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, Function, GgufModelBuilder,
-    Model, RequestBuilder, Response as MrResponse, SamplingParams, TextMessageRole, Tool,
-    ToolCallResponse, ToolCallType, ToolType,
+    CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, DeviceLayerMapMetadata,
+    DeviceMapMetadata, DeviceMapSetting, Function, GgufModelBuilder, MemoryGpuConfig, Model,
+    PagedAttentionMetaBuilder, RequestBuilder, Response as MrResponse, SamplingParams,
+    TextMessageRole, Tool, ToolCallResponse, ToolCallType, ToolType, best_device,
 };
 
 use crate::llm::{
-    Backend, Content, MessageContent, Request, Response, Role, ToolCall, ToolDefinition, Usage,
+    Backend, Content, ContextCapacityExceeded, MessageContent, Request, Response, Role, ToolCall,
+    ToolDefinition, Usage,
 };
+use crate::settings::Limits;
 
 pub struct MistralRsBackend {
     model: Model,
+    max_context_tokens: usize,
+    max_output_tokens: usize,
 }
 
 impl MistralRsBackend {
@@ -23,17 +28,49 @@ impl MistralRsBackend {
     pub async fn load(
         model_id_or_path: &str,
         chat_template: Option<&Path>,
-        max_concurrent_inferences: usize,
+        limits: Limits,
+        allow_cpu: bool,
     ) -> Result<Self> {
+        let started = Instant::now();
+        limits.validate()?;
+        let cache_context_tokens = limits.cache_context_tokens()?;
+        tracing::info!(
+            model = model_id_or_path,
+            chat_template = chat_template.map(|path| path.display().to_string()),
+            max_concurrent_inferences = limits.max_concurrent_inferences,
+            max_context_tokens = limits.max_context_tokens,
+            max_output_tokens = limits.max_output_tokens,
+            cache_context_tokens,
+            "starting game model load"
+        );
         let (dir, file) = model_id_or_path.rsplit_once('/').context(
             "--model must be a path or repo id containing a GGUF filename, e.g. dir/model.gguf",
         )?;
+        let gpu_used_before_mib = if allow_cpu {
+            0
+        } else {
+            log_gpu_memory("before model load")?
+        };
         ensure!(
-            max_concurrent_inferences > 0,
-            "limits.max_concurrent_inferences must be greater than zero"
+            mistralrs::paged_attn_supported(),
+            "this mistral.rs build does not support PagedAttention, which Cairnworld requires for fixed VRAM allocation"
         );
-        let mut builder =
-            GgufModelBuilder::new(dir, vec![file]).with_max_num_seqs(max_concurrent_inferences);
+        let paged_attention = PagedAttentionMetaBuilder::default()
+            .with_gpu_memory(MemoryGpuConfig::ContextSize(cache_context_tokens))
+            .build()
+            .context("configuring fixed paged KV-cache capacity")?;
+        let mut builder = GgufModelBuilder::new(dir, vec![file])
+            .with_max_num_seqs(limits.max_concurrent_inferences)
+            .with_prefix_cache_n(None)
+            .with_paged_attn(paged_attention);
+        if !allow_cpu {
+            builder = builder.with_device_mapping(DeviceMapSetting::Map(
+                DeviceMapMetadata::from_num_device_layers(vec![DeviceLayerMapMetadata {
+                    ordinal: 0,
+                    layers: usize::MAX,
+                }]),
+            ));
+        }
         if let Some(template) = chat_template {
             ensure!(
                 template.exists(),
@@ -45,17 +82,70 @@ impl MistralRsBackend {
         let model = builder
             .build()
             .await
-            .with_context(|| format!("loading GGUF model from {model_id_or_path}"))?;
-        Ok(Self { model })
+            .inspect_err(|error| {
+                tracing::error!(
+                    model = model_id_or_path,
+                    elapsed = ?started.elapsed(),
+                    error = %error,
+                    "game model failed to load"
+                )
+            })
+            .with_context(|| {
+                if allow_cpu {
+                    format!("loading GGUF model from {model_id_or_path}")
+                } else {
+                    format!(
+                        "loading GGUF model from {model_id_or_path}; the model must fit entirely in GPU memory (use --allow-cpu only for explicit CPU/GPU execution)"
+                    )
+                }
+            })?;
+        if !allow_cpu {
+            let gpu_used_after_mib = log_gpu_memory("after model load")?;
+            tracing::info!(
+                allocated_mib = gpu_used_after_mib.saturating_sub(gpu_used_before_mib),
+                "fixed model and KV-cache GPU allocation"
+            );
+        }
+        tracing::info!(
+            model = model_id_or_path,
+            elapsed = ?started.elapsed(),
+            "game model load completed"
+        );
+        Ok(Self {
+            model,
+            max_context_tokens: limits.max_context_tokens,
+            max_output_tokens: limits.max_output_tokens,
+        })
     }
 }
 
-fn request_builder(request: Request) -> Result<RequestBuilder> {
+fn log_gpu_memory(phase: &str) -> Result<usize> {
+    let device = best_device(false).context("selecting CUDA device for model telemetry")?;
+    let memory = mistralrs::core::MemoryUsage
+        .query(&device)
+        .context("querying CUDA memory for model telemetry")?;
+    let total_mib = memory.total() / (1024 * 1024);
+    let available_mib = memory.available() / (1024 * 1024);
+    anyhow::ensure!(
+        !matches!(device, mistralrs::Device::Cpu),
+        "CUDA is unavailable; the model must fit entirely in GPU memory (use --allow-cpu only for explicit CPU/GPU execution)"
+    );
+    tracing::info!(
+        phase,
+        total_mib,
+        available_mib,
+        used_mib = total_mib.saturating_sub(available_mib),
+        "CUDA memory telemetry"
+    );
+    Ok(total_mib.saturating_sub(available_mib))
+}
+
+fn request_builder(request: &Request, max_output_tokens: usize) -> Result<RequestBuilder> {
     let mut request_builder = RequestBuilder::new();
-    for message in request.messages {
-        match message.content {
+    for message in &request.messages {
+        match &message.content {
             MessageContent::Text(content) => {
-                let role = match message.role {
+                let role = match &message.role {
                     Role::System => TextMessageRole::System,
                     Role::User => TextMessageRole::User,
                     Role::Assistant => TextMessageRole::Assistant,
@@ -67,7 +157,12 @@ fn request_builder(request: Request) -> Result<RequestBuilder> {
                 request_builder = request_builder.add_message_with_tool_call(
                     TextMessageRole::Assistant,
                     "",
-                    calls.into_iter().enumerate().map(to_mistral_call).collect(),
+                    calls
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(to_mistral_call)
+                        .collect(),
                 )
             }
             MessageContent::ToolResult {
@@ -79,6 +174,7 @@ fn request_builder(request: Request) -> Result<RequestBuilder> {
     Ok(request_builder
         .set_sampling(SamplingParams::neutral())
         .set_sampler_temperature(request.sampling.temperature as f64)
+        .set_sampler_max_len(max_output_tokens)
         .set_tools(
             request
                 .tools
@@ -91,23 +187,44 @@ fn request_builder(request: Request) -> Result<RequestBuilder> {
 }
 
 impl Backend for MistralRsBackend {
+    async fn input_tokens(&self, request: &Request) -> Result<usize> {
+        let tokens = self
+            .model
+            .tokenize_chat_request(request_builder(request, self.max_output_tokens)?)
+            .await
+            .context("tokenizing exact model chat request")?;
+        Ok(tokens.len())
+    }
+
     async fn complete(
         &self,
         request: Request,
         mut on_token: impl FnMut(&str) + Send,
     ) -> Result<Response> {
-        let request_builder = request_builder(request)?;
+        let started = Instant::now();
+        tracing::info!(
+            messages = request.messages.len(),
+            tools = request.tools.len(),
+            max_context_tokens = self.max_context_tokens,
+            max_output_tokens = self.max_output_tokens,
+            temperature = request.sampling.temperature,
+            thinking = request.sampling.enable_thinking,
+            "starting model inference"
+        );
+        let request_builder = request_builder(&request, self.max_output_tokens)?;
 
         let mut stream = self
             .model
             .stream_chat_request(request_builder)
             .await
+            .inspect_err(|error| {
+                tracing::error!(error = %error, elapsed = ?started.elapsed(), "model inference could not start")
+            })
             .context("starting streamed inference")?;
 
-        // The streaming path never emits a terminal `Response::Done`; the
-        // last `Chunk` (carrying `finish_reason` and `usage`) is the
-        // completion signal, so the final response is assembled from the
-        // accumulated deltas rather than read back from the backend.
+        // mistral.rs's streaming API ends after its final Chunk. That chunk
+        // contains the complete response metadata, so returning at that point
+        // is the API contract; no separate Done response is guaranteed.
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut tool_calls = BTreeMap::new();
@@ -115,17 +232,28 @@ impl Backend for MistralRsBackend {
             input_tokens: 0,
             output_tokens: 0,
         };
+        let mut streaming = false;
+        let mut chunks = 0usize;
         loop {
-            let chunk = stream
-                .next()
-                .await
-                .context("inference stream ended without a final chunk")?;
+            let Some(chunk) = stream.next().await else {
+                tracing::error!(
+                    elapsed = ?started.elapsed(),
+                    chunks,
+                    "model inference stream ended without a final chunk"
+                );
+                anyhow::bail!("inference stream ended without a final chunk");
+            };
+            if !streaming {
+                streaming = true;
+                tracing::info!(elapsed = ?started.elapsed(), "model inference began streaming");
+            }
             match chunk {
                 MrResponse::Chunk(ChatCompletionChunkResponse {
                     choices,
                     usage: chunk_usage,
                     ..
                 }) => {
+                    chunks += 1;
                     let finished = choices
                         .first()
                         .is_some_and(|choice| choice.finish_reason.is_some());
@@ -172,21 +300,43 @@ impl Backend for MistralRsBackend {
                         };
                     }
                     if finished {
-                        return Ok(assemble(
+                        let response = assemble(
                             content,
                             reasoning,
                             tool_calls.into_values().collect(),
                             usage,
-                        ));
+                        );
+                        tracing::info!(
+                            elapsed = ?started.elapsed(),
+                            chunks,
+                            input_tokens = response.usage.input_tokens,
+                            output_tokens = response.usage.output_tokens,
+                            tool_calls = matches!(&response.content, Content::ToolCalls(calls) if !calls.is_empty()),
+                            "model inference completed"
+                        );
+                        return Ok(response);
                     }
                 }
                 MrResponse::ModelError(message, _) => {
+                    tracing::error!(elapsed = ?started.elapsed(), %message, "model reported an inference error");
                     anyhow::bail!("model error during inference: {message}")
                 }
+                MrResponse::ContextLengthExceeded { requested_tokens } => {
+                    let error = ContextCapacityExceeded {
+                        requested_tokens,
+                        max_context_tokens: self.max_context_tokens,
+                    };
+                    tracing::error!(elapsed = ?started.elapsed(), %error, "model rejected request before inference");
+                    return Err(error.into());
+                }
                 MrResponse::InternalError(error) | MrResponse::ValidationError(error) => {
+                    tracing::error!(elapsed = ?started.elapsed(), %error, "model inference stream error");
                     return Err(anyhow::anyhow!(error).context("inference stream error"));
                 }
-                _ => anyhow::bail!("unexpected response variant from chat stream"),
+                _ => {
+                    tracing::error!(elapsed = ?started.elapsed(), "model returned an unexpected chat stream response");
+                    anyhow::bail!("unexpected response variant from chat stream")
+                }
             }
         }
     }
@@ -283,19 +433,33 @@ fn append_tool_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{Message, Sampling};
+    use crate::llm::{Message, Sampling, ToolDefinition};
     use crate::settings::Settings;
+
+    fn show_inference_lifecycle() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("cairnworld=info")
+            .with_test_writer()
+            .try_init();
+    }
 
     #[tokio::test]
     #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
-    async fn stream_and_final_response_agree() {
+    async fn streaming_completion_leaves_the_model_available_for_the_next_turn() {
+        show_inference_lifecycle();
         let settings = Settings::load().expect("settings should load");
+        let requested_model = std::env::var("CAIRNWORLD_TEST_MODEL").ok();
         let model = settings
-            .model(None)
+            .model(requested_model.as_deref())
             .expect("configure a model in local.toml or default.toml to run this test");
-        let backend = MistralRsBackend::load(&model.path, model.chat_template.as_deref(), 4)
-            .await
-            .expect("model should load");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .expect("model should load");
 
         let request = Request {
             messages: vec![Message::text(
@@ -309,18 +473,116 @@ mod tests {
             },
         };
 
-        let mut streamed = String::new();
-        let response = backend
-            .complete(request, |token| streamed.push_str(token))
-            .await
-            .expect("completion should succeed");
+        for turn in 1..=2 {
+            let mut streamed = String::new();
+            let response = backend
+                .complete(request.clone(), |token| streamed.push_str(token))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("streamed completion {turn} should succeed: {error:#}")
+                });
 
-        let Content::Text(final_text) = response.content else {
-            panic!("expected text content");
+            let Content::Text(final_text) = response.content else {
+                panic!("streamed completion {turn} should produce text");
+            };
+            assert!(!streamed.is_empty());
+            assert!(!final_text.is_empty());
+            assert_eq!(streamed, final_text);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
+    async fn opening_turn_with_tools_has_a_valid_chat_template_shape() {
+        show_inference_lifecycle();
+        let settings = Settings::load().expect("settings should load");
+        let model = settings
+            .model(None)
+            .expect("configure a model in local.toml or default.toml to run this test");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .expect("model should load");
+        let request = Request {
+            messages: vec![
+                Message::text(Role::System, "You are the player's guide."),
+                Message::text(
+                    Role::User,
+                    "The player has entered the world. Begin character creation by speaking directly to them.",
+                ),
+            ],
+            tools: vec![ToolDefinition {
+                name: "roll_hit_protection".into(),
+                description: "Roll starting Hit Protection.".into(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            sampling: Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
         };
-        assert!(!streamed.is_empty());
-        assert!(!final_text.is_empty());
-        assert_eq!(streamed, final_text);
+        backend.complete(request, |_| {}).await.expect(
+            "opening request must reach the configured model without a chat-template error",
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a CUDA-capable device and the configured Qwen GGUF model"]
+    async fn qwen_zero_argument_tool_cannot_emit_placeholder_arguments() {
+        show_inference_lifecycle();
+        let settings = Settings::load().expect("settings should load");
+        let model = settings
+            .model(Some("dev-qwen3"))
+            .expect("configure the dev-qwen3 model");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .expect("model should load");
+        let response = backend
+            .complete(
+                Request {
+                    messages: vec![
+                        Message::text(
+                            Role::System,
+                            "Follow the user's request using the available tool.",
+                        ),
+                        Message::text(
+                            Role::User,
+                            "Call roll_attributes now. Do not write a reply.",
+                        ),
+                    ],
+                    tools: vec![ToolDefinition {
+                        name: "roll_attributes".to_string(),
+                        description: "Roll the character's attributes.".to_string(),
+                        schema: serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {},
+                        }),
+                    }],
+                    sampling: Sampling {
+                        temperature: 0.0,
+                        enable_thinking: false,
+                    },
+                },
+                |_| {},
+            )
+            .await
+            .expect("Qwen zero-argument tool request should complete");
+        let Content::ToolCalls(calls) = response.content else {
+            panic!("Qwen should call the requested zero-argument tool");
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "roll_attributes");
+        assert_eq!(calls[0].arguments, "{}");
     }
 
     #[test]

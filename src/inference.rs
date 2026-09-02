@@ -92,7 +92,7 @@ where
         }
     }
 
-    /// Resume durable work after startup. Each job remains in SQLite until its
+    /// Resume stored work after startup. Each job remains in SQLite until its
     /// summary and notice have committed, so this is safe to call repeatedly.
     pub async fn resume(&self, store: &Store) -> Result<()> {
         for job in store.pending_compactions().await? {
@@ -161,12 +161,13 @@ where
         self.admit_deferred(store.clone(), agent_id).await;
         loop {
             let changed = self.changed.notified();
-            let mut state = self.state.lock().expect("scheduler state poisoned");
-            if let Some(error) = state.failures.remove(&agent_id) {
-                anyhow::bail!("deferred compaction for agent {agent_id} failed: {error}");
-            }
-            let inactive = !state.deferred_agents.contains(&agent_id);
-            drop(state);
+            let inactive = {
+                let mut state = self.state.lock().expect("scheduler state poisoned");
+                if let Some(error) = state.failures.remove(&agent_id) {
+                    anyhow::bail!("deferred compaction for agent {agent_id} failed: {error}");
+                }
+                !state.deferred_agents.contains(&agent_id)
+            };
             if inactive {
                 if store.pending_compaction(agent_id).await?.is_none() {
                     return Ok(());
@@ -240,6 +241,10 @@ where
     B: Backend + Send + Sync + 'static,
 {
     async fn before_agent(&self, store: &Store, agent_id: i64) -> Result<()> {
+        // A pending job was created with the previous final reply. It must
+        // finish before this agent can assemble another context, otherwise the
+        // same over-threshold history would be inferred again. Other agents
+        // remain schedulable while this one waits.
         self.scheduler.wait_for_agent(store, agent_id).await
     }
 
@@ -248,6 +253,10 @@ where
             self.scheduler.admit_deferred(store.clone(), agent_id).await;
         }
         Ok(())
+    }
+
+    async fn input_tokens(&self, request: &Request) -> Result<usize> {
+        self.scheduler.backend.input_tokens(request).await
     }
 
     async fn complete(
@@ -265,11 +274,18 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::llm::{Message, Role, Sampling, Usage};
+    use crate::{
+        llm::{Message, Role, Sampling, Usage},
+        store::CompletedReply,
+    };
 
     struct TestBackend;
 
     impl Backend for TestBackend {
+        async fn input_tokens(&self, _request: &Request) -> Result<usize> {
+            Ok(0)
+        }
+
         async fn complete(
             &self,
             _request: Request,
@@ -368,7 +384,7 @@ mod tests {
         ));
         let store = Store::open(&path).await.unwrap();
         let world = store.create_world("test").await.unwrap();
-        let agent = store.create_agent(world, "sandbox", "test").await.unwrap();
+        let agent = store.create_agent(world).await.unwrap();
         store
             .append_message(agent, &Message::text(Role::User, "older history"))
             .await
@@ -376,17 +392,24 @@ mod tests {
         store
             .append_reply_and_enqueue_compaction(
                 agent,
-                &Message::text(Role::Assistant, "reply"),
-                1,
-                1,
-                &Sampling {
-                    temperature: 0.0,
-                    enable_thinking: false,
+                CompletedReply {
+                    message: &Message::text(Role::Assistant, "reply"),
+                    next_input_tokens: 2,
+                    compact_before_next_input_tokens: 2,
+                    sampling: &Sampling {
+                        temperature: 0.0,
+                        enable_thinking: false,
+                    },
+                    model: "test",
+                    static_segments: &[],
                 },
-                "test",
             )
             .await
             .unwrap();
+        assert!(
+            store.pending_compaction(agent).await.unwrap().is_some(),
+            "a reply whose output makes the next input reach the threshold must queue compaction"
+        );
         let scheduler = scheduler(1);
         scheduler.wait_for_agent(&store, agent).await.unwrap();
         assert!(store.pending_compaction(agent).await.unwrap().is_none());

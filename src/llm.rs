@@ -1,7 +1,28 @@
-use std::future::Future;
+use std::{fmt, future::Future};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+/// The model rejected a request before inference because its fixed KV-cache
+/// reservation cannot admit the requested sequence. This is distinct from a
+/// model or transport failure: compaction may recover it by reducing history.
+#[derive(Debug)]
+pub struct ContextCapacityExceeded {
+    pub requested_tokens: usize,
+    pub max_context_tokens: usize,
+}
+
+impl fmt::Display for ContextCapacityExceeded {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "model request needs {} tokens but the fixed context capacity is {}",
+            self.requested_tokens, self.max_context_tokens
+        )
+    }
+}
+
+impl std::error::Error for ContextCapacityExceeded {}
 
 pub trait Backend {
     async fn before_agent(&self, _store: &crate::store::Store, _agent_id: i64) -> Result<()> {
@@ -11,6 +32,13 @@ pub trait Backend {
     async fn after_agent(&self, _store: &crate::store::Store, _agent_id: i64) -> Result<()> {
         Ok(())
     }
+
+    /// Count the exact input tokens for a request as the loaded model's chat
+    /// template will receive it, including tool protocol. This is reserved for
+    /// the exceptional fixed-capacity compaction fallback: completed ordinary
+    /// inferences already report their exact next-context usage, so counting
+    /// them again would be pure overhead.
+    fn input_tokens(&self, request: &Request) -> impl Future<Output = Result<usize>> + Send;
 
     fn complete(
         &self,

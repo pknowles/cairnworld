@@ -171,15 +171,23 @@ For each NPCs location and path, the Questioner concept is again executed to add
 detail to each. The Questioner is given the world summary and the seed prompt
 provided by the Storyteller.
 
+Introducing randomness in LLMs is difficult. One thing I'm tempted to try is
+injecting a pile of random nouns, adjectives (and maybe a few numbers in
+different scales) into the prompt that may trigger more variance without relying
+on LLM "temperature" to do all the work. They would simply be declared as random
+items to draw from. Maybe it'd just confuse the LLM but worth checking.
+
 ## Character creation
 
 When player characters first enter the world, character creation begins
 immediately. The player's agent must guide players through creating a character
 with a rich background but must communicate with the Storyteller agent, which
-has an agenda. The Storyteller's goal is to make the player relevant to the
-world setting, connecting them to events, items, locations and NPCs. It must
-also avoid the same connections as other players. The Storyteller again works
-with the Questioner to promote richer ideas for setting and story integration.
+has an agenda. This would be a system prompt so the player is immediately met
+with an intro, questions to answer and decisions to make. The Storyteller's goal
+is to make the player relevant to the world setting, connecting them to events,
+items, locations and NPCs. It must also avoid the same connections as other
+players. The Storyteller again works with the Questioner to promote richer ideas
+for setting and story integration.
 
 I'm not sure exactly how this interaction will be implemented. We'll have to
 experiment with a few ideas and see which gives the best results. My first idea
@@ -296,14 +304,16 @@ agents.
 Single GM vs multiple? If we had one, or rather a single chat history for it,
 this might cause contextual confusion if many players travel to separate
 locations. So far the GM seems to resolve local interaction, which by name is at
-a location. So we will technically have multiple GMs. The text here may refer to
-one, but it's always implied to be the one for the character's location. The GM
-manages sub-location dynamic state and arbitrates character interaction as per
-the game rules. One possible pitfall is when characters move from one location
-to another, the GM in the new location would not have their recent context.
-Given the GM should provide the Storyteller with frequent encounter summaries,
-this may not be a problem - i.e. the new location's GM still has enough context
-to do its job. Easy to change later too.
+a location. So we could technically have multiple GMs. The text here would then
+refer to one, but it'd be implied to be the one for the character's location -
+any PC or NPC. The GM would then manage dynamic state at its location and
+arbitrates character interaction as per the game rules. One possible pitfall is
+when characters move from one location to another, the GM in the new location
+would not have their recent context. Given the GM should provide the Storyteller
+with frequent encounter summaries, this may not be a problem - i.e. the new
+location's GM still has enough context to do its job. Easy to change later too.
+I don't know if this will work, so it will need playtesting. Easy enough to
+consolidate GMs if it isn't useful.
 
 The following are a few examples that should serve to define the interface. In
 the simplest form, a player might wants to attack an NPC. They say that to their
@@ -380,6 +390,12 @@ their attributes/equipment/behaviour "as needed" (a common RPG phrase) based on
 the Storyteller's instructions for the encounter. The GM may then narrate the
 look/difficulty. This may need some playtesting.
 
+Can we hide who is a PC and NPC from the GM? This would be the ultimate in
+fairness. Would it make for a better game or not? Not sure. A big concern would
+be not wasting time having the GM make special narrations to NPCs. Maybe the GM
+won't notice if it's only asked to make narrations for some characters. Maybe
+narrations can be the player agents' job?
+
 ## Dynamic Storyteller
 
 These are currently ideas for the future. Not the initial version.
@@ -438,7 +454,8 @@ some threshold, a portion of the chat history must be summarized/compacted:
 - After: [summary_1, chat_n+1, ..., chat_n+k]
 
 Where the number of raw chat messages in front of the summary (k) must not
-exceed some character count threshold. The ideas being:
+exceed some threshold (message/token/character count, whatever's appropriate).
+The ideas being:
 
 - Compaction is expensive, so do it infrequently
 - Keep some raw chat history after the summary as this is likely more important to keep accurate
@@ -462,18 +479,37 @@ importantly which information is important to keep. Many interactions in the
 chat are temporary and would not need recording, but some are not. This will
 likely need gameplay testing to optimize.
 
-Compaction likely happens immediately after an agent emits some output rather
-than before, as this is when the token count is first known. It should happen
-semi-asynchronously so that the LLM's result can immediately be used. E.g. if a
-player's agent replies to the player and must immediately compact, the player
-will see the agent's response and can start typing straight away. Obviously the
-agent's chat would block if another call to it comes in before compaction
-completes. Moreover, we expect to run on a single GPU so this would not be async
-with respect to other LLM calls. Ideally we should process all agents chats,
-queueing compactions and only block on compactions on next calls to that agent.
-Doing this means recursive agent calls that all happen to compact after
-returning won't have to finish compaction before the player(s) see the final
-response.
+The compaction threshold is likely triggered right after an agent emits some
+output rather than before, as this is when the token count is first known.
+However, it should happen semi-asynchronously so that the LLM's result can
+immediately be used. E.g. if a player's agent replies to the player and must
+immediately compact, the player will see the agent's response and can start
+typing straight away. Obviously the agent's chat would block if another call to
+it comes in before compaction completes. Moreover, we expect to run on a single
+GPU so this would not be async with respect to other LLM calls. Ideally we
+should process all agents chats, queueing compactions and only block on
+compactions on next calls to that agent. Doing this means recursive agent calls
+that all happen to compact after returning won't have to finish compaction
+before the player(s) see the final response.
+
+- Ideally any chat increase implicitly checks the threshold and schedules
+  compaction, but this would require tokenizing and it might be worth avoiding
+  that and checking the threshold after each inference. A consequence is
+  overshooting input threshold before inference, where we would take the
+  corrective steps below and re-run inference.
+- Compaction runs lazily at the next free moment (e.g. as soon as control is
+  returned to the user)
+- If compaction has not completed before a chat needs another inference,
+  compaction happens inline immediately.
+
+If the threshold is overshot by too much and we cannot fit the input anymore, we
+must reduce the amount we compact and summarise. For example, lets say we would
+like to compact [summary_1, chat_0, ..., chat_n-1] but it doesn't fit. We can
+instead keep chat_n-1 as raw history, or chat_n-2 or however many we need. As
+long as we can compact [summary_1, chat_0] we have shortened the input and can
+iterate until back under the compaction threshold. Slow, but at least doable in
+a fixed GPU allocation and it saves us from the occasional giant messages
+pushing us past both the threshold and input limit in one go.
 
 ## Notes editing tools
 
@@ -504,14 +540,14 @@ asking them to make changes.
 
 Game objects
 - Player characters
-  - Name and ID - the ID is generated from the name and used by agents in tool
+  - Name and ID - the ID is charN where N is a small unique number
     calls to uniquely identify the character
   - InCombat, Moved and Acted booleans for combat actions
   - Time
   - Location - both a reference to the location object and a string description within it
   - Character sheet info, including background
 - Non-player characters
-  - Name and ID - the ID is generated from the name and used by agents in tool
+  - Name and ID - the ID is charN where N is a small unique number
     calls to uniquely identify the character
   - InCombat, Moved and Acted booleans for combat actions
   - Description: background, motive, ambition, how they fit into the world,
@@ -1115,6 +1151,34 @@ some fixed concurrency may be a good idea to improve latency and maybe even
 memory access patterns. If we can use mistral.rs directly to do this that'd be
 even better - less code for us to maintain and we get a feature for free.
 
+## Memory Usage
+
+LLMs are big and VRAM intensive. Much like any video game, we should not do any
+dynamic allocation so that once launched successfully we can be confident the
+server won't crash due to OOM. It would be nice if we could have our
+conversation compaction limit guide this initial allocation as I expect our
+chosen input and output size for the model will contribute significantly to
+memory requirements. I'd like to see the amounts allocated. This should be
+printed during initial allocation. It would be interesting to see the
+conversation's memory usage breakdown in the developer's inference view too.
+I.e. to guide balancing allocations, context, system/tool prompts, conversation
+history size, output size limit etc.
+
+## System prompts
+
+These will make or break the game and are particularly important. Keeping them
+in an easy to find place is useful, however stick to the "group what changes
+together principle". I'll want to hand edit these and easily trace (i.e. just
+find) inference operations in the developer view to them.
+
+## Chat
+
+Agents get very confused when they miss context. If there's any error, we should
+emit it to agents' chats as it propagates through the stack. This lets the agent
+know their tool call failed and they didn't even get a chance to output
+anything. We should keep what the agent sees VERY small as context is expensive
+and it may not be able to do anything about it.
+
 # TODO
 
 How will experience and character growth happen?
@@ -1139,3 +1203,13 @@ recall. Useful search terms: *agent memory, long-term conversational memory,
 associative retrieval, hierarchical RAG, RAPTOR, MemoRAG, A-MEM, episodic
 memory, semantic memory, hybrid vector/BM25 retrieval, recursive summarization,
 memory consolidation, retrieval from generated clues*.
+
+It's tempting to have the storyteller be able to pre-generate some backgrounds
+and player portraits. A high quality blur filter on a 512x512 image can actually
+look OK for a full screen background of the chat window. I'm wondering if we
+could run Stable Diffusion 1.5 or something locally. We'd need to unload the LLM
+first probably, or accept background CPU generation.
+
+Perhaps even MusicGen (small), Stable Audio 3 Small-SFX, Stable Audio Open 1.0,
+that could create some music clips and foley to mix and play as the game state
+changes or on entrance to areas. Feature creep that may never happen atm.

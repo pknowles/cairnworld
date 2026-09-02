@@ -91,6 +91,16 @@ reaches the user - never something an agent can observe and react to.
 
 # Decision Log
 
+## 2026-09-01: GM narration is already delivered context
+
+> the player agent must see that it was narrated and know that it was sent to
+> the player verbatim already. it can then ask me what I want to do. Could we
+> even tag GM's narration as "GM"?
+
+GM narration is a distinct, durable player-visible entry. The player agent
+receives the exact narration only after it has been sent through that channel;
+it must guide the player's next choice rather than repeat or invent the scene.
+
 ## 2026-08-08: Exact compaction accounting
 
 > we should not lie in values stored. be super explicit and use the exact right
@@ -100,11 +110,12 @@ reaches the user - never something an agent can observe and react to.
 > messages will consume? ... we could linearly scan through, tokenizing messages
 > but that would be rediculous
 
-`compact_at_input_tokens` is the exact input-token count the model reports for
-the completed inference, including its static context, history, tools and
-generation prompt. It is not a character count, a JSON serialization, or a
-conversion estimate. Compaction reuses this recorded value; it never invokes a
-second tokenizer pass just to decide or verify compaction.
+`compact_before_next_input_tokens` compares the exact model-reported input plus
+output token counts of a completed inference. Their sum is the next inference's
+starting context, including its static context, history, tools and generation
+prompt. It is not a character count, a JSON serialization, or a conversion
+estimate. Normal compaction reuses those recorded values; it never invokes a
+second tokenizer pass merely to decide whether ordinary compaction is due.
 
 `keep_tail_messages` retains an exact number of persisted raw message rows. It
 does not promise a token budget. This avoids both a false conversion between
@@ -113,13 +124,63 @@ turn retries compaction when its recorded input reaches the trigger again.
 
 Each recorded inference stores the model-reported `input_tokens` and
 `output_tokens` for the debug view. Those are factual usage measurements and
-the compaction trigger. Because the reply is appended after that input was
-measured, the trigger is the threshold that prompts compaction after a turn,
-not a promise that the next context already fits.
+together decide whether compaction is queued after a turn. The threshold is
+kept below the fixed context capacity with room for the configured output, so a
+turn that has not queued compaction can safely run again.
 
 An inline, non-model-facing chat notice records every compaction and the case
 where only the retained tail remains. Repeated notices make a bad threshold or
 one-off huge message visible without interrupting play.
 
-This supersedes the character-tail rule currently recorded in
-`user_declarations.md`; that declaration needs a separate reconciliation.
+## 2026-09-01: Capacity fallback tokenization
+
+> The happy path tokenization will NOT run tokenization at all? This was the
+> entire reason why I designed the compaction threhsold to happen immediately
+> after inference - because we know exactly then
+
+> if we tokenize once on the infrequent over-sized compaction fallback, we can
+> guarantee being under input memory requirements whereas estimation can fail?
+
+The ordinary trigger and summary path therefore use only completed-inference
+usage. If the normal summary input cannot fit fixed KV capacity, its fallback
+uses the loaded model's actual chat-template tokenizer to choose a fitting
+linear prefix summary and verify progress; this is the sole tokenization path.
+
+This is an agreed design decision that conflicts with the character-tail rule
+currently recorded in `user_declarations.md`; that declaration needs a separate
+reconciliation before the design can be committed as fully traceable.
+
+## 2026-08-22: Build only durable vertical slices
+
+> as long as there is minimal effort to make something work inbetween steps -
+> just consolidate steps if this is the case. and the final result of course
+> must be traced back to the top level user declarations to verify no spruious
+> features were added
+
+An intermediate increment may expose an incomplete feature only when it uses
+the same durable data and component boundaries as the final feature. If it
+would require a temporary relationship or a replacement implementation, merge
+it with its dependencies into one complete vertical slice. Every proposed data
+relationship and component must cite a user declaration before implementation.
+
+## 2026-08-22: Character tool identifiers
+
+> lets keep them numbers only and two digits unless we run out
+
+Character names are not identifiers. A character receives an immutable `charN`
+tool ID with a globally unique numeric suffix. Allocation chooses an unused
+two-digit value from 10 through 99; after that pool is exhausted it widens to
+three digits, and so on. The value is independent of character name and
+creation order.
+
+This is reflected in the Game state section of user_declarations.md.
+
+## 2026-08-22: Character creation opens proactively
+
+> The player's agent would already be given a system prompt telling it to guide
+> the player through character creation. It would speak first.
+
+An imported or newly joined Adventurer is blank. The player agent initiates the
+ordinary chat-based creation conversation and, when appropriate, calls the
+declared creation roll tools. Rust performs and persists each roll; the player
+does not issue a special character-creation command.

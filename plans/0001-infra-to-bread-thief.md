@@ -1,9 +1,10 @@
 # Infrastructure to Bread Thief
 
-Status: in-progress (2026-08-09) - milestones 1-3 complete; Milestone 4's
-durable deferred-compaction/scheduling follow-up is in progress; milestone 5
-planned, not started; milestones 6-9 not started. The model choice deferred
-from milestone 3 is still open.
+Status: in-progress (2026-08-22) - milestones 1-3 complete; Milestone 4's
+durable deferred-compaction/scheduling follow-up is in progress. The original
+web-only milestone 5 detail is superseded by the durable vertical slice in
+`plans/0002-playable-bread-thief.md`; do not implement the obsolete detail
+below. The model choice deferred from milestone 3 is still open.
 
 ## Goal
 
@@ -55,33 +56,34 @@ specified up front.
    user_declarations.md. `--prompts <dir>` assumed prompts live as files to
    substitute in, when they are assembled from stored text and message rows;
    the declared feature is re-running a stored inference after the code or
-   prompts change, which reassembly already does. `--fork` copied an agent's
-   history into a sandbox to poke at; the nearest declaration is "agents may
-   want to test features and repro bugs quickly without writing temporary
-   scripts", which is asking for accessible game data under MCP, not a CLI
-   flag. If that need is real it belongs in milestone 9.
+   prompts change, which reassembly already does - deferred to milestone
+   9/8 in plans/deferred.md, not dropped outright. `--fork` (copying an
+   agent's history into a sandbox to poke at) was an unauthorized agent
+   addition: no user_declarations.md passage asked for it, and it does not
+   belong in plans/deferred.md either, since that file is for declared
+   features blocked on a dependency, not invented ones.
    The initial synchronous implementation is followed by durable deferred
    compaction: foreground replies return immediately, persisted jobs survive
    restart, and priority admission runs them in available model capacity.
-5. **Webserver + UI.** Axum + Leptos, Google OAuth2 login, one world, one
-   player agent, websocket chat page. Verifies: a friend can log in from
-   another machine and chat against the real model.
-6. **Multi-agent + actions.** Player agent → GM call tree, `CallContext`,
-   sequences, action IDs with `pending_action`/approve-action, narration
-   broadcast. Verifies: the attack-approval flow from user_declarations.md
-   end to end with two real agents.
-7. **Bread Thief.** Game state schema, JSON import/export, the simplified
-   scenario (scenarios/bread_thief.md) with the minimal action set: Move,
-   Say, Attack, Save, TakeDamage, BeginCombat/EndCombat, Give/Take, Look.
-   Verifies: a human can play the scenario to any of its endings.
-8. **Dev mode.** The split view: chat histories, sequence view, inference
+5. **Playable Bread Thief.** One durable vertical slice: identity and world
+   membership; the actual world/character/location/item schema; the
+   relationship-owned location GM, player, and NPC agents;
+   sequences and actions; the simplified Bread Thief scenario; and Axum +
+   Leptos with Google OAuth2 and the websocket game page. This deliberately
+   consolidates the old web-only, multi-agent/action, and game-schema
+   milestones: none is useful on a temporary ownership or agent model.
+   Verifies: a new Google account can join a world from another machine and a
+   human can play Bread Thief to any ending through the browser against the
+   real model.
+6. **Dev mode.** The split view: chat histories, sequence view, inference
    view, game object browser. Verifies: every Bread Thief playtest
    interaction is fully inspectable down to verbatim model input.
-9. **MCP.** RMCP server over the existing tool surface and debug queries.
+7. **MCP.** RMCP server over the existing tool surface and debug queries.
    Verifies: a coding agent can drive a playtest and pull sequences without
    custom scripts.
 
-Milestones 7 and 8 may swap or interleave in practice - playtesting without
+Milestones 5 and 6 may overlap in implementation once sequences exist -
+playtesting without
 the inference view will get painful fast, and that pressure is fine to
 follow.
 
@@ -848,7 +850,7 @@ Before/After lists are what the model sees, not what is stored. The debug
 viewer is expected to show summaries inline in the full history, which only
 works because none of it is thrown away.
 
-## Milestone 5 detail: Webserver + UI
+## Superseded web-only milestone detail — do not implement
 
 Goal: the same recorded agent loop, reached over a network instead of a
 terminal. A friend logs in with a Google account on another machine and has a

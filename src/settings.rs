@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 #[derive(Deserialize, Default)]
@@ -11,6 +11,18 @@ pub struct Settings {
     pub models: BTreeMap<String, Model>,
     #[serde(default)]
     pub limits: Limits,
+    pub web: Option<Web>,
+}
+
+/// Deployment configuration for the OAuth-only browser interface. It is
+/// optional in shared configuration because the model REPL has no web
+/// dependency, but `serve` requires every field.
+#[derive(Clone, Deserialize)]
+pub struct Web {
+    pub bind: String,
+    pub google_client_id: String,
+    pub google_client_secret: String,
+    pub google_redirect_url: String,
 }
 
 /// A model and everything needed to talk to it. The chat template travels with
@@ -43,12 +55,19 @@ impl Settings {
             chat_template: None,
         })
     }
+
+    pub fn web(&self) -> Result<&Web> {
+        self.web.as_ref().context(
+            "missing [web] configuration; `serve` requires bind, google_client_id, google_client_secret, and google_redirect_url",
+        )
+    }
 }
 
 /// Runaway bounds. These exist to stop a loop that is already wrong, so
 /// hitting one is a hard error that propagates to the user - never something
 /// an agent can see and react to.
 #[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     /// Maximum requests admitted to the loaded model at once.
     pub max_concurrent_inferences: usize,
@@ -57,8 +76,17 @@ pub struct Limits {
     /// Inferences one external trigger may run across every agent it reaches,
     /// including recursive agent-to-agent calls.
     pub max_inferences_total: u32,
-    /// Compact after a completed inference reports this many input tokens.
-    pub compact_at_input_tokens: usize,
+    /// Fixed total input plus generated-token capacity reserved for each
+    /// admitted inference. This is the per-sequence part of the paged KV pool.
+    pub max_context_tokens: usize,
+    /// Maximum generated tokens in one inference, including a tool call.
+    pub max_output_tokens: usize,
+    /// After a completed turn, compact when its input plus output tokens would
+    /// make the next inference reach this size. The reply is delivered first;
+    /// compaction is queued for idle time, and that agent's next inference
+    /// waits for the queued work rather than re-running the same history.
+    /// This is a lazy history-maintenance threshold, not a KV-cache size.
+    pub compact_before_next_input_tokens: usize,
     /// Exact number of newest raw messages retained after a summary.
     pub keep_tail_messages: usize,
 }
@@ -69,9 +97,68 @@ impl Default for Limits {
             max_concurrent_inferences: 4,
             max_inferences_per_chat: 8,
             max_inferences_total: 64,
-            compact_at_input_tokens: 16_000,
+            max_context_tokens: 16_384,
+            max_output_tokens: 1_024,
+            compact_before_next_input_tokens: 15_360,
             keep_tail_messages: 32,
         }
+    }
+}
+
+impl Limits {
+    /// Validate the one runtime policy before a model is loaded. A paged cache
+    /// is shared by every admitted sequence, so its capacity is the per-turn
+    /// context multiplied by the concurrency cap.
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            self.max_concurrent_inferences > 0,
+            "limits.max_concurrent_inferences must be greater than zero"
+        );
+        ensure!(
+            self.max_inferences_per_chat > 0,
+            "limits.max_inferences_per_chat must be greater than zero"
+        );
+        ensure!(
+            self.max_inferences_total > 0,
+            "limits.max_inferences_total must be greater than zero"
+        );
+        ensure!(
+            self.max_context_tokens > 0,
+            "limits.max_context_tokens must be greater than zero"
+        );
+        ensure!(
+            self.max_output_tokens > 0,
+            "limits.max_output_tokens must be greater than zero"
+        );
+        ensure!(
+            self.max_context_tokens > self.max_output_tokens,
+            "limits.max_context_tokens must exceed limits.max_output_tokens"
+        );
+        ensure!(
+            self.compact_before_next_input_tokens > 0,
+            "limits.compact_before_next_input_tokens must be greater than zero"
+        );
+        ensure!(
+            self.compact_before_next_input_tokens
+                <= self.max_context_tokens - self.max_output_tokens,
+            "limits.compact_before_next_input_tokens must leave room for limits.max_output_tokens within limits.max_context_tokens"
+        );
+        ensure!(
+            self.keep_tail_messages > 0,
+            "limits.keep_tail_messages must be greater than zero"
+        );
+        self.cache_context_tokens()?;
+        Ok(())
+    }
+
+    /// Total token pool required by paged attention for every simultaneously
+    /// admitted inference to use its complete configured context.
+    pub fn cache_context_tokens(self) -> Result<usize> {
+        self.max_context_tokens
+            .checked_mul(self.max_concurrent_inferences)
+            .context(
+                "limits.max_context_tokens multiplied by limits.max_concurrent_inferences overflowed",
+            )
     }
 }
 
@@ -84,5 +171,41 @@ impl Settings {
             .context("loading default.toml and local.toml")?
             .try_deserialize()
             .context("parsing configuration")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Limits;
+
+    #[test]
+    fn fixed_context_capacity_is_independent_of_lazy_compaction() {
+        let limits = Limits {
+            max_concurrent_inferences: 3,
+            max_inferences_per_chat: 1,
+            max_inferences_total: 1,
+            max_context_tokens: 2_048,
+            max_output_tokens: 1_024,
+            compact_before_next_input_tokens: 800,
+            keep_tail_messages: 1,
+        };
+
+        limits.validate().unwrap();
+        assert_eq!(limits.cache_context_tokens().unwrap(), 6_144);
+    }
+
+    #[test]
+    fn compaction_trigger_must_leave_output_room_in_fixed_context() {
+        let limits = Limits {
+            max_concurrent_inferences: 3,
+            max_inferences_per_chat: 1,
+            max_inferences_total: 1,
+            max_context_tokens: 1_000,
+            max_output_tokens: 200,
+            compact_before_next_input_tokens: 801,
+            keep_tail_messages: 1,
+        };
+
+        assert!(limits.validate().is_err());
     }
 }

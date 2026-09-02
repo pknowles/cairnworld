@@ -16,8 +16,8 @@ binary has subcommands:
 - `cairnworld chat` - interactive agent REPL (see "Dev CLI: chat, replay")
 - `cairnworld replay <inference-id>` - re-run a recorded inference, optionally
   with edited prompts
-- `cairnworld world export|import <file.json>` - world snapshots for checked-in
-  scenarios and repros
+- `cairnworld import-scenario` / `export-scenario` - reusable checked-in
+  scenario templates
 
 Layers, each depending only on those above it:
 
@@ -91,7 +91,7 @@ no GM measures the harness, so it waits for real play (see plans/).
   Its template quotes tool results and puts tool definitions in the first user
   message alongside the question.
 
-If no single model does both jobs well, different models per agent kind
+If no single model does both jobs well, different models per agent relationship
 (tool-heavy GM vs voice-heavy NPCs) is possible behind the backend trait, but
 is not designed for until evidence demands it. Constrained/JSON-schema
 generation remains a fallback mechanism for weak tool callers.
@@ -110,21 +110,30 @@ than storing a copy of them.
 
 ## Inference scheduling
 
-One loaded mistral.rs model accepts concurrent requests and schedules their
+One loaded mistral.rs model accepts concurrent requests and schedules its
 sequences itself. Cairnworld controls admission policy, not model execution:
-`limits.max_concurrent_inferences` defaults to 4. Foreground player and agent
-requests take priority; deferred work such as compaction uses capacity not
-needed by them. A completed reply is delivered before its deferred work runs.
-When the cap is full, lower-priority work waits rather than increasing player
-latency. This remains a policy setting, so measurement can tune it for the
-available GPU without duplicating the backend scheduler.
+`limits.max_concurrent_inferences` defaults to 4. At model load, the paged KV
+cache reserves `max_context_tokens` for every admitted sequence; this fixed
+total input-plus-output capacity, not compaction, determines the VRAM budget.
+`max_output_tokens` bounds one generated reply within that capacity. After a
+completed turn, its reported input plus output is the starting size of the next
+input; reaching `compact_before_next_input_tokens` queues lazy compaction. The
+reply is delivered first, but the same agent cannot run another inference until
+its queued compaction completes. Foreground player and agent requests take
+priority; deferred work uses capacity not needed by them. When the cap is full,
+lower-priority work waits rather than increasing player latency. This remains a
+policy setting, so measurement can tune it for the available GPU without
+duplicating the backend scheduler.
 
 Deferred work is persisted before it is admitted. Restarting loads unfinished
 jobs again, so a completed reply cannot lose its required compaction merely
 because the server exits. A job records the model and sampling of the turn
-that created it and is written atomically with that reply. Completing a job
-atomically stores its result, its developer-visible notice, and removes the
-job; a crash while it runs leaves it eligible to retry. A later request to the
+that created it plus its static prompt/tool recipe, and is written atomically
+with that reply. A capacity rejection inside a tool loop creates the same job
+against the already-persisted tool history, then retries only after it settles.
+The final completion atomically stores its developer-visible notice and removes
+the job; a capacity fallback retains the job while it persists each rolling
+summary. A crash while it runs leaves it eligible to retry. A later request to the
 same agent cannot overtake its earlier deferred work, while unrelated agents
 continue through available capacity.
 
@@ -142,8 +151,8 @@ composes directly with axum and the world tasks, and migrations are built in
 
 ## Chat schema
 
-- `agent(id, world_id, kind, name)` - one row per agent: each player agent,
-  each location GM, each NPC, the Storyteller, transient Questioners.
+- `agent(id, world_id)` - one row per chat history. Its gameplay role is
+  defined by the relationship that owns it, not a duplicated kind string.
 - `message(id, agent_id, seq, role, content, created_at)` - `content` is
   tagged JSON: plain text, tool calls, or tool results. `seq` orders messages
   per agent.
@@ -153,8 +162,8 @@ composes directly with axum and the world tasks, and migrations are built in
 - `chat_notice(id, agent_id, after_message_id, content)` - an inline event in
   a user/developer chat view. It is deliberately not selected for agent
   context.
-- `pending_compaction(agent_id, after_message_id, input_tokens, sampling,
-  model)` - durable deferred work caused by an already completed reply. It is
+- `pending_compaction(agent_id, after_message_id, next_input_tokens, sampling,
+  model, static_segments)` - durable deferred work caused by an already completed reply. It is
   not a derived cache: its presence is the instruction to compact after a
   restart.
 
@@ -220,14 +229,71 @@ Notes are stored as key/value pairs per object, per the "actually this sounds
 pretty solid" option in user_declarations.md: the editing tool overwrites a
 whole value by key, avoiding line-range or paragraph-index fragility.
 
+## World identity and agent topology
+
+This is the durable ownership graph behind the landing page, world detail page,
+and agent calls. It follows user_declarations.md's User Interface: accounts are
+keyed only by email; players may change a non-unique display name; a world has
+one owner; invitation acceptance grants and owner removal revokes access while
+retaining the player association and characters; every joined player has a
+player agent; characters can be PCs or NPCs; and the developer view exposes
+the Storyteller, GM, and NPC chats.
+
+- `user(id, email, display_name)` holds unique email and a non-unique display
+  name. Neither display name nor any game relationship affects login identity.
+- `world_owner(world_id, user_id)` names the single creator/owner without
+  making a sandbox chat world a partial user world. `world_member(world_id,
+  user_id, access)` records one user's current access to one world; removal
+  changes `access` but retains the association and characters exactly as
+  declared. `member_player_agent(member_id, agent_id)` gives that membership
+  its singular player chat history.
+- Every `agent(id, world_id)` is only a chat history. Its gameplay
+  purpose is determined by a relationship that owns it: `world_storyteller`,
+  `member_player_agent`, `location_gm`, or `npc_agent`. A PC belongs to a
+  membership through `player_character`; an NPC is played through `npc_agent`.
+  Locations contain game state and do not own agents beyond their
+  location-scoped GM.
+
+The relation, rather than a string `agent.kind`, is the source of truth. A
+`kind` can say an agent is a GM without saying which location it governs, allow
+two GMs for one location, or leave a labelled agent unused. Putting nullable
+role foreign keys on `agent` has the inverse problem: it makes mutually
+exclusive ownership implicit and permits invalid combinations. Small explicit
+relationship tables (one Storyteller per world and one GM per location) own
+real game data, make cardinality constraints direct, and avoid construction
+cycles: create a world, its agents, then their relationships in one transaction.
+
+This accommodates the declaration's open, playtestable design: there may be a
+GM for each location, including locations occupied by PCs or NPCs; a later
+playtest may consolidate them without changing agent histories or player
+identity. It does not pre-decide Storyteller iteration, invitation mechanics,
+or dynamic NPC/location creation beyond the relationships those declared
+features require.
+
+## Character tool identifiers
+
+Every character has an immutable, globally unique numeric `tool_id`, rendered
+to models and tools as `charN`. This `charN` handle is the only character
+identifier sent in an LLM-facing tool argument; names are separate
+player-facing text and may change. Allocation chooses uniformly from the unused
+two-digit range 10 through 99. Once it is exhausted, it chooses from the unused
+three-digit range, and widens again only when required. SQLite's single
+application connection serializes allocation, so selecting from unused values
+cannot collide or require retrying.
+
+The numeric suffix avoids duplicate "Adventurer" and renamed-character
+problems. It also keeps `charN` handles short for small models without exposing
+allocation order.
+
 # Agent loop
 
 ## Context assembly
 
 Every inference input is assembled fresh, in this order:
 
-1. Role prompt - static per agent kind, versioned in the repo as plain text
-   files (`prompts/`), loaded at startup, recorded in `text`.
+1. Role prompt - static for the relationship the agent is serving, versioned in
+   the repo as plain text files (`prompts/`), loaded at startup, recorded in
+   `text`.
 2. Context packet - current dynamic state this agent is entitled to see,
    rebuilt each time: e.g. for a GM, its location description, characters
    present with sheets, GM notes, visible Storyteller notes. Never appended to
@@ -254,11 +320,23 @@ Structural rules, enforced in rust:
 ## Tools
 
 A tool is one visible operation: its name, short description, JSON schema, and
- the Rust code that validates and performs it. Each agent kind builds its own
- fixed tool list from the features it offers. When an agent loop needs to find
+the Rust code that validates and performs it. Each agent relationship builds
+its own fixed tool list from the features it offers. When an agent loop needs to find
  an operation by the model-supplied name, it uses that list directly as a small
  lookup table; there is no central tool registry, manager, or service with a
  separate lifetime. Two mechanics from user_declarations.md shape the tools:
+
+A malformed or unavailable model tool call is a rejected tool result, persisted
+in the same history as a successful result so the agent can correct itself or
+explain the limitation. A failure while executing a valid call remains an
+application error with its full causal context; it does not masquerade as an
+agent-visible result.
+
+Tool schemas are the generation constraint as well as the Rust validation
+contract. Every Cairnworld tool explicitly declares an object `properties`
+map; a zero-argument operation declares an empty one. The tool boundary rejects
+an incomplete schema before inference, rather than repairing it later or
+letting a model template interpret a missing map as arbitrary parameters.
 
 - **Action IDs and approve-action.** When a character agent's tool call needs
   GM arbitration, rust assigns the next action id, stores the validated
@@ -268,6 +346,12 @@ A tool is one visible operation: its name, short description, JSON schema, and
 - **Rule packets.** The player agent sees a tool's short description; when the
   call reaches the GM, rust attaches the extended rulebook text for that tool
   (stored in `text`, so recorded like everything else).
+- **GM narration delivery.** A GM's completed narration is persisted and sent
+  verbatim as a distinct GM entry before the player agent's follow-up
+  inference. That follow-up receives the exact narration together with the
+  fact that the player has already seen it, so it can guide the next choice
+  without inventing or repeating the scene. If it fails, the GM entry remains
+  durable and the failure still reaches the browser.
 
 Dice rolls are rust (`rand`), never the model. Every roll is recorded (see
 sequences) so a session is fully replayable as data.
@@ -280,7 +364,8 @@ before the next event starts. Per-agent history ordering is therefore trivial,
 and there are no locks to reason about. This is deliberately the simplest
 model that is correct; if a world with many players ever stalls on it,
 that is a measured problem for later. Broadcast messages (GM narration to a
-location) fan out from the world task to connected websockets via channels.
+location) fan out from the world task to connected websockets via channels as
+soon as the GM settles, independently of any later player-agent reply.
 
 # Sequences (debug spine)
 
@@ -365,10 +450,13 @@ spine means no extra bookkeeping exists only for debugging.
 
 # Chat compaction
 
-Config: `compact_at_input_tokens` (reported completed-inference input trigger) and
-`keep_tail_messages` (exact newest raw rows preserved after the summary). When
-an agent's assembled context
-exceeds the trigger:
+Config: `max_context_tokens` (fixed total input-plus-output capacity),
+`max_output_tokens` (the per-inference generated-token limit),
+`compact_before_next_input_tokens` (the lazy next-input trigger), and
+`keep_tail_messages` (exact newest raw rows preserved after the summary). A
+completed turn's reported input plus output predicts its next input. When that
+prediction reaches the trigger, compaction is queued; it must complete before
+another inference for that agent, but does not delay the completed reply:
 
 1. Choose the cut point `n` so exactly `keep_tail_messages` raw messages after
    `n` remain.
@@ -379,12 +467,22 @@ exceeds the trigger:
 3. Run it through the normal recorded inference path; store the `summary` row
    with `covers_to_seq = n`.
 
-The trigger uses the model-reported `input_tokens` already recorded for the
-completed inference. It adds no tokenization work and therefore describes the
-input that caused compaction, rather than estimating the newly appended reply.
-Compaction happens after a completed turn, so there is no background job. If
-only the retained tail remains, it records an inline notice and retries after a
-later turn; it never interrupts the game for context pressure alone.
+The trigger uses the completed inference's model-reported `input_tokens` plus
+`output_tokens`; it adds no tokenization work and exactly describes the context
+that would be assembled next. The durable background job begins after the
+completed reply is delivered. If only the retained tail remains, it records an
+inline notice and retires the job; a later turn can queue a new one. It never
+interrupts the completed game response for context pressure alone.
+
+If the ordinary compaction request itself is rejected because the fixed KV
+cache cannot admit it, the job enters its exceptional capacity fallback. Only
+there does it use the loaded model's chat-template tokenizer: it increases the
+verbatim raw tail until one otherwise ordinary, linear prefix-summary request
+fits `max_context_tokens - max_output_tokens`. It persists that summary and
+repeats while the measured reconstructed context remains at or above the lazy
+threshold. A pass that does not reduce that measured context is a hard error.
+The normal path never tokenizes merely to re-check a value already reported by
+the model.
 
 # Dev CLI: chat, replay
 
@@ -393,14 +491,9 @@ frontend over the same `agent`/`store` functions the game uses - no parallel
 implementation - and every inference made here goes through the normal
 recorded path, in a dedicated sandbox world so world telemetry stays clean.
 
-- **`cairnworld chat`** - interactive stdio REPL. In its simplest form it is
-  a bare 1:1 conversation with the model for verifying the backend. Once the
-  agent layer exists it runs as a real agent:
-  `--kind gm|npc|player|storyteller` selects the role prompt and tool set,
-  and the full context assembly and compaction machinery is exercised - so a
-  REPL session is a faithful stand-in for in-game behaviour, not an
-  approximation. Rust-side tool code executes for real against the sandbox
-  world's state.
+- **`cairnworld chat`** - interactive stdio REPL for verifying the backend and
+  recording path. It is not a player-game transport. Player interaction uses
+  the web game's authenticated membership and websocket path.
 - **Replay:** `cairnworld replay <inference-id>` reassembles the recorded input
   via the reconstruction machinery and re-runs it, printing old and new output
   side by side. Reassembly uses the current code and the current prompt files,
@@ -454,9 +547,10 @@ Fewer lines of ours, chosen once here so nothing gets reinvented mid-build:
 - `insta` - snapshot tests for context assembly (review prompt-affecting
   diffs explicitly)
 
-Token counting for the compaction trigger uses the loaded model's own
-tokenizer through mistral.rs - no separate tokenizer dependency, no
-estimation drift.
+The normal compaction trigger uses the completed model inference's exact usage,
+not a second tokenizer pass. Only the rare capacity fallback tokenizes through
+mistral.rs's loaded chat template, including its tool protocol; there is no
+separate tokenizer dependency or estimate.
 
 # Game layer
 
@@ -488,8 +582,11 @@ Storyteller initialization output and tools.)
 
 ## Character creation (TODO)
 
-Player agent guiding Cairn character creation; Storyteller background
-negotiation with spoiler scrubbing; the ReadyToBegin/RollOmens sync point.
+The player agent opens the first chat with its character-creation prompt and
+guides the player through Cairn creation. The later full flow includes
+Storyteller background negotiation with spoiler scrubbing and the
+ReadyToBegin/RollOmens sync point. Bread Thief initially keeps the same
+player-agent-led conversation while omitting Storyteller negotiation.
 (Character creation; TODO section of user_declarations.md.)
 
 ## Encounter difficulty (TODO)

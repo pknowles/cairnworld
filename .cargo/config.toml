@@ -1,0 +1,4 @@
+[env]
+# Leptos reads this while it compiles its hydration helper. Keeping it Cargo-wide
+# makes ordinary `cargo run` and `cargo-leptos` emit and request one WASM name.
+LEPTOS_OUTPUT_NAME = { value = "cairnworld", force = true }

@@ -1,10 +1,12 @@
-use anyhow::{Context, Result, bail};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
     context,
     llm::{Backend, Content, Message, Response, Sampling},
     settings::Limits,
-    store::Store,
+    store::{CompletedReply, Store},
     tools::{self, Tool},
 };
 
@@ -12,116 +14,239 @@ use crate::{
 /// reaches so recursive calls draw from the same total. Exhausting either
 /// bound is a hard error: the bounds only ever fire on a loop that is already
 /// wrong, so the failure must reach the user rather than an agent.
-pub struct Budget {
+struct BudgetState {
     limits: Limits,
     total_spent: u32,
+}
+
+/// Inference budget for one external trigger. Clones share the same counter so
+/// a nested GM or NPC call cannot reset the trigger-wide limit.
+#[derive(Clone)]
+pub struct Budget {
+    state: Arc<Mutex<BudgetState>>,
 }
 
 impl Budget {
     pub fn new(limits: Limits) -> Self {
         Self {
-            limits,
-            total_spent: 0,
+            state: Arc::new(Mutex::new(BudgetState {
+                limits,
+                total_spent: 0,
+            })),
         }
     }
 
     /// Charge one inference against the whole trigger and the current chat.
-    fn spend(&mut self, chat_spent: u32) -> Result<()> {
-        if chat_spent >= self.limits.max_inferences_per_chat {
+    fn spend(&self, chat_spent: u32) -> Result<()> {
+        let mut state = self.state.lock().expect("inference budget poisoned");
+        if chat_spent >= state.limits.max_inferences_per_chat {
             bail!(
                 "chat reached its limit of {} inferences without settling on a reply \
                  (limits.max_inferences_per_chat)",
-                self.limits.max_inferences_per_chat
+                state.limits.max_inferences_per_chat
             );
         }
-        if self.total_spent >= self.limits.max_inferences_total {
+        if state.total_spent >= state.limits.max_inferences_total {
             bail!(
                 "this action reached its limit of {} inferences across all agents \
                  (limits.max_inferences_total)",
-                self.limits.max_inferences_total
+                state.limits.max_inferences_total
             );
         }
-        self.total_spent += 1;
+        state.total_spent += 1;
         Ok(())
+    }
+
+    fn limits(&self) -> Limits {
+        self.state.lock().expect("inference budget poisoned").limits
     }
 
     #[cfg(test)]
     pub fn total_spent(&self) -> u32 {
-        self.total_spent
+        self.state
+            .lock()
+            .expect("inference budget poisoned")
+            .total_spent
     }
 }
 
+/// Per-trigger provenance shared by every nested agent call.
+#[derive(Clone)]
+pub struct CallContext {
+    sequence_id: Option<i64>,
+    parent_inference_id: Option<i64>,
+    agents: Arc<Mutex<Vec<i64>>>,
+}
+
+impl CallContext {
+    pub fn root(sequence_id: Option<i64>) -> Self {
+        Self {
+            sequence_id,
+            parent_inference_id: None,
+            agents: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn child(&self, parent_inference_id: i64) -> Self {
+        Self {
+            sequence_id: self.sequence_id,
+            parent_inference_id: Some(parent_inference_id),
+            agents: Arc::clone(&self.agents),
+        }
+    }
+
+    fn enter(&self, agent_id: i64) -> Result<ActiveAgent> {
+        let mut agents = self.agents.lock().expect("agent call stack poisoned");
+        ensure!(
+            !agents.contains(&agent_id),
+            "agent {agent_id} would recursively call itself"
+        );
+        agents.push(agent_id);
+        Ok(ActiveAgent {
+            agents: Arc::clone(&self.agents),
+            agent_id,
+        })
+    }
+}
+
+struct ActiveAgent {
+    agents: Arc<Mutex<Vec<i64>>>,
+    agent_id: i64,
+}
+
+impl Drop for ActiveAgent {
+    fn drop(&mut self) {
+        let removed = self.agents.lock().expect("agent call stack poisoned").pop();
+        debug_assert_eq!(removed, Some(self.agent_id));
+    }
+}
+
+/// All stored inputs for one agent completion. The callbacks that surface its
+/// live output remain invocation-local rather than becoming persisted state.
+pub struct Turn<'a> {
+    pub agent_id: i64,
+    pub static_messages: &'a [Message],
+    pub tools: &'a [Tool],
+    pub sampling: Sampling,
+    pub model: &'a str,
+}
+
 /// Resolve one chat turn, recording every model response and tool result in order.
-#[allow(clippy::too_many_arguments)]
 pub async fn complete<B: Backend>(
     store: &Store,
     backend: &B,
-    budget: &mut Budget,
-    agent_id: i64,
-    static_messages: &[Message],
-    tools: &[Tool],
-    sampling: Sampling,
-    model: &str,
+    budget: &Budget,
+    turn: Turn<'_>,
+    on_token: impl FnMut(&str) + Send,
+    on_activity: impl FnMut(String),
+) -> Result<Response> {
+    let call = CallContext::root(None);
+    complete_with_call_context(store, backend, budget, turn, &call, on_token, on_activity).await
+}
+
+/// Resolve a turn while retaining its external sequence and, for a nested
+/// agent call, the inference that caused it.
+pub async fn complete_with_call_context<B: Backend>(
+    store: &Store,
+    backend: &B,
+    budget: &Budget,
+    turn: Turn<'_>,
+    call: &CallContext,
     mut on_token: impl FnMut(&str) + Send,
     mut on_activity: impl FnMut(String),
 ) -> Result<Response> {
+    let _active = call.enter(turn.agent_id)?;
     backend
-        .before_agent(store, agent_id)
+        .before_agent(store, turn.agent_id)
         .await
         .context("waiting for earlier deferred work for this agent")?;
-    let definitions = tools::definitions(tools);
+    let definitions = tools::definitions(turn.tools).context("validating declared tool schemas")?;
     let mut chat_spent = 0;
     loop {
         budget
             .spend(chat_spent)
             .context("resolving this chat turn")?;
         chat_spent += 1;
-        let response = context::complete(
+        let completion = context::complete_recorded(
             store,
             backend,
-            agent_id,
-            static_messages,
-            &definitions,
-            sampling.clone(),
-            model,
+            context::RecordedCompletion {
+                agent_id: turn.agent_id,
+                sequence_id: call.sequence_id,
+                parent_inference_id: call.parent_inference_id,
+                static_messages: turn.static_messages,
+                tools: &definitions,
+                sampling: turn.sampling.clone(),
+                model: turn.model,
+            },
             &mut on_token,
         )
         .await
         .context("running recorded agent inference")?;
+        let response = completion.response;
         let Content::ToolCalls(calls) = &response.content else {
+            // The completed model request reports its exact template-expanded
+            // input and generated output. That is the next normal context, so
+            // this happy path deliberately does not tokenize it again: doing
+            // so would be pure overhead. Tokenization is reserved for the
+            // rare compaction fallback whose own input proved too large.
+            let next_input_tokens = response
+                .usage
+                .input_tokens
+                .checked_add(response.usage.output_tokens)
+                .context("completed inference input plus output token count overflowed")?;
+            let static_segments = context::static_segments(&completion.segments);
             store
                 .append_reply_and_enqueue_compaction(
-                    agent_id,
-                    &Message::assistant(response.content.clone(), response.reasoning.clone()),
-                    response.usage.input_tokens,
-                    budget.limits.compact_at_input_tokens,
-                    &sampling,
-                    model,
+                    turn.agent_id,
+                    CompletedReply {
+                        message: &Message::assistant(
+                            response.content.clone(),
+                            response.reasoning.clone(),
+                        ),
+                        next_input_tokens,
+                        compact_before_next_input_tokens: budget
+                            .limits()
+                            .compact_before_next_input_tokens,
+                        sampling: &turn.sampling,
+                        model: turn.model,
+                        static_segments: &static_segments,
+                    },
                 )
                 .await
                 .context("storing final agent response and any due compaction")?;
             backend
-                .after_agent(store, agent_id)
+                .after_agent(store, turn.agent_id)
                 .await
                 .context("admitting any due deferred compaction")?;
             return Ok(response);
         };
         store
             .append_message(
-                agent_id,
+                turn.agent_id,
                 &Message::assistant(response.content.clone(), response.reasoning.clone()),
             )
             .await
             .context("storing agent response")?;
         for call in calls {
             on_activity(format!("tool call {}: {}", call.name, call.arguments));
-            let result = tools::execute(tools, call)
-                .with_context(|| format!("running tool call {}", call.id))?;
+            let (result, after_result) = tools::execute(turn.tools, call, completion.inference_id)
+                .await
+                .with_context(|| format!("executing tool call {}", call.id))?
+                .into_parts();
             let activity = format!("tool result {}: {result}", call.id);
             store
-                .append_message(agent_id, &Message::tool_result(call.id.clone(), result))
+                .append_message(
+                    turn.agent_id,
+                    &Message::tool_result(call.id.clone(), result),
+                )
                 .await
                 .with_context(|| format!("storing result for tool call {}", call.id))?;
+            if let Some(after_result) = after_result {
+                after_result
+                    .await
+                    .with_context(|| format!("delivering result of tool call {}", call.id))?;
+            }
             on_activity(activity);
         }
     }
@@ -154,6 +279,10 @@ mod tests {
     }
 
     impl Backend for ScriptedBackend {
+        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
+            Ok(0)
+        }
+
         async fn complete(
             &self,
             request: crate::llm::Request,
@@ -190,7 +319,7 @@ mod tests {
         ));
         let store = Store::open(&path).await.unwrap();
         let world = store.create_world("test").await.unwrap();
-        let agent = store.create_agent(world, "sandbox", "test").await.unwrap();
+        let agent = store.create_agent(world).await.unwrap();
         store
             .append_message(
                 agent,
@@ -201,12 +330,21 @@ mod tests {
         (store, path, agent)
     }
 
-    /// A save the character cannot pass: d20 must roll *under* the attribute,
-    /// so an attribute of 1 always fails. Fixed by the Cairn rules, not a seed.
-    fn certain_failure(character: &str) -> String {
-        format!(
-            r#"{{"character":"{character}","attribute":"dex","reason":"dodge","attribute_value":1}}"#
-        )
+    fn scripted_turn<'a>(agent_id: i64, tools: &'a [Tool]) -> Turn<'a> {
+        Turn {
+            agent_id,
+            static_messages: &[],
+            tools,
+            sampling: Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
+            model: "scripted",
+        }
+    }
+
+    fn test_echo_arguments(text: &str) -> String {
+        format!(r#"{{"text":"{text}"}}"#)
     }
 
     async fn history(store: &Store, agent: i64) -> Vec<Message> {
@@ -231,9 +369,9 @@ mod tests {
         let backend = ScriptedBackend::new([
             response(
                 Content::ToolCalls(vec![ToolCall {
-                    id: "save-1".to_string(),
-                    name: "save".to_string(),
-                    arguments: certain_failure("Rook"),
+                    id: "echo-1".to_string(),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("Rook"),
                 }]),
                 "private scratch work",
             ),
@@ -243,15 +381,8 @@ mod tests {
         let final_response = complete(
             &store,
             &backend,
-            &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::save()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            &Budget::new(Limits::default()),
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |event| activity.push(event),
         )
@@ -265,29 +396,34 @@ mod tests {
         assert_eq!(store.inference_count().await.unwrap(), 2);
         assert!(
             matches!(activity.as_slice(), [call, result]
-                if call.starts_with("tool call save:")
-                    && result.starts_with("tool result save-1:")),
+                if call.starts_with("tool call test_echo:")
+                    && result.starts_with("tool result echo-1:")),
             "tool activity must be emitted as each call and result occurs: {activity:?}"
         );
-        let requests = backend.requests.lock().unwrap();
-        assert_eq!(requests[0].tools, tools::definitions(&[tools::save()]));
-        // The second inference must see Rust's verdict, not the model's guess.
-        assert!(matches!(requests[1].messages.as_slice(), [
-            Message { content: MessageContent::Text(_), .. },
-            Message { content: MessageContent::ToolCalls(calls), reasoning, .. },
-            Message { content: MessageContent::ToolResult { tool_call_id, content }, .. },
-        ] if calls[0].id == "save-1"
-            && reasoning.is_empty()
-            && tool_call_id == "save-1"
-            && content.contains("fails")));
-        drop(requests);
+        {
+            let requests = backend.requests.lock().unwrap();
+            assert_eq!(
+                requests[0].tools,
+                tools::definitions(&[tools::test_echo()]).unwrap()
+            );
+            // The second inference must see the callback result, not the call arguments.
+            assert!(matches!(requests[1].messages.as_slice(), [
+                Message { content: MessageContent::Text(_), .. },
+                Message { content: MessageContent::ToolCalls(calls), reasoning, .. },
+                Message { content: MessageContent::ToolResult { tool_call_id, content }, .. },
+            ] if calls[0].id == "echo-1"
+                && reasoning.is_empty()
+                && tool_call_id == "echo-1"
+                && content == "Rook"));
+        }
         let entries = history(&store, agent_id).await;
         // Reasoning is stored on the message but never replayed into context.
         assert!(
             matches!(&entries[1], Message { content: MessageContent::ToolCalls(_), reasoning, .. } if reasoning.is_empty())
         );
         assert!(
-            matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "save-1" && content.contains("fails"))
+            matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content }
+                if tool_call_id == "echo-1" && content == "Rook")
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
@@ -304,15 +440,8 @@ mod tests {
         complete(
             &store,
             &backend,
-            &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::save()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            &Budget::new(Limits::default()),
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -322,11 +451,11 @@ mod tests {
         let recorded = store.reconstruct_inference(1).await.unwrap();
         assert_eq!(
             recorded.request.tools,
-            tools::definitions(&[tools::save()]),
+            tools::definitions(&[tools::test_echo()]).unwrap(),
             "the recorded recipe must rebuild the exact tool list that was sent"
         );
 
-        store.corrupt_text_for_test("\"name\":\"save\"").await;
+        store.corrupt_text_for_test("\"name\":\"test_echo\"").await;
         let error = store
             .reconstruct_inference(1)
             .await
@@ -337,36 +466,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_tool_call_stops_after_recording_the_call_without_a_result() {
+    async fn unavailable_tool_becomes_a_result_the_model_can_explain() {
         let (store, path, agent_id) = test_store().await;
-        let backend = ScriptedBackend::new([response(
-            Content::ToolCalls(vec![ToolCall {
-                id: "bad".to_string(),
-                name: "not_a_tool".to_string(),
-                arguments: "{}".to_string(),
-            }]),
-            "",
-        )]);
-        let error = complete(
+        let backend = ScriptedBackend::new([
+            response(
+                Content::ToolCalls(vec![ToolCall {
+                    id: "bad".to_string(),
+                    name: "not_a_tool".to_string(),
+                    arguments: "{}".to_string(),
+                }]),
+                "",
+            ),
+            response(Content::Text("I cannot do that here.".to_string()), ""),
+        ]);
+        let response = complete(
             &store,
             &backend,
-            &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::save()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            &Budget::new(Limits::default()),
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-        assert!(format!("{error:#}").contains("unknown tool `not_a_tool`"));
-        assert_eq!(store.inference_count().await.unwrap(), 1);
+        assert!(
+            matches!(response.content, Content::Text(ref text) if text == "I cannot do that here.")
+        );
+        assert_eq!(store.inference_count().await.unwrap(), 2);
         assert!(matches!(
             history(&store, agent_id).await.as_slice(),
             [
@@ -378,8 +505,55 @@ mod tests {
                     content: MessageContent::ToolCalls(_),
                     ..
                 },
+                Message {
+                    content: MessageContent::ToolResult { .. },
+                    ..
+                },
+                Message {
+                    content: MessageContent::Text(_),
+                    ..
+                },
             ]
         ));
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_known_tool_arguments_are_returned_to_the_model() {
+        let (store, path, agent_id) = test_store().await;
+        let backend = ScriptedBackend::new([
+            response(
+                Content::ToolCalls(vec![ToolCall {
+                    id: "bad-arguments".to_string(),
+                    name: "test_echo".to_string(),
+                    arguments: "{}".to_string(),
+                }]),
+                "",
+            ),
+            response(Content::Text("I need text to echo.".to_string()), ""),
+        ]);
+
+        complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(agent_id, &[tools::test_echo()]),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let entries = history(&store, agent_id).await;
+        let MessageContent::ToolResult { content, .. } = &entries[2].content else {
+            panic!("the rejected call must be persisted as its tool result");
+        };
+        assert!(
+            content.contains("Tool arguments were rejected: parsing test echo arguments"),
+            "got {content}"
+        );
+        assert_eq!(store.inference_count().await.unwrap(), 2);
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
@@ -391,14 +565,14 @@ mod tests {
             response(
                 Content::ToolCalls(vec![
                     ToolCall {
-                        id: "rook-save".to_string(),
-                        name: "save".to_string(),
-                        arguments: certain_failure("Rook"),
+                        id: "rook-echo".to_string(),
+                        name: "test_echo".to_string(),
+                        arguments: test_echo_arguments("Rook"),
                     },
                     ToolCall {
-                        id: "mara-save".to_string(),
-                        name: "save".to_string(),
-                        arguments: certain_failure("Mara"),
+                        id: "mara-echo".to_string(),
+                        name: "test_echo".to_string(),
+                        arguments: test_echo_arguments("Mara"),
                     },
                 ]),
                 "",
@@ -408,15 +582,8 @@ mod tests {
         complete(
             &store,
             &backend,
-            &mut Budget::new(Limits::default()),
-            agent_id,
-            &[],
-            &[tools::save()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            &Budget::new(Limits::default()),
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -431,9 +598,9 @@ mod tests {
         else {
             panic!("first tool result should be stored");
         };
-        // Each result must name the character from *its own* call, so results
-        // attributed to the wrong call are caught rather than looking plausible.
-        assert_eq!(tool_call_id, "rook-save");
+        // Each result must remain paired with its own call rather than a
+        // positional assumption.
+        assert_eq!(tool_call_id, "rook-echo");
         assert!(content.contains("Rook"), "got {content}");
         let MessageContent::ToolResult {
             tool_call_id,
@@ -442,15 +609,14 @@ mod tests {
         else {
             panic!("second tool result should be stored");
         };
-        assert_eq!(tool_call_id, "mara-save");
+        assert_eq!(tool_call_id, "mara-echo");
         assert!(content.contains("Mara"), "got {content}");
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
 
     /// A model that keeps calling a tool must be stopped by the budget rather
-    /// than looping forever. Observed for real: Llama 3.1 re-rolled the same
-    /// save repeatedly, hoping for a better result.
+    /// than looping forever.
     #[tokio::test]
     async fn a_model_that_never_settles_is_stopped_by_the_chat_limit() {
         let (store, path, agent_id) = test_store().await;
@@ -458,33 +624,28 @@ mod tests {
             max_concurrent_inferences: 4,
             max_inferences_per_chat: 3,
             max_inferences_total: 64,
-            compact_at_input_tokens: 32_768,
+            max_context_tokens: 33_792,
+            max_output_tokens: 1_024,
+            compact_before_next_input_tokens: 32_768,
             keep_tail_messages: 32,
         };
         let repeat = || {
             response(
                 Content::ToolCalls(vec![ToolCall {
                     id: "again".to_string(),
-                    name: "save".to_string(),
-                    arguments: certain_failure("Rook"),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("Rook"),
                 }]),
                 "",
             )
         };
         let backend = ScriptedBackend::new([repeat(), repeat(), repeat(), repeat(), repeat()]);
-        let mut budget = Budget::new(limits);
+        let budget = Budget::new(limits);
         let error = complete(
             &store,
             &backend,
-            &mut budget,
-            agent_id,
-            &[],
-            &[tools::save()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            &budget,
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -507,19 +668,21 @@ mod tests {
     #[tokio::test]
     async fn the_total_limit_stops_a_chat_that_is_within_its_own_limit() {
         let (store, path, agent_id) = test_store().await;
-        let mut budget = Budget::new(Limits {
+        let budget = Budget::new(Limits {
             max_concurrent_inferences: 4,
             max_inferences_per_chat: 100,
             max_inferences_total: 2,
-            compact_at_input_tokens: 32_768,
+            max_context_tokens: 33_792,
+            max_output_tokens: 1_024,
+            compact_before_next_input_tokens: 32_768,
             keep_tail_messages: 32,
         });
         let repeat = || {
             response(
                 Content::ToolCalls(vec![ToolCall {
                     id: "again".to_string(),
-                    name: "save".to_string(),
-                    arguments: certain_failure("Rook"),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("Rook"),
                 }]),
                 "",
             )
@@ -528,15 +691,8 @@ mod tests {
         let error = complete(
             &store,
             &backend,
-            &mut budget,
-            agent_id,
-            &[],
-            &[tools::save()],
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-            "scripted",
+            &budget,
+            scripted_turn(agent_id, &[tools::test_echo()]),
             |_| {},
             |_| {},
         )
@@ -547,5 +703,29 @@ mod tests {
         assert!(message.contains("max_inferences_total"), "got {message}");
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn nested_calls_share_one_budget() {
+        let budget = Budget::new(Limits::default());
+        let nested = budget.clone();
+        budget.spend(0).unwrap();
+        nested.spend(0).unwrap();
+        assert_eq!(budget.total_spent(), 2);
+    }
+
+    #[test]
+    fn call_context_rejects_an_agent_already_on_the_call_stack() {
+        let call = CallContext::root(Some(12));
+        let active = call.enter(4).unwrap();
+        let error = match call.child(99).enter(4) {
+            Ok(_) => panic!("an agent must not recursively invoke itself"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("recursively call itself"));
+        drop(active);
+        call.child(99)
+            .enter(4)
+            .expect("the agent is callable again after its prior turn ends");
     }
 }

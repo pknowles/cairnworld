@@ -17,19 +17,48 @@ chat_template = "templates/hermes-tools.jinja"
 [models.qwen]
 path = "models/Qwen_Qwen3-8B-Q4_K_M.gguf"
 
+# Smaller development candidates for an 8GB GPU. Keep the production-sized
+# models above available for environments with more VRAM; choose one explicitly
+# with `--model` during local development.
+[models.dev-qwen3]
+path = "models/Qwen3-4B-Q4_K_M.gguf"
+
+[models.dev-qwen25]
+path = "models/qwen2.5-3b-instruct-q4_k_m.gguf"
+
+[models.dev-llama32]
+path = "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+
 # Runaway bounds. These stop a loop that is already wrong - hitting one is an
 # error that reaches the user, not something an agent can see and react to.
 [limits]
 # Requests admitted to the loaded model at once. Mistral.rs batches these
 # sequences internally; foreground work is admitted before deferred work.
-max_concurrent_inferences = 4
+max_concurrent_inferences = 1
 # Inferences one chat turn may run before its tool loop is abandoned. A turn
 # needs one inference per tool round trip plus a final reply.
 max_inferences_per_chat = 8
 # Inferences one player action may run across every agent it reaches,
 # including recursive agent-to-agent calls.
 max_inferences_total = 64
-# A completed inference's reported input triggers compaction at this size.
-compact_at_input_tokens = 16000
+# Fixed total input plus generated-token capacity reserved in the paged KV cache
+# for each admitted inference. This determines the model's fixed VRAM budget.
+max_context_tokens = 16384
+# Maximum generated tokens in one inference, including tool calls.
+max_output_tokens = 1024
+# After a completed turn, compaction is queued when its input plus output tokens
+# would make the next inference reach this size. The reply is delivered first;
+# the next call to that agent waits for its queued compaction. This is lazy
+# history maintenance, independent of the fixed KV-cache capacity above.
+compact_before_next_input_tokens = 8000
 # Recent raw history is retained exactly; older history becomes a summary.
 keep_tail_messages = 32
+
+# Browser serving is deliberately configured only in local.toml: Google OAuth
+# credentials are machine/deployment secrets. `cairnworld serve` fails with a
+# clear message until all fields are set.
+# [web]
+# bind = "127.0.0.1:3000"
+# google_client_id = "..."
+# google_client_secret = "..."
+# google_redirect_url = "http://localhost:3000/auth/google/callback"

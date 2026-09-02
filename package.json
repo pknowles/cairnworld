@@ -1,0 +1,14 @@
+{
+  "scripts": {
+    "build:css": "tailwindcss -i style/app.css -o target/site/pkg/cairnworld.css",
+    "build:frontend": "cargo leptos build --frontend-only && npm run build:css",
+    "test:hydration": "npm run build:frontend && node scripts/check_hydration.cjs && node scripts/check_player_chat.cjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "daisyui": "^5.7.21",
+    "playwright-core": "^1.62.1",
+    "tailwindcss": "^4.3.3",
+    "ws": "^8.21.3"
+  }
+}
