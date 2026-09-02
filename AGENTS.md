@@ -14,7 +14,11 @@ Some files may be temporary or intentionally un-tracked. You may use
 .git/info/exclude for these, not .gitignore. Never use `git add -A`; prefer `git
 add -u`, be surgical and explicitly add new files. Use temporary commits rather
 than git stash or copying files as they are far more robust and there is less
-risk of losing anything.
+risk of losing anything. Never add temporary changes to uncommitted/dirty files
+as you may lose track of which changes are which. Separate with a temporary
+commit first. Never use `git checkout` to revert changes you think you made.
+Coding agents often screw this up and delete code because they don't realise
+there are other changes in a file they edited.
 
 Use integrated edit/search tools rather than grep/sed when at all possible.
 
@@ -43,6 +47,7 @@ hard gate and MUST be followed:
    - Are your changes project-consistent, modular and did not introduce duplication?
    - Did you "fix" anything without evidence, i.e. proving the thing you fixed was actually the cause and true underlying problem? See Debugging below for details.
    - Did you write any workarounds or bandaids that only fix a specific symptom, i.e. without finding the true cause needed for a robust solution? E.g. evidence-less, speculative or defensive "just in case" code without user sign off?
+   - Did you skip or relax tests that resulted in important coverage lost?
    - Anything else the user should know about?
 
 All issues should be fixed appropriately before committing.

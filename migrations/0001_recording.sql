@@ -1,3 +1,9 @@
+-- Pre-1.0: this schema is edited in place rather than migrated. There are no
+-- deployed databases, and supporting migrations this early costs more than it
+-- saves. Changing a column here invalidates existing database files - delete
+-- them and start again. Add real migrations when a database exists that
+-- someone would miss.
+
 CREATE TABLE world (
     id INTEGER PRIMARY KEY NOT NULL,
     name TEXT NOT NULL
@@ -16,12 +22,18 @@ CREATE TABLE message (
     seq INTEGER NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    -- Verbatim model reasoning, empty when none was emitted. Recorded because
+    -- it is model output, but never fed back into an agent's context.
+    reasoning TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (agent_id, seq)
 );
 
+-- Static prompt pieces an inference referenced: role prompts and the tool
+-- definitions sent with a request. Rows are written once and never updated, so
+-- a recipe referring to one always resolves to the text actually sent.
 CREATE TABLE text (
-    hash TEXT PRIMARY KEY NOT NULL,
+    id INTEGER PRIMARY KEY NOT NULL,
     content TEXT NOT NULL
 );
 

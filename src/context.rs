@@ -3,7 +3,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use crate::{
-    llm::{Backend, Message, Response, Sampling},
+    llm::{Backend, Message, MessageContent, Response, Sampling, ToolDefinition},
     store::{InferenceOutcome, Segment, Store},
 };
 
@@ -12,19 +12,32 @@ pub async fn complete<B: Backend>(
     backend: &B,
     agent_id: i64,
     static_messages: &[Message],
+    tools: &[ToolDefinition],
     sampling: Sampling,
     model: &str,
     on_token: impl FnMut(&str),
 ) -> Result<Response> {
     let mut segments = Vec::new();
     for message in static_messages {
+        let MessageContent::Text(content) = &message.content else {
+            anyhow::bail!("static context messages must contain text");
+        };
         let text = store
-            .put_text(&message.content)
+            .store_prompt_text(content)
             .await
             .context("storing static context text")?;
         segments.push(Segment::Text {
             text,
             role: message.role.clone(),
+        });
+    }
+    if !tools.is_empty() {
+        let definitions = serde_json::to_string(tools).context("serializing tool definitions")?;
+        segments.push(Segment::Tools {
+            text: store
+                .store_prompt_text(&definitions)
+                .await
+                .context("storing tool definitions")?,
         });
     }
     if let Some(messages) = store
@@ -119,6 +132,7 @@ mod tests {
             on_token("hello");
             Ok(Response {
                 content: Content::Text("hello".to_string()),
+                reasoning: String::new(),
                 usage: Usage {
                     input_tokens: 3,
                     output_tokens: 1,
@@ -134,13 +148,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .append_message(
-                agent,
-                &Message {
-                    role: Role::User,
-                    content: "Hello".to_string(),
-                },
-            )
+            .append_message(agent, &Message::text(Role::User, "Hello"))
             .await
             .unwrap();
         agent
@@ -163,11 +171,12 @@ mod tests {
             &store,
             &StreamingBackend,
             agent,
-            &[Message {
-                role: Role::System,
-                content: "Be concise.".to_string(),
-            }],
-            Sampling { temperature: 0.0 },
+            &[Message::text(Role::System, "Be concise.")],
+            &[],
+            Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
             "streaming-model",
             |token| streamed.push_str(token),
         )
@@ -200,7 +209,11 @@ mod tests {
             &FailingBackend,
             agent,
             &[],
-            Sampling { temperature: 0.0 },
+            &[],
+            Sampling {
+                temperature: 0.0,
+                enable_thinking: false,
+            },
             "failing-model",
             |_| {},
         )

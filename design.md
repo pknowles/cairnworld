@@ -25,8 +25,8 @@ Layers, each depending only on those above it:
 1. `llm` - inference backends behind one trait; every call recorded
 2. `store` - sqlite persistence: chat histories, game objects, inference
    records
-3. `agent` - context assembly, the agent loop, tool registry, agent-to-agent
-   call tree
+3. `agent` - context assembly, the agent loop, per-invocation tool lists,
+   agent-to-agent call tree
 4. `game` - game objects, actions, dice, Cairn rules
 5. `web` - axum routes, websocket chat, Leptos frontend, dev mode views
 6. `mcp` - RMCP server exposing the same tool surface to coding agents
@@ -59,41 +59,38 @@ struct Request {
 
 struct Response {
     content: Content,            // Text(String) | ToolCalls(Vec<ToolCall>)
+    reasoning: String,           // chain-of-thought, empty when the model emits none
     usage: Usage,                // input tokens, output tokens
 }
 ```
 
-`on_token` fires as generation produces output; mistral.rs and typical
-OpenAI-compatible APIs both stream natively, so this is not extra machinery,
-just not discarding what the backend already gives us. `complete` still
+`on_token` fires as generation produces output; mistral.rs streams natively, so
+this is not extra machinery, just not discarding what the backend already gives
+us. `complete` still
 returns the same fully-assembled `Response` at the end - recording, tool-call
 parsing and the agent loop all operate on the complete response exactly as
 before. Streaming is purely an additional, optional view onto the same
 generation; nothing downstream of the backend has to change to support it.
 
-Backends:
-
-- **mistral.rs, in-process** (first). GGUF quantized model on GPU. Loaded once
-  at startup; failure to load is a startup failure (fail fast).
-- **OpenAI-compatible HTTP client** (early second). Nearly free to add since
-  the request shape is identical, and it buys a lot: comparing small-model
-  behaviour against a large API model when debugging prompts, and running the
-  test suite on machines without a GPU.
-
+The backend is **mistral.rs, in-process**: a GGUF quantized model on GPU,
+loaded once at startup. Failure to load is a startup failure (fail fast).
 Model choice is configuration (CLI arg / config), not code.
 
 **Model selection.** Stheno v3.3 is a Llama-3-base RP finetune with no native
 tool-call template, so it is out as the primary model. Requirements: reliable
 tool calling, good conversational/NPC voice, ~8B GGUF, long context.
-Candidates, to be settled by a bake-off against our real tool set before
-anything is built on top (see plans/):
+All three candidates run and are selectable by name from configuration. The
+choice between them is deliberately open: comparing them on a single tool with
+no GM measures the harness, so it waits for real play (see plans/).
 
-- **Qwen3 8B** - strongest current small model for tool calling and general
-  capability; fewer RP finetunes exist but base instruct voice may be enough.
-- **Hermes (NousResearch, Llama 3.1 8B base)** - explicitly trained for both
-  function calling and RP/creative voice; likely the best single-model fit.
-- **Llama 3.1 8B Instruct** - the baseline with a native tool template and
-  the largest finetune ecosystem if a swap is wanted later.
+- **Qwen3 8B** - purpose-built tool template. Its GGUF cannot be split across
+  CPU and GPU without the fork's fix.
+- **Hermes (NousResearch, Llama 3.1 8B base)** - trained for both function
+  calling and RP voice, but its GGUF ships no tool template, so one is supplied
+  from `templates/`.
+- **Llama 3.1 8B Instruct** - native tool template, largest finetune ecosystem.
+  Its template quotes tool results and puts tool definitions in the first user
+  message alongside the question.
 
 If no single model does both jobs well, different models per agent kind
 (tool-heavy GM vs voice-heavy NPCs) is possible behind the backend trait, but
@@ -141,9 +138,15 @@ Requirement: reconstruct the *verbatim* model input for any inference, without
 storing the whole input redundantly every time.
 
 All large strings that feed prompts - role prompts, rule packets, notes/context
-packets, compaction instructions - live in one content-addressed table:
+packets, compaction instructions - live in one table:
 
-- `text(hash, content)` - insert-if-absent; referenced by hash.
+- `text(id, content)` - written once, never updated, referenced by id.
+
+The requirement is that an inference does not store a second copy of the whole
+conversation, which the recipe below already achieves. Deduplicating identical
+strings is not a goal: it would save almost nothing here and a content hash as
+the primary key makes one shared row able to rewrite history for every
+inference that references it.
 
 An inference is recorded as a recipe of references plus verbatim output:
 
@@ -152,12 +155,12 @@ An inference is recorded as a recipe of references plus verbatim output:
   duration_ms, model, created_at)`
 
 `segments` is a JSON array describing the input in order, e.g.
-`[{text: <hash>}, {summary: <id>}, {messages: [first_seq, last_seq]},
-{text: <hash>}]`. Reconstruction resolves the references; `input_hash` is the
+`[{text: <id>}, {summary: <id>}, {messages: [first_seq, last_seq]},
+{text: <id>}]`. Reconstruction resolves the references; `input_hash` is the
 hash of the fully assembled input actually sent, so a unit test can reassemble
-and verify equality for every recorded inference. This test runs over real
-recorded data, which makes any drift between assembly and recording fail
-loudly.
+and verify equality for every recorded inference. This is the one hash that
+earns its place: it runs over real recorded data and makes any drift between
+assembly and recording fail loudly.
 
 A failed inference is recorded, not dropped: exactly one of `output`/`error`
 is set, and a failure keeps its full recipe and `input_hash` so the prompt
@@ -197,7 +200,7 @@ whole value by key, avoiding line-range or paragraph-index fragility.
 Every inference input is assembled fresh, in this order:
 
 1. Role prompt - static per agent kind, versioned in the repo as plain text
-   files (`prompts/`), loaded at startup, recorded by hash.
+   files (`prompts/`), loaded at startup, recorded in `text`.
 2. Context packet - current dynamic state this agent is entitled to see,
    rebuilt each time: e.g. for a GM, its location description, characters
    present with sheets, GM notes, visible Storyteller notes. Never appended to
@@ -223,9 +226,12 @@ Structural rules, enforced in rust:
 
 ## Tools
 
-A tool = name + short description + JSON schema + rust handler. Each agent
-kind has a fixed tool set. Two mechanics from user_declarations.md shape the
-framework:
+A tool is one visible operation: its name, short description, JSON schema, and
+ the Rust code that validates and performs it. Each agent kind builds its own
+ fixed tool list from the features it offers. When an agent loop needs to find
+ an operation by the model-supplied name, it uses that list directly as a small
+ lookup table; there is no central tool registry, manager, or service with a
+ separate lifetime. Two mechanics from user_declarations.md shape the tools:
 
 - **Action IDs and approve-action.** When a character agent's tool call needs
   GM arbitration, rust assigns the next action id, stores the validated
@@ -234,7 +240,7 @@ framework:
   text. Rust executes the stored arguments - the LLM never re-copies them.
 - **Rule packets.** The player agent sees a tool's short description; when the
   call reaches the GM, rust attaches the extended rulebook text for that tool
-  (content-addressed, so recorded like everything else).
+  (stored in `text`, so recorded like everything else).
 
 Dice rolls are rust (`rand`), never the model. Every roll is recorded (see
 sequences) so a session is fully replayable as data.
@@ -316,7 +322,9 @@ the right column navigates:
 - Chat entries → sequence view: the call tree of inferences and actions for
   that entry's sequence, with per-node and cumulative token/time costs
 - Any inference → inference view: reconstructed verbatim input and verbatim
-  output, or the recorded error for a failed one
+  output, or the recorded error for a failed one. Where a model emitted
+  reasoning, it is shown collapsed beside the output - recorded like any other
+  model output, but never re-fed into a later context
 - Game objects → current state and notes
 
 An in-progress sequence view shows each open inference's raw token stream
@@ -359,21 +367,22 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   `--kind gm|npc|player|storyteller` selects the role prompt and tool set,
   and the full context assembly and compaction machinery is exercised - so a
   REPL session is a faithful stand-in for in-game behaviour, not an
-  approximation. Rust-side tool handlers execute for real against the
-  sandbox world's state.
+  approximation. Rust-side tool code executes for real against the sandbox
+  world's state.
 - **Fork:** `cairnworld chat --fork <agent-id> [--at <seq>]` copies an
   existing agent's history (from any world, up to an optional seq) into a
   sandbox agent and drops into the REPL at that point. The source world is
   untouched. This is the shortcut for "get me an agent in exactly the state
   where it misbehaved, and let me poke it."
-- **Replay:** `cairnworld replay <inference-id> [--prompts <dir>]`
-  reassembles the recorded verbatim input via the reconstruction machinery
-  and re-runs it, printing old and new output side by side. With `--prompts`,
-  segments whose hash matches a current repo prompt file are substituted with
-  the edited version. This is the core prompt-iteration loop: find a bad
-  exchange in dev mode, edit the prompt file, replay until the output is
-  right, commit. Replay depends only on the recording layer, and doubles as
-  the living proof that reconstruction works.
+- **Replay:** `cairnworld replay <inference-id>` reassembles the recorded input
+  via the reconstruction machinery and re-runs it, printing old and new output
+  side by side. Reassembly uses the current code and the current prompt files,
+  so editing a role prompt and replaying shows what the new prompt would have
+  produced for that exact exchange - the loop user_declarations.md asks for
+  under Debugging and Telemetry: "reference a specific LLM output message,
+  replace the history to match the prompt changes and then re-generate".
+  Replay depends only on the recording layer, and doubles as the living proof
+  that reconstruction works.
 - REPL niceties: `/undo` (drop the last exchange and re-prompt - i.e.
   delete-and-retry for interactive prompt testing), `/tools` (show the
   assembled tool definitions), `/context` (dump the exact input that will be
@@ -392,7 +401,7 @@ An RMCP server (own subcommand or enabled under `serve`) exposing:
 - read access to the debug spine: sequences, inferences, reconstruction,
   chat histories, game objects
 
-This reuses the tool registry and store queries verbatim - it is a thin
+This reuses the same tool lists and store queries verbatim - it is a thin
 transport, not a second implementation.
 
 # Off-the-shelf dependencies
@@ -412,7 +421,7 @@ Fewer lines of ours, chosen once here so nothing gets reinvented mid-build:
 - `anyhow` - error propagation with accumulated context
 - `clap` (derive) - CLI subcommands
 - `rand` - dice
-- `blake3` - content-addressed text hashing
+- `blake3` - hashes an assembled request so reconstruction can be verified
 - `tracing`/`tracing-subscriber` - server logs (game telemetry lives in
   sqlite, not logs)
 - `insta` - snapshot tests for context assembly (review prompt-affecting
@@ -431,8 +440,9 @@ sections of user_declarations.md.
 
 ## Actions and rules (TODO)
 
-The full character/NPC/GM/Storyteller tool sets over the framework's tool
-registry, rule packets from the Cairn SRD, item transfer invariants
+The full character/NPC/GM/Storyteller tool sets over the framework's
+per-invocation tool lists, rule packets from the Cairn SRD, item transfer
+invariants
 (Give/Take through rust so items cannot duplicate), BePersuaded, save
 mechanics. (Tool calls; GM interaction.)
 
@@ -476,13 +486,9 @@ operating on chat histories. (Dynamic Storyteller; Spell ideas.)
 
 # Open questions
 
-1. **Model.** Final pick between Qwen3 8B, Hermes (Llama 3.1 8B) and Llama
-   3.1 8B Instruct happens in the bake-off on evidence from our real tool set
-   (see Model selection).
-2. **Second backend timing.** The OpenAI-compatible HTTP backend is cheap and
-   useful for debugging comparisons; proposal is to add it alongside the
-   bake-off, when tool-calling behaviour is being compared across models
-   anyway.
-3. **user_declarations.md tech stack.** It lists neither Leptos nor sqlx.
+1. **Model.** All three run; the pick waits for a scenario worth measuring,
+   since one tool and no GM measures the harness rather than the models (see
+   Model selection).
+2. **user_declarations.md tech stack.** It lists neither Leptos nor sqlx.
    Suggested addition once these decisions settle (design.md must not
    contradict the declarations).

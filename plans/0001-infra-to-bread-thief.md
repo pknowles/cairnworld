@@ -1,7 +1,7 @@
 # Infrastructure to Bread Thief
 
-Status: in-progress (2026-07-26) - milestones 1-2 complete; milestone 3 next
-(see detail below); milestones 4-9 not started
+Status: in-progress (2026-07-30) - milestones 1-3 complete; milestones 4-9 not
+started. The model choice deferred from milestone 3 is still open.
 
 ## Goal
 
@@ -30,16 +30,30 @@ specified up front.
    tables plus content-addressed `text` and `inference` recipe rows; context
    assembly as the single recorded path to the model; `cairnworld replay`.
    Detailed below.
-3. **Tool calls + model bake-off.** Tool registry (schemars-derived schemas)
-   + agent loop with one toy tool (a dice roll); exercised from the REPL
-   against Qwen3 8B, Hermes (Llama 3.1 8B) and Llama 3.1 8B Instruct; add
-   the OpenAI-compatible HTTP backend for the comparison. Verifies: the
-   chosen model reliably emits valid tool calls - **decision gate for the
-   model** (design.md, Model selection).
+3. **Tool calls + three working models.** Complete. Schemars-derived tool
+   definitions assembled per agent invocation + agent loop with the GM's
+   `save`; exercised from the REPL against Qwen3 8B, Hermes 3 (Llama 3.1 8B)
+   and Llama 3.1 8B Instruct, each selectable by name from configuration.
+   Detailed below.
+
+   Scope changed during the work. The milestone was to produce comparison
+   evidence for the model choice, but making all three run at all consumed it:
+   three defects had to be found and fixed first, one of which silently
+   dropped every tool call from the prompt and invalidated any measurement
+   taken before it. Comparing models on one toy tool with no GM would measure
+   the harness, so the comparison moves to a milestone where there is real play
+   to measure - most likely 7, once Bread Thief is playable. Keeping three
+   working models is the durable result; the choice stays open.
 4. **Compaction + fork.** `summary` table; compaction with artificially low
-   thresholds; `chat --fork` and `--prompts` replay substitution. Verifies:
-   summaries cover the right ranges, reconstruction still holds across
-   compaction, and the prompt-iteration loop works end to end.
+   thresholds; `chat --fork`. Verifies: summaries cover the right ranges,
+   reconstruction still holds across compaction, and replaying a stored
+   inference after a prompt edit re-runs it with the new prompt.
+
+   A `--prompts <dir>` flag was planned here and has been dropped. It was not
+   traceable to user_declarations.md, and it assumed prompts live as files to
+   be substituted in, when they are assembled from stored text and message
+   rows. What the declarations ask for is re-running stored chats after the
+   code or prompts change, which reassembly already does.
 5. **Webserver + UI.** Axum + Leptos, Google OAuth2 login, one world, one
    player agent, websocket chat page. Verifies: a friend can log in from
    another machine and chat against the real model.
@@ -72,8 +86,8 @@ produces a streamed reply.
 - One crate, `cairnworld`. design.md's `llm` layer: the `Backend` trait and
   the mistral.rs implementation. No persistence, no tools, no web server.
 - `cairnworld chat` in its "bare 1:1 conversation" form (see design.md, Dev
-  CLI: chat, fork, replay) - no `--kind`, `--fork`, `--prompts` flags yet,
-  since those depend on the agent and store layers.
+  CLI: chat, fork, replay) - no `--kind` or `--fork` flags yet, since those
+  depend on the agent and store layers.
 
 ### Observations (2026-07-26)
 
@@ -233,3 +247,427 @@ deleting it.
   queryable with its error and reconstructable input.
 - A real GPU chat followed by replay has been exercised end to end.
 - Documentation matches the code; tests and builds pass; one commit.
+
+## Milestone 3 detail: Tool calls + three working models
+
+Complete (2026-07-30).
+
+Goal: prove the same recorded agent loop can offer a schema-derived tool,
+persist the assistant tool call and rust-generated result in its history, then
+produce a final response - on every candidate model, not only the one that
+happened to work.
+
+The goal changed during the work. It was to produce comparison evidence for the
+model choice; what it produced is a harness that runs three models correctly.
+Making them run consumed the milestone, and the comparison moves to a milestone
+with real play to measure. See "Outcome" at the end of this section.
+
+### Terms used in this plan
+
+- A **tool** is one visible operation offered to a model: its name, short
+  description, argument schema, argument type, and Rust code that performs the
+  operation. It is not a generic service.
+- A **tool list** is the fixed list of tools offered for one agent invocation.
+  It is assembled with that invocation's other input. Looking up a returned
+  tool name is an ordinary search of this local list; there is no global
+  `ToolRegistry`, manager, or controller. The list holds Rust execution code
+  and never crosses the wire: it *derives* the serializable
+  `Vec<ToolDefinition>` placed in `Request.tools` and recorded in the
+  tool-definition segment, and it resolves a returned name back to the local
+  operation to run. Only definitions are serialized; the code is never part of
+  a request or a record.
+- A **tool-call message** is the assistant chat entry containing the model's
+  structured call name, arguments, and call id. A **tool-result message** is
+  the following tool chat entry containing that id and Rust's result. These are
+  persisted messages, not text rendered for debugging.
+- A **tool-definition segment** is a reference to the exact JSON tool list sent
+  with an inference. It lets replay reconstruct `Request` including its tools
+  without storing another complete request blob. It reuses the existing `text`
+  table and `Segment` enum - the tool list serializes to JSON, which is text,
+  so there is no second store to maintain.
+
+### Scope and design choice
+
+Ordered so each step is verifiable on its own and none builds rows that a
+later step immediately produces for real. Persistence and the loop are one
+step because a stored call/result history has no source until the loop
+exists - splitting them would mean hand-writing histories only to test them,
+then writing them again from the loop.
+
+1. **Backend protocol support.** Teach the mistral.rs backend to send the shared tool
+   definitions and return the shared structured calls. It
+   must assemble streamed tool-call deltas as well as streamed text. CLI
+   parsing selects a complete local GGUF configuration rather than accepting
+   unrelated optional flags.
+
+   *Reasoning mode.* Qwen3 is a hybrid reasoning model and mistral.rs 0.8.1
+   defaults `enable_thinking` to true, so left alone it emits `<think>` blocks
+   while Llama 3.1 and Hermes 3 do not. Thinking is a comparison axis (see
+   below), so the backend must make it an explicit, recorded input rather than
+   an inherited default: `enable_thinking` becomes part of the provider
+   configuration, set via `RequestBuilder::enable_thinking(bool)`.
+
+   Reasoning arrives already separated: mistral.rs's `Delta` carries
+   `reasoning_content` beside `content` and `tool_calls`, split by its
+   incremental tag parser, which handles tags spanning token boundaries and
+   partial UTF-8. So the backend never scans or strips accumulated text - it
+   reads a field that is already structured, and `Response` gains a
+   `reasoning: String` field (empty when absent) to carry it.
+
+   Reasoning is kept, not discarded. It is model output, and
+   user_declarations.md requires games be recorded in full with input and
+   output reconstructable; dropping it would leave the inference view unable to
+   show what the model actually produced. Two distinct rules, deliberately not
+   conflated:
+
+   - *Stored and shown.* Persisted with the assistant message and rendered in
+     the developer inference view, collapsed by default.
+   - *Never re-fed to a model.* Context assembly ignores it, exactly as it
+     ignores failed inferences. Reasoning is scratch work: replaying it costs
+     the context budget that prompt_standards.md treats as scarcest, and models
+     are trained expecting their own prior reasoning to be absent.
+
+   Because the structured field is authoritative, a tool call the model merely
+   described inside its reasoning is never mistaken for one it emitted.
+   mistral.rs reports total completion tokens rather than a separate reasoning
+   count, so the comparison records raw reasoning and total completion tokens
+   without inventing a split that the backend did not measure.
+
+   This step is independently verifiable: it turns a `Request` carrying tools
+   into wire bytes and a streamed reply back into `Content::ToolCalls`, with no
+   persistence involved.
+
+   Verify: backend fixtures cover ordinary text, one call, multiple calls, and
+   fragmented streamed call arguments.
+
+2. **Structured messages, the dice operation, and the agent loop.** One step:
+   the schema change, the tool, and the loop that produces the histories the
+   schema change exists to store.
+
+   *Message content.* Two distinct concepts, so two types - reusing one would
+   admit invalid states:
+
+   - `Content` stays what a *model produced*: `Text` or `ToolCalls`. A tool
+     result is not something a model can produce, so it must not become a
+     `Content` variant; that would make `Response { content: ToolResult(..) }`
+     representable, letting a backend claim to have generated a result Rust
+     owns.
+   - `MessageContent` is what a *chat entry holds*: text, the model's tool
+     calls, or a tool result. `Message.content` becomes this instead of a bare
+     `String`. Today it is a `String` while `store.rs` already writes
+     `Content::Text(..)` as tagged JSON and refuses anything else on read, so
+     the stored and in-memory shapes already disagree; this closes that.
+
+   The overlap is real but small (`Text`, and `ToolCalls` when an assistant
+   response is appended), and converting a `Response`'s `Content` into a
+   `MessageContent` is the explicit, total step where a model output becomes
+   history. "Keep a single definition" applies to one concept written twice,
+   not to two concepts that share a variant name.
+
+   Reasoning is not a variant of either. A model reasons *and then* answers or
+   calls a tool, so it accompanies content rather than replacing it: it rides
+   alongside content on `Response` and on the persisted assistant message; an
+   empty string represents no reasoning.
+   Making it a variant would wrongly imply a reply that is reasoning and
+   nothing else.
+
+   *Call and result pairing.* `Content::ToolCalls` holds N calls in one
+   assistant message, and each `ToolCall` already owns both its `id` and its
+   `arguments`. Each call becomes one `Tool`-role message carrying that call's
+   id, appended in returned order, so a response with N calls appends one
+   assistant message and N tool messages with consecutive `seq`. Pairing is by
+   id, never by position.
+
+   *The tool-definition segment.* Extend the recipe with the segment defined
+   above and reassemble the tool list alongside messages and sampling.
+   `store.rs`'s `request_for_segments` currently hardcodes `tools: vec![]`
+   while `input_hash` covers the whole serialized `Request` including tools -
+   so reconstruction breaks the moment a real tool list is sent. Fixing that
+   is the concrete target of this step's reconstruction test.
+
+   *The tool.* Add `save` as the only tool offered by the REPL in this
+   milestone - the GM's Save from user_declarations.md, not an invented dice
+   primitive. A toy `roll_die` would have inverted the declared rule that
+   "rolls are made by rust code, not LLMs": the model would ask for a number
+   and interpret it, rather than ask for an outcome and receive a verdict. It
+   would also have measured the comparison against a tool surface we intend to
+   delete.
+
+   Rust rolls d20 and applies the Cairn under-the-attribute rule; the model
+   supplies who, which attribute, why, and an optional difficulty. Tool names
+   are snake_case at the LLM boundary (user_declarations.md, Tool calls), so
+   `Save` is `save` on the wire. The invocation's tool list supplies its
+   definition and finds it by name. Its description is model-facing text,
+   written and reviewed against prompt_standards.md before the comparison runs.
+   The REPL agent's system prompt is fixed for the comparison and recorded with
+   it, since whether a model calls a tool at all depends on it.
+
+   The attribute's value is a temporary argument until the `character` table
+   exists (milestone 7). It is flagged in the code as such: the model must not
+   supply a stat it does not own, since a model that can choose the number can
+   choose to pass. Removing it is a breaking schema change that invalidates
+   recorded inferences and every test constructing `save` arguments.
+
+   *The loop.* Invoke, persist the returned call, validate and run it, append
+   the result, then invoke again for final text - the loop from
+   user_declarations.md.
+
+   An invalid call is already preserved as the successful inference's output,
+   but appends no invented result and causes no further inference; its
+   validation error propagates with context. This is fail-fast for this
+   milestone, not the final policy: user_declarations.md's GM rejects actions
+   with explanatory text the calling agent can act on, and that flow arrives
+   with approve-action in milestone 6. A backend error remains a failed
+   inference record through the existing context path.
+
+   Verify: scripted backend responses exercise final text with no tool, one
+   valid roll, and multiple valid rolls. The final response must receive and use
+   the actual persisted result; reconstructed inputs before and after the roll
+   must be hash-equal, over histories the loop actually produced. Missing,
+   corrupt, and cross-agent references fail with context, and existing
+   text-only histories still reconstruct.
+
+3. **REPL, replay, and llm comparison.** Wire `chat` through this real loop and keep
+   `replay` at the existing inference boundary, so each replay reuses the exact
+   recorded tool definitions and messages. Run the same fixed prompt set,
+   schemas, sampling, system prompt, and trial count on Qwen3 8B, Hermes, and
+   Llama 3.1 8B Instruct. Record each run in its sandbox database.
+
+   The output is evidence, not a verdict: per model and per case, what it did
+   well and badly, with counts over the trials. Structural tool correctness
+   (valid name, schema-valid arguments, matching id/result, and final use of
+   that result), latency, and VRAM are measured here. Conversational/NPC voice
+   and long-context behaviour matter for the choice but are not exercised by a
+   dice roll, so this milestone does not claim to measure them. The user reads
+   the situations and stats and picks the model.
+
+### Alternatives considered
+
+- Letting mistral.rs invoke callbacks would make the application miss the
+  call/result messages that define the agent's history.
+- Putting pseudo-tool JSON in a prompt would create a second unvalidated
+  protocol and bypass the model's native tool interface.
+- A global registry/service would group unrelated tool operations by technical
+  category and impose a separate lifetime without owning game data. A local
+  invocation-specific tool list provides the required lookup directly.
+
+### Test design
+
+Happy paths: final text without a tool; one valid dice call followed by final
+text; several valid dice calls followed by final text; and replay of each
+inference in that exchange.
+
+Edges: unknown name, malformed JSON, zero sides, multiple calls with distinct
+ids, a mixture of valid and invalid calls, fragmented streamed call arguments,
+empty final text, and backend failure before or during streamed output.
+
+Expected outcomes: valid calls have schema-valid arguments, a Rust-generated
+bounded result paired with the visible call id, and final text based on that
+result. Invalid calls and backend failures stop immediately with accumulated
+context; neither produces a fabricated tool result or a later model call.
+Every inference input remains reconstructable, while only backend failures are
+stored as failed inference outcomes.
+
+Validation options: scripted backend tests exercise the real loop cheaply and
+make history/reconstruction observable; backend fixtures test streamed call
+assembly; real candidate runs test model behaviour and performance. Together
+they catch a loop that merely appends text, a backend adapter that loses ids or
+splits arguments incorrectly, and a model that emits plausible-looking but
+unusable calls.
+
+#### What a wrong result looks like, and whether the test catches it
+
+Each case below names the plausible wrong implementation, then the assertion
+that fails because of it. A case whose wrong result no assertion catches is not
+worth writing.
+
+- *Result not actually generated by the tool.* A scripted call with
+  `sides: 1` must produce exactly 1 - the one die whose outcome is fixed, so
+  the assertion needs no seeding and no test RNG abstraction. A separate call
+  with `sides: 20` asserts the result lies in `1..=20`, over enough repeats to
+  catch an off-by-one at either bound. Note the model supplies only `sides`,
+  never a result, so "the loop echoed the model's number" is not a reachable
+  failure; what these catch is a result that is constant, out of range, or
+  derived from the wrong field.
+- *Loop appends the result but never re-invokes.* Assert the exchange ends in
+  an assistant text message and that two inference rows exist for one user
+  turn. Asserting only "a result message exists" would pass.
+- *Final response ignores the result.* The scripted second response is
+  generated from its own input, so assert the second inference's reconstructed
+  input contains the tool-result message with Rust's value. Asserting the final
+  text mentions a number would pass on a model that hallucinated the same one.
+- *Results not attributed to the originating call.* One response carrying
+  several calls with distinct ids and distinct `sides` (e.g. 1 and 20, so the
+  d1 result is known exactly). Assert every stored tool-result message carries
+  its originating call's id and a value consistent with *that* call's `sides` -
+  which fails if results are attributed to the wrong call.
+- *Streamed argument fragments concatenated in arrival order but parsed per
+  fragment.* A fixture splits `{"sides": 20}` mid-token across chunks; assert
+  the assembled call parses to `sides == 20`. Per-fragment parsing errors out.
+- *Tool definitions omitted from the hash.* Record an inference, mutate the
+  stored tool-definition text, and assert reconstruction fails. If `tools` were
+  still hardcoded empty, reconstruction would wrongly succeed - this is the
+  assertion that pins the `request_for_segments` fix.
+- *Invalid call silently dropped.* Assert both that the error propagates with
+  context and that no tool-result message was appended - dropping the call
+  would satisfy neither.
+- *Backend failure recorded as an empty success.* Assert the inference row has
+  an error and no output, and that no assistant message was appended.
+- *Reasoning discarded, or leaking back into context.* A scripted response
+  carrying both `reasoning` and content must leave the reasoning retrievable
+  from the stored assistant message - catching a loop that drops it - while the
+  next turn's reconstructed input contains the content and not the reasoning,
+  catching the opposite error of replaying scratch work into the context
+  budget. One fixture, both failure directions.
+
+#### Tests deliberately not written
+
+- No test seeds the RNG to pin a specific roll. That would pin `rand`'s
+  internals, which may change across versions without the behaviour being
+  wrong, and it would need a test-only RNG seam in production code. The Cairn
+  rule gives certain outcomes without either: d20 must roll *under* the
+  attribute, so an attribute of 1 always fails and 21 always passes.
+- No test asserts the JSON field ordering of a serialized tool definition. The
+  hash covers the bytes actually sent, so ordering is already pinned where it
+  matters; asserting it separately would fail on a valid serde change.
+- No test asserts the exact wording of `save`'s description. It is reviewed as a
+  prompt, and pinning its text would make prompt iteration fail the suite. The
+  schema test pins the contract that matters: every argument the model must
+  supply is described, and the attribute is constrained to the Cairn set.
+- No test reimplements the recipe assembly to compare against it. Reconstruction
+  is verified by round-tripping through the real store, per coding_standards.md.
+
+### Model comparison method
+
+Candidates, all Q4_K_M GGUF to match the quant already measured in milestone 1,
+one loaded at a time - at ~5.9GB resident on an 8GB card, concurrent loading is
+not possible, so runs are sequential:
+
+- **Llama 3.1 8B Instruct** - the milestone-1 baseline.
+- **Qwen3 8B** - `bartowski/Qwen_Qwen3-8B-GGUF`, 4.68 GiB.
+- **Hermes 3 Llama 3.1 8B** - `NousResearch/Hermes-3-Llama-3.1-8B-GGUF`,
+  4.58 GiB.
+
+All three are downloaded in `models/` (gitignored), byte-size verified against
+the source and confirmed to carry the GGUF magic.
+
+Reasoning mode is a comparison axis, not a setting chosen in advance - whether
+thinking earns its latency on this workload is exactly the kind of question
+the runs should answer rather than the plan asserting. It applies only where
+the model has the mode: reading the `chat_template` out of each GGUF's metadata
+shows `enable_thinking` and `<think>` present in Qwen3's 4614-character
+template and absent from Hermes 3's (291 chars) and Llama 3.1's, so forcing the
+toggle on those two yields no second data point. That gives four
+configurations:
+
+| Configuration | Thinking |
+|---|---|
+| Llama 3.1 8B Instruct | n/a |
+| Hermes 3 Llama 3.1 8B | n/a |
+| Qwen3 8B | disabled |
+| Qwen3 8B | enabled |
+
+Each configuration is recorded with its `enable_thinking` value so runs are
+never ambiguous after the fact. mistral.rs supplies total completion-token
+usage, not separate reasoning-token usage, so the report records the raw
+reasoning text and total completion tokens alongside latency. It must not
+invent a separate reasoning-token count.
+
+Prompt set - six fixed user turns addressed to an agent acting as GM with
+`save` available. Because `save` is a real game action rather than a dice
+primitive, judging *when* a save is warranted is part of the tool's job, so
+these deliberately span the explicit and the implied.
+
+1. An explicit save request naming character, attribute and reason.
+2. A described hazard implying a save without naming one ("Rook edges along the
+   rotten ledge") - tests whether the tool is reached from a situation.
+3. Two characters facing the same hazard in one turn - tests multiple calls and
+   id handling.
+4. A save whose attribute is unstated ("can Rook resist the smoke?") - tests
+   whether the model picks a plausible attribute or invents a field.
+5. A two-turn exchange: a save, then a follow-up referring to its outcome -
+   tests whether the persisted verdict actually entered context, and whether
+   the model narrates the verdict it was given rather than one it preferred.
+6. A plain conversational turn with no action at all - tests that offering a
+   tool does not derail ordinary chat, and that a model does not call
+   unprompted.
+
+Session structure: every trial starts in a fresh sandbox world and agent, so
+trials are independent. Prompt 5 is the one deliberately multi-turn case, and
+both its turns run in the same session.
+
+Ten trials per prompt per configuration at a fixed temperature of 0.7
+throughout - a middle setting that leaves the run-to-run variance the
+comparison exists to expose, rather than greedy decoding which would hide it.
+The exact value matters less than it being identical across configurations and
+recorded with the results.
+
+That is 240 model turns (4 configurations x 6 prompts x 10 trials, with prompt
+5 contributing two turns), and more inferences than that: every turn where a
+tool is called costs at least two inferences, so the recorded row count will be
+substantially higher. Runs are sequential since only one model fits in 8GB, and
+the two Qwen3 configurations share one load.
+
+Reported per configuration, per prompt: how often a call was emitted where a
+save was warranted and withheld where it was not; how often the name and
+arguments were schema-valid, including a sensible attribute where none was
+named; how often each result carried its originating call's id; how often the
+final text narrated the verdict Rust returned rather than a preferred one;
+median and worst latency; total completion tokens, raw reasoning when present,
+and peak VRAM. Failures are quoted verbatim from the recorded
+inferences rather than summarised, since what a model does badly is the part
+that decides the choice.
+
+The report is the deliverable. It ranks nothing and picks nothing: it shows,
+per configuration, what worked, what failed, and what it cost, so the quality
+and latency trade can be judged directly. It does not cover NPC voice or
+long-context behaviour - one save exchange exercises neither.
+
+### Outcome
+
+The comparison above was not run. The method is kept because it still applies
+when the comparison happens.
+
+Shipped: structured message content, with `Content` (what a model produced)
+separate from `MessageContent` (what a chat entry holds), so a tool result
+cannot be represented as model output; a tool-definition segment in the recipe,
+so reconstruction rebuilds a `Request` including its tools; the agent loop,
+bounded by two configurable limits whose breach is an error reaching the user
+rather than an agent; `save` as the one tool, taken from user_declarations.md
+rather than an invented dice primitive; and three models selectable by name
+from configuration, each paired with the chat template it needs.
+
+Three defects had to be fixed before any model could be judged, all found by
+reading what the model actually received rather than what the code implied:
+
+1. mistral.rs dropped every assistant tool call from the rendered prompt: the
+   builder stored them under a `function` key while the templates read
+   `tool_calls`. Models saw an empty assistant turn followed by a tool result
+   with nothing explaining it. Llama 3.1 reissued the same call until the chat
+   limit stopped it - 8 calls for one question, 1 after the fix.
+2. Qwen3 GGUF inference failed whenever the device mapper split layers across
+   CPU and GPU, omitting the device move before the final norm that the Llama
+   path performs.
+3. The Hermes 3 GGUF ships a chat template with no tool support, so every tool
+   definition was silently discarded before the model saw it.
+
+1 and 2 are fixed in the mistral.rs fork; 3 is addressed by `templates/`.
+
+Deferred, with reasons:
+
+- **The model choice.** Comparing three models on one toy tool with no GM
+  measures the harness. It moves to a milestone with real play - most likely 7.
+- **Rendered-prompt storage.** The verbatim prompt is what exposed defect 1,
+  and nothing stores it. Costs measured in experiments/0003; the decision
+  belongs with milestone 8's inference view.
+
+Known and unexplained, recorded in experiments/0001:
+
+- Llama 3.1's final reply describes the tool and its parameters instead of
+  narrating the outcome.
+- Hermes 3 emits a `<tool_call>` block with no closing tag, so it never parses;
+  deterministic at temperature 0. It also read "Rook has DEX 11" as
+  `attribute_value: 1`.
+- The Llama 3.1 template quotes tool results before the model sees them. A
+  corrected template fixes the quoting but changes no measured behaviour, so it
+  is not adopted.

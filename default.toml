@@ -1,4 +1,28 @@
 # Checked-in defaults, shared by everyone. Per-machine overrides (model path,
-# secrets, etc.) go in config/local.toml, which is gitignored.
+# secrets, etc.) go in local.toml, which is gitignored.
 
-# model = "models/model.gguf"
+# Which model to use when --model is not given. Set this in local.toml.
+# model = "llama"
+
+# Candidate models, selected by name with --model or the key above. Weights are
+# not checked in; models/ is gitignored. A model whose GGUF ships a template
+# that cannot express tool calls needs chat_template to be usable.
+[models.llama]
+path = "models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+
+[models.hermes]
+path = "models/Hermes-3-Llama-3.1-8B.Q4_K_M.gguf"
+chat_template = "templates/hermes-tools.jinja"
+
+[models.qwen]
+path = "models/Qwen_Qwen3-8B-Q4_K_M.gguf"
+
+# Runaway bounds. These stop a loop that is already wrong - hitting one is an
+# error that reaches the user, not something an agent can see and react to.
+[limits]
+# Inferences one chat turn may run before its tool loop is abandoned. A turn
+# needs one inference per tool round trip plus a final reply.
+max_inferences_per_chat = 8
+# Inferences one player action may run across every agent it reaches,
+# including recursive agent-to-agent calls.
+max_inferences_total = 64

@@ -83,7 +83,11 @@ instructions. Less is more.
   actual tool boundary visible to that agent?
 - Did a workflow example accidentally become a mandatory sequence, hiding other
   actions that remain valid?
-- Did you test to verify the new prompt assembly?
+- Did you test to verify the new prompt assembly? Inspect what the model
+  actually received, captured from the running system. A prompt rebuilt by
+  hand, or by re-applying a template outside the normal path, only shows what
+  you already believed and will hide any difference introduced by the code in
+  between.
 - Did a real chat through the normal product path verify the intended model
   behavior with the intended provider, visible tools, and backend?
 - Is an LLM doing something that is fully deterministic that would be better
