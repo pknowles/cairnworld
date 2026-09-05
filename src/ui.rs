@@ -130,11 +130,12 @@ fn wait_for_game(message: RwSignal<String>) {
 #[island]
 pub fn PlayerChat(
     world_id: i64,
+    character_id: i64,
     after_message_id: Option<i64>,
     children: Children,
 ) -> impl IntoView {
     #[cfg(not(feature = "hydrate"))]
-    let _ = (world_id, after_message_id);
+    let _ = (world_id, character_id, after_message_id);
     let entries = RwSignal::new(Vec::<ChatEntry>::new());
     let can_act = RwSignal::new(false);
     let activity = RwSignal::new(None::<ChatActivity>);
@@ -145,6 +146,7 @@ pub fn PlayerChat(
     #[cfg(feature = "hydrate")]
     let socket = connect_player_chat(
         world_id,
+        character_id,
         after_message_id,
         entries,
         can_act,
@@ -297,6 +299,7 @@ pub fn chat_role_name(role: ChatRole) -> &'static str {
 #[cfg(feature = "hydrate")]
 fn connect_player_chat(
     world_id: i64,
+    character_id: i64,
     after_message_id: Option<i64>,
     entries: RwSignal<Vec<ChatEntry>>,
     can_act: RwSignal<bool>,
@@ -332,9 +335,11 @@ fn connect_player_chat(
     };
     let url = match after_message_id {
         Some(after_message_id) => {
-            format!("{scheme}://{host}/world/{world_id}/ws?after_message_id={after_message_id}")
+            format!(
+                "{scheme}://{host}/world/{world_id}/characters/{character_id}/ws?after_message_id={after_message_id}"
+            )
         }
-        None => format!("{scheme}://{host}/world/{world_id}/ws"),
+        None => format!("{scheme}://{host}/world/{world_id}/characters/{character_id}/ws"),
     };
     let websocket = match WebSocket::new(&url) {
         Ok(socket) => socket,

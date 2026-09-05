@@ -1,8 +1,8 @@
--- Pre-1.0: this schema is edited in place rather than migrated. There are no
--- deployed databases, and supporting migrations this early costs more than it
--- saves. Changing a column here invalidates existing database files - delete
--- them and start again. Add real migrations when a database exists that
--- someone would miss.
+-- Pre-1.0: this is the complete, authoritative schema. Existing databases are
+-- deliberately incompatible while the project has no real users or data that
+-- must be retained: delete the database and recreate it after changing this
+-- file. Stop editing schema history in place and add forward migrations once
+-- real user databases exist.
 
 CREATE TABLE world (
     id INTEGER PRIMARY KEY NOT NULL,
@@ -58,14 +58,6 @@ CREATE TABLE agent (
     world_id INTEGER NOT NULL REFERENCES world(id)
 );
 
--- An agent is just a history. This relationship is what makes it the one
--- player-facing history for a membership; other agent roles get their own
--- owning game relationship as those game objects are introduced.
-CREATE TABLE member_player_agent (
-    member_id INTEGER PRIMARY KEY NOT NULL REFERENCES world_member(id),
-    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
-);
-
 -- A character does not have a location until it is created and placed. This
 -- avoids incomplete placeholder rows for the Adventurer created on joining.
 CREATE TABLE character (
@@ -88,8 +80,9 @@ CREATE TABLE character (
 );
 
 CREATE TABLE player_character (
-    member_id INTEGER PRIMARY KEY NOT NULL REFERENCES world_member(id),
-    character_id INTEGER NOT NULL UNIQUE REFERENCES character(id)
+    member_id INTEGER NOT NULL REFERENCES world_member(id),
+    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
+    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
 );
 
 CREATE TABLE location (
@@ -101,6 +94,11 @@ CREATE TABLE location (
     gm_notes TEXT NOT NULL DEFAULT '{}',
     storyteller_notes TEXT NOT NULL DEFAULT '{}',
     UNIQUE (world_id, name)
+);
+
+CREATE TABLE world_starting_location (
+    world_id INTEGER PRIMARY KEY NOT NULL REFERENCES world(id),
+    location_id INTEGER NOT NULL REFERENCES location(id)
 );
 
 CREATE TABLE character_location (
@@ -241,6 +239,7 @@ CREATE TABLE inference (
     output_tokens INTEGER,
     duration_ms INTEGER NOT NULL,
     model TEXT NOT NULL,
+    tool_choice TEXT NOT NULL DEFAULT '"auto"',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK ((output IS NULL) != (error IS NULL)),
     CHECK (
@@ -282,7 +281,8 @@ CREATE TABLE action (
 CREATE TABLE pending_compaction (
     agent_id INTEGER PRIMARY KEY NOT NULL REFERENCES agent(id),
     after_message_id INTEGER NOT NULL REFERENCES message(id),
-    input_tokens INTEGER NOT NULL,
+    next_input_tokens INTEGER NOT NULL,
     sampling TEXT NOT NULL,
-    model TEXT NOT NULL
+    model TEXT NOT NULL,
+    static_segments TEXT NOT NULL DEFAULT '[]'
 );

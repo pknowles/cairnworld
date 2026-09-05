@@ -1,5 +1,8 @@
 # Character ownership
 
+Completed and verified 2026-09-07 after the AGENTS.md self-review against
+`coding_standards.md` and `prompt_standards.md`.
+
 ## Goal
 
 Replace the accidental one-membership/one-character/one-history restriction
@@ -41,11 +44,10 @@ membership-owned singular player agent is an intermediate implementation bug.
 
 ## Implementation
 
-1. Replace the initial schema's singular ownership constraints with a real
-   migration that preserves each existing character and player-agent history.
-   Add the durable world starting-location relationship. Backfill it from the
-   owner Adventurer's location; Bread Thief currently has one location, so this
-   is the exact known scenario start for existing local worlds.
+1. Replace the initial schema's singular ownership constraints in the
+   authoritative pre-release schema. Existing local databases are intentionally
+   incompatible and must be recreated until real user data exists. Add the
+   durable world starting-location relationship.
 2. Replace `MemberAgent` with a character-scoped relationship containing
    membership, account, world, character, and agent identifiers. Make all
    store game queries, agent operations, and broadcasts use that relationship.
@@ -71,7 +73,20 @@ membership-owned singular player agent is an intermediate implementation bug.
   removed member's character, or a character from another world is forbidden.
 - Two characters under one account can open different histories and act
   without crossing character state, location, or broadcasts.
-- Existing databases migrate without dropping their sole character or its
-  history. `cargo fmt --check`, focused store/web/game tests, the complete Rust
-  suite, and the browser hydration suite pass. Complete the `AGENTS.md`
-  self-review before committing.
+- A fresh database initializes the complete schema. `cargo fmt --check`,
+  focused store/web/game tests, the complete Rust suite, and the browser
+  hydration suite pass. Complete the `AGENTS.md` self-review before committing.
+
+## Verification record
+
+- `cargo fmt --check`, `cargo check`, and `cargo test` passed; opt-in device
+  tests remain opt-in.
+- The compiled loading and player-chat browser hydration checks passed.
+- The scripted arbitration test covers one GM narration reaching every
+  co-located character's history under one account.
+- Store and game tests cover independent character histories, authorization,
+  retained removed memberships, creation state, and action arbitration; the
+  world-detail rendering test covers character-specific entry links.
+- Review corrected the remaining membership-named character queries and the
+  implementation reference's opening-operation scope. No prompt or design
+  changes were needed.
