@@ -188,8 +188,8 @@ pub async fn complete_with_call_context<B: Backend>(
             // The completed model request reports its exact template-expanded
             // input and generated output. That is the next normal context, so
             // this happy path deliberately does not tokenize it again: doing
-            // so would be pure overhead. Tokenization is reserved for the
-            // rare compaction fallback whose own input proved too large.
+            // so would be pure overhead. Capacity recovery instead retries
+            // real summary inferences with progressively smaller prefixes.
             let next_input_tokens = response
                 .usage
                 .input_tokens
@@ -279,10 +279,6 @@ mod tests {
     }
 
     impl Backend for ScriptedBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             request: crate::llm::Request,

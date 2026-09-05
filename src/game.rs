@@ -942,13 +942,6 @@ mod tests {
     }
 
     impl ScriptedBackend {
-        fn new(responses: impl IntoIterator<Item = Response>) -> Self {
-            Self {
-                responses: Mutex::new(responses.into_iter().collect()),
-                requests: Arc::new(Mutex::new(vec![])),
-            }
-        }
-
         fn recording(
             responses: impl IntoIterator<Item = Response>,
         ) -> (Self, Arc<Mutex<Vec<crate::llm::Request>>>) {
@@ -964,10 +957,6 @@ mod tests {
     }
 
     impl Backend for ScriptedBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             request: crate::llm::Request,
@@ -1023,10 +1012,6 @@ mod tests {
     }
 
     impl Backend for DelayedBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             _request: crate::llm::Request,
@@ -1116,6 +1101,18 @@ mod tests {
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let companion = store
+            .create_player_character(owner.id, installed.world_id)
+            .await
+            .unwrap();
+        let player_names = [
+            store
+                .player_scene(&installed.member)
+                .await
+                .unwrap()
+                .character_name,
+            store.player_scene(&companion).await.unwrap().character_name,
+        ];
         let creation = store
             .begin_sequence(installed.world_id, "creation test")
             .await
@@ -1132,26 +1129,23 @@ mod tests {
             .ready_to_begin(&installed.member, creation.id, None)
             .await
             .unwrap();
-        let backend = InferenceScheduler::new(
-            ScriptedBackend::new([
-                response(Content::ToolCalls(vec![ToolCall {
-                    id: "take-1".into(),
-                    name: "take".into(),
-                    arguments: r#"{"item":"flour sack"}"#.into(),
-                }])),
-                response(Content::ToolCalls(vec![ToolCall {
-                    id: "approve-1".into(),
-                    name: "approve_action".into(),
-                    arguments: r#"{"action_id":1}"#.into(),
-                }])),
-                response(Content::Text(
-                    "You lift the flour sack while Toma watches.".into(),
-                )),
-                response(Content::Text("What do you do next?".into())),
-            ]),
-            Limits::default(),
-        )
-        .unwrap();
+        let (scripted_backend, recorded_requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "take-1".into(),
+                name: "take".into(),
+                arguments: r#"{"item":"flour sack"}"#.into(),
+            }])),
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "approve-1".into(),
+                name: "approve_action".into(),
+                arguments: r#"{"action_id":1}"#.into(),
+            }])),
+            response(Content::Text(
+                "You lift the flour sack while Toma watches.".into(),
+            )),
+            response(Content::Text("What do you do next?".into())),
+        ]);
+        let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
         let game = Arc::new(Game::new(
             store.clone(),
             backend.foreground(),
@@ -1229,6 +1223,23 @@ mod tests {
         assert_eq!(player_inference.parent_inference_id, None);
         assert_eq!(gm_inference.sequence_id, player_inference.sequence_id);
         assert_eq!(gm_inference.parent_inference_id, Some(player_inference.id));
+        let requests = recorded_requests.lock().unwrap();
+        let gm_packet = requests
+            .iter()
+            .flat_map(|request| request.messages.iter())
+            .find_map(|message| match &message.content {
+                MessageContent::Text(text) if text.starts_with("You arbitrate this location.") => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("the GM arbitration must receive its actual location packet");
+        for name in player_names {
+            assert!(
+                gm_packet.contains(&format!("\"name\":\"{name}\"")),
+                "the GM packet must name every player character in its location"
+            );
+        }
         drop(game);
         drop(store);
         std::fs::remove_file(path).unwrap();

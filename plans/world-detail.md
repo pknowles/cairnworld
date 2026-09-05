@@ -26,10 +26,10 @@ relationship rather than recreating any ownership or access logic.
   separate player-agent history. `Store::world_members(world_id)` returns one
   `WorldMember` per membership with its characters. It includes removed
   memberships so their retained association is visible.
-- `world_detail` in `src/web.rs` first calls `active_member`; an unauthenticated,
-  removed, or unrelated user cannot render the page. It then loads the world,
-  member rows, and invitations (for the owner only) and passes them to
-  `WorldDetail`.
+- `world_detail` in `src/web.rs` first verifies the signed-in account has an
+  active membership; an unauthenticated, removed, or unrelated user cannot
+  render the page. It then loads the world, member rows, and invitations (for
+  the owner only) and passes them to `WorldDetail`.
 - Character play routes resolve the signed-in account, active membership, and
   the character named in their path again. A route parameter is a requested
   resource, never authority; the resolved character relationship selects its
@@ -63,8 +63,8 @@ relationship rather than recreating any ownership or access logic.
 - Do not implement dead-character icons, replacement Adventurers, Storyteller
   approval, world status, recap, epilogue, Developer Mode, or Storyteller world
   initialization. Each needs a later state/design increment.
-- Do not change `Game`, `active_member`, `game_page`, or `game_socket`; the
-  existing membership resolution is the sole entry boundary this page reuses.
+- Do not add a second game or websocket boundary. Character ownership's
+  character-scoped routes remain the sole entry boundary this page links to.
 
 ## Implementation steps
 

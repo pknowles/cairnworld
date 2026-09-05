@@ -255,10 +255,6 @@ where
         Ok(())
     }
 
-    async fn input_tokens(&self, request: &Request) -> Result<usize> {
-        self.scheduler.backend.input_tokens(request).await
-    }
-
     async fn complete(
         &self,
         request: Request,
@@ -282,10 +278,6 @@ mod tests {
     struct TestBackend;
 
     impl Backend for TestBackend {
-        async fn input_tokens(&self, _request: &Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             _request: Request,

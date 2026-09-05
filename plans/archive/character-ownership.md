@@ -8,7 +8,7 @@ Completed and verified 2026-09-07 after the AGENTS.md self-review against
 Replace the accidental one-membership/one-character/one-history restriction
 with the declared ownership graph: an active world member owns a list of
 independently playable characters, each with its own player-agent history. Let
-an active member create a further blank `Adventurer` so one account can playtest
+an active member create a further blank `AdventurerN` so one account can playtest
 that graph.
 
 ## Declaration trace
@@ -33,7 +33,7 @@ membership-owned singular player agent is an intermediate implementation bug.
   session account, active membership, and exact owned character in one store
   query. The URL identifies a requested resource; it is never authority.
   The websocket uses the same resolved character relationship.
-- Creating an additional character creates a new agent, blank `Adventurer`,
+- Creating an additional character creates a new agent, blank `AdventurerN`,
   player-character relationship, and starting-location placement in one
   transaction. A world records its scenario starting location so later
   characters do not depend on where an earlier character has travelled.
@@ -61,7 +61,11 @@ membership-owned singular player agent is an intermediate implementation bug.
 5. Change game page and websocket routes to include `character_id`, resolving
    the active owned character on every HTTP and websocket entry. Do not trust a
    hidden field, query string, browser-supplied agent id, or prior page load.
-6. Update `implementation_reference.md` after verification.
+6. Use the character's already-unique `tool_id` as `N` in its placeholder
+   name, and include every player character at a location in that location
+   GM's freshly rebuilt scene packet. The packet must be used for both opening
+   narration and action arbitration.
+7. Update `implementation_reference.md` after verification.
 
 ## Verification
 

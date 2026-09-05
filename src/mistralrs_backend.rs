@@ -187,15 +187,6 @@ fn request_builder(request: &Request, max_output_tokens: usize) -> Result<Reques
 }
 
 impl Backend for MistralRsBackend {
-    async fn input_tokens(&self, request: &Request) -> Result<usize> {
-        let tokens = self
-            .model
-            .tokenize_chat_request(request_builder(request, self.max_output_tokens)?)
-            .await
-            .context("tokenizing exact model chat request")?;
-        Ok(tokens.len())
-    }
-
     async fn complete(
         &self,
         request: Request,
@@ -322,7 +313,7 @@ impl Backend for MistralRsBackend {
                     anyhow::bail!("model error during inference: {message}")
                 }
                 MrResponse::ContextLengthExceeded { requested_tokens } => {
-                    let error = ContextCapacityExceeded {
+                    let error = ContextCapacityExceeded::FixedKv {
                         requested_tokens,
                         max_context_tokens: self.max_context_tokens,
                     };
