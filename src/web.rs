@@ -44,6 +44,8 @@ const USER_ID: &str = "user_id";
 const OAUTH_STATE: &str = "oauth_state";
 const OAUTH_NONCE: &str = "oauth_nonce";
 const OAUTH_VERIFIER: &str = "oauth_verifier";
+const WORLD_DETAIL_ROW_CLASSES: &str =
+    "flex flex-wrap items-center justify-between gap-3 rounded-box bg-base-200 p-3";
 type GoogleClient = CoreClient<
     EndpointSet,
     EndpointNotSet,
@@ -851,30 +853,51 @@ fn WorldDetail(
     viewer_id: i64,
 ) -> impl IntoView {
     let is_owner = world.owner_id == viewer_id;
+    let world_id = world.id;
+    let world_path = format!("/world/{world_id}");
+    let member_path = format!("{world_path}/members");
+    let play_path = format!("{world_path}/play");
+    let invitation_path = format!("{world_path}/invitations");
     view! {
         <main class="min-h-dvh bg-base-200 p-4 sm:p-8">
             <section class="card mx-auto max-w-5xl bg-base-100 shadow-xl"><div class="card-body gap-6">
-            <div class="flex flex-wrap items-center justify-between gap-4"><h1 class="card-title text-3xl">{world.name}</h1><a class="btn btn-primary" href=format!("/world/{}/play", world.id)>"Enter world"</a></div>
+            <div class="flex flex-wrap items-center justify-between gap-4"><h1 class="card-title text-3xl">{world.name}</h1></div>
             <section><h2 class="mb-3 text-xl font-semibold">"Players"</h2>
             <ul class="space-y-2">{members.into_iter().map(move |member| {
-                let remove = is_owner && member.user_id != viewer_id && member.access == "active";
-                view! { <li class="flex flex-wrap items-center justify-between gap-3 rounded-box bg-base-200 p-3">
-                    <span>{format!("{} — {} ({})", member.display_name, member.character_name, member.access)}</span>
-                    {remove.then(|| view! { <form action=format!("/world/{}/members/{}", world.id, member.user_id) method="post"><button class="btn btn-error btn-sm" type="submit">"Remove"</button></form> })}
+                let is_active = member.access == "active";
+                let remove = is_owner && member.user_id != viewer_id && is_active;
+                let enter = member.user_id == viewer_id && is_active;
+                let player = format!("{} ({})", member.display_name, member.access);
+                let character = member.character_name;
+                let remove_path = format!("{member_path}/{}", member.user_id);
+                let enter_path = play_path.clone();
+                view! { <li class=WORLD_DETAIL_ROW_CLASSES>
+                    <div class="w-full flex flex-wrap items-center justify-between gap-3">
+                        <span>{player}</span>
+                        {remove.then(|| view! { <form action=remove_path method="post"><button class="btn btn-error btn-sm" type="submit">"Remove"</button></form> })}
+                    </div>
+                    <ul class="w-full pl-6"><li class="flex flex-wrap items-center justify-between gap-3">
+                        <span>{character}</span>
+                        {enter.then(|| view! { <a class="btn btn-primary btn-sm" href=enter_path>"Enter world"</a> })}
+                    </li></ul>
                 </li> }
             }).collect_view()}</ul></section>
             {is_owner.then(|| view! {
                 <section class="border-t border-base-300 pt-6">
                     <h2 class="mb-3 text-xl font-semibold">"Invitation links"</h2>
-                    <form class="join mb-4" action=format!("/world/{}/invitations", world.id) method="post">
+                    <form class="join mb-4" action=invitation_path.clone() method="post">
                         <input class="input join-item w-full" name="max_uses" type="number" min="1" placeholder="Maximum uses (optional)"/>
                         <button class="btn join-item" type="submit">"Create link"</button>
                     </form>
-                    <ul class="space-y-2">{invitations.into_iter().map(|invitation| view! {
-                        <li class="flex flex-wrap items-center justify-between gap-3 rounded-box bg-base-200 p-3"><a class="link link-primary break-all" href=format!("/invite/{}", invitation.token)>{format!("/invite/{}", invitation.token)}</a>
+                    <ul class="space-y-2">{invitations.into_iter().map(move |invitation| {
+                        let public_invitation_path = format!("/invite/{}", invitation.token);
+                        let public_invitation_href = public_invitation_path.clone();
+                        let revoke_path = format!("{invitation_path}/{}/revoke", invitation.token);
+                        view! {
+                        <li class=WORLD_DETAIL_ROW_CLASSES><a class="link link-primary break-all" href=public_invitation_href>{public_invitation_path}</a>
                         <span class="badge badge-ghost">{invitation.max_uses.map(|max| (max - invitation.uses).to_string()).unwrap_or_else(|| "unlimited".to_string())}</span>
-                        <form action=format!("/world/{}/invitations/{}/revoke", world.id, invitation.token) method="post"><button class="btn btn-error btn-sm" type="submit">"Revoke"</button></form></li>
-                    }).collect_view()}</ul>
+                        <form action=revoke_path method="post"><button class="btn btn-error btn-sm" type="submit">"Revoke"</button></form></li>
+                    }}).collect_view()}</ul>
                 </section>
             })}
             </div></section>
@@ -997,6 +1020,42 @@ mod tests {
         assert!(html.contains("Toma watches."));
         assert!(html.contains("data-role=\"user\""));
         assert!(html.contains("data-role=\"narration\""));
+    }
+
+    #[test]
+    fn world_detail_gives_each_active_viewer_their_own_entry_link() {
+        fn detail(viewer_id: i64) -> String {
+            render_page("Cairnworld", false, move || {
+                view! { <WorldDetail
+                    world=World { id: 7, name: "Bread Thief".into(), owner_id: 1 }
+                    members=vec![
+                        WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), character_name: "Rook".into() },
+                        WorldMember { user_id: 2, display_name: "Invitee".into(), access: "active".into(), character_name: "Moth".into() },
+                        WorldMember { user_id: 3, display_name: "Removed".into(), access: "removed".into(), character_name: "Ash".into() },
+                    ]
+                    invitations=vec![crate::store::Invitation { token: "invite".into(), world_id: 7, max_uses: Some(2), uses: 1 }]
+                    viewer_id
+                /> }
+            })
+        }
+
+        let owner = detail(1);
+        let invitee = detail(2);
+        for html in [&owner, &invitee] {
+            assert!(html.contains("Owner (active)"));
+            assert!(html.contains("Invitee (active)"));
+            assert!(html.contains("Removed (removed)"));
+            assert_eq!(html.matches("href=\"/world/7/play\"").count(), 1);
+        }
+        let owner_link = owner.find("href=\"/world/7/play\"").unwrap();
+        assert!(owner.find("Rook").unwrap() < owner_link);
+        assert!(owner_link < owner.find("Moth").unwrap());
+        let invitee_link = invitee.find("href=\"/world/7/play\"").unwrap();
+        assert!(invitee.find("Moth").unwrap() < invitee_link);
+        assert!(invitee_link < invitee.find("Ash").unwrap());
+        assert!(owner.contains("action=\"/world/7/members/2\""));
+        assert!(owner.contains("action=\"/world/7/invitations\""));
+        assert!(owner.contains("action=\"/world/7/invitations/invite/revoke\""));
     }
 
     #[test]

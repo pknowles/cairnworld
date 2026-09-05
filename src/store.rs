@@ -2834,6 +2834,23 @@ mod tests {
             None,
             "a removed member must no longer resolve to a playable history"
         );
+        let members = store.world_members(world.world_id).await.unwrap();
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| (
+                    member.user_id,
+                    member.display_name.as_str(),
+                    member.access.as_str(),
+                    member.character_name.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (owner.id, "Owner", "active", "Adventurer"),
+                (invited.id, "Invited", "removed", "Adventurer"),
+            ],
+            "the detail page must retain the removed membership and its character"
+        );
         let restored = store
             .accept_invitation(&invited, &invite.token)
             .await
