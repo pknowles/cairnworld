@@ -13,7 +13,7 @@ use crate::llm::Sampling;
 /// This request only sees the material it replaces. Static role context and
 /// tools are deliberately absent: they are supplied to every normal inference
 /// and would waste both summary space and model attention.
-const PROMPT: &str = "Summarize this earlier chat for its next model context. Retain facts, decisions, unresolved questions, and commitments that will matter later. Omit transient discussion and anything supplied separately by the agent's standing instructions or tools.";
+const PROMPT: &str = "The conversation above is your own history. Replace it with a summary your next turn will read in its place: keep the facts, decisions, open questions, and commitments that still matter, and drop small talk and anything your standing instructions or tools already provide.";
 
 /// Compact a completed turn only after the next inference would reach the
 /// configured lazy-history threshold. No message is deleted; the new summary
@@ -279,7 +279,7 @@ mod tests {
             next_input_tokens: 100,
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
             model: "scripted".to_string(),
             static_segments: vec![Segment::Text {
@@ -327,7 +327,7 @@ mod tests {
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "scripted",
                 limits,
@@ -373,7 +373,7 @@ mod tests {
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "scripted",
                 limits: Limits {
@@ -429,7 +429,7 @@ mod tests {
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "scripted",
                 limits,
@@ -456,7 +456,7 @@ mod tests {
                 &live,
                 Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -510,7 +510,7 @@ mod tests {
                 next_input_tokens: 99,
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "scripted",
                 limits: Limits {
@@ -551,7 +551,7 @@ mod tests {
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "scripted",
                 limits: Limits {

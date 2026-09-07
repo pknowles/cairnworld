@@ -145,9 +145,17 @@ pub struct ToolDefinition {
     pub schema: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Sampling {
     pub temperature: f32,
+    /// Nucleus, top-k, and minimum-probability cutoffs. `None` leaves that
+    /// truncation off; sampling the full distribution of a small model at a
+    /// normal temperature produces incoherent tails.
+    pub top_p: Option<f32>,
+    pub top_k: Option<usize>,
+    pub min_p: Option<f32>,
+    /// One-shot penalty applied to tokens that have already appeared.
+    pub presence_penalty: Option<f32>,
     pub enable_thinking: bool,
 }
 

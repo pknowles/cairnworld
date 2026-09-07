@@ -26,8 +26,12 @@ when things were built.
   non-streaming `send_chat_request` path), so there is nothing to read back.
   Sampling starts from `SamplingParams::neutral()`, not the crate's default
   `deterministic()` (which forces greedy `top_k = 1` independent of
-  temperature). It maps native structured tool calls and reasoning deltas to
-  the shared types, and applies the recorded `enable_thinking` setting. Tools
+  temperature), then applies the request's `temperature` and any of `top_p`,
+  `top_k`, `min_p`, `presence_penalty` that are set. Truncation matters: a
+  small model sampled from its full distribution at a normal temperature
+  produces incoherent text and, with tools present, spurious tool calls. It
+  maps native structured tool calls and reasoning deltas to the shared types,
+  and applies the recorded `enable_thinking` setting. Tools
   are sent with `strict`, constraining generation to the argument schema.
 - `src/tools.rs` - relationship-local tools distinguish a model-correctable
   rejected call (malformed or unavailable name, returned durably to the
@@ -108,9 +112,11 @@ when things were built.
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 
 - `src/main.rs` - `cairnworld chat [--model <name|path>] [--temperature <f32>]
-  [--enable-thinking] [--system <text>] [--database <path>] [--chat-template
-  <path>]` creates a sandbox world and agent, then resolves each turn through
-  the agent loop. `chat`, `replay`, and `serve` require the selected GGUF to
+  [--enable-thinking <bool>] [--system <text>] [--database <path>]
+  [--chat-template <path>]` creates a sandbox world and agent, then resolves
+  each turn through the agent loop. `--temperature` and `--enable-thinking`
+  override the resolved model's configured sampling; the other knobs come only
+  from configuration. `chat`, `replay`, and `serve` require the selected GGUF to
   fit entirely on the GPU; `--allow-cpu` explicitly permits a CPU/GPU split.
   `serve [--model <name|path>]` shares the same selection path. `cairnworld
   replay [--model <name|path>] [--database <path>]
@@ -127,7 +133,10 @@ when things were built.
 - `src/settings.rs` - `[models.<name>]` entries pair a GGUF path with the chat
   template that file needs, so `--model hermes` carries its template
   automatically. `--model` also accepts a path directly, and `--chat-template`
-  overrides whatever the entry specifies.
+  overrides whatever the entry specifies. A common `[sampling]` block sets
+  `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, and
+  `enable_thinking`; `[models.<name>.sampling]` overrides any of those field by
+  field, and `Settings::sampling` resolves the pair for a model.
   The interactive editor supports normal terminal history/editing, shows when
   a model is active, and renders recorded tool activity, compaction summaries,
   and notices after each turn.

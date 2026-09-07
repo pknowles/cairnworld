@@ -390,7 +390,7 @@ mod tests {
                     compact_before_next_input_tokens: 2,
                     sampling: &Sampling {
                         temperature: 0.0,
-                        enable_thinking: false,
+                        ..Default::default()
                     },
                     model: "test",
                     static_segments: &[],

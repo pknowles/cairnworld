@@ -179,10 +179,24 @@ fn request_builder(request: &Request, max_output_tokens: usize) -> Result<Reques
             } => request_builder = request_builder.add_tool_message(content, tool_call_id),
         }
     }
-    Ok(request_builder
+    let sampling = &request.sampling;
+    let mut request_builder = request_builder
         .set_sampling(SamplingParams::neutral())
-        .set_sampler_temperature(request.sampling.temperature as f64)
-        .set_sampler_max_len(max_output_tokens)
+        .set_sampler_temperature(sampling.temperature as f64)
+        .set_sampler_max_len(max_output_tokens);
+    if let Some(top_p) = sampling.top_p {
+        request_builder = request_builder.set_sampler_topp(top_p as f64);
+    }
+    if let Some(top_k) = sampling.top_k {
+        request_builder = request_builder.set_sampler_topk(top_k);
+    }
+    if let Some(min_p) = sampling.min_p {
+        request_builder = request_builder.set_sampler_minp(min_p as f64);
+    }
+    if let Some(presence_penalty) = sampling.presence_penalty {
+        request_builder = request_builder.set_sampler_presence_penalty(presence_penalty);
+    }
+    Ok(request_builder
         .set_tools(
             request
                 .tools
@@ -469,7 +483,7 @@ mod tests {
             tools: vec![],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
 
@@ -523,7 +537,7 @@ mod tests {
             }],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
         backend.complete(request, |_| {}).await.expect(
@@ -572,7 +586,7 @@ mod tests {
                     }],
                     sampling: Sampling {
                         temperature: 0.0,
-                        enable_thinking: false,
+                        ..Default::default()
                     },
                 },
                 |_| {},
@@ -637,7 +651,7 @@ mod tests {
             }],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
         backend

@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
+use crate::llm::Sampling;
+
 #[derive(Deserialize, Default)]
 pub struct Settings {
     /// Which entry of `models` to use when `--model` is not given.
@@ -11,7 +13,50 @@ pub struct Settings {
     pub models: BTreeMap<String, Model>,
     #[serde(default)]
     pub limits: Limits,
+    /// Sampling shared by every model; `[models.<name>.sampling]` overrides it
+    /// field by field.
+    #[serde(default)]
+    pub sampling: SamplingConfig,
     pub web: Option<Web>,
+}
+
+/// Every sampling knob is optional so a common `[sampling]` block and a
+/// per-model one merge cleanly. `temperature` is the only one with a default
+/// when nothing sets it.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamplingConfig {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<usize>,
+    pub min_p: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub enable_thinking: Option<bool>,
+}
+
+impl SamplingConfig {
+    /// Fields set in `over` win; unset fields keep `self`.
+    fn merged(self, over: SamplingConfig) -> SamplingConfig {
+        SamplingConfig {
+            temperature: over.temperature.or(self.temperature),
+            top_p: over.top_p.or(self.top_p),
+            top_k: over.top_k.or(self.top_k),
+            min_p: over.min_p.or(self.min_p),
+            presence_penalty: over.presence_penalty.or(self.presence_penalty),
+            enable_thinking: over.enable_thinking.or(self.enable_thinking),
+        }
+    }
+
+    fn resolve(self) -> Sampling {
+        Sampling {
+            temperature: self.temperature.unwrap_or(1.0),
+            top_p: self.top_p,
+            top_k: self.top_k,
+            min_p: self.min_p,
+            presence_penalty: self.presence_penalty,
+            enable_thinking: self.enable_thinking.unwrap_or(false),
+        }
+    }
 }
 
 /// Deployment configuration for the OAuth-only browser interface. It is
@@ -35,6 +80,8 @@ pub struct Model {
     pub path: String,
     pub chat_template: Option<PathBuf>,
     pub source_model: Option<String>,
+    #[serde(default)]
+    pub sampling: SamplingConfig,
 }
 
 impl Settings {
@@ -56,7 +103,14 @@ impl Settings {
             path: name.to_string(),
             chat_template: None,
             source_model: None,
+            sampling: SamplingConfig::default(),
         })
+    }
+
+    /// Sampling for a model: the common `[sampling]` block with that model's
+    /// own `[models.<name>.sampling]` fields layered on top.
+    pub fn sampling(&self, model: &Model) -> Sampling {
+        self.sampling.merged(model.sampling).resolve()
     }
 
     pub fn web(&self) -> Result<&Web> {
@@ -199,6 +253,47 @@ mod tests {
 
         let model = settings.model(Some("dev-qwen35")).unwrap();
         assert_eq!(model.source_model.as_deref(), Some("Qwen/Qwen3.5-4B"));
+    }
+
+    #[test]
+    fn per_model_sampling_overrides_the_common_block_field_by_field() {
+        let settings: Settings = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+                    [sampling]
+                    temperature = 0.7
+                    top_p = 0.8
+                    top_k = 20
+
+                    [models.tight]
+                    path = "models/tight.gguf"
+                    [models.tight.sampling]
+                    top_p = 0.1
+                    presence_penalty = 1.0
+
+                    [models.plain]
+                    path = "models/plain.gguf"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        let tight = settings.sampling(&settings.model(Some("tight")).unwrap());
+        assert_eq!(tight.temperature, 0.7); // from the common block
+        assert_eq!(tight.top_p, Some(0.1)); // overridden
+        assert_eq!(tight.top_k, Some(20)); // from the common block
+        assert_eq!(tight.presence_penalty, Some(1.0)); // model-only
+
+        let plain = settings.sampling(&settings.model(Some("plain")).unwrap());
+        assert_eq!(plain.top_p, Some(0.8));
+        assert_eq!(plain.presence_penalty, None);
+
+        // An unconfigured path falls back to the temperature default.
+        let bare = settings.sampling(&settings.model(Some("x/y.gguf")).unwrap());
+        assert_eq!(bare.top_p, Some(0.8));
     }
 
     #[test]

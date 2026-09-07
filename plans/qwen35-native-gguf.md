@@ -24,6 +24,9 @@ through Cairnworld's normal in-process, fixed-paged GPU backend.
 - Close the compaction input with the instruction as a user-role message, and
   reject any assembled request that is not a well-formed conversation (one
   leading system message, a real user turn) at assembly.
+- Give sampling per-model configuration with a shared default. Untruncated
+  sampling of a 4B model produces incoherent text and spurious tool calls;
+  Qwen3.5 needs `top_p`/`top_k` truncation to follow its prompt.
 
 ## Steps
 
@@ -44,12 +47,17 @@ through Cairnworld's normal in-process, fixed-paged GPU backend.
 7. Close the compaction input with the instruction as a user-role message;
    have `request_for_segments` reject an assembled request that is not a
    well-formed conversation.
-8. Start the application with `--model dev-qwen35` and exercise a normal
+8. Add a `SamplingConfig` with a common `[sampling]` block and per-model
+   overrides, resolved into `llm::Sampling`; apply `top_p`/`top_k`/`min_p`/
+   `presence_penalty` in the backend. Set the shared truncation in
+   `default.toml`.
+9. Start the application with `--model dev-qwen35` and exercise a normal
    browser chat that requires tool use; inspect the recorded request and result.
    Drive a chat long enough to compact and confirm the post-compaction request
    reaches the model; repeat once with `--model dev-qwen3` and once with a
-   Hermes model for no regression.
-9. Update the implementation reference, run applicable tests and formatting,
+   Hermes model for no regression. Confirm the opening waits for the player
+   instead of calling a creation tool.
+10. Update the implementation reference, run applicable tests and formatting,
    then self-review under `AGENTS.md`, `coding_standards.md`, and
    `prompt_standards.md` before committing the complete slice.
 
@@ -66,5 +74,7 @@ through Cairnworld's normal in-process, fixed-paged GPU backend.
 - The full character-creation to opening-narration flow completes on
   `dev-qwen35` with no "No user query found" or "System message must be at the
   beginning" error; `dev-qwen3` is unaffected.
+- With the shared sampling, `dev-qwen35`'s opening turn produces text that
+  waits for the player rather than calling a creation tool.
 - Existing configured GGUFs still load without a `source_model`.
 

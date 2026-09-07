@@ -333,7 +333,7 @@ mod tests {
             tools,
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
             model: "scripted",
         }
@@ -351,7 +351,7 @@ mod tests {
                 &segments,
                 Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await

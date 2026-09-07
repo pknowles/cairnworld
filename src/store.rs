@@ -2796,7 +2796,7 @@ mod tests {
                 &segments,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3371,7 +3371,7 @@ mod tests {
             tools: vec![],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
         let inference_id = store
@@ -3492,7 +3492,7 @@ mod tests {
             tools: vec![],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
         let inference_id = store
@@ -3791,7 +3791,7 @@ mod tests {
                 &recipe,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3837,7 +3837,7 @@ mod tests {
                 &store.history_segments(agent).await.unwrap(),
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3895,7 +3895,7 @@ mod tests {
                 &recipe,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3928,7 +3928,7 @@ mod tests {
                 &recipe,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3955,7 +3955,7 @@ mod tests {
         };
         let sampling = Sampling {
             temperature: 0.0,
-            enable_thinking: false,
+            ..Default::default()
         };
 
         // A second system message anywhere but first is rejected.

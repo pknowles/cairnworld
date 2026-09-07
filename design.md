@@ -51,9 +51,9 @@ trait Backend {
 }
 
 struct Request {
-    messages: Vec<Message>,      // system / user / assistant / tool roles
+    messages: Vec<Message>,      // system / user / assistant / tool / narration roles
     tools: Vec<ToolDefinition>,  // name, description, JSON schema
-    sampling: Sampling,          // temperature etc. (Storyteller runs hot)
+    sampling: Sampling,          // temperature + truncation, per model
 }
 
 struct Response {
@@ -80,7 +80,9 @@ tool-call template, so it is out as the primary model. Requirements: reliable
 tool calling, good conversational/NPC voice, ~8B GGUF, long context.
 All three candidates run and are selectable by name from configuration. The
 choice between them is deliberately open: comparing them on a single tool with
-no GM measures the harness, so it waits for real play (see plans/).
+no GM measures the harness, so it waits for real play (see plans/). Each model
+carries its own sampling: a shared block sets sensible truncation and a model
+overrides it where its family needs different values.
 
 - **Qwen3 8B** - purpose-built tool template. Its GGUF cannot be split across
   CPU and GPU without the fork's fix.

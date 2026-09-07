@@ -66,12 +66,12 @@ enum Command {
         /// works. Falls back to the `model` key in local.toml/default.toml.
         #[arg(long)]
         model: Option<String>,
-        /// Sampling temperature.
-        #[arg(long, default_value_t = 1.0)]
-        temperature: f32,
-        /// Enable the model's reasoning mode when its template supports it.
+        /// Sampling temperature; overrides the model's configured value.
         #[arg(long)]
-        enable_thinking: bool,
+        temperature: Option<f32>,
+        /// Enable the model's reasoning mode; overrides its configured value.
+        #[arg(long)]
+        enable_thinking: Option<bool>,
         /// Optional system prompt.
         #[arg(long)]
         system: Option<String>,
@@ -146,10 +146,17 @@ async fn main() -> Result<()> {
             allow_cpu,
         } => {
             let settings = Settings::load()?;
+            let model = resolve_model(model.as_deref(), chat_template, &settings)?;
+            let mut sampling = settings.sampling(&model);
+            if let Some(temperature) = temperature {
+                sampling.temperature = temperature;
+            }
+            if let Some(enable_thinking) = enable_thinking {
+                sampling.enable_thinking = enable_thinking;
+            }
             run_chat(
-                resolve_model(model.as_deref(), chat_template, &settings)?,
-                temperature,
-                enable_thinking,
+                model,
+                sampling,
                 system,
                 Path::new(&database),
                 settings.limits,
@@ -185,13 +192,14 @@ async fn main() -> Result<()> {
                 .await
                 .context("opening web database")?;
             let model = resolve_model(model.as_deref(), None, &settings)?;
+            let sampling = settings.sampling(&model);
             let game = web::GameLoad::loading();
             let loading_game = game.clone();
             let loading_store = store.clone();
             let limits = settings.limits;
             tokio::spawn(async move {
                 tracing::info!(model = %model.path, "starting game model load");
-                let result = load_game(loading_store, model, limits, allow_cpu).await;
+                let result = load_game(loading_store, model, sampling, limits, allow_cpu).await;
                 match &result {
                     Ok(_) => tracing::info!("game model is ready"),
                     Err(error) => {
@@ -295,6 +303,7 @@ async fn backend(
 async fn load_game(
     store: Store,
     model: settings::Model,
+    sampling: Sampling,
     limits: settings::Limits,
     allow_cpu: bool,
 ) -> Result<Arc<game::Game<MistralRsBackend>>> {
@@ -309,17 +318,13 @@ async fn load_game(
         scheduler.foreground(),
         limits,
         model.path,
-        Sampling {
-            temperature: 1.0,
-            enable_thinking: false,
-        },
+        sampling,
     )))
 }
 
 async fn run_chat(
     model: settings::Model,
-    temperature: f32,
-    enable_thinking: bool,
+    sampling: Sampling,
     system: Option<String>,
     database: &Path,
     limits: settings::Limits,
@@ -392,10 +397,7 @@ async fn run_chat(
                 agent_id: agent,
                 static_messages: &static_messages,
                 tools: &tools,
-                sampling: Sampling {
-                    temperature,
-                    enable_thinking,
-                },
+                sampling: sampling.clone(),
                 model: &model.path,
             },
             |token| {

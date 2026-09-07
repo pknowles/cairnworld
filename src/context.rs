@@ -325,7 +325,7 @@ mod tests {
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "streaming-model",
             },
@@ -367,7 +367,7 @@ mod tests {
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "failing-model",
             },
@@ -456,7 +456,7 @@ mod tests {
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "capacity-test",
             },

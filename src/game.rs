@@ -1049,7 +1049,7 @@ mod tests {
             "scripted".into(),
             Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         )
         .await
@@ -1167,7 +1167,7 @@ mod tests {
             "scripted".into(),
             Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         ));
         let mut broadcasts = game.subscribe(&installed.member).await.unwrap();
@@ -1209,7 +1209,7 @@ mod tests {
                     .unwrap(),
                 Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -1411,15 +1411,8 @@ mod tests {
         )
         .await
         .expect("model should load");
-        let (game, store, path, member) = opening_game(
-            backend,
-            model.path,
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-        )
-        .await;
+        let sampling = settings.sampling(&model);
+        let (game, store, path, member) = opening_game(backend, model.path, sampling).await;
 
         game.wait_for_opening(member.clone())
             .await
@@ -1483,15 +1476,8 @@ mod tests {
         )
         .await
         .expect("model should load");
-        let (game, store, path, member) = opening_game(
-            backend,
-            model.path,
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-        )
-        .await;
+        let sampling = settings.sampling(&model);
+        let (game, store, path, member) = opening_game(backend, model.path, sampling).await;
         let sequence = store
             .begin_sequence(member.world_id, "test completed creation")
             .await
