@@ -6,10 +6,16 @@ when things were built.
 ## Inference layer (design.md: Inference layer)
 
 - `src/llm.rs` - the `Backend` trait, `Request`/`Response`/`Message`/
-  `MessageContent`/`ToolDefinition`/`Sampling`/`Content`/`Usage` types.
+  `MessageContent`/`ToolDefinition`/`Sampling`/`Content`/`Usage` types. `Role`
+  is `System` (position-0 directive only), `User`, `Assistant`, `Tool`, and
+  `Narration` for a GM narration carried in a player agent's history; the
+  backend maps `Narration` to a user-role message that names the GM.
 - `src/mistralrs_backend.rs` - `MistralRsBackend`, the mistral.rs
   implementation of `Backend`. Loads a GGUF model via `GgufModelBuilder`
-  (`cuda` feature). `complete` drives `on_token` from
+  (`cuda` feature). A configured `source_model` supplies the original model's
+  configuration, tokenizer, and template when a native GGUF architecture such
+  as Qwen3.5 does not carry sufficient metadata itself. `complete` drives
+  `on_token` from
   `Model::stream_chat_request`'s `Chunk`s and assembles the final
   response. It logs model loading and inference lifecycle (request submitted,
   first stream chunk, completion or exact stream/model failure) with elapsed
@@ -29,16 +35,19 @@ when things were built.
   complete error context. It also rejects a model-facing tool schema unless it
   is an object with an explicit `properties` map; no-argument tools use `{}`.
 - `third_party/mistral.rs` - submodule of https://github.com/pknowles/mistral.rs,
-  depended on by path. It carries fixes absent upstream: Qwen3 GGUF inference
-  omits the device move before the final norm that the Llama path performs, so
-  any CPU/GPU layer split fails in rms-norm; its Qwen tool grammar supports
-  schemas that intentionally declare arbitrary parameters. Cairnworld's own
-  schemas always explicitly declare their properties. Clone with
+  depended on by path. It carries fixes for Qwen assistant tool-call rendering,
+  a Qwen tool grammar with arbitrary parameters, structured paged-KV capacity
+  rejections, and passing a stored tool call's `arguments` to the chat template
+  as a decoded object (the HF convention; Qwen3.5's template iterates it as
+  key/value pairs). Cairnworld's own schemas always explicitly declare their
+  properties. Its upstream base provides native GGUF loading for supported
+  architectures, including Qwen3.5. Clone with
   `--recurse-submodules`, or run `git submodule update --init` in an existing
   checkout.
 - `templates/hermes-tools.jinja` - the Hermes 3 GGUF ships a bare ChatML
   template that silently drops tool definitions, so its tool surface is unusable
-  without it. `[models.hermes]` supplies it automatically.
+  without it. `[models.hermes]` supplies it automatically. It renders a stored
+  tool call's object `arguments` with `| tojson`, matching the other templates.
 - `src/context.rs` - the only model-call boundary. It assembles a request from
   stored static prompt text and persisted agent messages, streams through
   the backend, then records either the completed response or the failure using
@@ -57,9 +66,11 @@ when things were built.
   It resumes pending jobs at startup and keeps same-agent history ordered.
 - `src/compaction.rs` - resolves a persisted compaction job as ordinary
   recorded summarisation, preserving exactly `keep_tail_messages` newest raw
-  rows. If that request is rejected for capacity, it retains one more raw row
-  and tries the real summary request again. If no older row remains, it fails;
-  it never predicts token use or retries unchanged history.
+  rows. The input is the previous summary and that raw range, closed by the
+  compaction instruction as a user-role message. If that request is rejected
+  for capacity, it retains one more raw row and tries the real summary request
+  again. If no older row remains, it fails; it never predicts token use or
+  retries unchanged history.
 - `src/tools.rs` - the ordinary invocation-local lookup used to derive
   `ToolDefinition`s and run the matching Rust callback. Game tools are added
   only with their related authenticated game state, never to the sandbox REPL.
@@ -85,7 +96,12 @@ when things were built.
   reconstruction rereads those rows and verifies the assembled input against
   its BLAKE3 hash. The live history selector is exactly newest summary plus
   messages after its `covers_to_seq`; all older message rows remain intact for
-  replay and debugging. Until real user databases exist, the checked-in schema
+  replay and debugging. `request_for_segments` carries the summary inside the
+  leading system message as a marked block, or as that message when a recipe
+  has no role prompt, and rejects any assembled request that is not a
+  well-formed conversation - one system message only in first place, and a
+  real user turn - so a malformed request fails at assembly with the agent id
+  rather than deep in a model's chat template. Until real user databases exist, the checked-in schema
   is rebuilt in place and existing local databases are intentionally replaced;
   later schema evolution requires forward migrations.
 
@@ -140,9 +156,10 @@ when things were built.
 
 - `src/game.rs` - the membership-scoped game service used by browser events.
   It serializes each world's events, opens a blank Adventurer's player agent
-  proactively, and gives the agent a static entry event so tool-capable Llama
-  templates have a valid first user turn without displaying or persisting a
-  fake player message. The ordinary agent loop executes any creation-roll
+  proactively, and gives every agent turn a user-role event message - the
+  player's entry, or the request that starts a GM's opening narration or
+  arbitration - so tool-capable templates have a valid first user turn without
+  displaying or persisting a fake player message. The ordinary agent loop executes any creation-roll
   calls and stores its final text. The first viewer starts one server-owned
   opening operation per character; concurrent reconnects wait on that same
   operation, then view its durable result rather than queueing game work.
@@ -171,8 +188,9 @@ when things were built.
   the hydrated page renders that state separately from durable chat entries,
   clears it only on server readiness, reports a closed socket separately, and
   renders server errors as chat notices. It logs each attempted error delivery.
-  GM narration is a separately tagged GM entry, delivered before the
-  player-agent follow-up so the guide does not duplicate it.
+  GM narration is stored in every present character's history under the
+  `Narration` role and delivered before the player-agent follow-up so the
+  guide does not duplicate it.
   It serves the `cargo-leptos` browser package
   at `/pkg` plus checked-in artwork at `/media`. Browser pages use one valid
   document shell with viewport metadata, stylesheet and, only where needed,

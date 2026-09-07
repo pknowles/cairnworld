@@ -663,8 +663,8 @@ async fn play_connection(
         let role = match entry.role {
             crate::llm::Role::User => ChatRole::User,
             crate::llm::Role::Assistant => ChatRole::Assistant,
-            crate::llm::Role::System => ChatRole::Narration,
-            crate::llm::Role::Tool => continue,
+            crate::llm::Role::Narration => ChatRole::Narration,
+            crate::llm::Role::System | crate::llm::Role::Tool => continue,
         };
         send_event(
             &mut socket,
@@ -968,8 +968,10 @@ fn player_chat_entries(history: Vec<PlayerChatEntry>) -> Vec<ChatEntry> {
             role: match entry.role {
                 crate::llm::Role::User => ChatRole::User,
                 crate::llm::Role::Assistant => ChatRole::Assistant,
-                crate::llm::Role::System => ChatRole::Narration,
-                crate::llm::Role::Tool => unreachable!("tool results are not player chat entries"),
+                crate::llm::Role::Narration => ChatRole::Narration,
+                crate::llm::Role::System | crate::llm::Role::Tool => {
+                    unreachable!("player chat entries are user, assistant, or narration")
+                }
             },
             text: entry.text,
         })
@@ -1044,7 +1046,7 @@ mod tests {
         let html = render_page("Cairnworld", true, || {
             view! { <GamePage world_id=7 character_id=8 history=vec![
                 PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into() },
-                PlayerChatEntry { id: 2, role: crate::llm::Role::System, text: "Toma watches.".into() },
+                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into() },
             ]/> }
         });
         assert!(html.contains("I look around."));

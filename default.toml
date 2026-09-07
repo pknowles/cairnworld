@@ -23,6 +23,12 @@ path = "models/Qwen_Qwen3-8B-Q4_K_M.gguf"
 [models.dev-qwen3]
 path = "models/Qwen3-4B-Q4_K_M.gguf"
 
+# Qwen3.5 GGUFs require the original model's configuration, tokenizer, and
+# template. mistral.rs obtains those assets from this source model identifier.
+[models.dev-qwen35]
+path = "models/Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+source_model = "Qwen/Qwen3.5-4B"
+
 [models.dev-qwen25]
 path = "models/qwen2.5-3b-instruct-q4_k_m.gguf"
 

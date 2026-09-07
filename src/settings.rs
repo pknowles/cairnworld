@@ -28,11 +28,13 @@ pub struct Web {
 /// A model and everything needed to talk to it. The chat template travels with
 /// the weights because it is a property of the file: the Hermes 3 GGUF ships
 /// one that silently drops tool definitions, so it needs a replacement while
-/// the others do not.
+/// the others do not. Some GGUFs also need their original model's configuration,
+/// tokenizer, and template, which `source_model` supplies.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Model {
     pub path: String,
     pub chat_template: Option<PathBuf>,
+    pub source_model: Option<String>,
 }
 
 impl Settings {
@@ -53,6 +55,7 @@ impl Settings {
         Ok(Model {
             path: name.to_string(),
             chat_template: None,
+            source_model: None,
         })
     }
 
@@ -176,7 +179,27 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::Limits;
+    use super::{Limits, Settings};
+
+    #[test]
+    fn source_model_is_available_to_a_named_gguf() {
+        let settings: Settings = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+                    [models.dev-qwen35]
+                    path = "models/Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+                    source_model = "Qwen/Qwen3.5-4B"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        let model = settings.model(Some("dev-qwen35")).unwrap();
+        assert_eq!(model.source_model.as_deref(), Some("Qwen/Qwen3.5-4B"));
+    }
 
     #[test]
     fn fixed_context_capacity_is_independent_of_lazy_compaction() {

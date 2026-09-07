@@ -406,6 +406,10 @@ mod tests {
             .append_message(agent, &Message::text(Role::Assistant, "A first reply."))
             .await
             .unwrap();
+        store
+            .append_message(agent, &Message::text(Role::User, "The latest question."))
+            .await
+            .unwrap();
         let backend = InferenceScheduler::new(
             CapacityBackend {
                 responses: Mutex::new(VecDeque::from([
@@ -463,7 +467,8 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("compaction did not reduce the fixed-KV request")
+                .contains("compaction did not reduce the fixed-KV request"),
+            "unexpected error: {error:#}"
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
         drop(store);

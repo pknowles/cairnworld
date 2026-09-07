@@ -497,7 +497,7 @@ where
                         .await?;
                     let delivery_game = Arc::clone(&game);
                     Ok(ToolOutcome::CompletedAfter {
-                        content: "The GM narration is now a separate system entry, already delivered verbatim to the player. Ask what they want to do next.".to_string(),
+                        content: "The GM's narration reached the player as its own entry. Ask what they want to do next.".to_string(),
                         after_result: Box::pin(async move {
                             delivery_game
                                 .deliver_narration(&member, narration.location_id, &narration.text, &broadcasts)
@@ -607,7 +607,7 @@ where
                 let narration = game.arbitrate(pending, location_id, budget, call).await?;
                 let delivery_game = Arc::clone(&game);
                 Ok(ToolOutcome::CompletedAfter {
-                    content: "The GM narration is now a separate system entry, already delivered verbatim to the player. Respond to the player's next choice.".to_string(),
+                    content: "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
                     after_result: Box::pin(async move {
                         delivery_game
                             .deliver_narration(&member, narration.location_id, &narration.text, &broadcasts)
@@ -638,11 +638,17 @@ where
                 .context("loading location GM scene for the opening")?,
         )
         .context("serializing location GM opening scene")?;
-        let prompt = Message::text(
+        let role = Message::text(
             Role::System,
             format!(
-                "A player character has just begun play in this location. Greet them by narrating their immediate scene, surroundings, and plot-relevant details they can perceive. The current scene packet is {scene}."
+                "You narrate play in this location. Describe only what the scene packet supports, in the second person to the character present. The current scene packet is {scene}."
             ),
+        );
+        // The event that starts this turn: tool-capable chat templates need a
+        // user message before the agent speaks.
+        let request = Message::text(
+            Role::User,
+            "A player character has just begun play here. Narrate their immediate scene, surroundings, and the plot-relevant details they can perceive.",
         );
         let response = agent::complete_with_call_context(
             &self.store,
@@ -650,7 +656,7 @@ where
             &budget,
             agent::Turn {
                 agent_id: gm_agent_id,
-                static_messages: &[prompt],
+                static_messages: &[role, request],
                 tools: &[],
                 sampling: self.sampling.clone(),
                 model: &self.model,
@@ -777,10 +783,18 @@ where
                 .context("loading location GM scene for prompt")?,
         )
         .context("serializing location GM scene for prompt")?;
-        let static_message = Message::text(
+        let role = Message::text(
             Role::System,
             format!(
-                "You arbitrate this location. The current scene packet is {scene}. Action {action_id} is a `{}` request with arguments {}. Judge it from that packet, call approve_action with its id if it can happen, then narrate the outcome.",
+                "You arbitrate this location. Judge each action from the scene packet, call approve_action with its id if it can happen or reject it with a reason, then narrate the outcome. The current scene packet is {scene}."
+            ),
+        );
+        // The event that starts this turn: tool-capable chat templates need a
+        // user message before the agent speaks.
+        let request = Message::text(
+            Role::User,
+            format!(
+                "Action {action_id} is a `{}` request with arguments {}.",
                 pending.tool, pending.args,
             ),
         );
@@ -790,7 +804,7 @@ where
             &budget,
             agent::Turn {
                 agent_id: pending.location_gm_agent_id,
-                static_messages: &[static_message],
+                static_messages: &[role, request],
                 tools: &[gm_tool, reject_tool],
                 sampling: self.sampling.clone(),
                 model: &self.model,
@@ -1175,7 +1189,7 @@ mod tests {
         let narration = chat
             .iter()
             .position(|entry| {
-                entry.role == Role::System
+                entry.role == Role::Narration
                     && entry.text == "You lift the flour sack while Toma watches."
             })
             .expect("the GM narration must be stored for a browser reload");
@@ -1213,7 +1227,7 @@ mod tests {
         assert!(
             matches!(
                 request.messages.get(narration - 1).map(|message| &message.content),
-                Some(MessageContent::ToolResult { content, .. }) if content.contains("GM narration is now a separate system entry")
+                Some(MessageContent::ToolResult { content, .. }) if content.contains("narration reached the player as its own entry")
             ),
             "the player agent must receive its tool result before the GM narration"
         );
@@ -1391,6 +1405,7 @@ mod tests {
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
+            model.source_model.as_deref(),
             settings.limits,
             false,
         )
@@ -1462,6 +1477,7 @@ mod tests {
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
+            model.source_model.as_deref(),
             settings.limits,
             false,
         )
@@ -1502,7 +1518,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .any(|entry| entry.role == Role::System),
+                .any(|entry| entry.role == Role::Narration),
             "the GM opening narration must become player-visible before the guide follows up"
         );
 

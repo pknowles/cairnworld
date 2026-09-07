@@ -1171,8 +1171,10 @@ impl Store {
                 if role == Role::Assistant && text.is_empty() {
                     return Ok(None);
                 }
-                Ok(matches!(role, Role::User | Role::Assistant | Role::System)
-                    .then_some(PlayerChatEntry { id, role, text }))
+                Ok(
+                    matches!(role, Role::User | Role::Assistant | Role::Narration)
+                        .then_some(PlayerChatEntry { id, role, text }),
+                )
             })
             .collect::<Result<_>>()?;
         Ok(entries.into_iter().flatten().collect())
@@ -1200,7 +1202,7 @@ impl Store {
         .await
         .context("finding active player agents at narrated location")?;
         for agent_id in agents {
-            self.append_message(agent_id, &Message::text(Role::System, narration))
+            self.append_message(agent_id, &Message::text(Role::Narration, narration))
                 .await
                 .with_context(|| {
                     format!("storing location narration for player agent {agent_id}")
@@ -2417,7 +2419,23 @@ impl Store {
                         row.id,
                         row.agent_id
                     );
-                    messages.push(Message::text(Role::System, row.content));
+                    // The summary is prior conversation carried in the leading
+                    // system message as a marked block, not a second system
+                    // turn: strict chat templates reject a system message
+                    // anywhere but first. When a recipe has a role prompt it
+                    // hosts the block; otherwise the summary is that message.
+                    let block = format!("Conversation summary so far:\n{}", row.content);
+                    match messages.first_mut() {
+                        Some(Message {
+                            role: Role::System,
+                            content: MessageContent::Text(system),
+                            ..
+                        }) => {
+                            system.push_str("\n\n");
+                            system.push_str(&block);
+                        }
+                        _ => messages.insert(0, Message::text(Role::System, block)),
+                    }
                 }
                 Segment::Messages { messages: range } => {
                     ensure!(
@@ -2487,6 +2505,24 @@ impl Store {
                 }
             }
         }
+        // A well-formed conversation for any chat model: at most one system
+        // message and only in first place, and a real user turn to answer.
+        // Strict templates (Qwen3.5) reject anything else outright; lenient
+        // ones hide the malformed input.
+        let system_positions = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == Role::System)
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>();
+        ensure!(
+            system_positions.is_empty() || system_positions == [0],
+            "assembled request for agent {agent_id} has system messages at {system_positions:?}, not only first"
+        );
+        ensure!(
+            messages.iter().any(|message| message.role == Role::User),
+            "assembled request for agent {agent_id} has no user turn for the model to answer"
+        );
         Ok(Request {
             messages,
             tools,
@@ -2989,7 +3025,7 @@ mod tests {
         store
             .append_message(
                 installed.member.agent_id,
-                &Message::text(Role::System, "Toma watches from the doorway."),
+                &Message::text(Role::Narration, "Toma watches from the doorway."),
             )
             .await
             .unwrap();
@@ -3003,7 +3039,7 @@ mod tests {
             vec![
                 (&Role::User, "Look around."),
                 (&Role::Assistant, "The hut is quiet."),
-                (&Role::System, "Toma watches from the doorway."),
+                (&Role::Narration, "Toma watches from the doorway."),
             ],
             "reloadable player chat must not leak raw tool syntax"
         );
@@ -3018,7 +3054,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (&Role::Assistant, "The hut is quiet."),
-                (&Role::System, "Toma watches from the doorway."),
+                (&Role::Narration, "Toma watches from the doorway."),
             ],
             "a page snapshot cursor must receive each later visible entry once"
         );
@@ -3727,18 +3763,32 @@ mod tests {
             .store_summary(agent, 0, "The floorboards hide a locked chest.", inference)
             .await
             .unwrap();
+        // A fresh event follows the summary, as one always does in production.
+        store
+            .append_message(agent, &Message::text(Role::User, "And the walls?"))
+            .await
+            .unwrap();
         let history = store.history_segments(agent).await.unwrap();
         assert!(matches!(
             history.as_slice(),
             [
                 Segment::Summary { summary: stored },
-                Segment::Messages { messages: MessageRange { first_seq: 1, last_seq: 1, .. } },
+                Segment::Messages { messages: MessageRange { first_seq: 1, last_seq: 2, .. } },
             ] if *stored == summary
         ));
+        let prompt = store
+            .store_prompt_text("You are a careful guide.")
+            .await
+            .unwrap();
+        let mut recipe = vec![Segment::Text {
+            text: prompt,
+            role: Role::System,
+        }];
+        recipe.extend(history);
         let assembled = store
             .request_for_segments(
                 agent,
-                &history,
+                &recipe,
                 Sampling {
                     temperature: 0.7,
                     enable_thinking: false,
@@ -3746,10 +3796,63 @@ mod tests {
             )
             .await
             .unwrap();
+        // The summary is folded into the single leading system message, not a
+        // second system turn, so strict chat templates accept it.
         assert!(matches!(assembled.messages.as_slice(), [
-            Message { role: Role::System, content: MessageContent::Text(summary), .. },
+            Message { role: Role::System, content: MessageContent::Text(system), .. },
             Message { role: Role::Assistant, .. },
-        ] if summary == "The floorboards hide a locked chest."));
+            Message { role: Role::User, .. },
+        ] if system.starts_with("You are a careful guide.")
+            && system.contains("The floorboards hide a locked chest.")));
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_summary_without_a_role_prompt_becomes_the_leading_system_message() {
+        let (store, path, agent, segments, request) = store_with_history().await;
+        let source = store
+            .record_inference(
+                agent,
+                &segments,
+                &request,
+                InferenceOutcome::Response(response()),
+                "test-model",
+                14,
+            )
+            .await
+            .unwrap();
+        store
+            .store_summary(agent, 0, "Earlier events.", source)
+            .await
+            .unwrap();
+        // A fresh event follows the summary, as one always does in production.
+        store
+            .append_message(agent, &Message::text(Role::User, "And then?"))
+            .await
+            .unwrap();
+        let request = store
+            .request_for_segments(
+                agent,
+                &store.history_segments(agent).await.unwrap(),
+                Sampling {
+                    temperature: 0.7,
+                    enable_thinking: false,
+                },
+            )
+            .await
+            .unwrap();
+        // One system message, first, carrying the marked summary.
+        assert!(matches!(
+            &request.messages[0],
+            Message { role: Role::System, content: MessageContent::Text(text), .. }
+                if text.contains("Earlier events.")
+        ));
+        assert!(
+            request.messages[1..]
+                .iter()
+                .all(|message| message.role != Role::System)
+        );
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
@@ -3772,7 +3875,20 @@ mod tests {
             .store_summary(agent, 0, "Earlier events.", source)
             .await
             .unwrap();
-        let recipe = vec![Segment::Summary { summary }];
+        store
+            .append_message(agent, &Message::text(Role::User, "And then?"))
+            .await
+            .unwrap();
+        let recipe = vec![
+            Segment::Summary { summary },
+            Segment::Messages {
+                messages: MessageRange {
+                    agent_id: agent,
+                    first_seq: 2,
+                    last_seq: 2,
+                },
+            },
+        ];
         let summary_request = store
             .request_for_segments(
                 agent,
@@ -3818,6 +3934,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("references summary"));
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_assembled_request_must_be_a_well_formed_conversation() {
+        let (store, path, agent, ..) = store_with_history().await;
+        let prompt = store.store_prompt_text("Guide.").await.unwrap();
+        let system = Segment::Text {
+            text: prompt,
+            role: Role::System,
+        };
+        let history = Segment::Messages {
+            messages: MessageRange {
+                agent_id: agent,
+                first_seq: 0,
+                last_seq: 1,
+            },
+        };
+        let sampling = Sampling {
+            temperature: 0.0,
+            enable_thinking: false,
+        };
+
+        // A second system message anywhere but first is rejected.
+        let error = store
+            .request_for_segments(
+                agent,
+                &[system.clone(), history.clone(), system.clone()],
+                sampling.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not only first"));
+
+        // A request with no user turn is rejected.
+        let assistant_only = Segment::Messages {
+            messages: MessageRange {
+                agent_id: agent,
+                first_seq: 1,
+                last_seq: 1,
+            },
+        };
+        let error = store
+            .request_for_segments(agent, &[system.clone(), assistant_only], sampling.clone())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("no user turn"));
+
+        // A leading system message plus a user turn is accepted.
+        store
+            .request_for_segments(agent, &[system, history], sampling)
+            .await
+            .unwrap();
         drop(store);
         std::fs::remove_file(path).unwrap();
     }

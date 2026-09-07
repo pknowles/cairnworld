@@ -276,11 +276,13 @@ async fn backend(
 ) -> Result<MistralRsBackend> {
     let path = model.path.clone();
     let chat_template = model.chat_template.clone();
+    let source_model = model.source_model.clone();
     tracing::info!(model = %path, "loading model");
     tokio::task::spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(MistralRsBackend::load(
             &path,
             chat_template.as_deref(),
+            source_model.as_deref(),
             limits,
             allow_cpu,
         ))

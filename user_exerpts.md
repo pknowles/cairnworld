@@ -91,6 +91,16 @@ reaches the user - never something an agent can observe and react to.
 
 # Decision Log
 
+## 2026-09-06: Qwen3.5 is a configured evaluation candidate
+
+> please try qwen 3.5
+
+> can you just update the code to use 3.5?
+
+Qwen3.5 4B is available as an explicitly selected development model. It does
+not replace the configured default; model selection remains evidence-based on
+a playable scenario.
+
 ## 2026-09-01: GM narration is already delivered context
 
 > the player agent must see that it was narrated and know that it was sent to

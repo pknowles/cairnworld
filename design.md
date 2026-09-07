@@ -84,6 +84,9 @@ no GM measures the harness, so it waits for real play (see plans/).
 
 - **Qwen3 8B** - purpose-built tool template. Its GGUF cannot be split across
   CPU and GPU without the fork's fix.
+- **Qwen3.5 4B** - a smaller development candidate requested for evaluation.
+  Its native GGUF loader reads configuration, tokenizer, and template assets
+  from the original Qwen model.
 - **Hermes (NousResearch, Llama 3.1 8B base)** - trained for both function
   calling and RP voice, but its GGUF ships no tool template, so one is supplied
   from `templates/`.
@@ -300,8 +303,16 @@ Every inference input is assembled fresh, in this order:
    rebuilt each time: e.g. for a GM, its location description, characters
    present with sheets, GM notes, visible Storyteller notes. Never appended to
    history - it is always current, so it never goes stale in the transcript.
-3. Latest summary, if any.
+3. Latest summary, if any, marked as a summary of earlier history.
 4. Raw message tail (`seq > covers_to_seq`).
+
+Each history message carries who sent it and implies who else received it: a
+player's own words, this agent's own replies, another agent's message (named),
+or a GM narration - which every character at that location, PC and NPC, is
+understood to have seen. The turn is started by such an event message, not by
+the role prompt alone. How these map onto a chat model's message roles is the
+backend's concern and follows each model's preference; the assembly only
+guarantees the distinctions above survive into the prompt.
 
 ## The loop
 
@@ -348,12 +359,13 @@ letting a model template interpret a missing map as arbitrary parameters.
 - **Rule packets.** The player agent sees a tool's short description; when the
   call reaches the GM, rust attaches the extended rulebook text for that tool
   (stored in `text`, so recorded like everything else).
-- **GM narration delivery.** A GM's completed narration is persisted and sent
-  verbatim as a distinct GM entry before the player agent's follow-up
-  inference. That follow-up receives the exact narration together with the
-  fact that the player has already seen it, so it can guide the next choice
-  without inventing or repeating the scene. If it fails, the GM entry remains
-  durable and the failure still reaches the browser.
+- **GM narration delivery.** A GM's completed narration is persisted verbatim
+  in the history of every character at that location before any player agent's
+  follow-up inference. It is a distinct narration entry, attributed to the GM
+  and understood to have been seen by everyone present, so a follow-up can
+  guide the next choice without inventing or repeating the scene. If it fails,
+  the narration entry remains durable and the failure still reaches the
+  browser.
 
 Dice rolls are rust (`rand`), never the model. Every roll is recorded (see
 sequences) so a session is fully replayable as data.
@@ -463,10 +475,10 @@ another inference for that agent, but does not delay the completed reply:
 
 1. Choose the cut point `n` so exactly `keep_tail_messages` raw messages after
    `n` remain.
-2. Build a compaction input: role prompt + previous summary + messages up to
-   `n` + the compaction instruction (what is static and always provided, what
-   will be lost, what matters to keep). Newer messages are excluded - the
-   agent's history is effectively truncated for this one inference.
+2. Build a compaction input: previous summary + messages up to `n`, then the
+   compaction instruction as the closing request (what will be lost, what
+   matters to keep, what is supplied separately). Newer messages are excluded -
+   the agent's history is effectively truncated for this one inference.
 3. Run it through the normal recorded inference path; store the `summary` row
    with `covers_to_seq = n`.
 

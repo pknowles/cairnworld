@@ -77,10 +77,14 @@ pub struct ToolCall {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Role {
+    /// The agent's standing directive. Only the first message of a request.
     System,
     User,
     Assistant,
     Tool,
+    /// A GM narration delivered into this history. Every character present sees
+    /// it; a backend presents it to the model as input attributed to the GM.
+    Narration,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

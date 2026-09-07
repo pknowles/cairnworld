@@ -143,10 +143,7 @@ async fn summary_segments(
         .store_prompt_text(PROMPT)
         .await
         .context("storing compaction prompt")?;
-    let mut segments = vec![Segment::Text {
-        text: prompt,
-        role: Role::System,
-    }];
+    let mut segments = Vec::new();
     if let Some(summary) = previous {
         segments.push(Segment::Summary {
             summary: summary.id,
@@ -161,6 +158,12 @@ async fn summary_segments(
             },
         });
     }
+    // The task comes last, as a user turn: the history above is the material
+    // to summarize, and instruct models expect the request at the end.
+    segments.push(Segment::Text {
+        text: prompt,
+        role: Role::User,
+    });
     Ok((segments, split, covered))
 }
 
@@ -458,9 +461,13 @@ mod tests {
             )
             .await
             .unwrap();
+        // The summary replaces the history it covers, carried in the leading
+        // system message; the retained tail follows unchanged.
         assert!(
-            matches!(&request.messages[0].content, MessageContent::Text(text) if text == "lasting fact and decision")
+            matches!(&request.messages[0].content, MessageContent::Text(text)
+                if text.contains("lasting fact and decision"))
         );
+        assert_eq!(request.messages[0].role, Role::System);
         assert!(
             matches!(&request.messages[1].content, MessageContent::Text(text) if text == "middle decision")
         );
