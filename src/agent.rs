@@ -254,11 +254,7 @@ pub async fn complete_with_call_context<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        sync::Mutex,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::{collections::VecDeque, sync::Mutex};
 
     use super::*;
     use crate::llm::{MessageContent, Role, ToolCall, Usage};
@@ -304,16 +300,9 @@ mod tests {
         }
     }
 
-    async fn test_store() -> (Store, std::path::PathBuf, i64) {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-agent-test-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.unwrap();
+    async fn test_store() -> (Store, crate::store::TestDatabase, i64) {
+        let db = crate::store::TestDatabase::new("agent-test");
+        let store = Store::open(db.path()).await.unwrap();
         let world = store.create_world("test").await.unwrap();
         let agent = store.create_agent(world).await.unwrap();
         store
@@ -323,7 +312,7 @@ mod tests {
             )
             .await
             .unwrap();
-        (store, path, agent)
+        (store, db, agent)
     }
 
     fn scripted_turn<'a>(agent_id: i64, tools: &'a [Tool]) -> Turn<'a> {
@@ -361,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_is_persisted_then_its_actual_result_enters_the_next_inference() {
-        let (store, path, agent_id) = test_store().await;
+        let (store, _db, agent_id) = test_store().await;
         let backend = ScriptedBackend::new([
             response(
                 Content::ToolCalls(vec![ToolCall {
@@ -421,8 +410,6 @@ mod tests {
             matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content }
                 if tool_call_id == "echo-1" && content == "Rook")
         );
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     /// The plan's headline reconstruction target: an inference carrying real
@@ -430,7 +417,7 @@ mod tests {
     /// must be rejected rather than silently reconstructing something else.
     #[tokio::test]
     async fn inferences_carrying_tools_reconstruct_and_detect_tampering() {
-        let (store, path, agent_id) = test_store().await;
+        let (store, _db, agent_id) = test_store().await;
         let backend =
             ScriptedBackend::new([response(Content::Text("Nothing to roll.".into()), "")]);
         complete(
@@ -457,13 +444,11 @@ mod tests {
             .await
             .expect_err("a mutated tool definition must fail reconstruction");
         assert!(format!("{error:#}").contains("does not match"), "{error:#}");
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn unavailable_tool_becomes_a_result_the_model_can_explain() {
-        let (store, path, agent_id) = test_store().await;
+        let (store, _db, agent_id) = test_store().await;
         let backend = ScriptedBackend::new([
             response(
                 Content::ToolCalls(vec![ToolCall {
@@ -511,13 +496,11 @@ mod tests {
                 },
             ]
         ));
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn rejected_known_tool_arguments_are_returned_to_the_model() {
-        let (store, path, agent_id) = test_store().await;
+        let (store, _db, agent_id) = test_store().await;
         let backend = ScriptedBackend::new([
             response(
                 Content::ToolCalls(vec![ToolCall {
@@ -550,13 +533,11 @@ mod tests {
             "got {content}"
         );
         assert_eq!(store.inference_count().await.unwrap(), 2);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn multiple_tool_results_keep_their_call_ids() {
-        let (store, path, agent_id) = test_store().await;
+        let (store, _db, agent_id) = test_store().await;
         let backend = ScriptedBackend::new([
             response(
                 Content::ToolCalls(vec![
@@ -607,15 +588,13 @@ mod tests {
         };
         assert_eq!(tool_call_id, "mara-echo");
         assert!(content.contains("Mara"), "got {content}");
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     /// A model that keeps calling a tool must be stopped by the budget rather
     /// than looping forever.
     #[tokio::test]
     async fn a_model_that_never_settles_is_stopped_by_the_chat_limit() {
-        let (store, path, agent_id) = test_store().await;
+        let (store, _db, agent_id) = test_store().await;
         let limits = Limits {
             max_concurrent_inferences: 4,
             max_inferences_per_chat: 3,
@@ -655,15 +634,13 @@ mod tests {
             limits.max_inferences_per_chat,
             "the loop must stop at the limit, not after it"
         );
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     /// The total bound is shared across agents, so a chat that stays under its
     /// own limit still stops once the whole action has spent its budget.
     #[tokio::test]
     async fn the_total_limit_stops_a_chat_that_is_within_its_own_limit() {
-        let (store, path, agent_id) = test_store().await;
+        let (store, _db, agent_id) = test_store().await;
         let budget = Budget::new(Limits {
             max_concurrent_inferences: 4,
             max_inferences_per_chat: 100,
@@ -697,8 +674,6 @@ mod tests {
 
         let message = format!("{error:#}");
         assert!(message.contains("max_inferences_total"), "got {message}");
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

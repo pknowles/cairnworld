@@ -161,6 +161,9 @@ when things were built.
 - Cargo's development profile keeps Cairnworld debuggable while compiling its
   dependencies optimized without debug information. This keeps unchanged local
   runs fast and avoids duplicating dependency symbols in every test binary.
+- `store::TestDatabase` gives each test a uniquely named on-disk SQLite
+  database (a process-wide counter, not a timestamp, since `cargo test` is
+  multi-threaded) and removes its `.sqlite`/`-wal`/`-shm` files on drop.
 
 ## Web play (design.md: Web server and UI; Auth)
 

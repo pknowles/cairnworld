@@ -1,5 +1,10 @@
 # Qwen3.5 native GGUF support
 
+Completed and verified: `dev-qwen35` runs the full game path - character
+creation, opening narration, arbitration, compaction, multiplayer - with the
+shared sampling and no chat-template errors; all ignored live tests pass
+against it.
+
 ## Goal
 
 Run the local Qwen3.5 4B Q4 GGUF as an explicitly selected development model

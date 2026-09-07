@@ -220,12 +220,42 @@ impl Limits {
 }
 
 impl Settings {
+    /// The runtime configuration: checked-in `default.toml` with per-machine
+    /// `local.toml` layered on top.
     pub fn load() -> Result<Self> {
+        Self::build(config::File::with_name("local").required(false))
+    }
+
+    /// `default.toml` with an inline TOML override layered on top and no
+    /// `local.toml`. Tests use this so they exercise the real configuration
+    /// path without depending on a developer's machine.
+    #[cfg(test)]
+    pub fn for_test(overrides: &str) -> Result<Self> {
+        Self::build(config::File::from_str(overrides, config::FileFormat::Toml))
+    }
+
+    /// `default.toml` selecting the named model at a context size that fits an
+    /// 8 GB card, for the `#[ignore]`d device tests. No `local.toml`; change the
+    /// `[limits]` here for other hardware.
+    #[cfg(test)]
+    pub fn for_device_test(model: &str) -> Result<Self> {
+        // 4096 keeps the paged KV reservation under 2 GB so an 8 GB card holds
+        // the model too; the compaction trigger just needs to sit comfortably
+        // inside that with output-token headroom.
+        Self::for_test(&format!(
+            "model = \"{model}\"\n\
+             [limits]\n\
+             max_context_tokens = 4096\n\
+             compact_before_next_input_tokens = 2048\n"
+        ))
+    }
+
+    fn build(over: impl config::Source + Send + Sync + 'static) -> Result<Self> {
         config::Config::builder()
             .add_source(config::File::with_name("default"))
-            .add_source(config::File::with_name("local").required(false))
+            .add_source(over)
             .build()
-            .context("loading default.toml and local.toml")?
+            .context("loading configuration")?
             .try_deserialize()
             .context("parsing configuration")
     }
@@ -234,6 +264,36 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::{Limits, Settings};
+
+    #[test]
+    fn for_test_overrides_one_limit_and_keeps_the_rest_of_checked_in_default_toml() {
+        // The intent: checked-in default.toml loads on its own, and an inline
+        // override merges into its `[limits]` table field-by-field rather than
+        // replacing it. No local.toml is consulted.
+        let baseline = Settings::for_test("").unwrap().limits;
+        let overridden = Settings::for_test("[limits]\nmax_context_tokens = 4096\n")
+            .unwrap()
+            .limits;
+
+        assert_eq!(overridden.max_context_tokens, 4096);
+        assert_ne!(baseline.max_context_tokens, 4096); // the override actually changed it
+        assert_eq!(overridden.keep_tail_messages, baseline.keep_tail_messages);
+        assert_eq!(
+            overridden.compact_before_next_input_tokens,
+            baseline.compact_before_next_input_tokens
+        );
+    }
+
+    #[test]
+    fn for_device_test_fits_a_small_card_and_selects_the_named_model() {
+        let settings = Settings::for_device_test("dev-qwen35").unwrap();
+        settings.limits.validate().unwrap();
+        assert!(settings.limits.max_context_tokens <= 4096);
+        assert_eq!(
+            settings.model(None).unwrap().path,
+            settings.model(Some("dev-qwen35")).unwrap().path
+        );
+    }
 
     #[test]
     fn source_model_is_available_to_a_named_gguf() {

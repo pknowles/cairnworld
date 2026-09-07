@@ -456,20 +456,26 @@ mod tests {
             .try_init();
     }
 
+    /// A configured model resolved from checked-in `default.toml`, at a context
+    /// size that fits an 8 GB GPU. No `local.toml`.
+    fn device_test_model(name: &str) -> (crate::settings::Model, crate::settings::Limits) {
+        let settings = Settings::for_device_test(name).expect("default.toml should load");
+        let model = settings
+            .model(None)
+            .expect("default.toml should configure the device-test model");
+        (model, settings.limits)
+    }
+
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn streaming_completion_leaves_the_model_available_for_the_next_turn() {
         show_inference_lifecycle();
-        let settings = Settings::load().expect("settings should load");
-        let requested_model = std::env::var("CAIRNWORLD_TEST_MODEL").ok();
-        let model = settings
-            .model(requested_model.as_deref())
-            .expect("configure a model in local.toml or default.toml to run this test");
+        let (model, limits) = device_test_model("dev-qwen35");
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
             model.source_model.as_deref(),
-            settings.limits,
+            limits,
             false,
         )
         .await
@@ -506,18 +512,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn opening_turn_with_tools_has_a_valid_chat_template_shape() {
         show_inference_lifecycle();
-        let settings = Settings::load().expect("settings should load");
-        let model = settings
-            .model(None)
-            .expect("configure a model in local.toml or default.toml to run this test");
+        let (model, limits) = device_test_model("dev-qwen35");
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
             model.source_model.as_deref(),
-            settings.limits,
+            limits,
             false,
         )
         .await
@@ -546,18 +549,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured Qwen GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn qwen_zero_argument_tool_cannot_emit_placeholder_arguments() {
         show_inference_lifecycle();
-        let settings = Settings::load().expect("settings should load");
-        let model = settings
-            .model(Some("dev-qwen3"))
-            .expect("configure the dev-qwen3 model");
+        let (model, limits) = device_test_model("dev-qwen3");
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
             model.source_model.as_deref(),
-            settings.limits,
+            limits,
             false,
         )
         .await
@@ -606,18 +606,15 @@ mod tests {
     /// Qwen3.5 template iterates `arguments` as key/value pairs, so it must
     /// reach the template as a decoded object, not the OpenAI wire string.
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn a_prior_tool_call_message_renders_for_the_next_turn() {
         show_inference_lifecycle();
-        let settings = Settings::load().expect("settings should load");
-        let model = settings
-            .model(None)
-            .expect("configure a model in local.toml or default.toml to run this test");
+        let (model, limits) = device_test_model("dev-qwen35");
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
             model.source_model.as_deref(),
-            settings.limits,
+            limits,
             false,
         )
         .await

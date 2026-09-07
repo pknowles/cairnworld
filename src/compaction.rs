@@ -169,11 +169,7 @@ async fn summary_segments(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        sync::Mutex,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::{collections::VecDeque, sync::Mutex};
 
     use super::*;
     use crate::llm::{ContextCapacityExceeded, Message, MessageContent, Response, Usage};
@@ -218,15 +214,8 @@ mod tests {
         }
     }
 
-    fn path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "cairnworld-compaction-test-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    fn database() -> crate::store::TestDatabase {
+        crate::store::TestDatabase::new("compaction-test")
     }
 
     fn response(summary: &str) -> Response {
@@ -266,8 +255,8 @@ mod tests {
 
     #[tokio::test]
     async fn capacity_job_retains_its_static_recipe_across_reload() {
-        let path = path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let prompt = store
             .store_prompt_text("standing instruction")
@@ -289,14 +278,12 @@ mod tests {
         };
         store.enqueue_compaction_for_test(&job).await.unwrap();
         assert_eq!(store.pending_compaction(agent).await.unwrap(), Some(job));
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn capacity_recovery_uses_a_smaller_real_summary_request() {
-        let path = path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_four_messages(&store).await;
         let backend = CapacityRecoveryBackend {
             responses: Mutex::new(VecDeque::from([
@@ -347,14 +334,12 @@ mod tests {
             0
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn capacity_recovery_fails_when_no_history_is_eligible() {
-        let path = path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = CapacityRecoveryBackend {
             responses: Mutex::new(VecDeque::from([Err(ContextCapacityExceeded::FixedKv {
@@ -398,14 +383,12 @@ mod tests {
         assert_eq!(backend.requests.lock().unwrap().len(), 1);
         assert!(store.latest_summary(agent).await.unwrap().is_none());
         assert!(store.pending_compaction(agent).await.unwrap().is_some());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn compaction_uses_only_the_range_it_covers_and_changes_live_context() {
-        let path = path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = ScriptedBackend {
             responses: Mutex::new(VecDeque::from([response("lasting fact and decision")])),
@@ -488,14 +471,12 @@ mod tests {
             "Compacted history before the next context reached 100 tokens; retained the newest 2 messages."
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn compaction_does_not_run_before_the_token_threshold() {
-        let path = path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = ScriptedBackend {
             responses: Mutex::new(VecDeque::new()),
@@ -529,14 +510,12 @@ mod tests {
         assert!(backend.requests.lock().unwrap().is_empty());
         assert!(store.latest_summary(agent).await.unwrap().is_none());
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn compaction_records_a_notice_when_only_the_tail_remains() {
-        let path = path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = ScriptedBackend {
             responses: Mutex::new(VecDeque::new()),
@@ -574,7 +553,5 @@ mod tests {
             "The next context would start at 100 tokens; no history older than the retained 3 messages was eligible for compaction."
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 }

@@ -8,7 +8,6 @@ Do not begin a later item until the preceding plan is completed and verified,
 unless a reorder is explicitly approved and completed first. I.e. keep the work
 plan organized and don't let items or plans rot.
 
-- [Qwen3.5 native GGUF support](qwen35-native-gguf.md)
 - [World detail](world-detail.md)
 - [Developer inspection](developer-inspection.md)
 - [Multiplayer presence](multiplayer-presence.md)

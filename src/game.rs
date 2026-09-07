@@ -937,7 +937,6 @@ mod tests {
             Mutex,
             atomic::{AtomicUsize, Ordering},
         },
-        time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
@@ -948,8 +947,6 @@ mod tests {
         scenario::Scenario,
         settings::Settings,
     };
-
-    static NEXT_TEST_DATABASE: AtomicUsize = AtomicUsize::new(0);
 
     struct ScriptedBackend {
         responses: Mutex<VecDeque<Response>>,
@@ -1041,7 +1038,7 @@ mod tests {
 
     async fn blank_opening_game<B>(
         backend: B,
-    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, PlayerAgent)
+    ) -> (Arc<Game<B>>, Store, crate::store::TestDatabase, PlayerAgent)
     where
         B: Backend + Send + Sync + 'static,
     {
@@ -1060,11 +1057,33 @@ mod tests {
         backend: B,
         model: String,
         sampling: Sampling,
-    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, PlayerAgent)
+    ) -> (Arc<Game<B>>, Store, crate::store::TestDatabase, PlayerAgent)
     where
         B: Backend + Send + Sync + 'static,
     {
         opening_game_with_limits(backend, model, sampling, Limits::default()).await
+    }
+
+    async fn device_test_game() -> (MistralRsBackend, String, Sampling, Limits) {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("cairnworld=info")
+            .with_test_writer()
+            .try_init();
+        let settings = Settings::for_device_test("dev-qwen35").expect("default.toml should load");
+        let model = settings
+            .model(None)
+            .expect("default.toml should configure the device-test model");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            model.source_model.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .expect("device-test model should load");
+        let sampling = settings.sampling(&model);
+        (backend, model.path, sampling, settings.limits)
     }
 
     async fn opening_game_with_limits<B>(
@@ -1072,20 +1091,12 @@ mod tests {
         model: String,
         sampling: Sampling,
         limits: Limits,
-    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, PlayerAgent)
+    ) -> (Arc<Game<B>>, Store, crate::store::TestDatabase, PlayerAgent)
     where
         B: Backend + Send + Sync + 'static,
     {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-opening-test-{}-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT_TEST_DATABASE.fetch_add(1, Ordering::Relaxed),
-        ));
-        let store = Store::open(&path).await.unwrap();
+        let db = crate::store::TestDatabase::new("opening-test");
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("opening@example.test", "Opening")
             .await
@@ -1104,20 +1115,13 @@ mod tests {
             model,
             sampling,
         ));
-        (game, store, path, installed.member)
+        (game, store, db, installed.member)
     }
 
     #[tokio::test]
     async fn player_take_is_approved_by_its_location_gm_and_transferred_by_rust() {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-game-test-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.unwrap();
+        let db = crate::store::TestDatabase::new("game-test");
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("warden@example.test", "Warden")
             .await
@@ -1288,9 +1292,6 @@ mod tests {
                 }),
             "the GM must be told which character took the action"
         );
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -1298,7 +1299,7 @@ mod tests {
         let (backend, recorded_requests) = ScriptedBackend::recording([response(Content::Text(
             "Welcome. Let us make your Adventurer.".into(),
         ))]);
-        let (game, store, path, member) = blank_opening_game(backend).await;
+        let (game, _store, _db, member) = blank_opening_game(backend).await;
 
         let response = game.enter(member.clone()).await.unwrap().unwrap();
         assert!(
@@ -1339,15 +1340,12 @@ mod tests {
             "reconnecting after the opening turn must not start a second character-creation conversation"
         );
         assert_eq!(recorded_requests.lock().unwrap().len(), 1);
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn concurrent_viewers_share_one_server_owned_opening() {
         let (backend, started, release, requests) = DelayedBackend::new();
-        let (game, store, path, member) = blank_opening_game(backend).await;
+        let (game, store, _db, member) = blank_opening_game(backend).await;
         let first_game = Arc::clone(&game);
         let first_member = member.clone();
         let first = tokio::spawn(async move { first_game.wait_for_opening(first_member).await });
@@ -1375,9 +1373,6 @@ mod tests {
                 .is_empty(),
             "the shared opening must finish with stored player-agent history"
         );
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -1392,7 +1387,7 @@ mod tests {
                 "Welcome. Let us make your Adventurer.".into(),
             )),
         ]);
-        let (game, store, path, member) = blank_opening_game(backend).await;
+        let (game, store, _db, member) = blank_opening_game(backend).await;
 
         game.wait_for_opening(member.clone()).await.unwrap();
         assert_eq!(requests.lock().unwrap().len(), 2);
@@ -1413,40 +1408,17 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant),
             "a later opening must persist the reply that makes reconnects viewers only"
         );
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_opening_reaches_a_stored_player_reply() {
         // This is deliberately the same server-owned opening path the web
         // socket awaits, rather than a direct backend request. A successful
         // return proves the agent settled and its player-visible reply
         // committed to stored history.
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("cairnworld=info")
-            .with_test_writer()
-            .try_init();
-        let settings = Settings::load().expect("settings should load");
-        let model_name = std::env::var("CAIRNWORLD_REAL_MODEL").expect(
-            "set CAIRNWORLD_REAL_MODEL to a configured GPU-resident model, such as dev-qwen3",
-        );
-        let model = settings
-            .model(Some(&model_name))
-            .expect("CAIRNWORLD_REAL_MODEL should name a configured model");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            settings.limits,
-            false,
-        )
-        .await
-        .expect("model should load");
-        let sampling = settings.sampling(&model);
-        let (game, store, path, member) = opening_game(backend, model.path, sampling).await;
+        let (backend, model_path, sampling, _limits) = device_test_game().await;
+        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
 
         game.wait_for_opening(member.clone())
             .await
@@ -1483,41 +1455,20 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
             "the completed opening must leave a player-visible assistant reply"
         );
-
-        std::fs::remove_file(path).expect("opening test database should be removable");
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_calls_ready_to_begin_after_the_final_roll() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("cairnworld=info")
-            .with_test_writer()
-            .try_init();
-        let settings = Settings::load().expect("settings should load");
-        let model_name = std::env::var("CAIRNWORLD_REAL_MODEL").expect(
-            "set CAIRNWORLD_REAL_MODEL to a configured GPU-resident model, such as dev-qwen3",
-        );
-        let model = settings
-            .model(Some(&model_name))
-            .expect("CAIRNWORLD_REAL_MODEL should name a configured model");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            settings.limits,
-            false,
-        )
-        .await
-        .expect("model should load");
+        let (backend, model_path, configured, _limits) = device_test_game().await;
         // Greedy: this asserts the model follows a specific instruction
         // (call ready_to_begin once the rolls are done), so it must not depend
         // on a sampling draw.
         let sampling = Sampling {
             temperature: 0.0,
-            ..settings.sampling(&model)
+            ..configured
         };
-        let (game, store, path, member) = opening_game(backend, model.path, sampling).await;
+        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
         let sequence = store
             .begin_sequence(member.world_id, "test completed creation")
             .await
@@ -1559,44 +1510,21 @@ mod tests {
                 .any(|entry| entry.role == Role::Narration),
             "the GM opening narration must become player-visible before the guide follows up"
         );
-
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).expect("opening test database should be removable");
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_compacts_a_long_chat_and_keeps_an_early_fact() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("cairnworld=info")
-            .with_test_writer()
-            .try_init();
-        let settings = Settings::load().expect("settings should load");
-        let model_name = std::env::var("CAIRNWORLD_REAL_MODEL")
-            .expect("set CAIRNWORLD_REAL_MODEL to a configured GPU-resident model");
-        let model = settings
-            .model(Some(&model_name))
-            .expect("CAIRNWORLD_REAL_MODEL should name a configured model");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            settings.limits,
-            false,
-        )
-        .await
-        .expect("model should load");
-        let sampling = settings.sampling(&model);
+        let (backend, model_path, sampling, base_limits) = device_test_game().await;
         // A threshold the second turn's context clears, retaining enough tail
         // that the summary has real history to work from.
         let limits = Limits {
             compact_before_next_input_tokens: 700,
             keep_tail_messages: 4,
-            ..settings.limits
+            ..base_limits
         };
-        let (game, store, path, member) =
-            opening_game_with_limits(backend, model.path, sampling, limits).await;
+        let (game, store, _db, member) =
+            opening_game_with_limits(backend, model_path, sampling, limits).await;
 
         // An early, checkable fact, then enough turns to force a compaction.
         game.player_message(member.clone(), "Remember the passphrase: BRAMBLEFOX.")
@@ -1623,9 +1551,5 @@ mod tests {
             "the summary dropped an early fact it should retain: {}",
             summary.content
         );
-
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).expect("compaction test database should be removable");
     }
 }
