@@ -396,6 +396,12 @@ be not wasting time having the GM make special narrations to NPCs. Maybe the GM
 won't notice if it's only asked to make narrations for some characters. Maybe
 narrations can be the player agents' job?
 
+Narration should be seen by all characters in the vicinity. I'm not sure on the
+details yet, so we should begin with all NPCs at the location and all PCs logged
+in. It may be the whole location is too big, but we need a way to have rust
+automatically route messages. It may also be that PCs should not see messages
+from other locations. This needs play testing.
+
 ## Dynamic Storyteller
 
 These are currently ideas for the future. Not the initial version.
@@ -940,6 +946,9 @@ not return for 60 seconds. This is generated with deferred priority, much like a
 chat summary, and if the server goes down the queued job to make a recap
 remains. It does not persist in the player agent's chat history; it's only for
 the world recap.
+
+TODO: what if a player misses a session? Should GM narrations be added to all PC
+chats even when not online? For now lets not, but this needs testing.
 
 If the world is complete it will have a short epilogue, describing what each
 player ends up doing. This will be written by the Storyteller. TODO: detail how

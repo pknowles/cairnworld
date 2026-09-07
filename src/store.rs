@@ -1087,6 +1087,16 @@ impl Store {
         .with_context(|| format!("member {} has no active location", member.member_id))
     }
 
+    /// The display name of one character, for attributing an action to the GM.
+    pub async fn character_name(&self, character_id: i64) -> Result<String> {
+        sqlx::query_scalar("SELECT name FROM character WHERE id = ?")
+            .bind(character_id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("loading character name")?
+            .with_context(|| format!("character {character_id} does not exist"))
+    }
+
     /// Resolve the current location's GM from the authenticated player character.
     /// The player agent never chooses which GM receives the opening request.
     pub async fn player_location_gm_agent_id(&self, member: &PlayerAgent) -> Result<i64> {
@@ -2939,7 +2949,7 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].characters.len(), 2);
         let gm_agent_id = store
-            .member_location_gm_agent_id(&installed.member)
+            .player_location_gm_agent_id(&installed.member)
             .await
             .unwrap();
         let gm_scene = store

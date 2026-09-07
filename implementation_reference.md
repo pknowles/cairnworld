@@ -89,7 +89,8 @@ when things were built.
   with separate GM and Storyteller JSON notes. Blank player characters are
   named `AdventurerN` from their globally unique `charN` suffix, and a location
   GM's fresh scene packet includes every player character currently there with
-  its sheet. `install_scenario` creates the
+  its sheet, and its role prompt tells it to narrate to the characters as a
+  group; an arbitration request names the acting character. `install_scenario` creates the
   entire initial relationship graph in one transaction and `export_scenario`
   exports only reusable scenario data, never a player's history or membership.
   The active-character lookup verifies the account, membership, world, and
