@@ -44,8 +44,10 @@ when things were built.
   the backend, then records either the completed response or the failure using
   the same reference recipe. Its recipe identifies the inference record so a
   compaction result can refer to the exact request that produced it. A
-  structured fixed-KV rejection is recovered here, once for every agent, by
-  persisting and waiting for its compaction job before retrying the same recipe.
+  structured fixed-KV rejection is recovered here by persisting and waiting for
+  a compaction job before retrying the same recipe. The retry must report fewer
+  required tokens. CUDA out-of-memory remains an ordinary model error because
+  it does not establish that compaction can reduce the failed allocation.
 - `src/agent.rs` - resolves one recorded chat turn: persists each assistant
   response, runs calls from the invocation-local tool list, persists their
   results, and repeats until final text. A final reply and any due compaction
@@ -55,10 +57,9 @@ when things were built.
   It resumes pending jobs at startup and keeps same-agent history ordered.
 - `src/compaction.rs` - resolves a persisted compaction job as ordinary
   recorded summarisation, preserving exactly `keep_tail_messages` newest raw
-  rows. If that request is rejected for fixed-KV capacity, it uses the loaded
-  model's exact chat-template tokenizer only to select and verify smaller
-  linear passes; each retained prefix summary is durable until the measured
-  reconstructed context is below the threshold.
+  rows. If that request is rejected for capacity, it retains one more raw row
+  and tries the real summary request again. If no older row remains, it fails;
+  it never predicts token use or retries unchanged history.
 - `src/tools.rs` - the ordinary invocation-local lookup used to derive
   `ToolDefinition`s and run the matching Rust callback. Game tools are added
   only with their related authenticated game state, never to the sandbox REPL.
@@ -68,19 +69,25 @@ when things were built.
 - `src/store.rs` and `migrations/` - SQLite store, WAL mode,
   identity-only sandbox worlds and chat-history agents; OAuth email identities
   with non-unique display names; durable world-owner, membership,
-  membership-player-agent, player-character, NPC-agent, and location-GM
+  character-owned player-agent, NPC-agent, and location-GM
   relationships; world/character/location/path/item/item-type/spell-type data
-  with separate GM and Storyteller JSON notes. `install_scenario` creates the
+  with separate GM and Storyteller JSON notes. Blank player characters are
+  named `AdventurerN` from their globally unique `charN` suffix, and a location
+  GM's fresh scene packet includes every player character currently there with
+  its sheet. `install_scenario` creates the
   entire initial relationship graph in one transaction and `export_scenario`
   exports only reusable scenario data, never a player's history or membership.
-  The active-membership lookup is the single player-world authorization
-  boundary. A recipe refers
+  The active-character lookup verifies the account, membership, world, and
+  requested character together before any play access. `player_location_id`,
+  `player_location_gm_agent_id`, and `player_sheet` resolve location, GM, and
+  sheet through that character relationship. A recipe refers
   to static text, tools, a summary, and/or an agent message range;
   reconstruction rereads those rows and verifies the assembled input against
   its BLAKE3 hash. The live history selector is exactly newest summary plus
   messages after its `covers_to_seq`; all older message rows remain intact for
-  replay and debugging. SQLx applies the checked-in migrations when a database
-  opens, preserving existing database files as recording metadata evolves.
+  replay and debugging. Until real user databases exist, the checked-in schema
+  is rebuilt in place and existing local databases are intentionally replaced;
+  later schema evolution requires forward migrations.
 
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 
@@ -121,8 +128,7 @@ when things were built.
   `max_context_tokens` per concurrently admitted inference. A completed turn
   queues compaction only when its measured input plus output would make the
   next input reach the lazy threshold; that agent's next inference waits for
-  it. This normal path performs no tokenization; only a capacity-recovery
-  compaction uses exact chat-template tokenization. Model startup logs the configured token pool, CUDA memory before and
+  it. This normal path and capacity recovery perform no tokenization. Model startup logs the configured token pool, CUDA memory before and
   after allocation, and their allocation delta; every inference logs its token capacity and actual
   input/output token use for the developer inference view.
 - Weights are not checked in; `models/` is gitignored.
@@ -138,7 +144,7 @@ when things were built.
   templates have a valid first user turn without displaying or persisting a
   fake player message. The ordinary agent loop executes any creation-roll
   calls and stores its final text. The first viewer starts one server-owned
-  opening operation per membership; concurrent reconnects wait on that same
+  opening operation per character; concurrent reconnects wait on that same
   operation, then view its durable result rather than queueing game work.
   Completing character creation asks the resolved location GM for opening
   narration in that same tool turn, so beginning play never needs a second
@@ -147,9 +153,15 @@ when things were built.
 - `src/web.rs` - `cairnworld serve`'s Axum routes. Google OIDC discovers and
   exchanges through `openidconnect`; SQLite-backed `tower-sessions` holds the
   verified account id. The landing page updates only a non-unique display
-  name; identity remains the verified email. Landing, world, invitation, and membership routes all
-  resolve access through `Store` rather than trusting a client user or agent
-  id. The authenticated `/world/:id/play` route loads that membership's
+  name; identity remains the verified email. The world detail page already
+  creates, limits, lists, revokes, and accepts invitation links, and lets an
+  owner remove an active member while retaining its durable association. It
+  renders every retained membership with its characters nested below it; an
+  active member can create another blank Adventurer, and every entry link names
+  its exact character. Landing,
+  world, invitation, and membership routes all resolve access through `Store`
+  rather than trusting a client user or agent id. The authenticated
+  `/world/:id/characters/:character_id/play` route loads that character's
   durable player-visible history and its final durable message id, while its
   websocket passes the same resolved membership and snapshot cursor into `Game`
   for each player message. After opening work settles, the socket sends every

@@ -48,8 +48,8 @@ async fn after_turn<B: Backend>(store: &Store, backend: &B, turn: CompletedTurn<
 /// Resolve one persisted compaction obligation. The normal path performs one
 /// ordinary deferred summary without tokenizing: the just-finished inference
 /// already reported its exact next-context size, and a second tokenization
-/// would be pure overhead. Only a proved fixed-KV capacity rejection enters
-/// the fallback below, where exact tokenization selects fitting linear passes.
+/// would be pure overhead. A rejected summary keeps one more raw message and
+/// retries the real request, never a predicted token count.
 pub async fn run<B: Backend>(
     store: &Store,
     backend: &B,
@@ -61,57 +61,72 @@ pub async fn run<B: Backend>(
         "limits.keep_tail_messages must be greater than zero"
     );
 
-    let (segments, split, covered) =
-        summary_segments(store, job.agent_id, limits.keep_tail_messages).await?;
-    if split <= covered {
+    let mut keep = limits.keep_tail_messages;
+    let mut recovering_capacity = false;
+    loop {
+        let (segments, split, covered) = summary_segments(store, job.agent_id, keep).await?;
+        if split <= covered {
+            if recovering_capacity {
+                anyhow::bail!(
+                    "compaction cannot reduce this context: retaining {keep} newest messages leaves no older history to summarize"
+                );
+            }
+            return store
+                .finish_compaction(
+                    job,
+                    None,
+                    &format!(
+                        "The next context would start at {} tokens; no history older than the retained {keep} messages was eligible for compaction.",
+                        job.next_input_tokens
+                    ),
+                )
+                .await;
+        }
+
+        let completion = context::complete_recipe(
+            store,
+            backend,
+            context::RecipeCompletion {
+                agent_id: job.agent_id,
+                sequence_id: None,
+                parent_inference_id: None,
+                segments: &segments,
+                sampling: job.sampling.clone(),
+                model: &job.model,
+            },
+            |_| {},
+        )
+        .await;
+        let completion = match completion {
+            Ok(completion) => completion,
+            Err(error) if error.downcast_ref::<ContextCapacityExceeded>().is_some() => {
+                recovering_capacity = true;
+                keep += 1;
+                continue;
+            }
+            Err(error) => return Err(error).context("running recorded compaction inference"),
+        };
+        let Content::Text(content) = completion.response.content else {
+            anyhow::bail!("compaction inference returned tool calls instead of summary text");
+        };
+        let notice = if recovering_capacity {
+            format!(
+                "Compacted history through a capacity recovery; retained the newest {keep} messages."
+            )
+        } else {
+            format!(
+                "Compacted history before the next context reached {} tokens; retained the newest {keep} messages.",
+                job.next_input_tokens
+            )
+        };
         return store
             .finish_compaction(
                 job,
-                None,
-                &format!(
-                    "The next context would start at {} tokens; no history older than the retained {} messages was eligible for compaction.",
-                    job.next_input_tokens, limits.keep_tail_messages
-                ),
+                Some((&content, split, completion.inference_id)),
+                &notice,
             )
             .await;
     }
-
-    let completion = context::complete_recipe(
-        store,
-        backend,
-        context::RecipeCompletion {
-            agent_id: job.agent_id,
-            sequence_id: None,
-            parent_inference_id: None,
-            segments: &segments,
-            sampling: job.sampling.clone(),
-            model: &job.model,
-        },
-        |_| {},
-    )
-    .await;
-    let completion = match completion {
-        Ok(completion) => completion,
-        Err(error) if error.downcast_ref::<ContextCapacityExceeded>().is_some() => {
-            return run_fallback(store, backend, job, limits).await;
-        }
-        Err(error) => return Err(error).context("running recorded compaction inference"),
-    };
-    let Content::Text(content) = completion.response.content else {
-        anyhow::bail!("compaction inference returned tool calls instead of summary text");
-    };
-    store
-        .finish_compaction(
-            job,
-            Some((&content, split, completion.inference_id)),
-            &format!(
-                "Compacted history before the next context reached {} tokens; retained the newest {} messages.",
-                job.next_input_tokens,
-                limits.keep_tail_messages
-            ),
-        )
-        .await?;
-    Ok(())
 }
 
 async fn summary_segments(
@@ -149,96 +164,6 @@ async fn summary_segments(
     Ok((segments, split, covered))
 }
 
-/// Recover only after the model rejected the ordinary summary for fixed KV
-/// capacity. This is intentionally the sole tokenizer path: ordinary turns
-/// and ordinary compaction already have measured usage and never pay for it.
-async fn run_fallback<B: Backend>(
-    store: &Store,
-    backend: &B,
-    job: &PendingCompaction,
-    limits: Limits,
-) -> Result<()> {
-    let max_input_tokens = limits
-        .max_context_tokens
-        .checked_sub(limits.max_output_tokens)
-        .context("configured context capacity does not leave output space")?;
-    let mut keep = limits.keep_tail_messages;
-    let mut previous_next_input_tokens = job.next_input_tokens;
-    loop {
-        let (segments, split, covered) = summary_segments(store, job.agent_id, keep).await?;
-        ensure!(
-            split > covered,
-            "compaction cannot reduce this context: retaining {} newest messages leaves no older history to summarize",
-            keep
-        );
-        let request = store
-            .request_for_segments(job.agent_id, &segments, job.sampling.clone())
-            .await
-            .context("assembling fallback compaction request")?;
-        let input_tokens = backend
-            .input_tokens(&request)
-            .await
-            .context("measuring fallback compaction request")?;
-        if input_tokens > max_input_tokens {
-            keep += 1;
-            continue;
-        }
-
-        let completion = context::complete_recipe(
-            store,
-            backend,
-            context::RecipeCompletion {
-                agent_id: job.agent_id,
-                sequence_id: None,
-                parent_inference_id: None,
-                segments: &segments,
-                sampling: job.sampling.clone(),
-                model: &job.model,
-            },
-            |_| {},
-        )
-        .await
-        .context("running measured fallback compaction inference")?;
-        let Content::Text(content) = completion.response.content else {
-            anyhow::bail!("compaction inference returned tool calls instead of summary text");
-        };
-        store
-            .append_summary(job.agent_id, split, &content, completion.inference_id)
-            .await?;
-
-        let mut normal_segments = job.static_segments.clone();
-        normal_segments.extend(store.history_segments(job.agent_id).await?);
-        let normal_request = store
-            .request_for_segments(job.agent_id, &normal_segments, job.sampling.clone())
-            .await
-            .context("assembling reconstructed context after fallback compaction")?;
-        let next_input_tokens = backend
-            .input_tokens(&normal_request)
-            .await
-            .context("measuring reconstructed context after fallback compaction")?;
-        if next_input_tokens < limits.compact_before_next_input_tokens {
-            return store
-                .finish_compaction(
-                    job,
-                    None,
-                    &format!(
-                        "Compacted history through a capacity fallback; next context is {} tokens, below the {}-token threshold.",
-                        next_input_tokens, limits.compact_before_next_input_tokens
-                    ),
-                )
-                .await;
-        }
-        ensure!(
-            next_input_tokens < previous_next_input_tokens,
-            "fallback compaction did not reduce next context: was {} tokens and is {} tokens",
-            previous_next_input_tokens,
-            next_input_tokens
-        );
-        previous_next_input_tokens = next_input_tokens;
-        keep = limits.keep_tail_messages;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -256,10 +181,6 @@ mod tests {
     }
 
     impl Backend for ScriptedBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             request: crate::llm::Request,
@@ -274,21 +195,12 @@ mod tests {
         }
     }
 
-    struct CapacityFallbackBackend {
+    struct CapacityRecoveryBackend {
         responses: Mutex<VecDeque<Result<Response>>>,
-        measured_inputs: Mutex<VecDeque<usize>>,
         requests: Mutex<Vec<crate::llm::Request>>,
     }
 
-    impl Backend for CapacityFallbackBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            self.measured_inputs
-                .lock()
-                .unwrap()
-                .pop_front()
-                .context("unexpected fallback token measurement")
-        }
-
+    impl Backend for CapacityRecoveryBackend {
         async fn complete(
             &self,
             request: crate::llm::Request,
@@ -379,24 +291,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capacity_fallback_measures_only_after_a_proved_rejection() {
+    async fn capacity_recovery_uses_a_smaller_real_summary_request() {
         let path = path();
         let store = Store::open(&path).await.unwrap();
         let agent = agent_with_four_messages(&store).await;
-        let backend = CapacityFallbackBackend {
+        let backend = CapacityRecoveryBackend {
             responses: Mutex::new(VecDeque::from([
-                Err(ContextCapacityExceeded {
+                Err(ContextCapacityExceeded::FixedKv {
                     requested_tokens: 101,
                     max_context_tokens: 110,
                 }
                 .into()),
                 Ok(response("first fact")),
             ])),
-            // The initial normal compaction makes no token-count call. Once
-            // it is rejected, retaining two rows still exceeds the 100-token
-            // input budget; retaining three fits, then the rebuilt context is
-            // under the lazy threshold.
-            measured_inputs: Mutex::new(VecDeque::from([101, 100, 99])),
             requests: Mutex::new(Vec::new()),
         };
         let limits = Limits {
@@ -427,7 +334,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(backend.requests.lock().unwrap().len(), 2);
-        assert!(backend.measured_inputs.lock().unwrap().is_empty());
         assert_eq!(
             store
                 .latest_summary(agent)
@@ -438,6 +344,57 @@ mod tests {
             0
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn capacity_recovery_fails_when_no_history_is_eligible() {
+        let path = path();
+        let store = Store::open(&path).await.unwrap();
+        let agent = agent_with_history(&store).await;
+        let backend = CapacityRecoveryBackend {
+            responses: Mutex::new(VecDeque::from([Err(ContextCapacityExceeded::FixedKv {
+                requested_tokens: 101,
+                max_context_tokens: 100,
+            }
+            .into())])),
+            requests: Mutex::new(Vec::new()),
+        };
+        let error = after_turn(
+            &store,
+            &backend,
+            CompletedTurn {
+                agent_id: agent,
+                after_message_id: 3,
+                next_input_tokens: 100,
+                sampling: Sampling {
+                    temperature: 0.0,
+                    enable_thinking: false,
+                },
+                model: "scripted",
+                limits: Limits {
+                    max_concurrent_inferences: 1,
+                    max_inferences_per_chat: 8,
+                    max_inferences_total: 64,
+                    max_context_tokens: 110,
+                    max_output_tokens: 10,
+                    compact_before_next_input_tokens: 100,
+                    keep_tail_messages: 2,
+                },
+            },
+        )
+        .await
+        .expect_err("capacity recovery must not retry unchanged history");
+
+        assert!(
+            error
+                .to_string()
+                .contains("leaves no older history to summarize")
+        );
+        assert_eq!(backend.requests.lock().unwrap().len(), 1);
+        assert!(store.latest_summary(agent).await.unwrap().is_none());
+        assert!(store.pending_compaction(agent).await.unwrap().is_some());
         drop(store);
         std::fs::remove_file(path).unwrap();
     }

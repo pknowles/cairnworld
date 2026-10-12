@@ -101,6 +101,18 @@ GM narration is a distinct, durable player-visible entry. The player agent
 receives the exact narration only after it has been sent through that channel;
 it must guide the player's next choice rather than repeat or invent the scene.
 
+## 2026-09-05: Character ownership is not membership ownership
+
+> today one membership owns exactly one player agent
+
+> that's a bug and needs fixing. hard coded 1:1 is an intermediate
+> implementation state that is wasted effort. I never called for it and it
+> should not exist
+
+Membership is the account's access relationship. Each player character owns
+its own agent/history, allowing a member to have multiple characters without
+crossing their state or chat histories.
+
 ## 2026-08-08: Exact compaction accounting
 
 > we should not lie in values stored. be super explicit and use the exact right

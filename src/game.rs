@@ -10,7 +10,7 @@ use crate::{
     inference::ScheduledBackend,
     llm::{Backend, Content, Message, Response, Role, Sampling, ToolDefinition},
     settings::Limits,
-    store::{MemberAgent, PendingAction, Store},
+    store::{PendingAction, PlayerAgent, Store},
     tools::{Tool, ToolFuture, ToolOutcome},
 };
 
@@ -50,7 +50,7 @@ struct Narration {
 /// Everything a player-facing action tool needs to submit one action to its
 /// location GM. The tool owns this invocation scope until a model calls it.
 struct PlayerActionTool {
-    member: MemberAgent,
+    member: PlayerAgent,
     sequence_id: i64,
     definition: ToolDefinition,
     validate: fn(&str) -> Result<()>,
@@ -62,12 +62,12 @@ struct PlayerActionTool {
 
 enum WorldEvent {
     PlayerMessage {
-        member: MemberAgent,
+        member: PlayerAgent,
         text: String,
         reply: oneshot::Sender<Result<Response>>,
     },
     Enter {
-        member: MemberAgent,
+        member: PlayerAgent,
         reply: oneshot::Sender<Result<Option<Response>>>,
     },
 }
@@ -97,7 +97,7 @@ where
     /// Queue a player message behind all earlier events in this world.
     pub async fn player_message(
         self: &Arc<Self>,
-        member: MemberAgent,
+        member: PlayerAgent,
         text: &str,
     ) -> Result<Response> {
         let world = self.world_events(member.world_id).await;
@@ -117,7 +117,7 @@ where
     }
 
     /// Queue opening a world behind all earlier events in that world.
-    pub async fn enter(self: &Arc<Self>, member: MemberAgent) -> Result<Option<Response>> {
+    pub async fn enter(self: &Arc<Self>, member: PlayerAgent) -> Result<Option<Response>> {
         let world = self.world_events(member.world_id).await;
         let (reply, receive) = oneshot::channel();
         world
@@ -134,18 +134,18 @@ where
     /// Multiple viewers share this operation; only its first observer queues
     /// game work. Once the player agent has a stored reply, reconnects return
     /// immediately and merely view that history.
-    pub async fn wait_for_opening(self: &Arc<Self>, member: MemberAgent) -> Result<()> {
+    pub async fn wait_for_opening(self: &Arc<Self>, member: PlayerAgent) -> Result<()> {
         if self.opening_complete(&member).await? {
             return Ok(());
         }
-        let member_id = member.member_id;
+        let character_id = member.character_id;
         let mut receiver = {
             let mut openings = self.openings.lock().await;
-            if let Some(receiver) = openings.get(&member_id) {
+            if let Some(receiver) = openings.get(&character_id) {
                 receiver.clone()
             } else {
                 let (sender, receiver) = watch::channel(OpeningState::Pending);
-                openings.insert(member_id, receiver.clone());
+                openings.insert(character_id, receiver.clone());
                 let game = Arc::clone(self);
                 tokio::spawn(async move {
                     tracing::info!(
@@ -158,7 +158,7 @@ where
                         Err(error) => OpeningState::Failed(format!("{error:#}")),
                     };
                     let _ = sender.send(state);
-                    game.openings.lock().await.remove(&member_id);
+                    game.openings.lock().await.remove(&character_id);
                 });
                 receiver
             }
@@ -176,13 +176,13 @@ where
         }
     }
 
-    /// Subscribe a connected browser to live narration from the member's
+    /// Subscribe a connected browser to live narration from the character's
     /// current location. World processing remains serialized across locations.
     pub async fn subscribe(
         self: &Arc<Self>,
-        member: &MemberAgent,
+        member: &PlayerAgent,
     ) -> Result<broadcast::Receiver<String>> {
-        let location_id = self.store.member_location_id(member).await?;
+        let location_id = self.store.player_location_id(member).await?;
         Ok(location_broadcast(
             &self.world_events(member.world_id).await.broadcasts,
             location_id,
@@ -236,7 +236,7 @@ where
     /// Resolve one player message through its membership-owned player agent.
     async fn resolve_player_message(
         self: &Arc<Self>,
-        member: MemberAgent,
+        member: PlayerAgent,
         text: &str,
         broadcasts: &LocationBroadcasts,
     ) -> Result<Response> {
@@ -257,7 +257,7 @@ where
         let budget = Budget::new(self.limits);
         let call = CallContext::root(Some(sequence.id));
         let tools = if ready {
-            let location_id = self.store.member_location_id(&member).await?;
+            let location_id = self.store.player_location_id(&member).await?;
             self.action_tools(
                 member.clone(),
                 sequence.id,
@@ -307,7 +307,7 @@ where
     /// roll.
     async fn resolve_enter(
         self: &Arc<Self>,
-        member: MemberAgent,
+        member: PlayerAgent,
         broadcasts: &LocationBroadcasts,
     ) -> Result<Option<Response>> {
         let ready = self
@@ -368,7 +368,7 @@ where
     }
 
     /// Whether the player agent has already produced its stored opening reply.
-    pub async fn opening_complete(&self, member: &MemberAgent) -> Result<bool> {
+    pub async fn opening_complete(&self, member: &PlayerAgent) -> Result<bool> {
         Ok(self
             .store
             .player_chat(member)
@@ -382,13 +382,13 @@ where
     /// its page snapshot and before its websocket became available.
     pub async fn player_chat_after(
         &self,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         after_message_id: Option<i64>,
     ) -> Result<Vec<crate::store::PlayerChatEntry>> {
         self.store.player_chat_after(member, after_message_id).await
     }
 
-    async fn player_prompt(&self, member: &MemberAgent, ready: bool) -> Result<Message> {
+    async fn player_prompt(&self, member: &PlayerAgent, ready: bool) -> Result<Message> {
         let text = if ready {
             let scene = serde_json::to_string(
                 &self
@@ -409,7 +409,7 @@ where
 
     fn creation_tools(
         self: &Arc<Self>,
-        member: MemberAgent,
+        member: PlayerAgent,
         sequence_id: i64,
         budget: Budget,
         call: CallContext,
@@ -512,7 +512,7 @@ where
 
     fn action_tools(
         self: &Arc<Self>,
-        member: MemberAgent,
+        member: PlayerAgent,
         sequence_id: i64,
         location_id: i64,
         budget: Budget,
@@ -624,12 +624,12 @@ where
     /// message to select normal scene tools.
     async fn opening_narration(
         self: &Arc<Self>,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         budget: Budget,
         call: CallContext,
     ) -> Result<Narration> {
-        let location_id = self.store.member_location_id(member).await?;
-        let gm_agent_id = self.store.member_location_gm_agent_id(member).await?;
+        let location_id = self.store.player_location_id(member).await?;
+        let gm_agent_id = self.store.player_location_gm_agent_id(member).await?;
         let scene = serde_json::to_string(
             &self
                 .store
@@ -820,7 +820,7 @@ where
 
     async fn deliver_narration(
         &self,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         location_id: i64,
         narration: &str,
         broadcasts: &LocationBroadcasts,
@@ -942,13 +942,6 @@ mod tests {
     }
 
     impl ScriptedBackend {
-        fn new(responses: impl IntoIterator<Item = Response>) -> Self {
-            Self {
-                responses: Mutex::new(responses.into_iter().collect()),
-                requests: Arc::new(Mutex::new(vec![])),
-            }
-        }
-
         fn recording(
             responses: impl IntoIterator<Item = Response>,
         ) -> (Self, Arc<Mutex<Vec<crate::llm::Request>>>) {
@@ -964,10 +957,6 @@ mod tests {
     }
 
     impl Backend for ScriptedBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             request: crate::llm::Request,
@@ -1023,10 +1012,6 @@ mod tests {
     }
 
     impl Backend for DelayedBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             _request: crate::llm::Request,
@@ -1041,7 +1026,7 @@ mod tests {
 
     async fn blank_opening_game<B>(
         backend: B,
-    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, MemberAgent)
+    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, PlayerAgent)
     where
         B: Backend + Send + Sync + 'static,
     {
@@ -1060,7 +1045,7 @@ mod tests {
         backend: B,
         model: String,
         sampling: Sampling,
-    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, MemberAgent)
+    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, PlayerAgent)
     where
         B: Backend + Send + Sync + 'static,
     {
@@ -1116,6 +1101,18 @@ mod tests {
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let companion = store
+            .create_player_character(owner.id, installed.world_id)
+            .await
+            .unwrap();
+        let player_names = [
+            store
+                .player_scene(&installed.member)
+                .await
+                .unwrap()
+                .character_name,
+            store.player_scene(&companion).await.unwrap().character_name,
+        ];
         let creation = store
             .begin_sequence(installed.world_id, "creation test")
             .await
@@ -1132,26 +1129,23 @@ mod tests {
             .ready_to_begin(&installed.member, creation.id, None)
             .await
             .unwrap();
-        let backend = InferenceScheduler::new(
-            ScriptedBackend::new([
-                response(Content::ToolCalls(vec![ToolCall {
-                    id: "take-1".into(),
-                    name: "take".into(),
-                    arguments: r#"{"item":"flour sack"}"#.into(),
-                }])),
-                response(Content::ToolCalls(vec![ToolCall {
-                    id: "approve-1".into(),
-                    name: "approve_action".into(),
-                    arguments: r#"{"action_id":1}"#.into(),
-                }])),
-                response(Content::Text(
-                    "You lift the flour sack while Toma watches.".into(),
-                )),
-                response(Content::Text("What do you do next?".into())),
-            ]),
-            Limits::default(),
-        )
-        .unwrap();
+        let (scripted_backend, recorded_requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "take-1".into(),
+                name: "take".into(),
+                arguments: r#"{"item":"flour sack"}"#.into(),
+            }])),
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "approve-1".into(),
+                name: "approve_action".into(),
+                arguments: r#"{"action_id":1}"#.into(),
+            }])),
+            response(Content::Text(
+                "You lift the flour sack while Toma watches.".into(),
+            )),
+            response(Content::Text("What do you do next?".into())),
+        ]);
+        let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
         let game = Arc::new(Game::new(
             store.clone(),
             backend.foreground(),
@@ -1229,6 +1223,23 @@ mod tests {
         assert_eq!(player_inference.parent_inference_id, None);
         assert_eq!(gm_inference.sequence_id, player_inference.sequence_id);
         assert_eq!(gm_inference.parent_inference_id, Some(player_inference.id));
+        let requests = recorded_requests.lock().unwrap();
+        let gm_packet = requests
+            .iter()
+            .flat_map(|request| request.messages.iter())
+            .find_map(|message| match &message.content {
+                MessageContent::Text(text) if text.starts_with("You arbitrate this location.") => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("the GM arbitration must receive its actual location packet");
+        for name in player_names {
+            assert!(
+                gm_packet.contains(&format!("\"name\":\"{name}\"")),
+                "the GM packet must name every player character in its location"
+            );
+        }
         drop(game);
         drop(store);
         std::fs::remove_file(path).unwrap();

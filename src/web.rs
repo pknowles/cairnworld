@@ -37,13 +37,15 @@ use crate::{
     mistralrs_backend::MistralRsBackend,
     scenario::Scenario,
     settings,
-    store::{MemberAgent, PlayerChatEntry, Store, World, WorldMember},
+    store::{PlayerAgent, PlayerChatEntry, Store, World, WorldMember},
 };
 
 const USER_ID: &str = "user_id";
 const OAUTH_STATE: &str = "oauth_state";
 const OAUTH_NONCE: &str = "oauth_nonce";
 const OAUTH_VERIFIER: &str = "oauth_verifier";
+const WORLD_DETAIL_ROW_CLASSES: &str =
+    "flex flex-wrap items-center justify-between gap-3 rounded-box bg-base-200 p-3";
 type GoogleClient = CoreClient<
     EndpointSet,
     EndpointNotSet,
@@ -198,11 +200,21 @@ pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Resu
         )
         .route("/world/{world_id}/members/{user_id}", post(remove_member))
         .route(
+            "/world/{world_id}/characters",
+            post(create_player_character),
+        )
+        .route(
             "/invite/{token}",
             get(invitation_page).post(accept_invitation),
         )
-        .route("/world/{world_id}/play", get(game_page))
-        .route("/world/{world_id}/ws", get(game_socket))
+        .route(
+            "/world/{world_id}/characters/{character_id}/play",
+            get(game_page),
+        )
+        .route(
+            "/world/{world_id}/characters/{character_id}/ws",
+            get(game_socket),
+        )
         .nest_service("/pkg", ServeDir::new("target/site/pkg"))
         .nest_service("/media", ServeDir::new("media"))
         .with_state(App {
@@ -386,22 +398,28 @@ async fn world_detail(
     session: Session,
     Path(world_id): Path<i64>,
 ) -> Result<Html<String>, WebError> {
-    let member = active_member(&app.store, &session, world_id).await?;
+    let viewer = session_user(&app.store, &session).await?;
+    if !app.store.has_active_membership(viewer.id, world_id).await? {
+        return Err(WebError::forbidden(format!(
+            "user {} has no active access to world {world_id}",
+            viewer.id
+        )));
+    }
     let world = app
         .store
         .world(world_id)
         .await?
         .with_context(|| format!("active membership references missing world {world_id}"))?;
     let members = app.store.world_members(world_id).await?;
-    let invitations = if world.owner_id == member.user_id {
-        app.store.invitations(member.user_id, world_id).await?
+    let invitations = if world.owner_id == viewer.id {
+        app.store.invitations(viewer.id, world_id).await?
     } else {
         vec![]
     };
     Ok(Html(render_page(
         "Cairnworld",
         false,
-        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=member.user_id/> },
+        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=viewer.id/> },
     )))
 }
 
@@ -440,6 +458,16 @@ async fn remove_member(
     Ok(Redirect::to(&format!("/world/{world_id}")))
 }
 
+async fn create_player_character(
+    State(app): State<App>,
+    session: Session,
+    Path(world_id): Path<i64>,
+) -> Result<Redirect, WebError> {
+    let user = session_user(&app.store, &session).await?;
+    app.store.create_player_character(user.id, world_id).await?;
+    Ok(Redirect::to(&format!("/world/{world_id}")))
+}
+
 async fn invitation_page(
     State(app): State<App>,
     session: Session,
@@ -469,9 +497,9 @@ async fn accept_invitation(
 async fn game_page(
     State(app): State<App>,
     session: Session,
-    Path(world_id): Path<i64>,
+    Path((world_id, character_id)): Path<(i64, i64)>,
 ) -> Result<Html<String>, WebError> {
-    let member = active_member(&app.store, &session, world_id).await?;
+    let member = active_player_character(&app.store, &session, world_id, character_id).await?;
     Ok(Html(match app.game.availability().await {
         GameAvailability::Loading => {
             render_page("Cairnworld", true, || view! { <GameLoadingPage/> })
@@ -481,7 +509,7 @@ async fn game_page(
             render_page(
                 "Cairnworld",
                 true,
-                move || view! { <GamePage world_id=member.world_id history=history/> },
+                move || view! { <GamePage world_id=member.world_id character_id=member.character_id history=history/> },
             )
         }
         GameAvailability::Failed(error) => return Err(WebError::unavailable(error)),
@@ -499,11 +527,11 @@ async fn game_status(State(app): State<App>) -> Result<StatusCode, WebError> {
 async fn game_socket(
     State(app): State<App>,
     session: Session,
-    Path(world_id): Path<i64>,
+    Path((world_id, character_id)): Path<(i64, i64)>,
     Query(cursor): Query<ChatCursor>,
     websocket: WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebError> {
-    let member = active_member(&app.store, &session, world_id).await?;
+    let member = active_player_character(&app.store, &session, world_id, character_id).await?;
     tracing::info!(
         world_id,
         user_id = member.user_id,
@@ -524,19 +552,20 @@ struct ChatCursor {
     after_message_id: Option<i64>,
 }
 
-async fn active_member(
+async fn active_player_character(
     store: &Store,
     session: &Session,
     world_id: i64,
-) -> std::result::Result<MemberAgent, WebError> {
+    character_id: i64,
+) -> std::result::Result<PlayerAgent, WebError> {
     let user_id = session_user(store, session).await?.id;
     store
-        .active_member_agent(user_id, world_id)
+        .active_player_character(user_id, world_id, character_id)
         .await
         .map_err(WebError::from)?
         .ok_or_else(|| {
             WebError::forbidden(format!(
-                "user {user_id} has no active access to world {world_id}"
+                "user {user_id} has no active access to character {character_id} in world {world_id}"
             ))
         })
 }
@@ -563,7 +592,7 @@ async fn session_user(
 async fn play(
     socket: WebSocket,
     game: Arc<Game<MistralRsBackend>>,
-    member: MemberAgent,
+    member: PlayerAgent,
     after_message_id: Option<i64>,
 ) {
     if let Err(error) = play_connection(socket, game, member, after_message_id).await {
@@ -574,7 +603,7 @@ async fn play(
 async fn play_connection(
     mut socket: WebSocket,
     game: Arc<Game<MistralRsBackend>>,
-    member: MemberAgent,
+    member: PlayerAgent,
     after_message_id: Option<i64>,
 ) -> Result<()> {
     tracing::info!(
@@ -716,7 +745,7 @@ async fn play_connection(
 /// Wait for the one stored opening turn, if this blank Adventurer has not
 /// already received it. A reconnect is only a viewer and never creates a
 /// second game event.
-async fn ensure_opening<B>(game: &Arc<Game<B>>, member: MemberAgent) -> Result<()>
+async fn ensure_opening<B>(game: &Arc<Game<B>>, member: PlayerAgent) -> Result<()>
 where
     B: Backend + Send + Sync + 'static,
 {
@@ -851,30 +880,55 @@ fn WorldDetail(
     viewer_id: i64,
 ) -> impl IntoView {
     let is_owner = world.owner_id == viewer_id;
+    let world_id = world.id;
+    let world_path = format!("/world/{world_id}");
+    let member_path = format!("{world_path}/members");
+    let invitation_path = format!("{world_path}/invitations");
     view! {
         <main class="min-h-dvh bg-base-200 p-4 sm:p-8">
             <section class="card mx-auto max-w-5xl bg-base-100 shadow-xl"><div class="card-body gap-6">
-            <div class="flex flex-wrap items-center justify-between gap-4"><h1 class="card-title text-3xl">{world.name}</h1><a class="btn btn-primary" href=format!("/world/{}/play", world.id)>"Enter world"</a></div>
+            <div class="flex flex-wrap items-center justify-between gap-4"><h1 class="card-title text-3xl">{world.name}</h1></div>
             <section><h2 class="mb-3 text-xl font-semibold">"Players"</h2>
             <ul class="space-y-2">{members.into_iter().map(move |member| {
-                let remove = is_owner && member.user_id != viewer_id && member.access == "active";
-                view! { <li class="flex flex-wrap items-center justify-between gap-3 rounded-box bg-base-200 p-3">
-                    <span>{format!("{} — {} ({})", member.display_name, member.character_name, member.access)}</span>
-                    {remove.then(|| view! { <form action=format!("/world/{}/members/{}", world.id, member.user_id) method="post"><button class="btn btn-error btn-sm" type="submit">"Remove"</button></form> })}
+                let is_active = member.access == "active";
+                let remove = is_owner && member.user_id != viewer_id && is_active;
+                let enter = member.user_id == viewer_id && is_active;
+                let create = member.user_id == viewer_id && is_active;
+                let player = format!("{} ({})", member.display_name, member.access);
+                let remove_path = format!("{member_path}/{}", member.user_id);
+                view! { <li class=WORLD_DETAIL_ROW_CLASSES>
+                    <div class="w-full flex flex-wrap items-center justify-between gap-3">
+                        <span>{player}</span>
+                        {create.then(|| view! { <form action=format!("{world_path}/characters") method="post"><button class="btn btn-sm" type="submit">"Create character"</button></form> })}
+                        {remove.then(|| view! { <form action=remove_path method="post"><button class="btn btn-error btn-sm" type="submit">"Remove"</button></form> })}
+                    </div>
+                    <ul class="w-full space-y-2 pl-6">{member.characters.into_iter().map({
+                        let world_path = world_path.clone();
+                        move |character| {
+                        let enter_path = format!("{world_path}/characters/{}/play", character.id);
+                        view! { <li class="flex flex-wrap items-center justify-between gap-3">
+                            <span>{character.name}</span>
+                            {enter.then(|| view! { <a class="btn btn-primary btn-sm" href=enter_path>"Enter world"</a> })}
+                        </li> }}
+                    }).collect_view()}</ul>
                 </li> }
             }).collect_view()}</ul></section>
             {is_owner.then(|| view! {
                 <section class="border-t border-base-300 pt-6">
                     <h2 class="mb-3 text-xl font-semibold">"Invitation links"</h2>
-                    <form class="join mb-4" action=format!("/world/{}/invitations", world.id) method="post">
+                    <form class="join mb-4" action=invitation_path.clone() method="post">
                         <input class="input join-item w-full" name="max_uses" type="number" min="1" placeholder="Maximum uses (optional)"/>
                         <button class="btn join-item" type="submit">"Create link"</button>
                     </form>
-                    <ul class="space-y-2">{invitations.into_iter().map(|invitation| view! {
-                        <li class="flex flex-wrap items-center justify-between gap-3 rounded-box bg-base-200 p-3"><a class="link link-primary break-all" href=format!("/invite/{}", invitation.token)>{format!("/invite/{}", invitation.token)}</a>
+                    <ul class="space-y-2">{invitations.into_iter().map(move |invitation| {
+                        let public_invitation_path = format!("/invite/{}", invitation.token);
+                        let public_invitation_href = public_invitation_path.clone();
+                        let revoke_path = format!("{invitation_path}/{}/revoke", invitation.token);
+                        view! {
+                        <li class=WORLD_DETAIL_ROW_CLASSES><a class="link link-primary break-all" href=public_invitation_href>{public_invitation_path}</a>
                         <span class="badge badge-ghost">{invitation.max_uses.map(|max| (max - invitation.uses).to_string()).unwrap_or_else(|| "unlimited".to_string())}</span>
-                        <form action=format!("/world/{}/invitations/{}/revoke", world.id, invitation.token) method="post"><button class="btn btn-error btn-sm" type="submit">"Revoke"</button></form></li>
-                    }).collect_view()}</ul>
+                        <form action=revoke_path method="post"><button class="btn btn-error btn-sm" type="submit">"Revoke"</button></form></li>
+                    }}).collect_view()}</ul>
                 </section>
             })}
             </div></section>
@@ -894,14 +948,14 @@ fn InvitationPage(token: String, user: Option<crate::store::User>) -> impl IntoV
 }
 
 #[component]
-fn GamePage(world_id: i64, history: Vec<PlayerChatEntry>) -> impl IntoView {
+fn GamePage(world_id: i64, character_id: i64, history: Vec<PlayerChatEntry>) -> impl IntoView {
     let after_message_id = history.last().map(|entry| entry.id);
     let history = player_chat_entries(history);
     view! {
         <main class="h-dvh bg-base-200 p-3 sm:p-6">
             <section class="mx-auto flex h-[calc(100dvh-1.5rem)] max-w-5xl flex-col rounded-box bg-base-100 shadow-xl sm:h-[calc(100dvh-3rem)]">
                 <header class="navbar border-b border-base-300 px-4"><h1 class="text-xl font-semibold">"Cairnworld"</h1><span class="ml-auto badge badge-primary badge-outline">"Adventure chat"</span></header>
-                <div class="flex min-h-0 flex-1 flex-col p-3 sm:p-5"><PlayerChat world_id after_message_id><ChatTranscript history/></PlayerChat></div>
+                <div class="flex min-h-0 flex-1 flex-col p-3 sm:p-5"><PlayerChat world_id character_id after_message_id><ChatTranscript history/></PlayerChat></div>
             </section>
         </main>
     }
@@ -988,7 +1042,7 @@ mod tests {
     #[test]
     fn game_page_renders_stored_chat_entries_with_their_visible_roles() {
         let html = render_page("Cairnworld", true, || {
-            view! { <GamePage world_id=7 history=vec![
+            view! { <GamePage world_id=7 character_id=8 history=vec![
                 PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into() },
                 PlayerChatEntry { id: 2, role: crate::llm::Role::System, text: "Toma watches.".into() },
             ]/> }
@@ -997,6 +1051,47 @@ mod tests {
         assert!(html.contains("Toma watches."));
         assert!(html.contains("data-role=\"user\""));
         assert!(html.contains("data-role=\"narration\""));
+    }
+
+    #[test]
+    fn world_detail_gives_each_active_viewer_their_own_entry_link() {
+        fn detail(viewer_id: i64) -> String {
+            render_page("Cairnworld", false, move || {
+                view! { <WorldDetail
+                    world=World { id: 7, name: "Bread Thief".into(), owner_id: 1 }
+                    members=vec![
+                        WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 8, name: "Rook".into() }, crate::store::WorldCharacter { id: 11, name: "Lark".into() }] },
+                        WorldMember { user_id: 2, display_name: "Invitee".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 9, name: "Moth".into() }] },
+                        WorldMember { user_id: 3, display_name: "Removed".into(), access: "removed".into(), characters: vec![crate::store::WorldCharacter { id: 10, name: "Ash".into() }] },
+                    ]
+                    invitations=vec![crate::store::Invitation { token: "invite".into(), world_id: 7, max_uses: Some(2), uses: 1 }]
+                    viewer_id
+                /> }
+            })
+        }
+
+        let owner = detail(1);
+        let invitee = detail(2);
+        for html in [&owner, &invitee] {
+            assert!(html.contains("Owner (active)"));
+            assert!(html.contains("Invitee (active)"));
+            assert!(html.contains("Removed (removed)"));
+            assert_eq!(
+                html.matches("href=\"/world/7/characters/").count(),
+                if html == &owner { 2 } else { 1 }
+            );
+        }
+        let owner_link = owner.find("href=\"/world/7/characters/8/play\"").unwrap();
+        assert!(owner.find("Rook").unwrap() < owner_link);
+        assert!(owner_link < owner.find("Moth").unwrap());
+        assert!(owner.contains("href=\"/world/7/characters/11/play\""));
+        assert!(owner.contains("action=\"/world/7/characters\""));
+        let invitee_link = invitee.find("href=\"/world/7/characters/9/play\"").unwrap();
+        assert!(invitee.find("Moth").unwrap() < invitee_link);
+        assert!(invitee_link < invitee.find("Ash").unwrap());
+        assert!(owner.contains("action=\"/world/7/members/2\""));
+        assert!(owner.contains("action=\"/world/7/invitations\""));
+        assert!(owner.contains("action=\"/world/7/invitations/invite/revoke\""));
     }
 
     #[test]
