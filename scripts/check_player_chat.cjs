@@ -20,25 +20,24 @@ let connections = 0;
 let disconnections = 0;
 let releaseOpening;
 let releaseReply;
+let closeReply;
 const openingReady = new Promise((resolve) => (releaseOpening = resolve));
 const replyReady = new Promise((resolve) => (releaseReply = resolve));
+const closeReady = new Promise((resolve) => (closeReply = resolve));
 
 function escapeHtml(text) {
   return text.replace(/[&<>\"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]);
 }
 
 function page() {
-  const transcript = entries.map(({ role, text }) => `<li data-role="${role}" class="chat chat-${role === "user" ? "end" : "start"}"><div class="chat-bubble">${escapeHtml(text)}</div></li>`).join("");
+  const transcript = entries.map(({ role, text }) => `<li data-role="${role}" class="chat chat-${role === "user" ? "end" : "start"}"><!><div class="chat-bubble">${escapeHtml(text)}</div></li>`).join("");
   return `<!doctype html>
 <link rel="stylesheet" href="/pkg/cairnworld.css">
 <main class="h-dvh bg-base-200 p-3 sm:p-6">
   <section class="mx-auto flex h-[calc(100dvh-1.5rem)] max-w-5xl flex-col rounded-box bg-base-100 shadow-xl sm:h-[calc(100dvh-3rem)]">
     <header class="navbar border-b border-base-300 px-4">Chat</header>
     <div id="chat-pane" class="flex min-h-0 flex-1 flex-col p-3 sm:p-5">
-      <leptos-island data-component="${island}" data-props='{"world_id":1,"after_message_id":24}'>
-        <ol id="chat" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-1 py-4" aria-live="polite"><leptos-children>${transcript}</leptos-children></ol>
-        <form id="message" class="join w-full"><input class="input join-item min-w-0 flex-1" name="text" autocomplete="off" disabled><button class="btn btn-primary join-item" type="submit" disabled>Send</button></form>
-      </leptos-island>
+      <leptos-island data-component="${island}" data-props='{"world_id":1,"character_id":2,"after_message_id":24}'><ol id="chat" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-1 py-4" aria-live="polite"><leptos-children>${transcript}<!></leptos-children><!></ol><!><form id="message" class="join w-full"><input class="input join-item min-w-0 flex-1" name="text" autocomplete="off" placeholder="Write a message…"><button class="btn btn-primary join-item" type="submit" disabled>Send</button></form></leptos-island>
     </div>
   </section>
 </main>
@@ -65,6 +64,11 @@ const server = createServer((request, response) => {
     response.writeHead(204);
     return response.end();
   }
+  if (request.url === "/close-reply") {
+    closeReply();
+    response.writeHead(204);
+    return response.end();
+  }
   if (request.url?.startsWith("/pkg/")) {
     const file = join(packageRoot, basename(request.url));
     const contentType = file.endsWith(".js")
@@ -83,7 +87,7 @@ const server = createServer((request, response) => {
 
 const sockets = new WebSocketServer({ noServer: true });
 server.on("upgrade", (request, socket, head) => {
-  if (request.url !== "/world/1/ws?after_message_id=24") return socket.destroy();
+  if (request.url !== "/world/1/characters/2/ws?after_message_id=24") return socket.destroy();
   sockets.handleUpgrade(request, socket, head, (connection) => sockets.emit("connection", connection));
 });
 
@@ -113,7 +117,7 @@ sockets.on("connection", (socket) => {
         entries.push({ role: "assistant", text });
         socket.send(JSON.stringify({ type: "entry", role: "assistant", text }));
         socket.send(JSON.stringify({ type: "can_act", value: true }));
-        if (messages === 2) socket.close();
+        if (messages === 2) closeReady.then(() => socket.close());
       };
       if (messages === 1) replyReady.then(reply);
       else reply();
@@ -188,6 +192,7 @@ async function checkPlayerChat() {
     await tab.locator('input[name="text"]').press("Enter");
     await ready(tab, "A bell rings.");
     assert.equal(messages, 2);
+    await release(port, "/close-reply");
     await tab.locator("#chat-status").getByText("Connection lost. Reload to reconnect.").waitFor();
     assert.equal(await tab.locator('input[name="text"]').isDisabled(), true);
   } finally {

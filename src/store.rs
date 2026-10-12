@@ -136,6 +136,7 @@ pub struct GmScene {
     pub gm_notes: serde_json::Value,
     pub items: Vec<SceneItem>,
     pub npcs: Vec<GmSceneNpc>,
+    pub players: Vec<GmScenePlayer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -148,6 +149,19 @@ pub struct GmSceneNpc {
     pub gm_notes: serde_json::Value,
 }
 
+/// A player character physically present at the GM's location. Player-agent
+/// history is private, but the GM needs this current character state to
+/// narrate and arbitrate a shared scene consistently.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GmScenePlayer {
+    pub name: String,
+    pub description: String,
+    pub background: String,
+    pub motive: String,
+    pub ambition: String,
+    pub sheet: serde_json::Value,
+}
+
 #[derive(FromRow)]
 struct GmSceneNpcRow {
     name: String,
@@ -156,6 +170,16 @@ struct GmSceneNpcRow {
     motive: String,
     ambition: String,
     gm_notes: String,
+}
+
+#[derive(FromRow)]
+struct GmScenePlayerRow {
+    name: String,
+    description: String,
+    background: String,
+    motive: String,
+    ambition: String,
+    sheet: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -1211,6 +1235,7 @@ impl Store {
             gm_notes: serde_json::from_str(&gm_notes).context("decoding location GM notes")?,
             items: Self::location_items(&self.pool, location_id).await?,
             npcs: Self::location_gm_npcs(&self.pool, location_id).await?,
+            players: Self::location_gm_players(&self.pool, location_id).await?,
         })
     }
 
@@ -1270,6 +1295,37 @@ impl Store {
                     ambition: row.ambition,
                     gm_notes: serde_json::from_str(&row.gm_notes)
                         .context("decoding NPC GM notes")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn location_gm_players(
+        pool: &SqlitePool,
+        location_id: i64,
+    ) -> Result<Vec<GmScenePlayer>> {
+        let rows: Vec<GmScenePlayerRow> = sqlx::query_as(
+            "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.sheet \
+             FROM character_location \
+             JOIN player_character ON player_character.character_id = character_location.character_id \
+             JOIN character ON character.id = player_character.character_id \
+             WHERE character_location.location_id = ? ORDER BY character.id",
+        )
+        .bind(location_id)
+        .fetch_all(pool)
+        .await
+        .context("loading location player characters for GM")?;
+        rows.into_iter()
+            .map(|row| {
+                let sheet = serde_json::from_str(&row.sheet)
+                    .context("decoding player character sheet for GM")?;
+                Ok(GmScenePlayer {
+                    name: row.name,
+                    description: row.description,
+                    background: row.background,
+                    motive: row.motive,
+                    ambition: row.ambition,
+                    sheet,
                 })
             })
             .collect()
@@ -1833,12 +1889,15 @@ impl Store {
             .last_insert_rowid();
         let sheet = serde_json::json!({});
         let notes = Notes::default();
-        let character_id = Self::insert_character(
+        let tool_id = Self::next_character_tool_id(transaction).await?;
+        let name = format!("Adventurer{tool_id}");
+        let character_id = Self::insert_character_with_tool_id(
             transaction,
             world_id,
+            tool_id,
             CharacterSeed {
                 role: "pc",
-                name: "Adventurer",
+                name: &name,
                 description: "",
                 background: "",
                 motive: "",
@@ -1860,11 +1919,6 @@ impl Store {
         sqlx::query("INSERT INTO character_location (character_id, location_id, description) VALUES (?, ?, '')")
             .bind(character_id).bind(starting_location_id).execute(&mut **transaction).await
             .with_context(|| format!("placing Adventurer in world {world_id}"))?;
-        let tool_id = sqlx::query_scalar("SELECT tool_id FROM character WHERE id = ?")
-            .bind(character_id)
-            .fetch_one(&mut **transaction)
-            .await
-            .context("loading Adventurer handle")?;
         Ok((character_id, agent_id, tool_id))
     }
 
@@ -1925,6 +1979,15 @@ impl Store {
         character: CharacterSeed<'_>,
     ) -> Result<i64> {
         let tool_id = Self::next_character_tool_id(transaction).await?;
+        Self::insert_character_with_tool_id(transaction, world_id, tool_id, character).await
+    }
+
+    async fn insert_character_with_tool_id(
+        transaction: &mut Transaction<'_, Sqlite>,
+        world_id: i64,
+        tool_id: i64,
+        character: CharacterSeed<'_>,
+    ) -> Result<i64> {
         Ok(sqlx::query(
             "INSERT INTO character \
              (world_id, tool_id, name, role, description, background, motive, ambition, sheet, gm_notes, storyteller_notes) \
@@ -2199,29 +2262,6 @@ impl Store {
         })
     }
 
-    /// Persist one rolling summary while retaining its compaction obligation.
-    /// A fallback may need several linear passes; keeping the job stored
-    /// means a restart resumes from this prefix rather than redoing it.
-    pub async fn append_summary(
-        &self,
-        agent_id: i64,
-        covers_to_seq: i64,
-        content: &str,
-        inference_id: i64,
-    ) -> Result<i64> {
-        let result = sqlx::query(
-            "INSERT INTO summary (agent_id, covers_to_seq, content, inference_id) VALUES (?, ?, ?, ?)",
-        )
-        .bind(agent_id)
-        .bind(covers_to_seq)
-        .bind(content)
-        .bind(inference_id)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("storing compaction result through message {covers_to_seq}"))?;
-        Ok(result.last_insert_rowid())
-    }
-
     #[cfg(test)]
     pub async fn chat_notice_contents(&self, agent_id: i64) -> Result<Vec<String>> {
         sqlx::query_scalar("SELECT content FROM chat_notice WHERE agent_id = ? ORDER BY id")
@@ -2259,8 +2299,17 @@ impl Store {
         content: &str,
         inference_id: i64,
     ) -> Result<i64> {
-        self.append_summary(agent_id, covers_to_seq, content, inference_id)
-            .await
+        let result = sqlx::query(
+            "INSERT INTO summary (agent_id, covers_to_seq, content, inference_id) VALUES (?, ?, ?, ?)",
+        )
+        .bind(agent_id)
+        .bind(covers_to_seq)
+        .bind(content)
+        .bind(inference_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("storing test summary through message {covers_to_seq}"))?;
+        Ok(result.last_insert_rowid())
     }
 
     pub async fn latest_summary(&self, agent_id: i64) -> Result<Option<Summary>> {
@@ -2822,6 +2871,21 @@ mod tests {
             .unwrap();
         assert_ne!(installed.member.character_id, second.character_id);
         assert_ne!(installed.member.agent_id, second.agent_id);
+        let characters: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT character.name, character.tool_id FROM player_character \
+             JOIN character ON character.id = player_character.character_id \
+             WHERE player_character.member_id = ? ORDER BY character.id",
+        )
+        .bind(installed.member.member_id)
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(characters.len(), 2);
+        assert!(
+            characters
+                .iter()
+                .all(|(name, tool_id)| { name == &format!("Adventurer{tool_id}") })
+        );
         assert_eq!(
             store.player_chat(&second).await.unwrap(),
             vec![],
@@ -2838,6 +2902,32 @@ mod tests {
         let members = store.world_members(installed.world_id).await.unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].characters.len(), 2);
+        let gm_agent_id = store
+            .member_location_gm_agent_id(&installed.member)
+            .await
+            .unwrap();
+        let gm_scene = store
+            .gm_scene(installed.world_id, gm_agent_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            gm_scene
+                .players
+                .iter()
+                .map(|player| player.name.as_str())
+                .collect::<Vec<_>>(),
+            characters
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            "the GM packet must identify every player character at its location"
+        );
+        assert!(
+            gm_scene
+                .players
+                .iter()
+                .all(|player| player.sheet == serde_json::json!({}))
+        );
         assert_eq!(
             store
                 .active_player_character(owner.id, installed.world_id, second.character_id)
@@ -3008,15 +3098,23 @@ mod tests {
                     member.user_id,
                     member.display_name.as_str(),
                     member.access.as_str(),
-                    member.characters[0].name.as_str(),
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                (owner.id, "Owner", "active", "Adventurer"),
-                (invited.id, "Invited", "removed", "Adventurer"),
+                (owner.id, "Owner", "active"),
+                (invited.id, "Invited", "removed")
             ],
             "the detail page must retain the removed membership and its character"
         );
+        let names = members
+            .iter()
+            .map(|member| member.characters[0].name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.iter().all(|name| {
+            name.strip_prefix("Adventurer")
+                .is_some_and(|suffix| suffix.parse::<i64>().is_ok())
+        }));
+        assert_ne!(names[0], names[1]);
         let restored = store
             .accept_invitation(&invited, &invite.token)
             .await
@@ -3126,8 +3224,8 @@ mod tests {
 
         assert!(installed.character_handle.starts_with("char"));
         assert_eq!(installed.character_handle.len(), 6);
-        let active_character: String = sqlx::query_scalar(
-            "SELECT character.name FROM player_character \
+        let (active_character, active_tool_id): (String, i64) = sqlx::query_as(
+            "SELECT character.name, character.tool_id FROM player_character \
              JOIN character ON character.id = player_character.character_id \
              WHERE player_character.member_id = ?",
         )
@@ -3135,7 +3233,7 @@ mod tests {
         .fetch_one(&store.pool)
         .await
         .unwrap();
-        assert_eq!(active_character, "Adventurer");
+        assert_eq!(active_character, format!("Adventurer{active_tool_id}"));
         let location_gms: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM location_gm \
              JOIN location ON location.id = location_gm.location_id WHERE location.world_id = ?",
@@ -3167,7 +3265,7 @@ mod tests {
             "the flour and cache can be found in the world"
         );
         let player_scene = store.player_scene(&installed.member).await.unwrap();
-        assert_eq!(player_scene.character_name, "Adventurer");
+        assert_eq!(player_scene.character_name, active_character);
         assert_eq!(player_scene.location_name, "charcoal hut");
         assert!(player_scene.inventory.is_empty());
         assert_eq!(

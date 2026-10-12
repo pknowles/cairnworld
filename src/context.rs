@@ -27,6 +27,7 @@ pub async fn complete_recorded<B: Backend>(
     completion: RecordedCompletion<'_>,
     mut on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
+    let mut last_fixed_kv_rejection = None;
     loop {
         let segments = segments(
             store,
@@ -55,17 +56,26 @@ pub async fn complete_recorded<B: Backend>(
                 // This is the one normal-agent completion boundary. A tool
                 // result can make its persisted history exceed fixed KV
                 // capacity before a final reply exists, so persist the same
-                // deferred obligation here, wait for it, and retry. Ordinary
-                // calls never tokenize: only the compaction worker's proved
-                // capacity fallback measures candidate requests.
+                // deferred obligation here, wait for it, and retry. Candidate
+                // summaries are admitted only by attempting real inference.
                 let capacity = error
                     .downcast_ref::<ContextCapacityExceeded>()
                     .expect("capacity error was checked above");
+                let ContextCapacityExceeded::FixedKv {
+                    requested_tokens, ..
+                } = capacity;
+                if let Some(previous) = last_fixed_kv_rejection {
+                    ensure!(
+                        *requested_tokens < previous,
+                        "compaction did not reduce the fixed-KV request: was {previous} tokens and is {requested_tokens} tokens"
+                    );
+                }
+                last_fixed_kv_rejection = Some(*requested_tokens);
                 let static_segments = static_segments(&segments);
                 store
                     .enqueue_capacity_compaction(
                         completion.agent_id,
-                        capacity.requested_tokens,
+                        *requested_tokens,
                         &completion.sampling,
                         completion.model,
                         &static_segments,
@@ -222,8 +232,11 @@ pub async fn complete_recipe<B: Backend>(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, sync::Mutex};
+
     use super::*;
     use crate::{
+        inference::InferenceScheduler,
         llm::{Content, Role, Usage},
         store::RecordedOutcome,
     };
@@ -232,11 +245,11 @@ mod tests {
 
     struct StreamingBackend;
 
-    impl Backend for FailingBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
+    struct CapacityBackend {
+        responses: Mutex<VecDeque<Result<Response>>>,
+    }
 
+    impl Backend for FailingBackend {
         async fn complete(
             &self,
             _request: crate::llm::Request,
@@ -247,10 +260,6 @@ mod tests {
     }
 
     impl Backend for StreamingBackend {
-        async fn input_tokens(&self, _request: &crate::llm::Request) -> Result<usize> {
-            Ok(0)
-        }
-
         async fn complete(
             &self,
             _request: crate::llm::Request,
@@ -265,6 +274,20 @@ mod tests {
                     output_tokens: 1,
                 },
             })
+        }
+    }
+
+    impl Backend for CapacityBackend {
+        async fn complete(
+            &self,
+            _request: crate::llm::Request,
+            _on_token: impl FnMut(&str) + Send,
+        ) -> Result<Response> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .context("unexpected capacity-recovery inference")?
         }
     }
 
@@ -359,6 +382,90 @@ mod tests {
             recorded.outcome,
             RecordedOutcome::Error("connection lost".to_string())
         );
+        assert!(
+            store.pending_compaction(agent).await.unwrap().is_none(),
+            "ordinary model failures must not be misclassified as compactable context pressure"
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn capacity_recovery_does_not_retry_an_unchanged_fixed_kv_request() {
+        let path = std::env::temp_dir().join(format!(
+            "cairnworld-context-test-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        let store = Store::open(&path).await.expect("store should open");
+        let agent = test_agent(&store).await;
+        store
+            .append_message(agent, &Message::text(Role::Assistant, "A first reply."))
+            .await
+            .unwrap();
+        let backend = InferenceScheduler::new(
+            CapacityBackend {
+                responses: Mutex::new(VecDeque::from([
+                    Err(ContextCapacityExceeded::FixedKv {
+                        requested_tokens: 101,
+                        max_context_tokens: 100,
+                    }
+                    .into()),
+                    Ok(Response {
+                        content: Content::Text("A concise summary.".into()),
+                        reasoning: String::new(),
+                        usage: Usage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                        },
+                    }),
+                    Err(ContextCapacityExceeded::FixedKv {
+                        requested_tokens: 101,
+                        max_context_tokens: 100,
+                    }
+                    .into()),
+                ])),
+            },
+            crate::settings::Limits {
+                max_concurrent_inferences: 1,
+                max_inferences_per_chat: 8,
+                max_inferences_total: 64,
+                max_context_tokens: 100,
+                max_output_tokens: 10,
+                compact_before_next_input_tokens: 90,
+                keep_tail_messages: 1,
+            },
+        )
+        .unwrap()
+        .foreground();
+        let error = complete_recorded(
+            &store,
+            &backend,
+            RecordedCompletion {
+                agent_id: agent,
+                sequence_id: None,
+                parent_inference_id: None,
+                static_messages: &[],
+                tools: &[],
+                sampling: Sampling {
+                    temperature: 0.0,
+                    enable_thinking: false,
+                },
+                model: "capacity-test",
+            },
+            |_| {},
+        )
+        .await
+        .expect_err("unchanged fixed-KV rejection must fail instead of looping");
+        assert!(
+            error
+                .to_string()
+                .contains("compaction did not reduce the fixed-KV request")
+        );
+        assert!(store.pending_compaction(agent).await.unwrap().is_none());
         drop(store);
         std::fs::remove_file(path).unwrap();
     }

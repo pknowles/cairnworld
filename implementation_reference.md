@@ -44,8 +44,10 @@ when things were built.
   the backend, then records either the completed response or the failure using
   the same reference recipe. Its recipe identifies the inference record so a
   compaction result can refer to the exact request that produced it. A
-  structured fixed-KV rejection is recovered here, once for every agent, by
-  persisting and waiting for its compaction job before retrying the same recipe.
+  structured fixed-KV rejection is recovered here by persisting and waiting for
+  a compaction job before retrying the same recipe. The retry must report fewer
+  required tokens. CUDA out-of-memory remains an ordinary model error because
+  it does not establish that compaction can reduce the failed allocation.
 - `src/agent.rs` - resolves one recorded chat turn: persists each assistant
   response, runs calls from the invocation-local tool list, persists their
   results, and repeats until final text. A final reply and any due compaction
@@ -55,10 +57,9 @@ when things were built.
   It resumes pending jobs at startup and keeps same-agent history ordered.
 - `src/compaction.rs` - resolves a persisted compaction job as ordinary
   recorded summarisation, preserving exactly `keep_tail_messages` newest raw
-  rows. If that request is rejected for fixed-KV capacity, it uses the loaded
-  model's exact chat-template tokenizer only to select and verify smaller
-  linear passes; each retained prefix summary is durable until the measured
-  reconstructed context is below the threshold.
+  rows. If that request is rejected for capacity, it retains one more raw row
+  and tries the real summary request again. If no older row remains, it fails;
+  it never predicts token use or retries unchanged history.
 - `src/tools.rs` - the ordinary invocation-local lookup used to derive
   `ToolDefinition`s and run the matching Rust callback. Game tools are added
   only with their related authenticated game state, never to the sandbox REPL.
@@ -70,7 +71,10 @@ when things were built.
   with non-unique display names; durable world-owner, membership,
   character-owned player-agent, NPC-agent, and location-GM
   relationships; world/character/location/path/item/item-type/spell-type data
-  with separate GM and Storyteller JSON notes. `install_scenario` creates the
+  with separate GM and Storyteller JSON notes. Blank player characters are
+  named `AdventurerN` from their globally unique `charN` suffix, and a location
+  GM's fresh scene packet includes every player character currently there with
+  its sheet. `install_scenario` creates the
   entire initial relationship graph in one transaction and `export_scenario`
   exports only reusable scenario data, never a player's history or membership.
   The active-character lookup verifies the account, membership, world, and
@@ -124,8 +128,7 @@ when things were built.
   `max_context_tokens` per concurrently admitted inference. A completed turn
   queues compaction only when its measured input plus output would make the
   next input reach the lazy threshold; that agent's next inference waits for
-  it. This normal path performs no tokenization; only a capacity-recovery
-  compaction uses exact chat-template tokenization. Model startup logs the configured token pool, CUDA memory before and
+  it. This normal path and capacity recovery perform no tokenization. Model startup logs the configured token pool, CUDA memory before and
   after allocation, and their allocation delta; every inference logs its token capacity and actual
   input/output token use for the developer inference view.
 - Weights are not checked in; `models/` is gitignored.

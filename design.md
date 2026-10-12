@@ -477,15 +477,16 @@ completed reply is delivered. If only the retained tail remains, it records an
 inline notice and retires the job; a later turn can queue a new one. It never
 interrupts the completed game response for context pressure alone.
 
-If the ordinary compaction request itself is rejected because the fixed KV
-cache cannot admit it, the job enters its exceptional capacity fallback. Only
-there does it use the loaded model's chat-template tokenizer: it increases the
-verbatim raw tail until one otherwise ordinary, linear prefix-summary request
-fits `max_context_tokens - max_output_tokens`. It persists that summary and
-repeats while the measured reconstructed context remains at or above the lazy
-threshold. A pass that does not reduce that measured context is a hard error.
-The normal path never tokenizes merely to re-check a value already reported by
-the model.
+If an ordinary inference or compaction request is rejected for capacity, the
+same durable compaction job runs inline. It tries the ordinary prefix summary;
+if that request cannot run, it retains one more raw message and tries again.
+No request is pre-tokenized or predicted. Only Mistral's explicit fixed-KV
+capacity rejection starts immediate compaction: it reports the exact requested
+token count. A retry must report fewer required tokens than the previous
+rejection; otherwise it is a hard error. CUDA out-of-memory is a model/runtime
+failure, not evidence that history can be reduced, so it fails directly. If
+retaining the requested tail leaves no older history, compaction is also a hard
+error rather than a no-op retry.
 
 # Dev CLI: chat, replay
 
@@ -551,9 +552,8 @@ Fewer lines of ours, chosen once here so nothing gets reinvented mid-build:
   diffs explicitly)
 
 The normal compaction trigger uses the completed model inference's exact usage,
-not a second tokenizer pass. Only the rare capacity fallback tokenizes through
-mistral.rs's loaded chat template, including its tool protocol; there is no
-separate tokenizer dependency or estimate.
+not a second tokenizer pass. Capacity recovery also uses actual inference
+outcomes, so there is no separate tokenizer dependency or estimate.
 
 # Game layer
 

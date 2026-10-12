@@ -709,18 +709,26 @@ See [character
 creation](cairn/second-edition/players-guide/character-creation.md) in Cairn
 second edition.
 
-- ChooseBackground
-- RollBackground - if not choosing a background; the agent offers the player a choice
+- ChooseBackground - returns the list of available names
+- RollBackground - if not choosing a background; the agent offers the player a
+  choice
+- ChooseName - may require storyteller approval; if rejected, the storyteller
+  must suggest alternatives that fit the story
 - RollHitProtection
 - RollAttributes
 - RollTraits
 - RollBonds
 - RollAge
-- ReadyToBegin - called when the player has finished character creation
+- ReadyToBegin - called when the player has finished character creation; rust validates the character sheet is complete
 
 ChooseBackground and RollBackground are only available when the Storyteller is
 not being used, e.g. during initial development (see An initial proof of
 concept).
+
+If the storyteller is active, each roll must be approved by the storyteller,
+which may add background-specific modifiers if the story calls for it. The
+storyteller may add some background narrative to the result that directly or
+indirectly explains why this happened to connect the character with the story.
 
 ## Character actions
 
@@ -760,28 +768,31 @@ concept).
   ambiguity. NPC agents must use it appropriately/honestly.
 - Attack - using a particular weapon
 - Retreat - implies a DEX save
-- Give/Drop/Place - initiates an item transfer
+- Give/Drop/Place - initiates an item transfer.
 - Take/Request/Pickup - sends a request for an item; if from another character,
   the GM may forward that request to the character's agent for approval. If it's
   from a PC, the player's agent must ask for player approval, which may time out
   after a minute. A timeout is an error that propagates. The triggering
   character agent receives both the timeout error and the narration that the
   other character just stands there motionless.
-- Look/Investigate/Open/Ask - more of a catch-all generic action. The character
-  agent may want more information about their surroundings from the GM, to
-  clarification something previously said or to actually spend time searching
-  for something. The GM may additionally require a save or advance time. The GM
-  may reject the request saying that that this is the middle of combat and would
-  cost an action and may leave them more vulnerable to attack if the choose to
-  proceed. The player should be able to acknowledge this and make a second
-  request to proceed regardless. Note that this example is a rejection with a
-  suggestion followed by a retry with an acknowledgement. The GM LLM must be
-  capable of performing this little dance as it will be common during play and
-  custom situation resolution. There is no structured "retry"; my hope is that
-  the GM agent will recognise the retry, particularly if its prompt implies this
-  proceedure and the player agent's prompt suggests to include the text "risk
-  aside/nevertheless, spending the action to...". An alternative would be a
-  separate confirmation dialog.
+- Accept - a character's agent must approve an item being given to them or taken
+  from them. If it's a player character, the agent would ask the player if they
+  accept and make the returning call appropriately.
+- Look/Investigate/Open/Ask - more of a catch-all chat-with-the-gm. The
+  character agent may want more information about their surroundings from the
+  GM, to clarification something previously said or to actually spend time
+  searching for something. The GM may additionally require a save or advance
+  time. The GM may reject the request saying that that this is the middle of
+  combat and would cost an action and may leave them more vulnerable to attack
+  if the choose to proceed. The player should be able to acknowledge this and
+  make a second request to proceed regardless. Note that this example is a
+  rejection with a suggestion followed by a retry with an acknowledgement. The
+  GM LLM must be capable of performing this little dance as it will be common
+  during play and custom situation resolution. There is no structured "retry";
+  my hope is that the GM agent will recognise the retry, particularly if its
+  prompt implies this proceedure and the player agent's prompt suggests to
+  include the text "risk aside/nevertheless, spending the action to...". An
+  alternative would be a separate confirmation dialog.
 - Wait - skips the remainder of their turn if in combat, waits a given amount of
   time. This could default to waiting to catch up to world time (e.g. waiting
   for another PC to finish doing something). If the wait is significant (i.e.
@@ -956,10 +967,10 @@ Next to each player is a shortcut Join button to enter the world with that
 character.
 
 When a player joins a world they are automatically given a new character, with a
-placeholder name "Adventurer". The stats are undefined until they enter the game
-with that character, at which point the player's agent will guide them through
-character creation, with the help of the Storyteller, asking them to name it at
-the end.
+placeholder name "AdventurerN", where N is to disambiguate multiple characters.
+The stats are undefined until they enter the game with that character, at which
+point the player's agent will guide them through character creation, with the
+help of the Storyteller, asking them to name it at the end.
 
 There is no character detail page. Instead, characters would ask their agent to
 describe it.
