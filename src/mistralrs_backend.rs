@@ -28,6 +28,7 @@ impl MistralRsBackend {
     pub async fn load(
         model_id_or_path: &str,
         chat_template: Option<&Path>,
+        source_model: Option<&str>,
         limits: Limits,
         allow_cpu: bool,
     ) -> Result<Self> {
@@ -37,6 +38,7 @@ impl MistralRsBackend {
         tracing::info!(
             model = model_id_or_path,
             chat_template = chat_template.map(|path| path.display().to_string()),
+            source_model,
             max_concurrent_inferences = limits.max_concurrent_inferences,
             max_context_tokens = limits.max_context_tokens,
             max_output_tokens = limits.max_output_tokens,
@@ -63,6 +65,9 @@ impl MistralRsBackend {
             .with_max_num_seqs(limits.max_concurrent_inferences)
             .with_prefix_cache_n(None)
             .with_paged_attn(paged_attention);
+        if let Some(source_model) = source_model {
+            builder = builder.with_tok_model_id(source_model);
+        }
         if !allow_cpu {
             builder = builder.with_device_mapping(DeviceMapSetting::Map(
                 DeviceMapMetadata::from_num_device_layers(vec![DeviceLayerMapMetadata {
@@ -145,11 +150,14 @@ fn request_builder(request: &Request, max_output_tokens: usize) -> Result<Reques
     for message in &request.messages {
         match &message.content {
             MessageContent::Text(content) => {
-                let role = match &message.role {
-                    Role::System => TextMessageRole::System,
-                    Role::User => TextMessageRole::User,
-                    Role::Assistant => TextMessageRole::Assistant,
-                    Role::Tool => TextMessageRole::Tool,
+                let (role, content) = match &message.role {
+                    Role::System => (TextMessageRole::System, content.clone()),
+                    Role::User => (TextMessageRole::User, content.clone()),
+                    Role::Assistant => (TextMessageRole::Assistant, content.clone()),
+                    Role::Tool => (TextMessageRole::Tool, content.clone()),
+                    // The model has no narrator role; deliver it as input that
+                    // names the GM as the source.
+                    Role::Narration => (TextMessageRole::User, format!("GM narration:\n{content}")),
                 };
                 request_builder = request_builder.add_message(role, content);
             }
@@ -171,10 +179,24 @@ fn request_builder(request: &Request, max_output_tokens: usize) -> Result<Reques
             } => request_builder = request_builder.add_tool_message(content, tool_call_id),
         }
     }
-    Ok(request_builder
+    let sampling = &request.sampling;
+    let mut request_builder = request_builder
         .set_sampling(SamplingParams::neutral())
-        .set_sampler_temperature(request.sampling.temperature as f64)
-        .set_sampler_max_len(max_output_tokens)
+        .set_sampler_temperature(sampling.temperature as f64)
+        .set_sampler_max_len(max_output_tokens);
+    if let Some(top_p) = sampling.top_p {
+        request_builder = request_builder.set_sampler_topp(top_p as f64);
+    }
+    if let Some(top_k) = sampling.top_k {
+        request_builder = request_builder.set_sampler_topk(top_k);
+    }
+    if let Some(min_p) = sampling.min_p {
+        request_builder = request_builder.set_sampler_minp(min_p as f64);
+    }
+    if let Some(presence_penalty) = sampling.presence_penalty {
+        request_builder = request_builder.set_sampler_presence_penalty(presence_penalty);
+    }
+    Ok(request_builder
         .set_tools(
             request
                 .tools
@@ -434,19 +456,26 @@ mod tests {
             .try_init();
     }
 
+    /// A configured model resolved from checked-in `default.toml`, at a context
+    /// size that fits an 8 GB GPU. No `local.toml`.
+    fn device_test_model(name: &str) -> (crate::settings::Model, crate::settings::Limits) {
+        let settings = Settings::for_device_test(name).expect("default.toml should load");
+        let model = settings
+            .model(None)
+            .expect("default.toml should configure the device-test model");
+        (model, settings.limits)
+    }
+
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn streaming_completion_leaves_the_model_available_for_the_next_turn() {
         show_inference_lifecycle();
-        let settings = Settings::load().expect("settings should load");
-        let requested_model = std::env::var("CAIRNWORLD_TEST_MODEL").ok();
-        let model = settings
-            .model(requested_model.as_deref())
-            .expect("configure a model in local.toml or default.toml to run this test");
+        let (model, limits) = device_test_model("dev-qwen35");
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
-            settings.limits,
+            model.source_model.as_deref(),
+            limits,
             false,
         )
         .await
@@ -460,7 +489,7 @@ mod tests {
             tools: vec![],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
 
@@ -483,17 +512,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and a configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn opening_turn_with_tools_has_a_valid_chat_template_shape() {
         show_inference_lifecycle();
-        let settings = Settings::load().expect("settings should load");
-        let model = settings
-            .model(None)
-            .expect("configure a model in local.toml or default.toml to run this test");
+        let (model, limits) = device_test_model("dev-qwen35");
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
-            settings.limits,
+            model.source_model.as_deref(),
+            limits,
             false,
         )
         .await
@@ -513,7 +540,7 @@ mod tests {
             }],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
         backend.complete(request, |_| {}).await.expect(
@@ -522,17 +549,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured Qwen GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn qwen_zero_argument_tool_cannot_emit_placeholder_arguments() {
         show_inference_lifecycle();
-        let settings = Settings::load().expect("settings should load");
-        let model = settings
-            .model(Some("dev-qwen3"))
-            .expect("configure the dev-qwen3 model");
+        let (model, limits) = device_test_model("dev-qwen3");
         let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
-            settings.limits,
+            model.source_model.as_deref(),
+            limits,
             false,
         )
         .await
@@ -561,7 +586,7 @@ mod tests {
                     }],
                     sampling: Sampling {
                         temperature: 0.0,
-                        enable_thinking: false,
+                        ..Default::default()
                     },
                 },
                 |_| {},
@@ -574,6 +599,62 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "roll_attributes");
         assert_eq!(calls[0].arguments, "{}");
+    }
+
+    /// A tool-using turn feeds the prior assistant tool call and its result
+    /// back to the model. The chat template must render that stored call; the
+    /// Qwen3.5 template iterates `arguments` as key/value pairs, so it must
+    /// reach the template as a decoded object, not the OpenAI wire string.
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn a_prior_tool_call_message_renders_for_the_next_turn() {
+        show_inference_lifecycle();
+        let (model, limits) = device_test_model("dev-qwen35");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            model.source_model.as_deref(),
+            limits,
+            false,
+        )
+        .await
+        .expect("model should load");
+        let request = Request {
+            messages: vec![
+                Message::text(Role::System, "You are the player's guide."),
+                Message::text(Role::User, "Attack the goblin with my sword."),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::ToolCalls(vec![ToolCall {
+                        id: "c1".to_string(),
+                        name: "attack".to_string(),
+                        arguments: r#"{"target":"goblin","weapon":"sword"}"#.to_string(),
+                    }]),
+                    reasoning: String::new(),
+                },
+                Message::tool_result("c1".to_string(), "You hit for 4 damage.".to_string()),
+                Message::text(Role::User, "What now?"),
+            ],
+            tools: vec![ToolDefinition {
+                name: "attack".into(),
+                description: "Attack a target with a weapon.".into(),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "weapon": {"type": "string"},
+                    },
+                }),
+            }],
+            sampling: Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        };
+        backend
+            .complete(request, |_| {})
+            .await
+            .expect("a prior tool-call message must reach the model without a chat-template error");
     }
 
     #[test]

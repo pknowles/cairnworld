@@ -303,15 +303,8 @@ mod tests {
 
     #[tokio::test]
     async fn assembled_completion_streams_and_records_a_history_recipe() {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-context-test-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before Unix epoch")
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.expect("store should open");
+        let db = crate::store::TestDatabase::new("context-test");
+        let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
         let mut streamed = String::new();
         let response = complete_recorded(
@@ -325,7 +318,7 @@ mod tests {
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "streaming-model",
             },
@@ -339,21 +332,12 @@ mod tests {
         let recorded = store.reconstruct_inference(1).await.unwrap();
         assert_eq!(recorded.request.messages.len(), 2);
         assert_eq!(recorded.outcome, RecordedOutcome::Response(response));
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn failed_completion_is_reconstructable_without_an_assistant_message() {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-context-test-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before Unix epoch")
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.expect("store should open");
+        let db = crate::store::TestDatabase::new("context-test");
+        let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
 
         let error = complete_recorded(
@@ -367,7 +351,7 @@ mod tests {
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "failing-model",
             },
@@ -386,24 +370,19 @@ mod tests {
             store.pending_compaction(agent).await.unwrap().is_none(),
             "ordinary model failures must not be misclassified as compactable context pressure"
         );
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn capacity_recovery_does_not_retry_an_unchanged_fixed_kv_request() {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-context-test-{}-{}.sqlite",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock before Unix epoch")
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.expect("store should open");
+        let db = crate::store::TestDatabase::new("context-test");
+        let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
         store
             .append_message(agent, &Message::text(Role::Assistant, "A first reply."))
+            .await
+            .unwrap();
+        store
+            .append_message(agent, &Message::text(Role::User, "The latest question."))
             .await
             .unwrap();
         let backend = InferenceScheduler::new(
@@ -452,7 +431,7 @@ mod tests {
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
                 model: "capacity-test",
             },
@@ -463,10 +442,9 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("compaction did not reduce the fixed-KV request")
+                .contains("compaction did not reduce the fixed-KV request"),
+            "unexpected error: {error:#}"
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 }

@@ -18,6 +18,41 @@ pub struct Store {
     pool: SqlitePool,
 }
 
+/// A test database at a unique path that deletes its files on drop, including
+/// after a panic. `cargo test` runs every test in one process on many threads,
+/// so a wall-clock timestamp is not a unique name; a process-wide counter is.
+#[cfg(test)]
+pub(crate) struct TestDatabase {
+    path: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl TestDatabase {
+    pub(crate) fn new(prefix: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "cairnworld-{prefix}-{}-{}.sqlite",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        Self { path }
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDatabase {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.path.display()));
+        }
+    }
+}
+
 #[derive(Clone, Debug, FromRow, PartialEq)]
 pub struct User {
     pub id: i64,
@@ -1087,6 +1122,16 @@ impl Store {
         .with_context(|| format!("member {} has no active location", member.member_id))
     }
 
+    /// The display name of one character, for attributing an action to the GM.
+    pub async fn character_name(&self, character_id: i64) -> Result<String> {
+        sqlx::query_scalar("SELECT name FROM character WHERE id = ?")
+            .bind(character_id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("loading character name")?
+            .with_context(|| format!("character {character_id} does not exist"))
+    }
+
     /// Resolve the current location's GM from the authenticated player character.
     /// The player agent never chooses which GM receives the opening request.
     pub async fn player_location_gm_agent_id(&self, member: &PlayerAgent) -> Result<i64> {
@@ -1171,8 +1216,10 @@ impl Store {
                 if role == Role::Assistant && text.is_empty() {
                     return Ok(None);
                 }
-                Ok(matches!(role, Role::User | Role::Assistant | Role::System)
-                    .then_some(PlayerChatEntry { id, role, text }))
+                Ok(
+                    matches!(role, Role::User | Role::Assistant | Role::Narration)
+                        .then_some(PlayerChatEntry { id, role, text }),
+                )
             })
             .collect::<Result<_>>()?;
         Ok(entries.into_iter().flatten().collect())
@@ -1200,7 +1247,7 @@ impl Store {
         .await
         .context("finding active player agents at narrated location")?;
         for agent_id in agents {
-            self.append_message(agent_id, &Message::text(Role::System, narration))
+            self.append_message(agent_id, &Message::text(Role::Narration, narration))
                 .await
                 .with_context(|| {
                     format!("storing location narration for player agent {agent_id}")
@@ -2417,7 +2464,23 @@ impl Store {
                         row.id,
                         row.agent_id
                     );
-                    messages.push(Message::text(Role::System, row.content));
+                    // The summary is prior conversation carried in the leading
+                    // system message as a marked block, not a second system
+                    // turn: strict chat templates reject a system message
+                    // anywhere but first. When a recipe has a role prompt it
+                    // hosts the block; otherwise the summary is that message.
+                    let block = format!("Conversation summary so far:\n{}", row.content);
+                    match messages.first_mut() {
+                        Some(Message {
+                            role: Role::System,
+                            content: MessageContent::Text(system),
+                            ..
+                        }) => {
+                            system.push_str("\n\n");
+                            system.push_str(&block);
+                        }
+                        _ => messages.insert(0, Message::text(Role::System, block)),
+                    }
                 }
                 Segment::Messages { messages: range } => {
                     ensure!(
@@ -2487,6 +2550,24 @@ impl Store {
                 }
             }
         }
+        // A well-formed conversation for any chat model: at most one system
+        // message and only in first place, and a real user turn to answer.
+        // Strict templates (Qwen3.5) reject anything else outright; lenient
+        // ones hide the malformed input.
+        let system_positions = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == Role::System)
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>();
+        ensure!(
+            system_positions.is_empty() || system_positions == [0],
+            "assembled request for agent {agent_id} has system messages at {system_positions:?}, not only first"
+        );
+        ensure!(
+            messages.iter().any(|message| message.role == Role::User),
+            "assembled request for agent {agent_id} has no user turn for the model to answer"
+        );
         Ok(Request {
             messages,
             tools,
@@ -2667,20 +2748,11 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::*;
     use crate::llm::{Content, ToolCall};
 
-    fn database_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "cairnworld-store-test-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock before Unix epoch")
-                .as_nanos()
-        ))
+    fn database() -> super::TestDatabase {
+        super::TestDatabase::new("store-test")
     }
 
     fn response() -> Response {
@@ -2715,9 +2787,9 @@ mod tests {
         }
     }
 
-    async fn store_with_history() -> (Store, std::path::PathBuf, i64, Vec<Segment>, Request) {
-        let path = database_path();
-        let store = Store::open(&path).await.expect("store should open");
+    async fn store_with_history() -> (Store, super::TestDatabase, i64, Vec<Segment>, Request) {
+        let db = database();
+        let store = Store::open(db.path()).await.expect("store should open");
         let world = store
             .create_world("test world")
             .await
@@ -2760,7 +2832,7 @@ mod tests {
                 &segments,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -2773,13 +2845,13 @@ mod tests {
                 .expect("assistant reasoning should persist");
         assert_eq!(stored_reasoning, "scratch work");
         assert!(request.messages[1].reasoning.is_empty());
-        (store, path, agent, segments, request)
+        (store, db, agent, segments, request)
     }
 
     #[tokio::test]
     async fn membership_resolves_only_the_authenticated_users_player_history() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let alex_one = store
             .find_or_create_user("alex.one@example.test", "Alex")
             .await
@@ -2848,15 +2920,12 @@ mod tests {
             None,
             "a world id alone must never select another user's player agent"
         );
-
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn active_member_can_create_independent_player_characters() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("owner@example.test", "Owner")
             .await
@@ -2903,7 +2972,7 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].characters.len(), 2);
         let gm_agent_id = store
-            .member_location_gm_agent_id(&installed.member)
+            .player_location_gm_agent_id(&installed.member)
             .await
             .unwrap();
         let gm_scene = store
@@ -2935,14 +3004,12 @@ mod tests {
                 .unwrap(),
             Some(second)
         );
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn player_chat_reloads_only_renderable_text_from_its_active_history() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("history@example.test", "History")
             .await
@@ -2989,7 +3056,7 @@ mod tests {
         store
             .append_message(
                 installed.member.agent_id,
-                &Message::text(Role::System, "Toma watches from the doorway."),
+                &Message::text(Role::Narration, "Toma watches from the doorway."),
             )
             .await
             .unwrap();
@@ -3003,7 +3070,7 @@ mod tests {
             vec![
                 (&Role::User, "Look around."),
                 (&Role::Assistant, "The hut is quiet."),
-                (&Role::System, "Toma watches from the doorway."),
+                (&Role::Narration, "Toma watches from the doorway."),
             ],
             "reloadable player chat must not leak raw tool syntax"
         );
@@ -3018,18 +3085,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (&Role::Assistant, "The hut is quiet."),
-                (&Role::System, "Toma watches from the doorway."),
+                (&Role::Narration, "Toma watches from the doorway."),
             ],
             "a page snapshot cursor must receive each later visible entry once"
         );
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn invitations_only_grant_the_invited_world_and_preserve_one_player_history() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("owner@example.test", "Owner")
             .await
@@ -3141,14 +3206,12 @@ mod tests {
                 .is_err(),
             "a revoked link must not grant access"
         );
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn character_creation_rolls_are_stored_and_ready_requires_them() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("roller@example.test", "Roller")
             .await
@@ -3203,14 +3266,12 @@ mod tests {
             .await
             .unwrap();
         assert!(store.is_ready_to_begin(&installed.member).await.unwrap());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn installs_bread_thief_as_a_complete_playable_relationship_graph() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("warden@example.test", "Warden")
             .await
@@ -3307,15 +3368,12 @@ mod tests {
             scenario,
             "exported JSON must recreate the same scenario graph in a fresh world"
         );
-
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn pending_actions_keep_the_validated_call_for_its_location_gm() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("warden@example.test", "Warden")
             .await
@@ -3335,7 +3393,7 @@ mod tests {
             tools: vec![],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
         let inference_id = store
@@ -3428,15 +3486,12 @@ mod tests {
             next_action_id, 1,
             "a rejected request consumes no action id"
         );
-
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn approved_take_transfers_one_available_item_exactly_once() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("taker@example.test", "Taker")
             .await
@@ -3456,7 +3511,7 @@ mod tests {
             tools: vec![],
             sampling: Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         };
         let inference_id = store
@@ -3543,15 +3598,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(holders_after_retry, 1);
-
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn character_handles_are_unique_and_widen_only_after_two_digits_are_full() {
-        let path = database_path();
-        let store = Store::open(&path).await.unwrap();
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("warden@example.test", "Warden")
             .await
@@ -3565,14 +3617,11 @@ mod tests {
         }
         let widened = store.install_scenario(&owner, &scenario).await.unwrap();
         assert_eq!(widened.character_handle.len(), 7);
-
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn reconstructs_history_recipe_without_copying_messages() {
-        let (store, path, agent, segments, request) = store_with_history().await;
+        let (store, _db, agent, segments, request) = store_with_history().await;
         let first = store
             .record_inference(
                 agent,
@@ -3609,13 +3658,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(messages, 2);
-        drop(store);
-        std::fs::remove_file(path).expect("test database should be removable");
     }
 
     #[tokio::test]
     async fn reconstruction_rejects_corrupt_or_invalid_references() {
-        let (store, path, agent, segments, request) = store_with_history().await;
+        let (store, _db, agent, segments, request) = store_with_history().await;
         let id = store
             .record_inference(
                 agent,
@@ -3659,13 +3706,11 @@ mod tests {
             format!("{:#}", store.reconstruct_inference(id).await.unwrap_err())
                 .contains("missing rows")
         );
-        drop(store);
-        std::fs::remove_file(path).expect("test database should be removable");
     }
 
     #[tokio::test]
     async fn reconstruction_rejects_cross_agent_references_and_preserves_failures() {
-        let (store, path, agent, mut segments, request) = store_with_history().await;
+        let (store, _db, agent, mut segments, request) = store_with_history().await;
         let world: i64 = sqlx::query_scalar("SELECT world_id FROM agent WHERE id = ?")
             .bind(agent)
             .fetch_one(&store.pool)
@@ -3705,13 +3750,11 @@ mod tests {
             recorded.outcome,
             RecordedOutcome::Error("backend disconnected".to_string())
         );
-        drop(store);
-        std::fs::remove_file(path).expect("test database should be removable");
     }
 
     #[tokio::test]
     async fn latest_summary_replaces_only_the_history_it_covers() {
-        let (store, path, agent, segments, request) = store_with_history().await;
+        let (store, _db, agent, segments, request) = store_with_history().await;
         let inference = store
             .record_inference(
                 agent,
@@ -3727,36 +3770,99 @@ mod tests {
             .store_summary(agent, 0, "The floorboards hide a locked chest.", inference)
             .await
             .unwrap();
+        // A fresh event follows the summary, as one always does in production.
+        store
+            .append_message(agent, &Message::text(Role::User, "And the walls?"))
+            .await
+            .unwrap();
         let history = store.history_segments(agent).await.unwrap();
         assert!(matches!(
             history.as_slice(),
             [
                 Segment::Summary { summary: stored },
-                Segment::Messages { messages: MessageRange { first_seq: 1, last_seq: 1, .. } },
+                Segment::Messages { messages: MessageRange { first_seq: 1, last_seq: 2, .. } },
             ] if *stored == summary
         ));
+        let prompt = store
+            .store_prompt_text("You are a careful guide.")
+            .await
+            .unwrap();
+        let mut recipe = vec![Segment::Text {
+            text: prompt,
+            role: Role::System,
+        }];
+        recipe.extend(history);
         let assembled = store
             .request_for_segments(
                 agent,
-                &history,
+                &recipe,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
             .unwrap();
+        // The summary is folded into the single leading system message, not a
+        // second system turn, so strict chat templates accept it.
         assert!(matches!(assembled.messages.as_slice(), [
-            Message { role: Role::System, content: MessageContent::Text(summary), .. },
+            Message { role: Role::System, content: MessageContent::Text(system), .. },
             Message { role: Role::Assistant, .. },
-        ] if summary == "The floorboards hide a locked chest."));
-        drop(store);
-        std::fs::remove_file(path).unwrap();
+            Message { role: Role::User, .. },
+        ] if system.starts_with("You are a careful guide.")
+            && system.contains("The floorboards hide a locked chest.")));
+    }
+
+    #[tokio::test]
+    async fn a_summary_without_a_role_prompt_becomes_the_leading_system_message() {
+        let (store, _db, agent, segments, request) = store_with_history().await;
+        let source = store
+            .record_inference(
+                agent,
+                &segments,
+                &request,
+                InferenceOutcome::Response(response()),
+                "test-model",
+                14,
+            )
+            .await
+            .unwrap();
+        store
+            .store_summary(agent, 0, "Earlier events.", source)
+            .await
+            .unwrap();
+        // A fresh event follows the summary, as one always does in production.
+        store
+            .append_message(agent, &Message::text(Role::User, "And then?"))
+            .await
+            .unwrap();
+        let request = store
+            .request_for_segments(
+                agent,
+                &store.history_segments(agent).await.unwrap(),
+                Sampling {
+                    temperature: 0.7,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // One system message, first, carrying the marked summary.
+        assert!(matches!(
+            &request.messages[0],
+            Message { role: Role::System, content: MessageContent::Text(text), .. }
+                if text.contains("Earlier events.")
+        ));
+        assert!(
+            request.messages[1..]
+                .iter()
+                .all(|message| message.role != Role::System)
+        );
     }
 
     #[tokio::test]
     async fn summary_recipe_reconstructs_and_rejects_cross_agent_summary() {
-        let (store, path, agent, segments, request) = store_with_history().await;
+        let (store, _db, agent, segments, request) = store_with_history().await;
         let source = store
             .record_inference(
                 agent,
@@ -3772,14 +3878,27 @@ mod tests {
             .store_summary(agent, 0, "Earlier events.", source)
             .await
             .unwrap();
-        let recipe = vec![Segment::Summary { summary }];
+        store
+            .append_message(agent, &Message::text(Role::User, "And then?"))
+            .await
+            .unwrap();
+        let recipe = vec![
+            Segment::Summary { summary },
+            Segment::Messages {
+                messages: MessageRange {
+                    agent_id: agent,
+                    first_seq: 2,
+                    last_seq: 2,
+                },
+            },
+        ];
         let summary_request = store
             .request_for_segments(
                 agent,
                 &recipe,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -3812,13 +3931,63 @@ mod tests {
                 &recipe,
                 Sampling {
                     temperature: 0.7,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("references summary"));
-        drop(store);
-        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_assembled_request_must_be_a_well_formed_conversation() {
+        let (store, _db, agent, ..) = store_with_history().await;
+        let prompt = store.store_prompt_text("Guide.").await.unwrap();
+        let system = Segment::Text {
+            text: prompt,
+            role: Role::System,
+        };
+        let history = Segment::Messages {
+            messages: MessageRange {
+                agent_id: agent,
+                first_seq: 0,
+                last_seq: 1,
+            },
+        };
+        let sampling = Sampling {
+            temperature: 0.0,
+            ..Default::default()
+        };
+
+        // A second system message anywhere but first is rejected.
+        let error = store
+            .request_for_segments(
+                agent,
+                &[system.clone(), history.clone(), system.clone()],
+                sampling.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not only first"));
+
+        // A request with no user turn is rejected.
+        let assistant_only = Segment::Messages {
+            messages: MessageRange {
+                agent_id: agent,
+                first_seq: 1,
+                last_seq: 1,
+            },
+        };
+        let error = store
+            .request_for_segments(agent, &[system.clone(), assistant_only], sampling.clone())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("no user turn"));
+
+        // A leading system message plus a user turn is accepted.
+        store
+            .request_for_segments(agent, &[system, history], sampling)
+            .await
+            .unwrap();
     }
 }

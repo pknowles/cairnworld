@@ -497,7 +497,7 @@ where
                         .await?;
                     let delivery_game = Arc::clone(&game);
                     Ok(ToolOutcome::CompletedAfter {
-                        content: "The GM narration is now a separate system entry, already delivered verbatim to the player. Ask what they want to do next.".to_string(),
+                        content: "The GM's narration reached the player as its own entry. Ask what they want to do next.".to_string(),
                         after_result: Box::pin(async move {
                             delivery_game
                                 .deliver_narration(&member, narration.location_id, &narration.text, &broadcasts)
@@ -607,7 +607,7 @@ where
                 let narration = game.arbitrate(pending, location_id, budget, call).await?;
                 let delivery_game = Arc::clone(&game);
                 Ok(ToolOutcome::CompletedAfter {
-                    content: "The GM narration is now a separate system entry, already delivered verbatim to the player. Respond to the player's next choice.".to_string(),
+                    content: "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
                     after_result: Box::pin(async move {
                         delivery_game
                             .deliver_narration(&member, narration.location_id, &narration.text, &broadcasts)
@@ -638,11 +638,17 @@ where
                 .context("loading location GM scene for the opening")?,
         )
         .context("serializing location GM opening scene")?;
-        let prompt = Message::text(
+        let role = Message::text(
             Role::System,
             format!(
-                "A player character has just begun play in this location. Greet them by narrating their immediate scene, surroundings, and plot-relevant details they can perceive. The current scene packet is {scene}."
+                "You narrate play in this location for the characters present, listed in the scene packet. Describe only what the packet supports, addressing the characters as a group. The current scene packet is {scene}."
             ),
+        );
+        // The event that starts this turn: tool-capable chat templates need a
+        // user message before the agent speaks.
+        let request = Message::text(
+            Role::User,
+            "A player character has just begun play here. Narrate the scene, surroundings, and plot-relevant details the characters present can perceive.",
         );
         let response = agent::complete_with_call_context(
             &self.store,
@@ -650,7 +656,7 @@ where
             &budget,
             agent::Turn {
                 agent_id: gm_agent_id,
-                static_messages: &[prompt],
+                static_messages: &[role, request],
                 tools: &[],
                 sampling: self.sampling.clone(),
                 model: &self.model,
@@ -777,10 +783,19 @@ where
                 .context("loading location GM scene for prompt")?,
         )
         .context("serializing location GM scene for prompt")?;
-        let static_message = Message::text(
+        let actor = self.store.character_name(pending.character_id).await?;
+        let role = Message::text(
             Role::System,
             format!(
-                "You arbitrate this location. The current scene packet is {scene}. Action {action_id} is a `{}` request with arguments {}. Judge it from that packet, call approve_action with its id if it can happen, then narrate the outcome.",
+                "You arbitrate this location for the characters present, listed in the scene packet. Judge each action from that packet, call approve_action with its id if it can happen or reject it with a reason, then narrate the outcome to the characters present. The current scene packet is {scene}."
+            ),
+        );
+        // The event that starts this turn: tool-capable chat templates need a
+        // user message before the agent speaks.
+        let request = Message::text(
+            Role::User,
+            format!(
+                "{actor} takes action {action_id}: a `{}` request with arguments {}.",
                 pending.tool, pending.args,
             ),
         );
@@ -790,7 +805,7 @@ where
             &budget,
             agent::Turn {
                 agent_id: pending.location_gm_agent_id,
-                static_messages: &[static_message],
+                static_messages: &[role, request],
                 tools: &[gm_tool, reject_tool],
                 sampling: self.sampling.clone(),
                 model: &self.model,
@@ -922,7 +937,6 @@ mod tests {
             Mutex,
             atomic::{AtomicUsize, Ordering},
         },
-        time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
@@ -933,8 +947,6 @@ mod tests {
         scenario::Scenario,
         settings::Settings,
     };
-
-    static NEXT_TEST_DATABASE: AtomicUsize = AtomicUsize::new(0);
 
     struct ScriptedBackend {
         responses: Mutex<VecDeque<Response>>,
@@ -1026,7 +1038,7 @@ mod tests {
 
     async fn blank_opening_game<B>(
         backend: B,
-    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, PlayerAgent)
+    ) -> (Arc<Game<B>>, Store, crate::store::TestDatabase, PlayerAgent)
     where
         B: Backend + Send + Sync + 'static,
     {
@@ -1035,7 +1047,7 @@ mod tests {
             "scripted".into(),
             Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         )
         .await
@@ -1045,20 +1057,46 @@ mod tests {
         backend: B,
         model: String,
         sampling: Sampling,
-    ) -> (Arc<Game<B>>, Store, std::path::PathBuf, PlayerAgent)
+    ) -> (Arc<Game<B>>, Store, crate::store::TestDatabase, PlayerAgent)
     where
         B: Backend + Send + Sync + 'static,
     {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-opening-test-{}-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT_TEST_DATABASE.fetch_add(1, Ordering::Relaxed),
-        ));
-        let store = Store::open(&path).await.unwrap();
+        opening_game_with_limits(backend, model, sampling, Limits::default()).await
+    }
+
+    async fn device_test_game() -> (MistralRsBackend, String, Sampling, Limits) {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("cairnworld=info")
+            .with_test_writer()
+            .try_init();
+        let settings = Settings::for_device_test("dev-qwen35").expect("default.toml should load");
+        let model = settings
+            .model(None)
+            .expect("default.toml should configure the device-test model");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            model.source_model.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .expect("device-test model should load");
+        let sampling = settings.sampling(&model);
+        (backend, model.path, sampling, settings.limits)
+    }
+
+    async fn opening_game_with_limits<B>(
+        backend: B,
+        model: String,
+        sampling: Sampling,
+        limits: Limits,
+    ) -> (Arc<Game<B>>, Store, crate::store::TestDatabase, PlayerAgent)
+    where
+        B: Backend + Send + Sync + 'static,
+    {
+        let db = crate::store::TestDatabase::new("opening-test");
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("opening@example.test", "Opening")
             .await
@@ -1069,28 +1107,21 @@ mod tests {
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
-        let scheduler = InferenceScheduler::new(backend, Limits::default()).unwrap();
+        let scheduler = InferenceScheduler::new(backend, limits).unwrap();
         let game = Arc::new(Game::new(
             store.clone(),
             scheduler.foreground(),
-            Limits::default(),
+            limits,
             model,
             sampling,
         ));
-        (game, store, path, installed.member)
+        (game, store, db, installed.member)
     }
 
     #[tokio::test]
     async fn player_take_is_approved_by_its_location_gm_and_transferred_by_rust() {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-game-test-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.unwrap();
+        let db = crate::store::TestDatabase::new("game-test");
+        let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("warden@example.test", "Warden")
             .await
@@ -1153,7 +1184,7 @@ mod tests {
             "scripted".into(),
             Sampling {
                 temperature: 0.0,
-                enable_thinking: false,
+                ..Default::default()
             },
         ));
         let mut broadcasts = game.subscribe(&installed.member).await.unwrap();
@@ -1175,7 +1206,7 @@ mod tests {
         let narration = chat
             .iter()
             .position(|entry| {
-                entry.role == Role::System
+                entry.role == Role::Narration
                     && entry.text == "You lift the flour sack while Toma watches."
             })
             .expect("the GM narration must be stored for a browser reload");
@@ -1186,6 +1217,16 @@ mod tests {
             ),
             "the player agent must follow already-delivered GM narration instead of preceding it"
         );
+        assert!(
+            store
+                .player_chat(&companion)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.role == Role::Narration
+                    && entry.text == "You lift the flour sack while Toma watches."),
+            "the same GM narration must reach every co-located character's history"
+        );
         let request = store
             .request_for_segments(
                 installed.member.agent_id,
@@ -1195,7 +1236,7 @@ mod tests {
                     .unwrap(),
                 Sampling {
                     temperature: 0.0,
-                    enable_thinking: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -1213,7 +1254,7 @@ mod tests {
         assert!(
             matches!(
                 request.messages.get(narration - 1).map(|message| &message.content),
-                Some(MessageContent::ToolResult { content, .. }) if content.contains("GM narration is now a separate system entry")
+                Some(MessageContent::ToolResult { content, .. }) if content.contains("narration reached the player as its own entry")
             ),
             "the player agent must receive its tool result before the GM narration"
         );
@@ -1228,21 +1269,29 @@ mod tests {
             .iter()
             .flat_map(|request| request.messages.iter())
             .find_map(|message| match &message.content {
-                MessageContent::Text(text) if text.starts_with("You arbitrate this location.") => {
+                MessageContent::Text(text) if text.starts_with("You arbitrate this location") => {
                     Some(text)
                 }
                 _ => None,
             })
             .expect("the GM arbitration must receive its actual location packet");
-        for name in player_names {
+        for name in &player_names {
             assert!(
                 gm_packet.contains(&format!("\"name\":\"{name}\"")),
                 "the GM packet must name every player character in its location"
             );
         }
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
+        let acting = &player_names[0];
+        assert!(
+            requests
+                .iter()
+                .flat_map(|request| request.messages.iter())
+                .any(|message| {
+                    matches!(&message.content, MessageContent::Text(text)
+                    if text.starts_with(&format!("{acting} takes action")))
+                }),
+            "the GM must be told which character took the action"
+        );
     }
 
     #[tokio::test]
@@ -1250,7 +1299,7 @@ mod tests {
         let (backend, recorded_requests) = ScriptedBackend::recording([response(Content::Text(
             "Welcome. Let us make your Adventurer.".into(),
         ))]);
-        let (game, store, path, member) = blank_opening_game(backend).await;
+        let (game, _store, _db, member) = blank_opening_game(backend).await;
 
         let response = game.enter(member.clone()).await.unwrap().unwrap();
         assert!(
@@ -1291,15 +1340,12 @@ mod tests {
             "reconnecting after the opening turn must not start a second character-creation conversation"
         );
         assert_eq!(recorded_requests.lock().unwrap().len(), 1);
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
     async fn concurrent_viewers_share_one_server_owned_opening() {
         let (backend, started, release, requests) = DelayedBackend::new();
-        let (game, store, path, member) = blank_opening_game(backend).await;
+        let (game, store, _db, member) = blank_opening_game(backend).await;
         let first_game = Arc::clone(&game);
         let first_member = member.clone();
         let first = tokio::spawn(async move { first_game.wait_for_opening(first_member).await });
@@ -1327,9 +1373,6 @@ mod tests {
                 .is_empty(),
             "the shared opening must finish with stored player-agent history"
         );
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -1344,7 +1387,7 @@ mod tests {
                 "Welcome. Let us make your Adventurer.".into(),
             )),
         ]);
-        let (game, store, path, member) = blank_opening_game(backend).await;
+        let (game, store, _db, member) = blank_opening_game(backend).await;
 
         game.wait_for_opening(member.clone()).await.unwrap();
         assert_eq!(requests.lock().unwrap().len(), 2);
@@ -1365,46 +1408,17 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant),
             "a later opening must persist the reply that makes reconnects viewers only"
         );
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_opening_reaches_a_stored_player_reply() {
         // This is deliberately the same server-owned opening path the web
         // socket awaits, rather than a direct backend request. A successful
         // return proves the agent settled and its player-visible reply
         // committed to stored history.
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("cairnworld=info")
-            .with_test_writer()
-            .try_init();
-        let settings = Settings::load().expect("settings should load");
-        let model_name = std::env::var("CAIRNWORLD_REAL_MODEL").expect(
-            "set CAIRNWORLD_REAL_MODEL to a configured GPU-resident model, such as dev-qwen3",
-        );
-        let model = settings
-            .model(Some(&model_name))
-            .expect("CAIRNWORLD_REAL_MODEL should name a configured model");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            settings.limits,
-            false,
-        )
-        .await
-        .expect("model should load");
-        let (game, store, path, member) = opening_game(
-            backend,
-            model.path,
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-        )
-        .await;
+        let (backend, model_path, sampling, _limits) = device_test_game().await;
+        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
 
         game.wait_for_opening(member.clone())
             .await
@@ -1441,41 +1455,20 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
             "the completed opening must leave a player-visible assistant reply"
         );
-
-        std::fs::remove_file(path).expect("opening test database should be removable");
     }
 
     #[tokio::test]
-    #[ignore = "requires a CUDA-capable device and the configured GGUF model"]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_calls_ready_to_begin_after_the_final_roll() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("cairnworld=info")
-            .with_test_writer()
-            .try_init();
-        let settings = Settings::load().expect("settings should load");
-        let model_name = std::env::var("CAIRNWORLD_REAL_MODEL").expect(
-            "set CAIRNWORLD_REAL_MODEL to a configured GPU-resident model, such as dev-qwen3",
-        );
-        let model = settings
-            .model(Some(&model_name))
-            .expect("CAIRNWORLD_REAL_MODEL should name a configured model");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            settings.limits,
-            false,
-        )
-        .await
-        .expect("model should load");
-        let (game, store, path, member) = opening_game(
-            backend,
-            model.path,
-            Sampling {
-                temperature: 0.0,
-                enable_thinking: false,
-            },
-        )
-        .await;
+        let (backend, model_path, configured, _limits) = device_test_game().await;
+        // Greedy: this asserts the model follows a specific instruction
+        // (call ready_to_begin once the rolls are done), so it must not depend
+        // on a sampling draw.
+        let sampling = Sampling {
+            temperature: 0.0,
+            ..configured
+        };
+        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
         let sequence = store
             .begin_sequence(member.world_id, "test completed creation")
             .await
@@ -1489,25 +1482,74 @@ mod tests {
             .await
             .unwrap();
 
-        game.player_message(
-            member.clone(),
-            "The required rolls are complete. Begin play now.",
-        )
-        .await
-        .expect("the player agent must begin play after the final roll");
-        assert!(store.is_ready_to_begin(&member).await.unwrap());
+        // A small model at greedy still occasionally re-rolls or stalls; a
+        // real session would prompt again. Three nudges is generous for a
+        // model that can follow the instruction and still fails a genuine
+        // prompt or template regression.
+        for attempt in 1..=3 {
+            game.player_message(
+                member.clone(),
+                "The required rolls are complete. Begin play now.",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("player agent turn {attempt} failed: {error:#}"));
+            if store.is_ready_to_begin(&member).await.unwrap() {
+                break;
+            }
+        }
+        assert!(
+            store.is_ready_to_begin(&member).await.unwrap(),
+            "the model never called ready_to_begin across three prompts"
+        );
         assert!(
             store
                 .player_chat(&member)
                 .await
                 .unwrap()
                 .iter()
-                .any(|entry| entry.role == Role::System),
+                .any(|entry| entry.role == Role::Narration),
             "the GM opening narration must become player-visible before the guide follows up"
         );
+    }
 
-        drop(game);
-        drop(store);
-        std::fs::remove_file(path).expect("opening test database should be removable");
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn real_model_compacts_a_long_chat_and_keeps_an_early_fact() {
+        let (backend, model_path, sampling, base_limits) = device_test_game().await;
+        // A threshold the second turn's context clears, retaining enough tail
+        // that the summary has real history to work from.
+        let limits = Limits {
+            compact_before_next_input_tokens: 700,
+            keep_tail_messages: 4,
+            ..base_limits
+        };
+        let (game, store, _db, member) =
+            opening_game_with_limits(backend, model_path, sampling, limits).await;
+
+        // An early, checkable fact, then enough turns to force a compaction.
+        game.player_message(member.clone(), "Remember the passphrase: BRAMBLEFOX.")
+            .await
+            .expect("first player message");
+        for prompt in [
+            "Describe the room I'm in.",
+            "What can I hear right now?",
+            "Tell me about the nearest exit.",
+            "What time of day is it?",
+        ] {
+            game.player_message(member.clone(), prompt)
+                .await
+                .expect("later player message");
+        }
+
+        let summary = store
+            .latest_summary(member.agent_id)
+            .await
+            .expect("summary should load")
+            .expect("a compaction must have run");
+        assert!(
+            summary.content.to_uppercase().contains("BRAMBLEFOX"),
+            "the summary dropped an early fact it should retain: {}",
+            summary.content
+        );
     }
 }

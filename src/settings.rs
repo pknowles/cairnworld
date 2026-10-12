@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
+use crate::llm::Sampling;
+
 #[derive(Deserialize, Default)]
 pub struct Settings {
     /// Which entry of `models` to use when `--model` is not given.
@@ -11,7 +13,50 @@ pub struct Settings {
     pub models: BTreeMap<String, Model>,
     #[serde(default)]
     pub limits: Limits,
+    /// Sampling shared by every model; `[models.<name>.sampling]` overrides it
+    /// field by field.
+    #[serde(default)]
+    pub sampling: SamplingConfig,
     pub web: Option<Web>,
+}
+
+/// Every sampling knob is optional so a common `[sampling]` block and a
+/// per-model one merge cleanly. `temperature` is the only one with a default
+/// when nothing sets it.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamplingConfig {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<usize>,
+    pub min_p: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub enable_thinking: Option<bool>,
+}
+
+impl SamplingConfig {
+    /// Fields set in `over` win; unset fields keep `self`.
+    fn merged(self, over: SamplingConfig) -> SamplingConfig {
+        SamplingConfig {
+            temperature: over.temperature.or(self.temperature),
+            top_p: over.top_p.or(self.top_p),
+            top_k: over.top_k.or(self.top_k),
+            min_p: over.min_p.or(self.min_p),
+            presence_penalty: over.presence_penalty.or(self.presence_penalty),
+            enable_thinking: over.enable_thinking.or(self.enable_thinking),
+        }
+    }
+
+    fn resolve(self) -> Sampling {
+        Sampling {
+            temperature: self.temperature.unwrap_or(1.0),
+            top_p: self.top_p,
+            top_k: self.top_k,
+            min_p: self.min_p,
+            presence_penalty: self.presence_penalty,
+            enable_thinking: self.enable_thinking.unwrap_or(false),
+        }
+    }
 }
 
 /// Deployment configuration for the OAuth-only browser interface. It is
@@ -28,11 +73,15 @@ pub struct Web {
 /// A model and everything needed to talk to it. The chat template travels with
 /// the weights because it is a property of the file: the Hermes 3 GGUF ships
 /// one that silently drops tool definitions, so it needs a replacement while
-/// the others do not.
+/// the others do not. Some GGUFs also need their original model's configuration,
+/// tokenizer, and template, which `source_model` supplies.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Model {
     pub path: String,
     pub chat_template: Option<PathBuf>,
+    pub source_model: Option<String>,
+    #[serde(default)]
+    pub sampling: SamplingConfig,
 }
 
 impl Settings {
@@ -53,7 +102,15 @@ impl Settings {
         Ok(Model {
             path: name.to_string(),
             chat_template: None,
+            source_model: None,
+            sampling: SamplingConfig::default(),
         })
+    }
+
+    /// Sampling for a model: the common `[sampling]` block with that model's
+    /// own `[models.<name>.sampling]` fields layered on top.
+    pub fn sampling(&self, model: &Model) -> Sampling {
+        self.sampling.merged(model.sampling).resolve()
     }
 
     pub fn web(&self) -> Result<&Web> {
@@ -163,12 +220,42 @@ impl Limits {
 }
 
 impl Settings {
+    /// The runtime configuration: checked-in `default.toml` with per-machine
+    /// `local.toml` layered on top.
     pub fn load() -> Result<Self> {
+        Self::build(config::File::with_name("local").required(false))
+    }
+
+    /// `default.toml` with an inline TOML override layered on top and no
+    /// `local.toml`. Tests use this so they exercise the real configuration
+    /// path without depending on a developer's machine.
+    #[cfg(test)]
+    pub fn for_test(overrides: &str) -> Result<Self> {
+        Self::build(config::File::from_str(overrides, config::FileFormat::Toml))
+    }
+
+    /// `default.toml` selecting the named model at a context size that fits an
+    /// 8 GB card, for the `#[ignore]`d device tests. No `local.toml`; change the
+    /// `[limits]` here for other hardware.
+    #[cfg(test)]
+    pub fn for_device_test(model: &str) -> Result<Self> {
+        // 4096 keeps the paged KV reservation under 2 GB so an 8 GB card holds
+        // the model too; the compaction trigger just needs to sit comfortably
+        // inside that with output-token headroom.
+        Self::for_test(&format!(
+            "model = \"{model}\"\n\
+             [limits]\n\
+             max_context_tokens = 4096\n\
+             compact_before_next_input_tokens = 2048\n"
+        ))
+    }
+
+    fn build(over: impl config::Source + Send + Sync + 'static) -> Result<Self> {
         config::Config::builder()
             .add_source(config::File::with_name("default"))
-            .add_source(config::File::with_name("local").required(false))
+            .add_source(over)
             .build()
-            .context("loading default.toml and local.toml")?
+            .context("loading configuration")?
             .try_deserialize()
             .context("parsing configuration")
     }
@@ -176,7 +263,98 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::Limits;
+    use super::{Limits, Settings};
+
+    #[test]
+    fn for_test_overrides_one_limit_and_keeps_the_rest_of_checked_in_default_toml() {
+        // The intent: checked-in default.toml loads on its own, and an inline
+        // override merges into its `[limits]` table field-by-field rather than
+        // replacing it. No local.toml is consulted.
+        let baseline = Settings::for_test("").unwrap().limits;
+        let overridden = Settings::for_test("[limits]\nmax_context_tokens = 4096\n")
+            .unwrap()
+            .limits;
+
+        assert_eq!(overridden.max_context_tokens, 4096);
+        assert_ne!(baseline.max_context_tokens, 4096); // the override actually changed it
+        assert_eq!(overridden.keep_tail_messages, baseline.keep_tail_messages);
+        assert_eq!(
+            overridden.compact_before_next_input_tokens,
+            baseline.compact_before_next_input_tokens
+        );
+    }
+
+    #[test]
+    fn for_device_test_fits_a_small_card_and_selects_the_named_model() {
+        let settings = Settings::for_device_test("dev-qwen35").unwrap();
+        settings.limits.validate().unwrap();
+        assert!(settings.limits.max_context_tokens <= 4096);
+        assert_eq!(
+            settings.model(None).unwrap().path,
+            settings.model(Some("dev-qwen35")).unwrap().path
+        );
+    }
+
+    #[test]
+    fn source_model_is_available_to_a_named_gguf() {
+        let settings: Settings = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+                    [models.dev-qwen35]
+                    path = "models/Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+                    source_model = "Qwen/Qwen3.5-4B"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        let model = settings.model(Some("dev-qwen35")).unwrap();
+        assert_eq!(model.source_model.as_deref(), Some("Qwen/Qwen3.5-4B"));
+    }
+
+    #[test]
+    fn per_model_sampling_overrides_the_common_block_field_by_field() {
+        let settings: Settings = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+                    [sampling]
+                    temperature = 0.7
+                    top_p = 0.8
+                    top_k = 20
+
+                    [models.tight]
+                    path = "models/tight.gguf"
+                    [models.tight.sampling]
+                    top_p = 0.1
+                    presence_penalty = 1.0
+
+                    [models.plain]
+                    path = "models/plain.gguf"
+                "#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        let tight = settings.sampling(&settings.model(Some("tight")).unwrap());
+        assert_eq!(tight.temperature, 0.7); // from the common block
+        assert_eq!(tight.top_p, Some(0.1)); // overridden
+        assert_eq!(tight.top_k, Some(20)); // from the common block
+        assert_eq!(tight.presence_penalty, Some(1.0)); // model-only
+
+        let plain = settings.sampling(&settings.model(Some("plain")).unwrap());
+        assert_eq!(plain.top_p, Some(0.8));
+        assert_eq!(plain.presence_penalty, None);
+
+        // An unconfigured path falls back to the temperature default.
+        let bare = settings.sampling(&settings.model(Some("x/y.gguf")).unwrap());
+        assert_eq!(bare.top_p, Some(0.8));
+    }
 
     #[test]
     fn fixed_context_capacity_is_independent_of_lazy_compaction() {

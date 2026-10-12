@@ -267,8 +267,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::*;
     use crate::{
         llm::{Message, Role, Sampling, Usage},
@@ -366,15 +364,8 @@ mod tests {
 
     #[tokio::test]
     async fn same_agent_waits_until_its_persisted_job_finishes() {
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-inference-test-{}-{}.sqlite",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Store::open(&path).await.unwrap();
+        let db = crate::store::TestDatabase::new("inference-test");
+        let store = Store::open(db.path()).await.unwrap();
         let world = store.create_world("test").await.unwrap();
         let agent = store.create_agent(world).await.unwrap();
         store
@@ -390,7 +381,7 @@ mod tests {
                     compact_before_next_input_tokens: 2,
                     sampling: &Sampling {
                         temperature: 0.0,
-                        enable_thinking: false,
+                        ..Default::default()
                     },
                     model: "test",
                     static_segments: &[],
@@ -405,7 +396,5 @@ mod tests {
         let scheduler = scheduler(1);
         scheduler.wait_for_agent(&store, agent).await.unwrap();
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
-        drop(store);
-        std::fs::remove_file(path).unwrap();
     }
 }
