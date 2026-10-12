@@ -11,6 +11,20 @@
     }
   },
   "starting_location": "charcoal hut",
+  "starting_group": "charcoal hut",
+  "groups": [
+    {
+      "name": "charcoal hut",
+      "location": "charcoal hut",
+      "description": "Everyone present at the charcoal hut: the Adventurer, Mara and Toma.",
+      "notes": {
+        "gm": {
+          "grouping": "This is one group, not several factions; Mara and Toma are both reachable in the same GM turn."
+        },
+        "storyteller": {}
+      }
+    }
+  ],
   "locations": [
     {
       "name": "charcoal hut",
@@ -30,7 +44,7 @@
   "npcs": [
     {
       "name": "Mara",
-      "location": "charcoal hut",
+      "group": "charcoal hut",
       "description": "The village storehouse keeper who asks the Adventurer to recover the flour. She is angry but does not want Toma badly hurt.",
       "background": "Mara knows Toma injured his leg, has struggled to work, has begged for food, and fears the constable.",
       "motive": "Recover enough flour for the village without making Toma's situation worse.",
@@ -45,7 +59,7 @@
     },
     {
       "name": "Toma",
-      "location": "charcoal hut",
+      "group": "charcoal hut",
       "description": "An injured former farmhand sheltering in the hut. His leg is swollen and poorly wrapped; he can walk, stand and fight, but cannot move quickly with the flour or climb through the window with it.",
       "background": "Toma stole a sack of flour after being unable to find work and fearing imprisonment by the constable.",
       "motive": "Avoid imprisonment and find enough food, warmth, and help to reach another settlement.",

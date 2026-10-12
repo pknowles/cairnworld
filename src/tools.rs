@@ -8,8 +8,44 @@ use serde::Deserialize;
 
 use crate::llm::{ToolCall, ToolDefinition};
 
-type ToolExecution = dyn Fn(&str, i64) -> ToolFuture + Send + Sync;
+/// The context every tool execution receives: the model call's arguments and
+/// the tool_execution row already created for this exact call (one per output
+/// ordinal, before any call in the batch runs). Nested game calls thread this
+/// id through instead of an inference id/call-id pair, so an action or its
+/// result links to the exact originating call by row rather than matching on
+/// model-supplied text.
+pub struct ToolCallContext<'a> {
+    pub arguments: &'a str,
+    pub tool_execution_id: i64,
+}
+
+type ToolExecution = dyn Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync;
 pub type AfterToolResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+/// A group partition or merge, proposed by a grouping tool call. Never
+/// applied at the point the tool executes - the batch loop collects these in
+/// call order and applies them all in one transaction at the end of the
+/// current model-returned tool batch (design.md's "Tool boundary": "Other
+/// calls in that batch execute in returned order against the pre-transition
+/// group, which is the context in which the model generated them").
+pub enum TopologyChange {
+    Split {
+        group_id: i64,
+        partitions: Vec<GroupPartition>,
+        continue_with_character_id: Option<i64>,
+    },
+    Merge {
+        group_ids: Vec<i64>,
+        name: String,
+        description: String,
+    },
+}
+
+pub struct GroupPartition {
+    pub character_ids: Vec<i64>,
+    pub name: String,
+    pub description: String,
+}
 
 /// The model receives a rejected call as an ordinary tool result and can
 /// correct its request. Infrastructure failures remain `Err` so they retain
@@ -21,21 +57,13 @@ pub enum ToolOutcome {
         after_result: AfterToolResult,
     },
     Rejected(String),
+    /// A proposed split/merge, not yet applied - see `TopologyChange`.
+    PendingTopologyChange(TopologyChange),
 }
 
 impl ToolOutcome {
     pub fn rejected(error: anyhow::Error) -> Self {
         Self::Rejected(format!("Tool arguments were rejected: {error:#}"))
-    }
-
-    pub fn into_parts(self) -> (String, Option<AfterToolResult>) {
-        match self {
-            Self::Completed(content) | Self::Rejected(content) => (content, None),
-            Self::CompletedAfter {
-                content,
-                after_result,
-            } => (content, Some(after_result)),
-        }
     }
 }
 
@@ -51,15 +79,15 @@ impl Tool {
         self.definition.clone()
     }
 
-    pub async fn execute(&self, arguments: &str, inference_id: i64) -> Result<ToolOutcome> {
-        (self.execute)(arguments, inference_id).await
+    pub async fn execute(&self, context: ToolCallContext<'_>) -> Result<ToolOutcome> {
+        (self.execute)(context).await
     }
 }
 
 impl Tool {
     pub fn new(
         definition: ToolDefinition,
-        execute: impl Fn(&str, i64) -> ToolFuture + Send + Sync + 'static,
+        execute: impl Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync + 'static,
     ) -> Self {
         Self {
             definition,
@@ -79,8 +107,8 @@ pub fn test_echo() -> Tool {
             schema: serde_json::to_value(schema_for!(TestEcho))
                 .expect("test echo schema should serialize"),
         },
-        |arguments, _| {
-            let arguments = arguments.to_string();
+        |context| {
+            let arguments = context.arguments.to_string();
             Box::pin(async move {
                 match test_echo_arguments(&arguments) {
                     Ok(content) => Ok(ToolOutcome::Completed(content)),
@@ -126,16 +154,23 @@ pub fn definitions(tools: &[Tool]) -> Result<Vec<ToolDefinition>> {
         .collect()
 }
 
-pub async fn execute(tools: &[Tool], call: &ToolCall, inference_id: i64) -> Result<ToolOutcome> {
+pub async fn execute(
+    tools: &[Tool],
+    call: &ToolCall,
+    tool_execution_id: i64,
+) -> Result<ToolOutcome> {
     let Some(tool) = tools.iter().find(|tool| tool.definition.name == call.name) else {
         return Ok(ToolOutcome::Rejected(format!(
             "Tool `{}` is unavailable in this conversation.",
             call.name
         )));
     };
-    tool.execute(&call.arguments, inference_id)
-        .await
-        .with_context(|| format!("executing tool `{}`", call.name))
+    tool.execute(ToolCallContext {
+        arguments: &call.arguments,
+        tool_execution_id,
+    })
+    .await
+    .with_context(|| format!("executing tool `{}`", call.name))
 }
 
 #[cfg(test)]
@@ -165,7 +200,7 @@ mod tests {
                 description: "Invalid fixture.".into(),
                 schema: serde_json::json!({"type": "object"}),
             },
-            |_, _| Box::pin(async { Ok(ToolOutcome::Completed(String::new())) }),
+            |_| Box::pin(async { Ok(ToolOutcome::Completed(String::new())) }),
         );
 
         let error = definitions(&[tool]).expect_err("missing properties must fail fast");

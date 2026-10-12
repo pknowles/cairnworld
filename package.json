@@ -2,7 +2,7 @@
   "scripts": {
     "build:css": "tailwindcss -i style/app.css -o target/site/pkg/cairnworld.css",
     "build:frontend": "cargo leptos build --frontend-only && npm run build:css",
-    "test:hydration": "npm run build:frontend && node scripts/check_hydration.cjs && node scripts/check_player_chat.cjs"
+    "test:hydration": "npm run build:frontend && mkdir -p target/browser-tests && TMPDIR=\"$PWD/target/browser-tests\" cargo test browser_checks -- --ignored --nocapture"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.3.3",

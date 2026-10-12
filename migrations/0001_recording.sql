@@ -1,8 +1,8 @@
--- Pre-1.0: this schema is edited in place rather than migrated. There are no
--- deployed databases, and supporting migrations this early costs more than it
--- saves. Changing a column here invalidates existing database files - delete
--- them and start again. Add real migrations when a database exists that
--- someone would miss.
+-- Pre-1.0: this is the complete, authoritative schema. Existing databases are
+-- deliberately incompatible while the project has no real users or data that
+-- must be retained: delete the database and recreate it after changing this
+-- file. Stop editing schema history in place and add forward migrations once
+-- real user databases exist.
 
 CREATE TABLE world (
     id INTEGER PRIMARY KEY NOT NULL,
@@ -12,7 +12,10 @@ CREATE TABLE world (
     storyteller_summary TEXT NOT NULL DEFAULT '',
     next_action_id INTEGER NOT NULL DEFAULT 0,
     gm_notes TEXT NOT NULL DEFAULT '{}',
-    storyteller_notes TEXT NOT NULL DEFAULT '{}'
+    storyteller_notes TEXT NOT NULL DEFAULT '{}',
+    -- Owner-controlled toggle. Recording runs regardless; this only decides
+    -- whether active members can open the developer inspection views.
+    developer_mode INTEGER NOT NULL DEFAULT 0
 );
 
 -- OAuth identity is email only. A player-visible name is ordinary profile text:
@@ -58,14 +61,6 @@ CREATE TABLE agent (
     world_id INTEGER NOT NULL REFERENCES world(id)
 );
 
--- An agent is just a history. This relationship is what makes it the one
--- player-facing history for a membership; other agent roles get their own
--- owning game relationship as those game objects are introduced.
-CREATE TABLE member_player_agent (
-    member_id INTEGER PRIMARY KEY NOT NULL REFERENCES world_member(id),
-    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
-);
-
 -- A character does not have a location until it is created and placed. This
 -- avoids incomplete placeholder rows for the Adventurer created on joining.
 CREATE TABLE character (
@@ -88,8 +83,9 @@ CREATE TABLE character (
 );
 
 CREATE TABLE player_character (
-    member_id INTEGER PRIMARY KEY NOT NULL REFERENCES world_member(id),
-    character_id INTEGER NOT NULL UNIQUE REFERENCES character(id)
+    member_id INTEGER NOT NULL REFERENCES world_member(id),
+    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
+    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
 );
 
 CREATE TABLE location (
@@ -103,15 +99,9 @@ CREATE TABLE location (
     UNIQUE (world_id, name)
 );
 
-CREATE TABLE character_location (
-    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
-    location_id INTEGER NOT NULL REFERENCES location(id),
-    description TEXT NOT NULL
-);
-
-CREATE TABLE location_gm (
-    location_id INTEGER PRIMARY KEY NOT NULL REFERENCES location(id),
-    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
+CREATE TABLE world_starting_location (
+    world_id INTEGER PRIMARY KEY NOT NULL REFERENCES world(id),
+    location_id INTEGER NOT NULL REFERENCES location(id)
 );
 
 CREATE TABLE npc_agent (
@@ -119,7 +109,7 @@ CREATE TABLE npc_agent (
     agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
 );
 
-CREATE TABLE path (
+CREATE TABLE connection (
     id INTEGER PRIMARY KEY NOT NULL,
     world_id INTEGER NOT NULL REFERENCES world(id),
     from_location_id INTEGER NOT NULL REFERENCES location(id),
@@ -129,6 +119,72 @@ CREATE TABLE path (
     gm_notes TEXT NOT NULL DEFAULT '{}',
     storyteller_notes TEXT NOT NULL DEFAULT '{}',
     CHECK (from_location_id <> to_location_id)
+);
+
+-- One GM agent per world; its many history branches are each owned by a
+-- group, not this table, since a world_gm plays several concurrent groups
+-- (design.md's "Groups and shared GM history": "GM context follows the
+-- interacting group, including when it moves; location alone does not
+-- determine shared history").
+CREATE TABLE world_gm (
+    world_id INTEGER PRIMARY KEY NOT NULL REFERENCES world(id),
+    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
+);
+
+-- One GM history branch shared by every character currently in the group.
+-- A null retired_at is an active group with a writable head; a retired group
+-- keeps its final head for inspection but gets no new characters or entries.
+-- location_id is where the group currently is, not a derived grouping key -
+-- distinct groups may share one location.
+-- name is a scenario-authoring/export handle (like location.name), not part
+-- of design.md's listed columns: groups need a stable reference distinct from
+-- their prose description for scenario JSON round-tripping.
+CREATE TABLE "group" (
+    id INTEGER PRIMARY KEY NOT NULL,
+    world_id INTEGER NOT NULL REFERENCES world(id),
+    name TEXT NOT NULL,
+    location_id INTEGER NOT NULL REFERENCES location(id),
+    description TEXT NOT NULL,
+    branch_id INTEGER NOT NULL UNIQUE REFERENCES history_branch(id),
+    gm_notes TEXT NOT NULL DEFAULT '{}',
+    storyteller_notes TEXT NOT NULL DEFAULT '{}',
+    retired_at TEXT,
+    UNIQUE (world_id, name)
+);
+
+-- Replaces character_location. Created with every character, including a
+-- blank Adventurer, at construction time. Each active character has exactly
+-- one group.
+CREATE TABLE character_group (
+    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
+    group_id INTEGER NOT NULL REFERENCES "group"(id),
+    description TEXT NOT NULL
+);
+
+-- The durable zero/one connected transition (design.md's Membership and
+-- presence: "Multiple tabs share one character-presence state"). Live
+-- connection IDs themselves are process-local, tracked in memory on
+-- WorldEvents, and never restored after restart - only this logical
+-- transition and its generation (bumped on every connect/disconnect, so a
+-- stale timer event can recognize it is no longer current) are durable.
+CREATE TABLE character_presence (
+    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
+    last_connected_at TEXT NOT NULL,
+    absent_since TEXT,
+    generation INTEGER NOT NULL DEFAULT 0
+);
+
+-- The announced online set and outstanding arrival/departure transition for
+-- one group (design.md's Membership and presence). due_at is set on a
+-- departure (or first arrival into an empty group); null while nothing is
+-- pending. generation is bumped every time this row's outstanding transition
+-- changes, so a `sleep_until` timer scheduled against an earlier generation
+-- recognizes itself as stale and does nothing.
+CREATE TABLE presence_narration (
+    group_id INTEGER PRIMARY KEY NOT NULL REFERENCES "group"(id),
+    last_announced_character_ids TEXT NOT NULL DEFAULT '[]',
+    due_at TEXT,
+    generation INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE item_type (
@@ -176,35 +232,157 @@ CREATE TABLE item_character (
     character_id INTEGER NOT NULL REFERENCES character(id)
 );
 
-CREATE TABLE message (
+-- The original content and reasoning of one event, as a single serialized
+-- body. Deliberately no uniqueness constraint: two independently produced
+-- events with equal text are still distinct events (design.md's Chat schema).
+CREATE TABLE recorded_content (
     id INTEGER PRIMARY KEY NOT NULL,
-    agent_id INTEGER NOT NULL REFERENCES agent(id),
-    seq INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    -- Verbatim model reasoning, empty when none was emitted. Recorded because
-    -- it is model output, but never fed back into an agent's context.
-    reasoning TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (agent_id, seq)
+    body TEXT NOT NULL
 );
 
--- One row for every external game trigger. Inferences and actions reference
--- this tree root so an entire player event can be reconstructed without
--- duplicating its inputs or outputs.
+-- The single writable branch of one agent's linear history. Positions are
+-- allocated by UPDATE ... RETURNING next_position in the same transaction
+-- that inserts the history_entry using that position.
+CREATE TABLE history_branch (
+    id INTEGER PRIMARY KEY NOT NULL,
+    agent_id INTEGER NOT NULL REFERENCES agent(id),
+    next_position INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (id, agent_id)
+);
+
+-- Immutable bounded references from a branch to an earlier branch it
+-- continues from, ordered by ordinal. Populated by split_group (one parent:
+-- the source) and merge_groups (one parent per source group). The keys make
+-- invalid links unrepresentable: both branches share agent_id (so one world),
+-- and a parent always has a smaller id than its child, so no cycle exists.
+CREATE TABLE history_parent (
+    branch_id INTEGER NOT NULL,
+    agent_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    parent_branch_id INTEGER NOT NULL,
+    through_position INTEGER NOT NULL,
+    PRIMARY KEY (branch_id, ordinal),
+    FOREIGN KEY (branch_id, agent_id) REFERENCES history_branch(id, agent_id),
+    FOREIGN KEY (parent_branch_id, agent_id) REFERENCES history_branch(id, agent_id),
+    CHECK (parent_branch_id < branch_id)
+);
+
+-- The single writable branch of a linear player, NPC, Storyteller or sandbox
+-- history. Every agent kind gets one row here at construction; GM heads move
+-- to groups once groups exist.
+CREATE TABLE agent_history (
+    agent_id INTEGER PRIMARY KEY NOT NULL REFERENCES agent(id),
+    branch_id INTEGER NOT NULL UNIQUE REFERENCES history_branch(id)
+);
+
+-- The raw history index: one row per message, inference start or summary
+-- activation, in branch/position order. Not a duplicate transcript - message,
+-- inference and summary rows carry the actual payload.
+CREATE TABLE history_entry (
+    id INTEGER PRIMARY KEY NOT NULL,
+    branch_id INTEGER NOT NULL REFERENCES history_branch(id),
+    position INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('message', 'inference', 'summary', 'notice')),
+    UNIQUE (branch_id, position)
+);
+
+-- One row for every external game trigger and its lifecycle. Inferences and
+-- actions reference this tree root so an entire player event can be
+-- reconstructed without duplicating its inputs or outputs. finished_at/error
+-- are set once the foreground (root, player-triggered) invocation returns;
+-- a deferred compaction this sequence's reply caused gets its own invocation
+-- and does not extend this wall-clock span.
 CREATE TABLE sequence (
     id INTEGER PRIMARY KEY NOT NULL,
     world_id INTEGER NOT NULL REFERENCES world(id),
     trigger TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    error TEXT,
+    CHECK (finished_at IS NOT NULL OR error IS NULL)
+);
+
+-- One agent loop (agent::complete_with_call_context). branch_id is the branch
+-- it started on; each inference within it records its own actual branch.
+-- The root invocation of a sequence has parent_tool_execution_id NULL; a
+-- nested invocation records the exact tool_execution that spawned it.
+-- Deferred compaction's invocation has no parent tool call, but records its
+-- triggering inference as cause_inference_id instead.
+CREATE TABLE invocation (
+    id INTEGER PRIMARY KEY NOT NULL,
+    -- NULL only for deferred compaction recovering fixed-KV capacity outside
+    -- any sequence, mirroring inference.sequence_id's existing nullability
+    -- for the identical reason.
+    sequence_id INTEGER REFERENCES sequence(id),
+    agent_id INTEGER NOT NULL REFERENCES agent(id),
+    branch_id INTEGER NOT NULL REFERENCES history_branch(id),
+    parent_tool_execution_id INTEGER REFERENCES tool_execution(id),
+    cause_inference_id INTEGER REFERENCES inference(id),
+    -- Next ordinal to allocate for an inference started within this
+    -- invocation, via UPDATE...RETURNING (allocate_position's pattern) so
+    -- allocation is one point update instead of a COUNT(*) rescan of every
+    -- prior inference in the invocation.
+    next_inference_ordinal INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    -- A short outcome label (settled, rejected, error, budget_exhausted,
+    -- interrupted); the inference/tool_execution rows it produced carry the
+    -- actual content and errors. Set together with finished_at by the RAII
+    -- wrapper on every exit path (agent.rs's InvocationGuard).
+    outcome TEXT,
+    CHECK ((finished_at IS NULL) = (outcome IS NULL))
+);
+
+-- Uniquely identifies each returned tool call by (inference_id, ordinal). The
+-- model call ID/name/arguments are not duplicated here: they resolve from the
+-- original inference output at that ordinal. One row is created per call in
+-- a returned batch before any of them executes, so siblings and unexecuted
+-- calls are always visible even if an earlier call fails.
+CREATE TABLE tool_execution (
+    id INTEGER PRIMARY KEY NOT NULL,
+    inference_id INTEGER NOT NULL REFERENCES inference(id),
+    ordinal INTEGER NOT NULL,
+    result_content_id INTEGER REFERENCES recorded_content(id),
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'rejected', 'failed', 'unexecuted')),
+    error TEXT,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    UNIQUE (inference_id, ordinal)
+);
+
+-- One event in a branch's ordered history. `id` is also its history_entry ID:
+-- the branch/position it occupies is looked up there, not duplicated here.
+CREATE TABLE message (
+    id INTEGER PRIMARY KEY NOT NULL REFERENCES history_entry(id),
+    role TEXT NOT NULL,
+    -- The human-facing provenance of a model-role message. An instruction is
+    -- still a user-role turn to the model, but was added by the game rather
+    -- than typed by a player.
+    origin TEXT NOT NULL DEFAULT 'conversation' CHECK (origin IN ('conversation', 'instruction')),
+    content INTEGER NOT NULL REFERENCES recorded_content(id),
+    -- The inference that produced this entry: an assistant reply or a tool
+    -- result. NULL for player input and delivered narration, which no
+    -- inference of this agent emitted.
+    source_inference_id INTEGER REFERENCES inference(id),
+    -- For a tool-result entry, the tool_execution it answers, so a result
+    -- links to its exact call within the producing inference's ordered output.
+    source_tool_execution_id INTEGER REFERENCES tool_execution(id),
+    -- The sequence this entry triggered, for player input that begins a turn
+    -- before any inference exists yet. An entry produced by an inference
+    -- resolves its sequence through source_inference_id instead; this stays
+    -- NULL there rather than duplicating the same fact.
+    trigger_sequence_id INTEGER REFERENCES sequence(id),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Notices are visible alongside chat history but never become model context.
+-- `id` is also its history_entry ID, like `message`.
 CREATE TABLE chat_notice (
-    id INTEGER PRIMARY KEY NOT NULL,
-    agent_id INTEGER NOT NULL REFERENCES agent(id),
-    after_message_id INTEGER NOT NULL REFERENCES message(id),
+    id INTEGER PRIMARY KEY NOT NULL REFERENCES history_entry(id),
     content TEXT NOT NULL,
+    -- The compaction (or capacity-recovery) inference this notice reports,
+    -- so the developer view links a notice to the summarisation that caused it.
+    source_inference_id INTEGER REFERENCES inference(id),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -213,53 +391,83 @@ CREATE TABLE chat_notice (
 -- a recipe referring to one always resolves to the text actually sent.
 CREATE TABLE text (
     id INTEGER PRIMARY KEY NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL UNIQUE
 );
 
 -- Compaction never changes message rows. A summary only changes the portion of
--- an agent's permanent history selected for its next live context.
+-- a branch's permanent history selected for its next live context. Its
+-- activation is a separate history entry from the ranges it covers.
 CREATE TABLE summary (
     id INTEGER PRIMARY KEY NOT NULL,
-    agent_id INTEGER NOT NULL REFERENCES agent(id),
-    covers_to_seq INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    inference_id INTEGER NOT NULL REFERENCES inference(id),
-    UNIQUE (agent_id, covers_to_seq)
+    -- The history_entry ID of this summary's activation (when it became the
+    -- selected point-in-time replacement), distinct from the ranges below.
+    history_entry_id INTEGER NOT NULL UNIQUE REFERENCES history_entry(id),
+    -- Ordered branch/position ranges of original messages this summary
+    -- replaces, as JSON `[{branch_id, first_position, last_position}, ...]`.
+    -- Always length 1 in this slice (no branch has parents yet); the general
+    -- shape avoids a second migration once split/merge produce more.
+    covered_ranges TEXT NOT NULL,
+    inference_id INTEGER NOT NULL REFERENCES inference(id)
 );
 
 CREATE TABLE inference (
     id INTEGER PRIMARY KEY NOT NULL,
+    -- The history_entry ID of this inference's start. Completion updates this
+    -- row in place; it does not create a new history entry.
+    history_entry_id INTEGER NOT NULL UNIQUE REFERENCES history_entry(id),
     agent_id INTEGER NOT NULL REFERENCES agent(id),
     sequence_id INTEGER REFERENCES sequence(id),
-    parent_inference_id INTEGER REFERENCES inference(id),
+    invocation_id INTEGER NOT NULL REFERENCES invocation(id),
+    -- Position of this inference within its invocation.
+    ordinal INTEGER NOT NULL,
     segments TEXT NOT NULL,
     sampling TEXT NOT NULL,
-    output TEXT,
+    output INTEGER REFERENCES recorded_content(id),
     error TEXT,
     input_hash TEXT NOT NULL,
     input_tokens INTEGER,
     output_tokens INTEGER,
-    duration_ms INTEGER NOT NULL,
+    duration_ms INTEGER,
+    finished_at TEXT,
     model TEXT NOT NULL,
+    tool_choice TEXT NOT NULL DEFAULT '"auto"',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK ((output IS NULL) != (error IS NULL)),
+    CHECK (
+        (finished_at IS NULL AND output IS NULL AND error IS NULL AND duration_ms IS NULL)
+        OR (finished_at IS NOT NULL AND ((output IS NULL) != (error IS NULL)))
+    ),
     CHECK (
         (output IS NULL AND input_tokens IS NULL AND output_tokens IS NULL)
         OR
         (output IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL)
-    )
+    ),
+    UNIQUE (invocation_id, ordinal)
 );
 
--- Character-action arguments are validated once, retained while the location
--- GM arbitrates, then executed from this row after approval. The world-local
--- id is the value the GM sees; it never has to reproduce model-supplied JSON.
+CREATE VIEW summary_content AS
+SELECT summary.id, summary.history_entry_id, summary.covered_ranges,
+       summary.inference_id, inference.agent_id, recorded_content.body
+FROM summary
+JOIN inference ON inference.id = summary.inference_id
+JOIN recorded_content ON recorded_content.id = inference.output;
+
+-- Character-action arguments are validated once, retained while the acting
+-- character's group GM arbitrates, then executed from this row after
+-- approval. The world-local id is the value the GM sees; it never has to
+-- reproduce model-supplied JSON.
 CREATE TABLE pending_action (
     world_id INTEGER NOT NULL REFERENCES world(id),
     id INTEGER NOT NULL,
     sequence_id INTEGER NOT NULL REFERENCES sequence(id),
-    inference_id INTEGER NOT NULL REFERENCES inference(id),
+    -- The tool_execution row for the call that submitted this action; resolves
+    -- to its model call ID/name/arguments via its inference's output.
+    requesting_tool_execution_id INTEGER NOT NULL REFERENCES tool_execution(id),
     character_id INTEGER NOT NULL REFERENCES character(id),
-    location_gm_agent_id INTEGER NOT NULL REFERENCES agent(id),
+    gm_agent_id INTEGER NOT NULL REFERENCES agent(id),
+    -- The acting character's group branch at submission time (design.md's
+    -- `GroupHistory`): agent_id alone cannot select a GM history once a
+    -- world_gm plays several groups.
+    gm_branch_id INTEGER NOT NULL REFERENCES history_branch(id),
     tool TEXT NOT NULL,
     args TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -269,20 +477,60 @@ CREATE TABLE pending_action (
 CREATE TABLE action (
     id INTEGER PRIMARY KEY NOT NULL,
     sequence_id INTEGER NOT NULL REFERENCES sequence(id),
-    inference_id INTEGER REFERENCES inference(id),
-    tool TEXT NOT NULL,
-    args TEXT NOT NULL,
-    result TEXT NOT NULL,
+    -- The tool_execution whose call performed this action. NULL only for the
+    -- server-driven test path that has no inference.
+    requesting_tool_execution_id INTEGER REFERENCES tool_execution(id),
+    -- The tool_execution of the GM's approval call, when one arbitrated it.
+    approving_tool_execution_id INTEGER REFERENCES tool_execution(id),
+    result_content_id INTEGER NOT NULL REFERENCES recorded_content(id),
+    -- Whether this resolution actually ran the action's state mutation
+    -- (true) or only recorded a rejection/no-op (false). A repeated
+    -- resolve attempt with a different outcome than this must be rejected,
+    -- not silently reported as success - design.md: "They cannot be
+    -- approved twice", which requires detecting a *conflicting* second
+    -- resolve, not only preventing a second state mutation.
+    approved INTEGER NOT NULL CHECK (approved IN (0, 1)),
+    -- The world-local pending_action.id this action resolved, so a repeated
+    -- approval attempt can look up the already-recorded outcome by matching
+    -- world_id (via the sequence join) plus this id, even though the source
+    -- pending_action row is deleted on resolve. Not a foreign key for that
+    -- reason: the referenced row no longer exists once this is set.
+    pending_action_id INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- A final reply that crossed the compaction threshold creates one durable
 -- obligation. It is not derived from current history, so restart cannot lose
--- work that was already required when the reply was delivered.
+-- work that was already required when the reply was delivered. Keyed by
+-- branch, not agent: a world_gm agent has several branches (one per group,
+-- design.md's GroupHistory) and each has its own independent obligation.
 CREATE TABLE pending_compaction (
-    agent_id INTEGER PRIMARY KEY NOT NULL REFERENCES agent(id),
-    after_message_id INTEGER NOT NULL REFERENCES message(id),
-    input_tokens INTEGER NOT NULL,
+    branch_id INTEGER PRIMARY KEY NOT NULL REFERENCES history_branch(id),
+    -- The exact cut this obligation covers: the branch position of the reply
+    -- (or capacity-rejected history) that made compaction due.
+    position INTEGER NOT NULL,
+    -- The sequence whose final reply crossed the threshold. Carried onto the
+    -- compaction inference so a summary links back to its triggering event.
+    -- NULL when a fixed-KV rejection forced recovery outside any sequence.
+    sequence_id INTEGER REFERENCES sequence(id),
+    -- The inference whose reply queued this job, carried onto the deferred
+    -- compaction invocation as its cause_inference_id (design.md: "deferred
+    -- compaction has its triggering inference as cause"). NULL for a
+    -- fixed-KV rejection, which has no successfully settled inference to
+    -- attribute the obligation to.
+    cause_inference_id INTEGER REFERENCES inference(id),
+    next_input_tokens INTEGER NOT NULL,
     sampling TEXT NOT NULL,
-    model TEXT NOT NULL
+    model TEXT NOT NULL,
+    static_segments TEXT NOT NULL DEFAULT '[]'
+);
+
+-- A formatting recipe and verification evidence, never an assembled prompt copy.
+CREATE TABLE inference_prompt (
+    inference_id INTEGER PRIMARY KEY REFERENCES inference(id),
+    format_id INTEGER NOT NULL REFERENCES text(id),
+    rendered_at TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    tokens_hash TEXT NOT NULL,
+    max_output_tokens INTEGER NOT NULL
 );

@@ -41,7 +41,7 @@ For each function call return a json object with function name and arguments wit
 ' }}
 {%- for tc in message.tool_calls %}
 {{- '<tool_call>
-{"name": "' + tc.function.name + '", "arguments": ' + tc.function.arguments + '}
+{"name": "' + tc.function.name + '", "arguments": ' + (tc.function.arguments | tojson) + '}
 </tool_call>
 ' }}
 {%- endfor %}

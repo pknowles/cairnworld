@@ -1,8 +1,15 @@
+#![deny(warnings)]
+#![forbid(unsafe_code)]
+// Leptos's typed view tree nests one generic layer per element/conditional;
+// PlayerChat's inspect pane is now deep enough to exceed rustc's default.
+#![recursion_limit = "256"]
+
 mod agent;
 mod compaction;
 mod context;
 mod game;
 mod inference;
+mod inspection;
 mod llm;
 mod mistralrs_backend;
 mod scenario;
@@ -66,12 +73,12 @@ enum Command {
         /// works. Falls back to the `model` key in local.toml/default.toml.
         #[arg(long)]
         model: Option<String>,
-        /// Sampling temperature.
-        #[arg(long, default_value_t = 1.0)]
-        temperature: f32,
-        /// Enable the model's reasoning mode when its template supports it.
+        /// Sampling temperature; overrides the model's configured value.
         #[arg(long)]
-        enable_thinking: bool,
+        temperature: Option<f32>,
+        /// Enable the model's reasoning mode; overrides its configured value.
+        #[arg(long)]
+        enable_thinking: Option<bool>,
         /// Optional system prompt.
         #[arg(long)]
         system: Option<String>,
@@ -146,10 +153,17 @@ async fn main() -> Result<()> {
             allow_cpu,
         } => {
             let settings = Settings::load()?;
+            let model = resolve_model(model.as_deref(), chat_template, &settings)?;
+            let mut sampling = settings.sampling(&model);
+            if let Some(temperature) = temperature {
+                sampling.temperature = temperature;
+            }
+            if let Some(enable_thinking) = enable_thinking {
+                sampling.enable_thinking = enable_thinking;
+            }
             run_chat(
-                resolve_model(model.as_deref(), chat_template, &settings)?,
-                temperature,
-                enable_thinking,
+                model,
+                sampling,
                 system,
                 Path::new(&database),
                 settings.limits,
@@ -185,13 +199,14 @@ async fn main() -> Result<()> {
                 .await
                 .context("opening web database")?;
             let model = resolve_model(model.as_deref(), None, &settings)?;
+            let sampling = settings.sampling(&model);
             let game = web::GameLoad::loading();
             let loading_game = game.clone();
             let loading_store = store.clone();
             let limits = settings.limits;
             tokio::spawn(async move {
                 tracing::info!(model = %model.path, "starting game model load");
-                let result = load_game(loading_store, model, limits, allow_cpu).await;
+                let result = load_game(loading_store, model, sampling, limits, allow_cpu).await;
                 match &result {
                     Ok(_) => tracing::info!("game model is ready"),
                     Err(error) => {
@@ -223,11 +238,7 @@ async fn run_import_scenario(
         .install_scenario(&owner, &scenario)
         .await
         .context("installing scenario")?;
-    let member = store
-        .active_member_agent(owner.id, installed.world_id)
-        .await
-        .context("resolving installed player membership")?
-        .context("newly installed world is missing its active owner membership")?;
+    let member = installed.member.clone();
     println!(
         "Installed {} as world {}. {} owns player agent {} for {}.",
         scenario.name,
@@ -280,11 +291,13 @@ async fn backend(
 ) -> Result<MistralRsBackend> {
     let path = model.path.clone();
     let chat_template = model.chat_template.clone();
+    let source_model = model.source_model.clone();
     tracing::info!(model = %path, "loading model");
     tokio::task::spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(MistralRsBackend::load(
             &path,
             chat_template.as_deref(),
+            source_model.as_deref(),
             limits,
             allow_cpu,
         ))
@@ -297,6 +310,7 @@ async fn backend(
 async fn load_game(
     store: Store,
     model: settings::Model,
+    sampling: Sampling,
     limits: settings::Limits,
     allow_cpu: bool,
 ) -> Result<Arc<game::Game<MistralRsBackend>>> {
@@ -311,17 +325,13 @@ async fn load_game(
         scheduler.foreground(),
         limits,
         model.path,
-        Sampling {
-            temperature: 1.0,
-            enable_thinking: false,
-        },
+        sampling,
     )))
 }
 
 async fn run_chat(
     model: settings::Model,
-    temperature: f32,
-    enable_thinking: bool,
+    sampling: Sampling,
     system: Option<String>,
     database: &Path,
     limits: settings::Limits,
@@ -374,7 +384,7 @@ async fn run_chat(
         // Do this before appending the next user row: an earlier compaction
         // must never see a newer chat message in the history it summarizes.
         backend
-            .before_agent(&store, agent)
+            .before_agent(&store, agent, None)
             .await
             .context("finishing earlier deferred work for this chat")?;
 
@@ -392,12 +402,11 @@ async fn run_chat(
             &budget,
             agent::Turn {
                 agent_id: agent,
+                branch: store.agent_branch(agent).await?,
                 static_messages: &static_messages,
+                dynamic_context: &[],
                 tools: &tools,
-                sampling: Sampling {
-                    temperature,
-                    enable_thinking,
-                },
+                sampling: sampling.clone(),
                 model: &model.path,
             },
             |token| {
@@ -437,22 +446,47 @@ async fn run_replay(
         "Recorded request:\n{}",
         serde_json::to_string_pretty(&recorded.request)?
     );
+    if let Some(prompt) = &recorded.model_prompt {
+        println!("Actual model prompt:\n{prompt}");
+    }
     match &recorded.outcome {
         RecordedOutcome::Response(response) => println!(
             "Recorded output:\n{}",
             serde_json::to_string_pretty(response)?
         ),
         RecordedOutcome::Error(error) => println!("Recorded error:\n{error}"),
+        RecordedOutcome::Running => println!("Inference has not finished."),
     }
     println!("Replayed output:");
     let backend = backend(&model, limits, allow_cpu).await?;
-    let response = context::complete_recipe(
+    // Detached replay records only the outcome, with no message or
+    // compaction side effect (design.md: "Detached replay writes only the
+    // outcome"), so it runs the shared recipe step and finishes it through
+    // the plain outcome-only `finish_inference` rather than
+    // `finish_chat_inference`. It still needs its own throwaway
+    // sequence/invocation to satisfy `inference.invocation_id` - every
+    // inference belongs to one - but this invocation is never finished as
+    // part of a live turn; it exists only to give the replayed inference a
+    // valid parent.
+    let world_id = store
+        .world_id_for_agent(recorded.agent_id)
+        .await
+        .context("resolving replayed inference's world")?;
+    let sequence = store
+        .begin_sequence(world_id, "detached replay")
+        .await
+        .context("starting detached replay sequence")?;
+    let invocation_id = store
+        .start_invocation(Some(sequence.id), recorded.agent_id, None, None, None)
+        .await
+        .context("starting detached replay invocation")?;
+    let run = context::run_recipe(
         &store,
         &backend,
         context::RecipeCompletion {
             agent_id: recorded.agent_id,
-            sequence_id: None,
-            parent_inference_id: None,
+            sequence_id: Some(sequence.id),
+            invocation_id,
             segments: &recorded.segments,
             sampling: recorded.request.sampling,
             model: &model.path,
@@ -464,7 +498,31 @@ async fn run_replay(
     )
     .await
     .context("replaying recorded inference")?;
-    let response = response.response;
+    store
+        .finish_inference(run.inference_id, run.outcome, run.duration_ms)
+        .await
+        .context("recording replayed inference outcome")?;
+    let outcome = if run.result.is_ok() {
+        "settled"
+    } else {
+        "error"
+    };
+    store
+        .finish_invocation(invocation_id, outcome)
+        .await
+        .context("finishing detached replay invocation")?;
+    store
+        .finish_sequence(
+            sequence.id,
+            run.result
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"))
+                .as_deref(),
+        )
+        .await
+        .context("finishing detached replay sequence")?;
+    let response = run.result.context("running inference")?;
     println!(
         "\nReplay usage: {} input tokens, {} output tokens",
         response.usage.input_tokens, response.usage.output_tokens
