@@ -604,23 +604,12 @@ unchanged. A grouping call with ordinary siblings preserves the full exchange.
 
 ## E. Exact inference evidence and complete raw fields
 
-1. Extend inference_prompt to reference a model artifact record containing GGUF
-   digest, tokenizer/config artifact references, formatter/adapter revision,
-   original template options and full effective generation settings. Store
-   immutable tokenizer/config files once under data/artifacts keyed by digest;
-   verify their digest on load. Record configured sampling separately from the
-   final resolved settings, including output limit, tool choice and thinking.
-2. At the existing runtime prompt observer, record hashes from the normal
-   tokenization pass and the original formatting inputs. Reconstruction uses
-   the recorded adapter version and artifacts. Preserve support for version 1
-   when later adapters change; never silently substitute the currently loaded
-   model/tokenizer. Reject missing/corrupt artifacts with their inference ID.
-3. Export complete inference/turn/history/object types through src/inspection.rs
+1. Export complete inference/turn/history/object types through src/inspection.rs
    in the existing library. Gate database/runtime dependencies to server code.
    Remove hand-maintained UI mirrors and content_text projections that lose IDs
    or arguments. Render raw JSON and separate exact prompt/message text fields,
    with full output/reasoning/errors, settings, sources and clipboard controls.
-4. Extend the existing runtime capture test through normal Game calls: capture
+2. Extend the existing runtime capture test through normal Game calls: capture
    request and formatted prompt/tokens independently, then open those same
    inference IDs in the browser. Include a real tool round trip and compaction;
    change notes/settings after capture and reopen before comparing again.

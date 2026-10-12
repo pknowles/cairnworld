@@ -1,9 +1,18 @@
 mod content;
 mod history;
 mod prompt;
-pub use history::{HistoryHead, PositionRange};
+pub use history::PositionRange;
 use history::EntryKind;
 pub use prompt::PromptEvidence;
+
+// Developer Mode's inspection view types are shared with the browser; see
+// crate::inspection's doc comment. Re-exported here since this module's
+// queries build and return them.
+pub use crate::inspection::{
+    AgentInfo, BranchHead, BranchNode, BranchParent, ConnectionObject, GameObject,
+    InferenceMessage, RawHistoryCursor, RawHistoryEntry, RecordedAction, RecordedInference,
+    RecordedOutcome, Segment, SequenceNode, SequenceSummary, WorldObjects,
+};
 
 use std::{
     collections::HashMap,
@@ -453,15 +462,6 @@ fn decode_notes(gm: &str, storyteller: &str) -> Result<Notes> {
     })
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(untagged)]
-pub enum Segment {
-    Text { text: i64, role: Role },
-    Tools { text: i64 },
-    Summary { summary: i64 },
-    Messages { messages: PositionRange },
-}
-
 #[derive(Debug)]
 pub enum InferenceOutcome {
     Response(Response),
@@ -507,32 +507,6 @@ pub struct InferenceRecord<'a> {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-pub enum RecordedOutcome {
-    Running,
-    Response(Response),
-    Error(String),
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-pub struct RecordedInference {
-    pub id: i64,
-    pub agent_id: i64,
-    pub sequence_id: Option<i64>,
-    /// The inference whose tool call caused this one, resolved by joining
-    /// this inference's invocation back to its parent_tool_execution_id
-    /// (design.md's actual nesting link, replacing the old direct
-    /// inference-to-inference pointer). `None` for a root or deferred
-    /// invocation's inference, which has no requesting tool call.
-    pub parent_inference_id: Option<i64>,
-    pub segments: Vec<Segment>,
-    pub request: Request,
-    pub model_prompt: Option<String>,
-    pub outcome: RecordedOutcome,
-    pub model: String,
-    pub duration_ms: Option<u64>,
-}
-
 #[derive(Debug, FromRow)]
 struct InferenceRow {
     id: i64,
@@ -548,15 +522,6 @@ struct InferenceRow {
     output_tokens: Option<i64>,
     duration_ms: Option<i64>,
     model: String,
-}
-
-/// One chat entry an inference produced, with its provenance for the developer view.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct InferenceMessage {
-    pub id: i64,
-    pub role: Role,
-    /// The tool_execution this entry answers, when it is a tool result.
-    pub answers_tool_execution_id: Option<i64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -578,24 +543,11 @@ impl TryFrom<InferenceMessageRow> for InferenceMessage {
     }
 }
 
-/// A completed action linked to the tool call that performed it. design.md's
-/// `action` no longer copies `tool`/`args`/`result` text: `tool`/`args`/
-/// `call_id` resolve from the requesting tool_execution's originating
-/// inference output at its ordinal (`Store::resolve_tool_call`), and `result`
-/// from `result_content_id` - both decoded once by `inference_actions`
-/// rather than by every reader of `RecordedAction`.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct RecordedAction {
-    pub id: i64,
-    pub call_id: Option<String>,
-    /// The GM inference that approved a character action, when one
-    /// arbitrated it (resolved through its approving tool_execution).
-    pub approval_inference_id: Option<i64>,
-    pub tool: String,
-    pub args: String,
-    pub result: String,
-}
-
+// design.md's `action` no longer copies `tool`/`args`/`result` text:
+// `tool`/`args`/`call_id` resolve from the requesting tool_execution's
+// originating inference output at its ordinal (`Store::resolve_tool_call`),
+// and `result` from `result_content_id` - both decoded once by
+// `inference_actions` rather than by every reader of `RecordedAction`.
 #[derive(Debug, FromRow)]
 struct RecordedActionRow {
     id: i64,
@@ -608,15 +560,7 @@ struct RecordedActionRow {
     result_content_id: i64,
 }
 
-// --- Developer Mode inspection view types ---------------------------------
-
-#[derive(Debug, PartialEq, Serialize)]
-pub struct SequenceSummary {
-    pub id: i64,
-    pub trigger: String,
-    pub started_at: String,
-    pub inference_count: i64,
-}
+// --- Developer Mode inspection view types (crate::inspection) -------------
 
 #[derive(Debug, FromRow)]
 struct SequenceSummaryRow {
@@ -639,25 +583,6 @@ impl TryFrom<SequenceSummaryRow> for SequenceSummary {
     }
 }
 
-/// One inference in a sequence tree, with the entries it produced. The tree
-/// shape comes from each node's `RecordedInference::parent_inference_id`, a
-/// derived field resolved from `invocation.parent_tool_execution_id` (see its
-/// own doc comment) - not a raw `inference` table column.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct SequenceNode {
-    pub inference: RecordedInference,
-    pub messages: Vec<InferenceMessage>,
-    pub actions: Vec<RecordedAction>,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-pub struct AgentInfo {
-    pub id: i64,
-    pub role: String,
-    pub character_name: Option<String>,
-    pub location_name: Option<String>,
-}
-
 #[derive(Debug, FromRow)]
 struct AgentInfoRow {
     id: i64,
@@ -677,75 +602,6 @@ impl TryFrom<AgentInfoRow> for AgentInfo {
             location_name: row.location_name,
         })
     }
-}
-
-/// One entry of a raw agent history page. Raw messages, the notices and
-/// summary markers that anchor after a message, and failed inferences appear
-/// in recorded order. Distinct from context assembly: no summary folding.
-#[derive(Debug, PartialEq, Serialize)]
-pub enum RawHistoryEntry {
-    Message {
-        id: i64,
-        role: Role,
-        content: MessageContent,
-        reasoning: String,
-        source_inference_id: Option<i64>,
-        answers_tool_execution_id: Option<i64>,
-    },
-    Notice {
-        id: i64,
-        content: String,
-        source_inference_id: Option<i64>,
-    },
-    Summary {
-        id: i64,
-        covered_ranges: Vec<PositionRange>,
-        inference_id: i64,
-        text: String,
-    },
-    FailedInference {
-        id: i64,
-        error: String,
-    },
-}
-
-/// An opaque paging cursor over one agent's raw history: the head it is
-/// paging (so a page never silently starts describing a different agent) and
-/// the branch/position to resume after.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct RawHistoryCursor {
-    pub head: HistoryHead,
-    pub next_branch_id: i64,
-    pub next_position: i64,
-}
-
-/// One branch in a world_gm agent's history DAG: its ordered bounded parents
-/// (design.md's split/merge), and, when a non-retired group currently uses it
-/// as its writable head, that group's id/name (user_declarations.md: "the
-/// GM's chat history view needs to authentically display the DAG, including
-/// multiple heads - one per Group"). A retired source branch (a completed
-/// split/merge's prior group) has no head - it still renders, just without a
-/// "current" label.
-#[derive(Clone, Debug, Serialize)]
-pub struct BranchNode {
-    pub branch_id: i64,
-    /// Ordered bounded parents (`history_parent`'s own ordinal order): this
-    /// branch's history is each parent's own entries up to `through_position`,
-    /// in this order, followed by this branch's own entries.
-    pub parents: Vec<BranchParent>,
-    pub head: Option<BranchHead>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct BranchParent {
-    pub branch_id: i64,
-    pub through_position: i64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct BranchHead {
-    pub group_id: i64,
-    pub group_name: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -770,43 +626,6 @@ struct RawSummaryRow {
     covered_ranges: String,
     inference_id: i64,
     content: String,
-}
-
-/// A world's current game objects and notes. Present state only - never a
-/// `Segment`, never assembled into a model request.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct WorldObjects {
-    pub name: String,
-    pub time: i64,
-    pub initial_prompt: String,
-    pub storyteller_summary: String,
-    pub gm_notes: String,
-    pub storyteller_notes: String,
-    pub characters: Vec<GameObject>,
-    pub locations: Vec<GameObject>,
-    pub items: Vec<GameObject>,
-    pub connections: Vec<ConnectionObject>,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-pub struct GameObject {
-    pub id: i64,
-    pub name: String,
-    pub description: String,
-    pub gm_notes: String,
-    pub storyteller_notes: String,
-}
-
-/// A connection has no name; it is identified by the locations it joins.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct ConnectionObject {
-    pub id: i64,
-    pub from: String,
-    pub to: String,
-    pub travel_time: i64,
-    pub description: String,
-    pub gm_notes: String,
-    pub storyteller_notes: String,
 }
 
 #[derive(Debug, FromRow)]

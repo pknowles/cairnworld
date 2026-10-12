@@ -413,9 +413,23 @@ behavior is not implied to exist here.
   generation. It stores no assembled prompt or token-array copy. Reconstruction
   uses the bounded request and retained template/time and rejects a text checksum
   mismatch. The GPU fidelity test compares the reconstructed prompt and token IDs
-  with those observed during actual generation. Historical tokenizer retention,
-  complete causal navigation and the Developer Mode interface remain in the
-  active Developer Mode plan.
+  with those observed during actual generation. `inference.model` already
+  records the configured model name that served each call; no separate
+  model/tokenizer identity or digest tracking is retained (design.md's Exact
+  model input and verification). Historical tokenizer retention across
+  formatter code changes, complete causal navigation and the Developer Mode
+  interface remain in the active Developer Mode plan.
+- `src/inspection.rs` - the plain data types Developer Mode's server and
+  browser both use: model request/response (`Request`, `Response`, `Message`,
+  etc., moved from `src/llm.rs`, which re-exports them) and the inspection
+  view types (`RecordedInference`, `SequenceNode`, `RawHistoryEntry`,
+  `BranchNode`/`BranchParent`/`BranchHead`, `WorldObjects`/`GameObject`/
+  `ConnectionObject`, etc., moved from `src/store.rs`, which re-exports them).
+  Exposed unconditionally through `lib.rs` (`pub mod inspection`) with no
+  sqlx/tokio/mistralrs dependency, so the `hydrate` (browser/wasm) build can
+  `use` these types directly instead of hand-mirroring a second, narrower copy
+  that could silently drop a field - `src/store.rs` and `src/web.rs` remain
+  the only code that builds them from the database or serves them over HTTP.
 
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 
@@ -690,7 +704,7 @@ behavior is not implied to exist here.
   - The turn view (`InspectSelection::Sequence`) fetches
     `/world/{id}/inspect/sequences/{id}` and renders every inference in that
     turn's tree (`SequenceNodeCard`, which embeds `InferenceCard`): agent,
-    model, parent link, output text/tool calls, reasoning, actions performed,
+    model, parent link, output (`ContentBlock`), reasoning, actions performed,
     and the messages it produced.
   - The inference view (`InspectSelection::Inference`) fetches
     `/world/{id}/inspect/inferences/{id}` and renders the same `InferenceCard`
@@ -714,7 +728,10 @@ behavior is not implied to exist here.
     its own section labelled by its current group head or "retired", with a
     "continues from branch ... @position" note - a shared ancestor branch
     is one section, never duplicated across the children that continue from
-    it.
+    it. A summary entry's heading names every one of its `covered_ranges` as
+    `branch {id} #{first}-#{last}` - each range's own branch_id and
+    first_position, not only its last_position, since a summary made after a
+    merge can cover ranges from more than one branch.
   - The world object/agent navigator (`InspectSelection::Agents`/`Objects`,
     `AgentsList`/`ObjectsView`) is always reachable from the pane header and
     fetches `/world/{id}/inspect/agents` or `/world/{id}/inspect/objects`,
@@ -723,11 +740,15 @@ behavior is not implied to exist here.
   `InferenceCard` shows per-node token usage (prompt/completion/total) and a
   cumulative total folded over every node in the current turn view; both are
   omitted when usage was not recorded rather than showing a misleading zero.
-  A `CopyButton` component sits next to every exact-text field worth copying
-  verbatim (outcome text, each request message, the post-template model
-  prompt) - it writes to the clipboard via `navigator.clipboard.write_text`
-  and flips to a checkmark for a moment, skipped entirely when the field is
-  empty.
+  `ContentBlock` renders model/message content (an inference's outcome, each
+  request message, a raw history entry) without collapsing it to one string:
+  plain text renders as-is, and each tool call keeps its own `id`/`name`/
+  `arguments` as a separate row rather than being joined with any others into
+  one line - a `CopyButton` sits next to every exact-text piece it renders
+  (an outcome's text, each tool call's arguments, a tool result's content,
+  each request message, the post-template model prompt) - it writes to the
+  clipboard via `navigator.clipboard.write_text` and flips to a checkmark for
+  a moment, skipped entirely when the field is empty.
   Step 6's live updates implement design.md's Live inspection protocol in
   full (Developer Inspection plan slice A). `Store` owns a `dev_events:
   Arc<Mutex<HashMap<world_id, broadcast::Sender<DevEvent>>>>` registry

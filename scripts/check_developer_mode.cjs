@@ -185,14 +185,17 @@ checkBrowser(server, async (tab, port) => {
   const inferenceResponse = tab.waitForResponse(r => r.url().endsWith(`/inspect/inferences/${fixture.inference_id}`));
   await tab.locator("aside button").getByText(`inference ${fixture.inference_id}`, { exact: true }).first().click();
   assert.equal((await inferenceResponse).status(), 200);
-  await tab.locator("aside").getByText("roll_hit_protection({})", { exact: true }).waitFor();
+  // A tool call renders as its own id/name/arguments, not one joined string
+  // (each call must stay individually identifiable, never merged together).
+  await tab.locator("aside").getByText("call hp-roll", { exact: true }).waitFor();
+  await tab.locator("aside").getByText("roll_hit_protection", { exact: true }).waitFor();
   assert.equal(await tab.locator("aside").getByText(`turn ${fixture.sequence_id}`, { exact: true }).count(), 1, "the inference view links back to its turn");
   // Design.md: exact text must be copyable without truncation. The button's
   // own click handler drives the copy, so this exercises the real code path.
   await tab.locator("aside").getByRole("button", { name: "Copy", exact: true }).first().click();
   await tab.locator("aside").getByRole("button", { name: "Copied", exact: true }).first().waitFor();
   const copied = await tab.evaluate(() => navigator.clipboard.readText());
-  assert.equal(copied, "roll_hit_protection({})", "copy captures the exact outcome text, not a truncated or escaped version");
+  assert.equal(copied, "{}", "copy captures the exact tool call arguments, not a truncated or escaped version");
 
   // Live inference progress over the real /inspect/events socket: driving
   // Store::start_inference/publish_token/finish_inference through the

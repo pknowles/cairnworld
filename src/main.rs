@@ -3,6 +3,7 @@ mod compaction;
 mod context;
 mod game;
 mod inference;
+mod inspection;
 mod llm;
 mod mistralrs_backend;
 mod scenario;

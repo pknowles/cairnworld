@@ -6,10 +6,13 @@
 //! walk the same selector instead of duplicating branch logic.
 
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, Transaction};
 
 use super::Store;
+
+// `HistoryHead` and `PositionRange` live in `crate::inspection` (shared with
+// the browser); re-exported here since this module builds and consumes them.
+pub use crate::inspection::{HistoryHead, PositionRange};
 
 /// One entry kind stored in `history_entry.kind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,14 +42,6 @@ impl EntryKind {
             other => anyhow::bail!("unknown history_entry kind {other}"),
         })
     }
-}
-
-/// A bounded point in one branch's history: everything reachable by walking
-/// its bounded parents, then this branch's own entries up to `cut`.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub struct HistoryHead {
-    pub branch_id: i64,
-    pub cut: i64,
 }
 
 /// One row of the raw history index, resolved to its branch/position.
@@ -84,15 +79,6 @@ impl TryFrom<HistoryEntryRow> for HistoryEntry {
 struct ParentRef {
     parent_branch_id: i64,
     through_position: i64,
-}
-
-/// A branch/position range, the unit `Segment::Messages` and
-/// `summary.covered_ranges` are built from.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub struct PositionRange {
-    pub branch_id: i64,
-    pub first_position: i64,
-    pub last_position: i64,
 }
 
 impl Store {

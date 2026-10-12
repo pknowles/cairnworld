@@ -1,7 +1,6 @@
 use std::fmt;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
 /// A model context could not run. Compaction may recover it by reducing stored
 /// history; transport and model failures remain ordinary errors.
@@ -71,120 +70,10 @@ pub trait Backend {
     ) -> impl Future<Output = Result<Response>> + Send;
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Request {
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolDefinition>,
-    pub sampling: Sampling,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Response {
-    pub content: Content,
-    pub reasoning: String,
-    pub usage: Usage,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", content = "value")]
-pub enum Content {
-    Text(String),
-    ToolCalls(Vec<ToolCall>),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub enum Role {
-    /// The agent's standing directive. Only the first message of a request.
-    System,
-    User,
-    Assistant,
-    Tool,
-    /// A GM narration delivered into this history. Every character present sees
-    /// it; a backend presents it to the model as input attributed to the GM.
-    Narration,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: MessageContent,
-    pub reasoning: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", content = "value")]
-pub enum MessageContent {
-    Text(String),
-    ToolCalls(Vec<ToolCall>),
-    ToolResult {
-        tool_call_id: String,
-        content: String,
-    },
-}
-
-impl Message {
-    pub fn text(role: Role, content: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: MessageContent::Text(content.into()),
-            reasoning: String::new(),
-        }
-    }
-
-    pub fn assistant(content: Content, reasoning: String) -> Self {
-        let content = match content {
-            Content::Text(content) => MessageContent::Text(content),
-            Content::ToolCalls(calls) => MessageContent::ToolCalls(calls),
-        };
-        Self {
-            role: Role::Assistant,
-            content,
-            reasoning,
-        }
-    }
-
-    pub fn tool_result(tool_call_id: String, content: String) -> Self {
-        Self {
-            role: Role::Tool,
-            content: MessageContent::ToolResult {
-                tool_call_id,
-                content,
-            },
-            reasoning: String::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub schema: serde_json::Value,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct Sampling {
-    pub temperature: f32,
-    /// Nucleus, top-k, and minimum-probability cutoffs. `None` leaves that
-    /// truncation off; sampling the full distribution of a small model at a
-    /// normal temperature produces incoherent tails.
-    pub top_p: Option<f32>,
-    pub top_k: Option<usize>,
-    pub min_p: Option<f32>,
-    /// One-shot penalty applied to tokens that have already appeared.
-    pub presence_penalty: Option<f32>,
-    pub enable_thinking: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Usage {
-    pub input_tokens: usize,
-    pub output_tokens: usize,
-}
+// Request/Response and their nested types live in `crate::inspection`, so the
+// browser can render exactly what the server sent/received with no separate
+// mirrored struct (see that module's doc comment).
+pub use crate::inspection::{
+    Content, Message, MessageContent, Request, Response, Role, Sampling, ToolCall, ToolDefinition,
+    Usage,
+};

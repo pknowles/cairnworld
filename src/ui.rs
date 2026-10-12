@@ -3,10 +3,15 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "hydrate")]
 use {
+    crate::inspection::{
+        AgentInfo, BranchHead, BranchNode, BranchParent, Content, GameObject, MessageContent,
+        RawHistoryCursor, RawHistoryEntry, RecordedInference, RecordedOutcome, Request,
+        SequenceNode, ToolCall, WorldObjects,
+    },
     std::{cell::RefCell, rc::Rc},
     wasm_bindgen::{JsCast, closure::Closure},
     wasm_bindgen_futures::{JsFuture, spawn_local},
-    web_sys::{Event, HtmlElement, MessageEvent, Response, WebSocket},
+    web_sys::{Event, HtmlElement, MessageEvent, Response as WebResponse, WebSocket},
 };
 
 /// Messages accepted from the browser's player-chat transport.
@@ -124,284 +129,43 @@ pub enum DevEvent {
     },
 }
 
-/// The full tool-call stack for one triggering event
-/// (`/world/:id/inspect/sequences/:id`). Mirrors `store::SequenceNode` field
-/// for field, including the verbatim model input/output the plan requires
-/// ("expose all fields without truncation"); `segments`/`tools`/`sampling`
-/// stay off this pane for now - the object/schema view is a later step.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct SequenceNodeView {
-    inference: InferenceSummary,
-    messages: Vec<InferenceMessageView>,
-    actions: Vec<ActionSummary>,
-}
-
-/// Mirrors `store::RecordedInference`. Shared by the turn view's per-node
-/// cards and the dedicated inference view (`/inspect/inferences/:id`) -
-/// both show the identical verbatim input/output, so one type and one
-/// rendering component serve both routes.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct InferenceSummary {
-    id: i64,
-    agent_id: i64,
-    sequence_id: Option<i64>,
-    parent_inference_id: Option<i64>,
-    request: RequestView,
-    model_prompt: Option<String>,
-    outcome: OutcomeView,
-    model: String,
-    duration_ms: Option<u64>,
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct RequestView {
-    messages: Vec<MessageView>,
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct MessageView {
-    role: String,
-    content: ContentView,
-    reasoning: String,
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-enum OutcomeView {
-    Running,
-    Response(ResponseView),
-    Error(String),
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct ResponseView {
-    content: ContentView,
-    reasoning: String,
-    usage: UsageView,
-}
-
-/// Mirrors `llm::Usage`.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Copy, Debug, Deserialize)]
-struct UsageView {
-    input_tokens: usize,
-    output_tokens: usize,
-}
-
-/// Mirrors `llm::Content`/`llm::MessageContent`'s explicit tagging exactly -
-/// the default (matching `OutcomeView`'s external tagging) is wrong here.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", content = "value")]
-enum ContentView {
-    Text(String),
-    ToolCalls(Vec<ToolCallView>),
-    ToolResult {
-        #[serde(rename = "tool_call_id")]
-        _tool_call_id: String,
-        content: String,
-    },
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct ToolCallView {
-    name: String,
-    arguments: String,
-}
-
-/// One chat entry this inference produced (`store::InferenceMessage`).
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct InferenceMessageView {
-    role: String,
-    answers_tool_execution_id: Option<i64>,
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct ActionSummary {
-    tool: String,
-    args: String,
-    result: String,
-}
-
-/// Mirrors `store::AgentInfo` (`/inspect/agents`).
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct AgentInfoView {
-    id: i64,
-    role: String,
-    character_name: Option<String>,
-    location_name: Option<String>,
-}
-
-/// Mirrors `store::RawHistoryEntry` (`/inspect/agents/:id/history`). This is
-/// the agent chat history view: the linear raw messages an agent's own
-/// inferences actually saw, with compaction summaries and failures inlined
-/// at the point they occurred - deliberately not the same as the turn view,
-/// which only shows one request/response.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-enum RawHistoryEntryView {
-    Message {
-        id: i64,
-        role: String,
-        content: ContentView,
-        reasoning: String,
-        source_inference_id: Option<i64>,
-        answers_tool_execution_id: Option<i64>,
-    },
-    Notice {
-        id: i64,
-        content: String,
-        source_inference_id: Option<i64>,
-    },
-    Summary {
-        id: i64,
-        covered_ranges: Vec<PositionRangeView>,
-        inference_id: i64,
-        text: String,
-    },
-    FailedInference {
-        id: i64,
-        error: String,
-    },
-}
-
-/// Mirrors `store::PositionRange`.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct PositionRangeView {
-    last_position: i64,
-}
-
-/// Mirrors `store::RawHistoryCursor`: the opaque paging cursor `/inspect/agents/:id/history` returns.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct RawHistoryCursorView {
-    head: HistoryHeadView,
-    next_branch_id: i64,
-    next_position: i64,
-}
-
-/// Mirrors `store::HistoryHead`.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct HistoryHeadView {
-    branch_id: i64,
-    cut: i64,
-}
-
-/// Mirrors the JSON body `/inspect/agents/:id/history` returns: a page of
-/// entries plus the cursor to resume after, or `None` when the page reached
-/// the head.
+/// The JSON body `/inspect/agents/:id/history` returns: a page of entries
+/// plus the cursor to resume after, or `None` when the page reached the head.
+/// Mirrors `web::RawHistoryPageResponse`.
 #[cfg(feature = "hydrate")]
 #[derive(Clone, Debug, Deserialize)]
 struct RawHistoryPageView {
-    entries: Vec<RawHistoryEntryView>,
-    cursor: Option<RawHistoryCursorView>,
+    entries: Vec<RawHistoryEntry>,
+    cursor: Option<RawHistoryCursor>,
 }
 
-/// Mirrors `store::BranchNode`, one node of `/inspect/agents/:id/branches`'
-/// whole-DAG response.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct BranchNodeView {
-    branch_id: i64,
-    parents: Vec<BranchParentView>,
-    head: Option<BranchHeadView>,
-}
-
-/// Mirrors `store::BranchParent`.
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct BranchParentView {
-    branch_id: i64,
-    through_position: i64,
-}
-
-/// Mirrors `store::BranchHead`'s `group_name` - `group_id` is omitted since
-/// nothing in this view links to a group yet (no group-detail view exists to
-/// link to; `WorldObjects` does not expose groups as a browseable type).
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct BranchHeadView {
-    group_name: String,
-}
-
-/// One branch's own paged entries inside a `GmBranchGraphView`, keyed
-/// separately from every sibling branch's paging state - a merge's shared
-/// ancestor is one `BranchSection` referenced by more than one child, never
-/// duplicated.
+/// One branch's own paged entries inside the whole-DAG response from
+/// `/inspect/agents/:id/branches`, keyed separately from every sibling
+/// branch's paging state - a merge's shared ancestor is one `BranchSection`
+/// referenced by more than one child, never duplicated.
 #[cfg(feature = "hydrate")]
 #[derive(Clone, Debug)]
 struct BranchSection {
     branch_id: i64,
-    parents: Vec<BranchParentView>,
-    head: Option<BranchHeadView>,
-    entries: Vec<RawHistoryEntryView>,
-    cursor: Option<RawHistoryCursorView>,
-}
-
-/// Mirrors `store::WorldObjects` (`/inspect/objects`): the world's current
-/// browseable objects, presented as-is with their relations, not projected
-/// into a simplified display (user_declarations.md: Developer Mode).
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct WorldObjectsView {
-    name: String,
-    time: i64,
-    initial_prompt: String,
-    storyteller_summary: String,
-    gm_notes: String,
-    storyteller_notes: String,
-    characters: Vec<GameObjectView>,
-    locations: Vec<GameObjectView>,
-    items: Vec<GameObjectView>,
-    connections: Vec<ConnectionObjectView>,
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct GameObjectView {
-    id: i64,
-    name: String,
-    description: String,
-    gm_notes: String,
-    storyteller_notes: String,
-}
-
-#[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct ConnectionObjectView {
-    id: i64,
-    from: String,
-    to: String,
-    travel_time: i64,
-    description: String,
-    gm_notes: String,
-    storyteller_notes: String,
+    parents: Vec<BranchParent>,
+    head: Option<BranchHead>,
+    entries: Vec<RawHistoryEntry>,
+    cursor: Option<RawHistoryCursor>,
 }
 
 /// Whichever view is currently loaded in the pane, keyed by `InspectSelection`.
 #[cfg(feature = "hydrate")]
 #[derive(Clone, Debug)]
 enum InspectData {
-    Sequence(Vec<SequenceNodeView>),
-    Inference(InferenceSummary),
+    Sequence(Vec<SequenceNode>),
+    Inference(RecordedInference),
     /// `branches` is never empty: a plain player/NPC/Storyteller agent has
     /// exactly one section here, with no parents and no head, rendered
     /// exactly as the single linear view always has been. A world_gm agent
     /// whose groups have split/merged has one section per branch in its DAG.
     AgentHistory { agent_id: i64, branches: Vec<BranchSection> },
-    Agents(Vec<AgentInfoView>),
-    Objects(WorldObjectsView),
+    Agents(Vec<AgentInfo>),
+    Objects(WorldObjects),
 }
 
 /// The pane is owned by the chat island, so switching views only changes
@@ -504,7 +268,7 @@ fn inspect_pane(
             InspectSelection::AgentHistory(agent_id) => fetch_json(
                 format!("/world/{world_id}/inspect/agents/{agent_id}/branches"),
                 "agent branch graph",
-                move |nodes: Vec<BranchNodeView>| {
+                move |nodes: Vec<BranchNode>| {
                     fetch_branch_sections(world_id, agent_id, nodes, apply, error);
                 },
                 error,
@@ -533,7 +297,7 @@ fn inspect_pane(
     fn fetch_branch_sections(
         world_id: i64,
         agent_id: i64,
-        nodes: Vec<BranchNodeView>,
+        nodes: Vec<BranchNode>,
         apply: impl Fn(InspectData) + Clone + 'static,
         error: RwSignal<Option<String>>,
     ) {
@@ -544,7 +308,7 @@ fn inspect_pane(
             let remaining = remaining.clone();
             let sections = sections.clone();
             let apply = apply.clone();
-            let BranchNodeView { branch_id, parents, head } = node;
+            let BranchNode { branch_id, parents, head } = node;
             fetch_json(
                 format!("/world/{world_id}/inspect/agents/{agent_id}/history?branch={branch_id}"),
                 "agent chat history",
@@ -651,15 +415,20 @@ fn inspect_pane(
                     if let Some(InspectData::Sequence(nodes)) = data
                         && !nodes.iter().any(|node| node.inference.id == inference_id)
                     {
-                        nodes.push(SequenceNodeView {
-                            inference: InferenceSummary {
+                        nodes.push(SequenceNode {
+                            inference: RecordedInference {
                                 id: inference_id,
                                 agent_id,
                                 sequence_id,
                                 parent_inference_id,
-                                request: RequestView { messages: Vec::new() },
+                                segments: Vec::new(),
+                                request: Request {
+                                    messages: Vec::new(),
+                                    tools: Vec::new(),
+                                    sampling: Default::default(),
+                                },
                                 model_prompt: None,
-                                outcome: OutcomeView::Running,
+                                outcome: RecordedOutcome::Running,
                                 model: String::new(),
                                 duration_ms: None,
                             },
@@ -789,15 +558,15 @@ fn inspect_pane(
                         None => ().into_any(),
                         Some(InspectData::Sequence(nodes)) => {
                             // Each inference appears once in this list (one
-                            // SequenceNodeView per inference id), so summing
+                            // SequenceNode per inference id), so summing
                             // it directly counts every inference exactly
                             // once - no separate dedup needed.
                             let (input_tokens, output_tokens, duration_ms) = nodes.iter().fold(
                                 (0usize, 0usize, 0u64),
                                 |(input, output, duration), node| {
                                     let (usage, node_duration) = match &node.inference.outcome {
-                                        OutcomeView::Response(response) => {
-                                            (Some(response.usage), node.inference.duration_ms)
+                                        RecordedOutcome::Response(response) => {
+                                            (Some(&response.usage), node.inference.duration_ms)
                                         }
                                         _ => (None, node.inference.duration_ms),
                                     };
@@ -845,16 +614,65 @@ fn inspect_pane(
     .into_any()
 }
 
+/// Renders `content` without collapsing it into one string: each tool call
+/// keeps its own `id`/`name`/`arguments` as a separate row, and every piece
+/// gets its own copy control for the exact recorded text (design.md: "Raw
+/// fields are expandable and copyable without truncation").
 #[cfg(feature = "hydrate")]
-fn content_text(content: ContentView) -> String {
+#[component]
+fn ContentBlock(content: MessageContent) -> impl IntoView {
     match content {
-        ContentView::Text(text) => text,
-        ContentView::ToolCalls(calls) => calls
-            .into_iter()
-            .map(|call| format!("{}({})", call.name, call.arguments))
-            .collect::<Vec<_>>()
-            .join(", "),
-        ContentView::ToolResult { content, .. } => content,
+        MessageContent::Text(text) => view! { <CopyableText text/> }.into_any(),
+        MessageContent::ToolCalls(calls) => view! { <ToolCallList calls/> }.into_any(),
+        MessageContent::ToolResult { tool_call_id, content } => view! {
+            <div class="flex flex-wrap items-start gap-1">
+                <span class="badge badge-ghost badge-sm">{format!("answers call {tool_call_id}")}</span>
+                <CopyableText text=content/>
+            </div>
+        }
+        .into_any(),
+    }
+}
+
+/// A response's content, distinct from `MessageContent` in never answering a
+/// tool call itself (an inference produces tool calls; it does not receive
+/// one).
+#[cfg(feature = "hydrate")]
+#[component]
+fn ResponseContentBlock(content: Content) -> impl IntoView {
+    match content {
+        Content::Text(text) => view! { <CopyableText text/> }.into_any(),
+        Content::ToolCalls(calls) => view! { <ToolCallList calls/> }.into_any(),
+    }
+}
+
+#[cfg(feature = "hydrate")]
+#[component]
+fn ToolCallList(calls: Vec<ToolCall>) -> impl IntoView {
+    view! {
+        <ul class="space-y-1">
+            {calls.into_iter().map(|call| view! {
+                <li class="flex flex-wrap items-start gap-1">
+                    <span class="badge badge-ghost badge-sm">{format!("call {}", call.id)}</span>
+                    <span class="font-semibold">{call.name}</span>
+                    <CopyableText text=call.arguments/>
+                </li>
+            }).collect_view()}
+        </ul>
+    }
+}
+
+/// One piece of exact recorded text, shown verbatim with a copy control for
+/// that exact string (never a truncated or re-derived version of it).
+#[cfg(feature = "hydrate")]
+#[component]
+fn CopyableText(text: String) -> impl IntoView {
+    let copy_text = text.clone();
+    view! {
+        <span class="flex items-start gap-1">
+            <span class="whitespace-pre-wrap">{text}</span>
+            {(!copy_text.is_empty()).then(|| view! { <CopyButton text=copy_text/> })}
+        </span>
     }
 }
 
@@ -902,7 +720,7 @@ fn reset_after_delay(copied: RwSignal<bool>) {
 #[cfg(feature = "hydrate")]
 #[component]
 fn SequenceNodeCard(
-    node: SequenceNodeView,
+    node: SequenceNode,
     selection: RwSignal<Option<InspectSelection>>,
     live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
 ) -> impl IntoView {
@@ -922,8 +740,8 @@ fn SequenceNodeCard(
                     <ul class="mt-1 space-y-1 border-t border-base-300 pt-1 text-base-content/60">
                         {produced.into_iter().map(|message| view! {
                             <li>{match message.answers_tool_execution_id {
-                                Some(tool_execution_id) => format!("{} (answers tool_execution {tool_execution_id})", message.role),
-                                None => message.role,
+                                Some(tool_execution_id) => format!("{} (answers tool_execution {tool_execution_id})", message.role.as_str()),
+                                None => message.role.as_str().to_string(),
                             }}</li>
                         }).collect_view()}
                     </ul>
@@ -941,20 +759,24 @@ fn SequenceNodeCard(
 #[cfg(feature = "hydrate")]
 #[component]
 fn InferenceCard(
-    inference: InferenceSummary,
+    inference: RecordedInference,
     selection: RwSignal<Option<InspectSelection>>,
     standalone: bool,
     live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
 ) -> impl IntoView {
-    let is_running = matches!(inference.outcome, OutcomeView::Running);
-    let (outcome, reasoning, usage) = match inference.outcome {
-        OutcomeView::Running => (None, String::new(), None),
-        OutcomeView::Error(error) => (Some(format!("error: {error}")), String::new(), None),
-        OutcomeView::Response(response) => (
-            Some(content_text(response.content)),
-            response.reasoning,
-            Some(response.usage),
-        ),
+    let is_running = matches!(inference.outcome, RecordedOutcome::Running);
+    let (outcome_text, outcome_content, reasoning, usage) = match inference.outcome {
+        RecordedOutcome::Running => (None, None, String::new(), None),
+        RecordedOutcome::Error(error) => (Some(format!("error: {error}")), None, String::new(), None),
+        RecordedOutcome::Response(response) => match response.content {
+            // Plain text can still be streaming into view live; render it
+            // through the same reactive path as the running/error cases.
+            Content::Text(text) => (Some(text), None, response.reasoning, Some(response.usage)),
+            // Tool calls never stream as partial text - render their full
+            // structure (each call's id/name/arguments) once the response
+            // has actually completed.
+            content => (None, Some(content), response.reasoning, Some(response.usage)),
+        },
     };
     let request_messages = inference.request.messages;
     let model_prompt = inference.model_prompt;
@@ -993,13 +815,13 @@ fn InferenceCard(
                 }))}
             </div>
             {
-                fn outcome_text(
-                    outcome: &Option<String>,
+                fn running_text(
+                    outcome_text: &Option<String>,
                     is_running: bool,
                     inference_id: i64,
                     live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
                 ) -> String {
-                    match outcome {
+                    match outcome_text {
                         Some(text) => text.clone(),
                         None if is_running => live_tokens
                             .get()
@@ -1010,14 +832,15 @@ fn InferenceCard(
                         None => String::new(),
                     }
                 }
-                let outcome_for_button = outcome.clone();
+                let outcome_for_button = outcome_text.clone();
                 view! {
+                    {outcome_content.map(|content| view! { <ResponseContentBlock content/> })}
                     <div class="flex items-start gap-1">
                         <p class="whitespace-pre-wrap">
-                            {move || outcome_text(&outcome, is_running, inference_id, live_tokens)}
+                            {move || running_text(&outcome_text, is_running, inference_id, live_tokens)}
                         </p>
                         {move || {
-                            let text = outcome_text(&outcome_for_button, is_running, inference_id, live_tokens);
+                            let text = running_text(&outcome_for_button, is_running, inference_id, live_tokens);
                             (!text.is_empty()).then(|| view! { <CopyButton text/> })
                         }}
                     </div>
@@ -1029,19 +852,14 @@ fn InferenceCard(
             <details class="mt-1 border-t border-base-300 pt-1">
                 <summary class="cursor-pointer select-none">"Input"</summary>
                 <ul class="mt-1 space-y-1">
-                    {request_messages.into_iter().map(|message| {
-                        let text = content_text(message.content);
-                        let copy_text = text.clone();
-                        view! {
-                            <li>
-                                <span class="font-semibold">{message.role}</span>
-                                <span class="whitespace-pre-wrap">{format!(": {text}")}</span>
-                                {(!copy_text.is_empty()).then(|| view! { <CopyButton text=copy_text/> })}
-                                {(!message.reasoning.is_empty()).then(|| view! {
-                                    <span class="block whitespace-pre-wrap text-base-content/60">{format!("reasoning: {}", message.reasoning)}</span>
-                                })}
-                            </li>
-                        }
+                    {request_messages.into_iter().map(|message| view! {
+                        <li>
+                            <span class="font-semibold">{message.role.as_str()}</span>
+                            <ContentBlock content=message.content/>
+                            {(!message.reasoning.is_empty()).then(|| view! {
+                                <span class="block whitespace-pre-wrap text-base-content/60">{format!("reasoning: {}", message.reasoning)}</span>
+                            })}
+                        </li>
                     }).collect_view()}
                 </ul>
                 {model_prompt.map(|prompt| view! {
@@ -1102,7 +920,7 @@ fn BranchSectionView(
     let branch_id = section.branch_id;
     let loading_more = RwSignal::new(false);
     let load_more_error = RwSignal::new(None::<String>);
-    let load_more = move |cursor: RawHistoryCursorView| {
+    let load_more = move |cursor: RawHistoryCursor| {
         loading_more.set(true);
         let query = serde_json::to_string(&cursor).unwrap_or_default();
         let encoded = js_sys::encode_uri_component(&query);
@@ -1156,7 +974,7 @@ fn BranchSectionView(
                 <button
                     class="btn btn-ghost btn-sm"
                     disabled=move || loading_more.get()
-                    on:click=move |_| load_more(cursor.clone())
+                    on:click=move |_| load_more(cursor)
                 >
                     {move || if loading_more.get() { "Loading…" } else { "Load more" }}
                 </button>
@@ -1170,13 +988,13 @@ fn BranchSectionView(
 
 #[cfg(feature = "hydrate")]
 #[component]
-fn RawHistoryEntryRow(entry: RawHistoryEntryView, selection: RwSignal<Option<InspectSelection>>) -> impl IntoView {
+fn RawHistoryEntryRow(entry: RawHistoryEntry, selection: RwSignal<Option<InspectSelection>>) -> impl IntoView {
     match entry {
-        RawHistoryEntryView::Message { id, role, content, reasoning, source_inference_id, answers_tool_execution_id } => view! {
+        RawHistoryEntry::Message { id, role, content, reasoning, source_inference_id, answers_tool_execution_id } => view! {
             <li class="rounded bg-base-200 p-2">
                 <div class="flex flex-wrap items-center gap-2">
                     <span class="badge badge-ghost badge-sm">{format!("message {id}")}</span>
-                    <span class="font-semibold">{role}</span>
+                    <span class="font-semibold">{role.as_str()}</span>
                     {answers_tool_execution_id.map(|tool_execution_id| view! { <span class="badge badge-ghost badge-sm">{format!("answers tool_execution {tool_execution_id}")}</span> })}
                     {source_inference_id.map(|inference_id| view! {
                         <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>
@@ -1184,13 +1002,13 @@ fn RawHistoryEntryRow(entry: RawHistoryEntryView, selection: RwSignal<Option<Ins
                         </button>
                     })}
                 </div>
-                <p class="whitespace-pre-wrap">{content_text(content)}</p>
+                <ContentBlock content/>
                 {(!reasoning.is_empty()).then(|| view! {
                     <p class="whitespace-pre-wrap text-base-content/60">{format!("reasoning: {reasoning}")}</p>
                 })}
             </li>
         }.into_any(),
-        RawHistoryEntryView::Notice { id, content, source_inference_id } => view! {
+        RawHistoryEntry::Notice { id, content, source_inference_id } => view! {
             <li class="alert alert-warning text-sm">
                 <span class="badge badge-ghost badge-sm">{format!("notice {id}")}</span>
                 <span>{content}</span>
@@ -1201,15 +1019,18 @@ fn RawHistoryEntryRow(entry: RawHistoryEntryView, selection: RwSignal<Option<Ins
                 })}
             </li>
         }.into_any(),
-        RawHistoryEntryView::Summary { id, covered_ranges, inference_id, text } => view! {
+        RawHistoryEntry::Summary { id, covered_ranges, inference_id, text } => view! {
             <li>
                 <details class="rounded border border-base-300 p-2">
                     <summary class="cursor-pointer select-none text-base-content/60">
                         {format!(
-                            "summary {id} through {}",
+                            "summary {id} covers {}",
                             covered_ranges
                                 .iter()
-                                .map(|range| format!("#{}", range.last_position))
+                                .map(|range| format!(
+                                    "branch {} #{}-#{}",
+                                    range.branch_id, range.first_position, range.last_position,
+                                ))
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         )}
@@ -1221,7 +1042,7 @@ fn RawHistoryEntryRow(entry: RawHistoryEntryView, selection: RwSignal<Option<Ins
                 </details>
             </li>
         }.into_any(),
-        RawHistoryEntryView::FailedInference { id, error } => view! {
+        RawHistoryEntry::FailedInference { id, error } => view! {
             <li class="alert alert-error text-sm">
                 <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>
                     {format!("inference {id} failed")}
@@ -1236,7 +1057,7 @@ fn RawHistoryEntryRow(entry: RawHistoryEntryView, selection: RwSignal<Option<Ins
 /// objects, descriptions, tools, agents and links to their chat histories").
 #[cfg(feature = "hydrate")]
 #[component]
-fn AgentsList(agents: Vec<AgentInfoView>, selection: RwSignal<Option<InspectSelection>>) -> impl IntoView {
+fn AgentsList(agents: Vec<AgentInfo>, selection: RwSignal<Option<InspectSelection>>) -> impl IntoView {
     view! {
         <ul class="flex flex-col gap-1 text-sm">
             {agents.into_iter().map(|agent| view! {
@@ -1256,8 +1077,8 @@ fn AgentsList(agents: Vec<AgentInfoView>, selection: RwSignal<Option<InspectSele
 /// relations without projecting them into a simplified display).
 #[cfg(feature = "hydrate")]
 #[component]
-fn ObjectsView(objects: WorldObjectsView) -> impl IntoView {
-    fn object_row(object: GameObjectView) -> impl IntoView {
+fn ObjectsView(objects: WorldObjects) -> impl IntoView {
+    fn object_row(object: GameObject) -> impl IntoView {
         view! {
             <li class="rounded bg-base-200 p-2">
                 <p class="font-semibold">{format!("{} ({})", object.name, object.id)}</p>
@@ -1343,7 +1164,7 @@ fn fetch_json<T: serde::de::DeserializeOwned + 'static>(
     let request = window.fetch_with_str(&url);
     spawn_local(async move {
         let response = match JsFuture::from(request).await {
-            Ok(response) => match response.dyn_into::<Response>() {
+            Ok(response) => match response.dyn_into::<WebResponse>() {
                 Ok(response) => response,
                 Err(_) => {
                     error.set(Some(format!(
@@ -1425,7 +1246,7 @@ fn wait_for_game(message: RwSignal<String>) {
     let request = window.fetch_with_str("/game-status");
     spawn_local(async move {
         let response = match JsFuture::from(request).await {
-            Ok(response) => match response.dyn_into::<Response>() {
+            Ok(response) => match response.dyn_into::<WebResponse>() {
                 Ok(response) => response,
                 Err(_) => {
                     message

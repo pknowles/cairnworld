@@ -815,15 +815,16 @@ settings, summaries, templates, or model defaults.
 
 Retain the existing immutable text/summary/message-range recipe for structured
 requests. Hash the actual request crossing the backend boundary and require
-reconstruction to match. Persist the effective backend settings (including
-output limit), immutable model/template/tokenizer identity and formatting
-options used for that call. Observe the rendered prompt and token IDs at the
-actual template/tokenization boundary used for generation, including special
-tokens and the generation prefix. Tests retain these observations temporarily
-for direct equality checks; production retains verification checksums and the
+reconstruction to match. The existing `inference.model` column already
+records which configured model served the call, so a later run against the
+same game state under a different model is identifiable; no further model
+identity is retained. Observe the rendered prompt and token IDs at the actual
+template/tokenization boundary used for generation, including special tokens
+and the generation prefix. Tests retain these observations temporarily for
+direct equality checks; production retains verification checksums and the
 source references needed to reconstruct, not duplicate expanded prompts or
-token arrays. Observe the normal tokenization pass; do not
-run another one on the inference hot path just for inspection.
+token arrays. Observe the normal tokenization pass; do not run another one on
+the inference hot path just for inspection.
 
 "Actual model prompt recording" means observing the formatted prompt as the
 model runtime consumes it. This is an implementation detail of the declared
@@ -855,17 +856,15 @@ Alternatives considered against the recording declaration and coding standards:
   retains small request metadata, and proves equality. This is the chosen
   approach; establish the exact formatter inputs needed before implementation.
 
-Retained model evidence uses `model_artifact(id, gguf_digest,
-tokenizer_digest, config_digest, adapter_revision, runtime_revision)` and
-`inference_prompt.model_artifact_id`. Tokenizer/config bytes live once under
-`data/artifacts/<digest>`; their digest is checked when loaded. The already
-retained template artifact holds the original template source and options.
-`inference.effective_settings` serializes the fully resolved runtime parameters,
-separately from requested sampling. The formatter module dispatches on the
-recorded adapter revision; version 1 remains supported when version 2 is added.
-Releases changing rendering dependencies must pass old-version reconstruction
-fixtures before replacing the supported runtime. Missing artifacts or an
-unsupported revision fail explicitly; they never use current defaults.
+Retained model evidence is the existing `inference.model` column — the
+configured `[models.<name>]` name that served the call (see
+[settings.rs](implementation_reference.md)) — a plain record, not a
+content-addressed identity. `inference_prompt.format_id` already references
+the recipe text used to render the prompt, and `max_output_tokens` the
+resolved output limit; no further settings blob is needed. Reconstruction and
+formatting always use the current runtime; tracking historical
+formatter/tokenizer revisions across code changes is not a requirement, so
+there is no adapter-version dispatch or artifact store to maintain.
 
 ### Verification contract
 

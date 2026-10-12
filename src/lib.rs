@@ -1,3 +1,4 @@
+pub mod inspection;
 pub mod ui;
 
 /// Entry point required by Leptos's generated islands loader.
