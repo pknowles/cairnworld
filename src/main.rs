@@ -223,11 +223,7 @@ async fn run_import_scenario(
         .install_scenario(&owner, &scenario)
         .await
         .context("installing scenario")?;
-    let member = store
-        .active_member_agent(owner.id, installed.world_id)
-        .await
-        .context("resolving installed player membership")?
-        .context("newly installed world is missing its active owner membership")?;
+    let member = installed.member.clone();
     println!(
         "Installed {} as world {}. {} owns player agent {} for {}.",
         scenario.name,

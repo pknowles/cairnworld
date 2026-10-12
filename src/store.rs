@@ -26,10 +26,11 @@ pub struct User {
 }
 
 #[derive(Clone, Debug, FromRow, PartialEq)]
-pub struct MemberAgent {
+pub struct PlayerAgent {
     pub member_id: i64,
     pub world_id: i64,
     pub user_id: i64,
+    pub character_id: i64,
     pub agent_id: i64,
 }
 
@@ -53,7 +54,23 @@ pub struct WorldMember {
     pub user_id: i64,
     pub display_name: String,
     pub access: String,
-    pub character_name: String,
+    pub characters: Vec<WorldCharacter>,
+}
+
+#[derive(Clone, Debug, FromRow, PartialEq)]
+pub struct WorldCharacter {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(FromRow)]
+struct WorldMemberCharacterRow {
+    member_id: i64,
+    user_id: i64,
+    display_name: String,
+    access: String,
+    character_id: i64,
+    character_name: String,
 }
 
 /// A text entry safe to render in the player-facing chat. Tool calls and tool
@@ -177,12 +194,13 @@ impl From<PendingActionRow> for PendingAction {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InstalledWorld {
     pub world_id: i64,
-    pub member: MemberAgent,
+    pub member: PlayerAgent,
     pub character_handle: String,
 }
 
 struct JoinedWorld {
     member_id: i64,
+    character_id: i64,
     agent_id: i64,
     character_tool_id: i64,
 }
@@ -450,7 +468,7 @@ impl Store {
 
     /// Accept a live invitation. Existing memberships regain access rather
     /// than silently creating a second player history or Adventurer.
-    pub async fn accept_invitation(&self, user: &User, token: &str) -> Result<MemberAgent> {
+    pub async fn accept_invitation(&self, user: &User, token: &str) -> Result<PlayerAgent> {
         let mut transaction = self
             .pool
             .begin()
@@ -464,10 +482,10 @@ impl Store {
         .await
         .context("loading invitation")?
         .with_context(|| format!("invitation `{token}` does not exist or was revoked"))?;
-        let existing: Option<MemberAgent> = sqlx::query_as(
-            "SELECT member.id AS member_id, member.world_id, member.user_id, player.agent_id \
+        let existing: Option<PlayerAgent> = sqlx::query_as(
+            "SELECT member.id AS member_id, member.world_id, member.user_id, player.character_id, player.agent_id \
              FROM world_member AS member \
-             JOIN member_player_agent AS player ON player.member_id = member.id \
+             JOIN player_character AS player ON player.member_id = member.id \
              WHERE member.world_id = ? AND member.user_id = ?",
         )
         .bind(invitation.world_id)
@@ -500,18 +518,18 @@ impl Store {
         .rows_affected();
         ensure!(consumed == 1, "invitation `{token}` has no remaining slots");
         let starting_location_id: i64 = sqlx::query_scalar(
-            "SELECT character_location.location_id FROM world_owner \
-             JOIN world_member ON world_member.world_id = world_owner.world_id \
-               AND world_member.user_id = world_owner.user_id \
-             JOIN player_character ON player_character.member_id = world_member.id \
-             JOIN character_location ON character_location.character_id = player_character.character_id \
-             WHERE world_owner.world_id = ?",
+            "SELECT location_id FROM world_starting_location WHERE world_id = ?",
         )
         .bind(invitation.world_id)
         .fetch_optional(&mut *transaction)
         .await
         .context("finding invitation world starting location")?
-        .with_context(|| format!("world {} has no owner Adventurer location", invitation.world_id))?;
+        .with_context(|| {
+            format!(
+                "world {} has no owner Adventurer location",
+                invitation.world_id
+            )
+        })?;
         let joined = Self::join_world(
             &mut transaction,
             user,
@@ -524,10 +542,11 @@ impl Store {
             .commit()
             .await
             .context("committing invitation acceptance")?;
-        Ok(MemberAgent {
+        Ok(PlayerAgent {
             member_id: joined.member_id,
             world_id: invitation.world_id,
             user_id: user.id,
+            character_id: joined.character_id,
             agent_id: joined.agent_id,
         })
     }
@@ -653,18 +672,40 @@ impl Store {
     }
 
     pub async fn world_members(&self, world_id: i64) -> Result<Vec<WorldMember>> {
-        sqlx::query_as(
-            "SELECT member.user_id, user.display_name, member.access, character.name AS character_name \
+        let rows: Vec<WorldMemberCharacterRow> = sqlx::query_as(
+            "SELECT member.id AS member_id, member.user_id, user.display_name, member.access, character.id AS character_id, character.name AS character_name \
              FROM world_member AS member \
              JOIN user ON user.id = member.user_id \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
-             WHERE member.world_id = ? ORDER BY member.id",
+             WHERE member.world_id = ? ORDER BY member.id, character.id",
         )
         .bind(world_id)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("loading members of world {world_id}"))
+        .with_context(|| format!("loading members of world {world_id}"))?;
+        let mut members = Vec::<WorldMember>::new();
+        let mut member_id = None;
+        for row in rows {
+            if member_id != Some(row.member_id) {
+                member_id = Some(row.member_id);
+                members.push(WorldMember {
+                    user_id: row.user_id,
+                    display_name: row.display_name,
+                    access: row.access,
+                    characters: vec![],
+                });
+            }
+            members
+                .last_mut()
+                .expect("member row was just added")
+                .characters
+                .push(WorldCharacter {
+                    id: row.character_id,
+                    name: row.character_name,
+                });
+        }
+        Ok(members)
     }
 
     pub async fn invitations(&self, owner_id: i64, world_id: i64) -> Result<Vec<Invitation>> {
@@ -856,6 +897,13 @@ impl Store {
                 .with_context(|| format!("linking NPC agent for {}", npc.name))?;
         }
 
+        sqlx::query("INSERT INTO world_starting_location (world_id, location_id) VALUES (?, ?)")
+            .bind(world_id)
+            .bind(locations[scenario.starting_location.as_str()])
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("recording starting location for world {world_id}"))?;
+
         let member = Self::join_world(
             &mut transaction,
             owner,
@@ -870,40 +918,100 @@ impl Store {
         Ok(InstalledWorld {
             world_id,
             character_handle: format!("char{}", member.character_tool_id),
-            member: MemberAgent {
+            member: PlayerAgent {
                 member_id: member.member_id,
                 world_id,
                 user_id: owner.id,
+                character_id: member.character_id,
                 agent_id: member.agent_id,
             },
         })
     }
 
     /// The single access lookup used before a member may read or affect a world.
-    pub async fn active_member_agent(
+    pub async fn active_player_character(
         &self,
         user_id: i64,
         world_id: i64,
-    ) -> Result<Option<MemberAgent>> {
+        character_id: i64,
+    ) -> Result<Option<PlayerAgent>> {
         sqlx::query_as(
-            "SELECT member.id AS member_id, member.world_id, member.user_id, player.agent_id \
+            "SELECT member.id AS member_id, member.world_id, member.user_id, player.character_id, player.agent_id \
              FROM world_member AS member \
-             JOIN member_player_agent AS player ON player.member_id = member.id \
-             WHERE member.user_id = ? AND member.world_id = ? AND member.access = 'active'",
+             JOIN player_character AS player ON player.member_id = member.id \
+             WHERE member.user_id = ? AND member.world_id = ? AND player.character_id = ? AND member.access = 'active'",
+        )
+        .bind(user_id)
+        .bind(world_id)
+        .bind(character_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| {
+            format!("resolving active character {character_id} for user {user_id} in world {world_id}")
+        })
+    }
+
+    pub async fn has_active_membership(&self, user_id: i64, world_id: i64) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM world_member WHERE user_id = ? AND world_id = ? AND access = 'active'",
         )
         .bind(user_id)
         .bind(world_id)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| {
-            format!("resolving active membership for user {user_id} in world {world_id}")
+        .context("checking active membership")?
+        .is_some())
+    }
+
+    /// Create a new blank Adventurer for an active membership. Each character
+    /// receives its own player agent and is placed at the durable world start.
+    pub async fn create_player_character(
+        &self,
+        user_id: i64,
+        world_id: i64,
+    ) -> Result<PlayerAgent> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting player-character creation")?;
+        let member_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM world_member WHERE user_id = ? AND world_id = ? AND access = 'active'",
+        )
+        .bind(user_id)
+        .bind(world_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("resolving active membership for new character")?
+        .with_context(|| format!("user {user_id} has no active access to world {world_id}"))?;
+        let starting_location_id: i64 = sqlx::query_scalar(
+            "SELECT location_id FROM world_starting_location WHERE world_id = ?",
+        )
+        .bind(world_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading world starting location")?
+        .with_context(|| format!("world {world_id} has no starting location"))?;
+        let (character_id, agent_id, _) =
+            Self::create_adventurer(&mut transaction, member_id, world_id, starting_location_id)
+                .await?;
+        transaction
+            .commit()
+            .await
+            .context("committing player-character creation")?;
+        Ok(PlayerAgent {
+            member_id,
+            world_id,
+            user_id,
+            character_id,
+            agent_id,
         })
     }
 
     /// Load exactly the player-visible state for the member's current location.
     /// It rechecks the membership relation so a stale browser connection cannot
     /// retain a scene after its access has been removed.
-    pub async fn player_scene(&self, member: &MemberAgent) -> Result<PlayerScene> {
+    pub async fn player_scene(&self, member: &PlayerAgent) -> Result<PlayerScene> {
         let (character_id, character_name, character_description, sheet, location_id, location_name, location_description):
             (i64, String, String, String, i64, String, String) = sqlx::query_as(
             "SELECT character.id, character.name, character.description, character.sheet, location.id, location.name, location.description \
@@ -912,11 +1020,12 @@ impl Store {
              JOIN character ON character.id = player_character.character_id \
              JOIN character_location ON character_location.character_id = character.id \
              JOIN location ON location.id = character_location.location_id \
-             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND member.access = 'active'",
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
         )
         .bind(member.member_id)
         .bind(member.world_id)
         .bind(member.user_id)
+        .bind(member.character_id)
         .fetch_optional(&self.pool)
         .await
         .context("loading player scene")?
@@ -935,37 +1044,39 @@ impl Store {
         })
     }
 
-    /// Resolve the active member's current location without exposing an
+    /// Resolve the active player's character location without exposing an
     /// internal database id in the model-facing scene packet.
-    pub async fn member_location_id(&self, member: &MemberAgent) -> Result<i64> {
+    pub async fn player_location_id(&self, member: &PlayerAgent) -> Result<i64> {
         sqlx::query_scalar(
             "SELECT character_location.location_id FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character_location ON character_location.character_id = player_character.character_id \
-             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND member.access = 'active'",
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
         )
         .bind(member.member_id)
         .bind(member.world_id)
         .bind(member.user_id)
+        .bind(member.character_id)
         .fetch_optional(&self.pool)
         .await
         .context("loading member location")?
         .with_context(|| format!("member {} has no active location", member.member_id))
     }
 
-    /// Resolve the current location's GM from the authenticated membership.
+    /// Resolve the current location's GM from the authenticated player character.
     /// The player agent never chooses which GM receives the opening request.
-    pub async fn member_location_gm_agent_id(&self, member: &MemberAgent) -> Result<i64> {
+    pub async fn player_location_gm_agent_id(&self, member: &PlayerAgent) -> Result<i64> {
         sqlx::query_scalar(
             "SELECT location_gm.agent_id FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character_location ON character_location.character_id = player_character.character_id \
              JOIN location_gm ON location_gm.location_id = character_location.location_id \
-             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND member.access = 'active'",
+             WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
         )
         .bind(member.member_id)
         .bind(member.world_id)
         .bind(member.user_id)
+        .bind(member.character_id)
         .fetch_optional(&self.pool)
         .await
         .context("loading member location GM")?
@@ -975,7 +1086,7 @@ impl Store {
     /// Load the text-only portion of one active membership's player-agent
     /// history in stored message order. This is used by the game page on
     /// every reload; it does not rely on a websocket's in-memory lifetime.
-    pub async fn player_chat(&self, member: &MemberAgent) -> Result<Vec<PlayerChatEntry>> {
+    pub async fn player_chat(&self, member: &PlayerAgent) -> Result<Vec<PlayerChatEntry>> {
         self.player_chat_after(member, None).await
     }
 
@@ -985,18 +1096,19 @@ impl Store {
     /// duplicated.
     pub async fn player_chat_after(
         &self,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         after_message_id: Option<i64>,
     ) -> Result<Vec<PlayerChatEntry>> {
         let active: Option<i64> = sqlx::query_scalar(
             "SELECT 1 FROM world_member AS member \
-             JOIN member_player_agent ON member_player_agent.member_id = member.id \
+             JOIN player_character ON player_character.member_id = member.id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
-             AND member_player_agent.agent_id = ? AND member.access = 'active'",
+             AND player_character.character_id = ? AND player_character.agent_id = ? AND member.access = 'active'",
         )
         .bind(member.member_id)
         .bind(member.world_id)
         .bind(member.user_id)
+        .bind(member.character_id)
         .bind(member.agent_id)
         .fetch_optional(&self.pool)
         .await
@@ -1009,14 +1121,16 @@ impl Store {
         );
         let rows: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT message.id, message.role, message.content FROM world_member AS member \
-             JOIN member_player_agent ON member_player_agent.member_id = member.id \
-             JOIN message ON message.agent_id = member_player_agent.agent_id \
+             JOIN player_character ON player_character.member_id = member.id \
+             JOIN message ON message.agent_id = player_character.agent_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
-             AND member.access = 'active' AND message.id > ? ORDER BY message.id",
+             AND player_character.character_id = ? AND player_character.agent_id = ? AND member.access = 'active' AND message.id > ? ORDER BY message.id",
         )
         .bind(member.member_id)
         .bind(member.world_id)
         .bind(member.user_id)
+        .bind(member.character_id)
+        .bind(member.agent_id)
         .bind(after_message_id.unwrap_or_default())
         .fetch_all(&self.pool)
         .await
@@ -1050,12 +1164,11 @@ impl Store {
         narration: &str,
     ) -> Result<()> {
         let agents: Vec<i64> = sqlx::query_scalar(
-            "SELECT member_player_agent.agent_id FROM world_member \
-             JOIN member_player_agent ON member_player_agent.member_id = world_member.id \
+            "SELECT player_character.agent_id FROM world_member \
              JOIN player_character ON player_character.member_id = world_member.id \
              JOIN character_location ON character_location.character_id = player_character.character_id \
              WHERE world_member.world_id = ? AND world_member.access = 'active' \
-             AND character_location.location_id = ? ORDER BY member_player_agent.agent_id",
+             AND character_location.location_id = ? ORDER BY player_character.agent_id",
         )
         .bind(world_id)
         .bind(location_id)
@@ -1166,12 +1279,12 @@ impl Store {
     /// call returns the stored result instead of offering a reroll.
     pub async fn roll_hit_protection(
         &self,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         sequence_id: i64,
         inference_id: Option<i64>,
     ) -> Result<i64> {
         let mut transaction = self.pool.begin().await.context("starting HP roll")?;
-        let (character_id, sheet): (i64, String) = Self::member_sheet(&mut transaction, member)
+        let (character_id, sheet): (i64, String) = Self::player_sheet(&mut transaction, member)
             .await
             .context("loading Adventurer for HP roll")?;
         let mut sheet: serde_json::Value =
@@ -1202,7 +1315,7 @@ impl Store {
     /// Roll STR, DEX, and WIL in order, once, using Cairn's 3d6 rule.
     pub async fn roll_attributes(
         &self,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         sequence_id: i64,
         inference_id: Option<i64>,
     ) -> Result<(i64, i64, i64)> {
@@ -1211,7 +1324,7 @@ impl Store {
             .begin()
             .await
             .context("starting attribute rolls")?;
-        let (character_id, sheet): (i64, String) = Self::member_sheet(&mut transaction, member)
+        let (character_id, sheet): (i64, String) = Self::player_sheet(&mut transaction, member)
             .await
             .context("loading Adventurer for attribute rolls")?;
         let mut sheet: serde_json::Value =
@@ -1256,12 +1369,12 @@ impl Store {
 
     pub async fn ready_to_begin(
         &self,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         sequence_id: i64,
         inference_id: Option<i64>,
     ) -> Result<()> {
         let mut transaction = self.pool.begin().await.context("starting ready-to-begin")?;
-        let (character_id, sheet): (i64, String) = Self::member_sheet(&mut transaction, member)
+        let (character_id, sheet): (i64, String) = Self::player_sheet(&mut transaction, member)
             .await
             .context("loading Adventurer to mark ready")?;
         let mut sheet: serde_json::Value =
@@ -1294,13 +1407,13 @@ impl Store {
             .context("committing ready-to-begin")
     }
 
-    pub async fn is_ready_to_begin(&self, member: &MemberAgent) -> Result<bool> {
+    pub async fn is_ready_to_begin(&self, member: &PlayerAgent) -> Result<bool> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .context("checking Adventurer readiness")?;
-        let (_, sheet) = Self::member_sheet(&mut transaction, member).await?;
+        let (_, sheet) = Self::player_sheet(&mut transaction, member).await?;
         transaction
             .commit()
             .await
@@ -1318,7 +1431,7 @@ impl Store {
     /// GM, so neither can be selected by model or browser input.
     pub async fn create_pending_action(
         &self,
-        member: &MemberAgent,
+        member: &PlayerAgent,
         sequence_id: i64,
         inference_id: i64,
         tool: &str,
@@ -1333,17 +1446,17 @@ impl Store {
         let (character_id, location_gm_agent_id): (i64, i64) = sqlx::query_as(
             "SELECT character.id, location_gm.agent_id \
              FROM world_member AS member \
-             JOIN member_player_agent AS player ON player.member_id = member.id \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
              JOIN character_location ON character_location.character_id = character.id \
              JOIN location_gm ON location_gm.location_id = character_location.location_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
-               AND member.access = 'active' AND player.agent_id = ?",
+               AND member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ?",
         )
         .bind(member.member_id)
         .bind(member.world_id)
         .bind(member.user_id)
+        .bind(member.character_id)
         .bind(member.agent_id)
         .fetch_optional(&mut *transaction)
         .await
@@ -1696,18 +1809,28 @@ impl Store {
         .await
         .with_context(|| format!("joining user {} to world {world_id}", user.email))?
         .last_insert_rowid();
+        let (character_id, agent_id, character_tool_id) =
+            Self::create_adventurer(transaction, member_id, world_id, starting_location_id).await?;
+        Ok(JoinedWorld {
+            member_id,
+            character_id,
+            agent_id,
+            character_tool_id,
+        })
+    }
+
+    async fn create_adventurer(
+        transaction: &mut Transaction<'_, Sqlite>,
+        member_id: i64,
+        world_id: i64,
+        starting_location_id: i64,
+    ) -> Result<(i64, i64, i64)> {
         let agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
             .bind(world_id)
             .execute(&mut **transaction)
             .await
             .with_context(|| format!("creating player agent for world {world_id}"))?
             .last_insert_rowid();
-        sqlx::query("INSERT INTO member_player_agent (member_id, agent_id) VALUES (?, ?)")
-            .bind(member_id)
-            .bind(agent_id)
-            .execute(&mut **transaction)
-            .await
-            .with_context(|| format!("linking player agent for world {world_id}"))?;
         let sheet = serde_json::json!({});
         let notes = Notes::default();
         let character_id = Self::insert_character(
@@ -1725,47 +1848,41 @@ impl Store {
             },
         )
         .await?;
-        sqlx::query("INSERT INTO player_character (member_id, character_id) VALUES (?, ?)")
-            .bind(member_id)
-            .bind(character_id)
-            .execute(&mut **transaction)
-            .await
-            .with_context(|| format!("linking Adventurer for world {world_id}"))?;
         sqlx::query(
-            "INSERT INTO character_location (character_id, location_id, description) VALUES (?, ?, '')",
+            "INSERT INTO player_character (member_id, character_id, agent_id) VALUES (?, ?, ?)",
         )
+        .bind(member_id)
         .bind(character_id)
-        .bind(starting_location_id)
+        .bind(agent_id)
         .execute(&mut **transaction)
         .await
-        .with_context(|| format!("placing Adventurer in world {world_id}"))?;
-        let character_tool_id = sqlx::query_scalar("SELECT tool_id FROM character WHERE id = ?")
+        .with_context(|| format!("linking Adventurer for world {world_id}"))?;
+        sqlx::query("INSERT INTO character_location (character_id, location_id, description) VALUES (?, ?, '')")
+            .bind(character_id).bind(starting_location_id).execute(&mut **transaction).await
+            .with_context(|| format!("placing Adventurer in world {world_id}"))?;
+        let tool_id = sqlx::query_scalar("SELECT tool_id FROM character WHERE id = ?")
             .bind(character_id)
             .fetch_one(&mut **transaction)
             .await
             .context("loading Adventurer handle")?;
-        Ok(JoinedWorld {
-            member_id,
-            agent_id,
-            character_tool_id,
-        })
+        Ok((character_id, agent_id, tool_id))
     }
 
-    async fn member_sheet(
+    async fn player_sheet(
         transaction: &mut Transaction<'_, Sqlite>,
-        member: &MemberAgent,
+        member: &PlayerAgent,
     ) -> Result<(i64, String)> {
         sqlx::query_as(
             "SELECT character.id, character.sheet FROM world_member AS member \
-             JOIN member_player_agent AS player ON player.member_id = member.id \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
-               AND member.access = 'active' AND player.agent_id = ?",
+             AND member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ?",
         )
         .bind(member.member_id)
         .bind(member.world_id)
         .bind(member.user_id)
+        .bind(member.character_id)
         .bind(member.agent_id)
         .fetch_optional(&mut **transaction)
         .await
@@ -2662,27 +2779,72 @@ mod tests {
 
         assert_eq!(
             store
-                .active_member_agent(alex_one.id, first.world_id)
+                .active_player_character(alex_one.id, first.world_id, first.member.character_id)
                 .await
                 .unwrap(),
             Some(first.member.clone())
         );
         assert_eq!(
             store
-                .active_member_agent(alex_two.id, second.world_id)
+                .active_player_character(alex_two.id, second.world_id, second.member.character_id)
                 .await
                 .unwrap(),
-            Some(second.member)
+            Some(second.member.clone())
         );
         assert_eq!(
             store
-                .active_member_agent(alex_one.id, other_world_id)
+                .active_player_character(alex_one.id, other_world_id, second.member.character_id)
                 .await
                 .unwrap(),
             None,
             "a world id alone must never select another user's player agent"
         );
 
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_member_can_create_independent_player_characters() {
+        let path = database_path();
+        let store = Store::open(&path).await.unwrap();
+        let owner = store
+            .find_or_create_user("owner@example.test", "Owner")
+            .await
+            .unwrap();
+        let installed = store
+            .install_scenario(&owner, &test_scenario("two characters"))
+            .await
+            .unwrap();
+        let second = store
+            .create_player_character(owner.id, installed.world_id)
+            .await
+            .unwrap();
+        assert_ne!(installed.member.character_id, second.character_id);
+        assert_ne!(installed.member.agent_id, second.agent_id);
+        assert_eq!(
+            store.player_chat(&second).await.unwrap(),
+            vec![],
+            "a new character never inherits another character's history"
+        );
+        store
+            .append_message(
+                installed.member.agent_id,
+                &Message::text(Role::User, "First character speaks."),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.player_chat(&second).await.unwrap(), vec![]);
+        let members = store.world_members(installed.world_id).await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].characters.len(), 2);
+        assert_eq!(
+            store
+                .active_player_character(owner.id, installed.world_id, second.character_id)
+                .await
+                .unwrap(),
+            Some(second)
+        );
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
@@ -2809,7 +2971,11 @@ mod tests {
         assert_eq!(member.world_id, world.world_id);
         assert_eq!(
             store
-                .active_member_agent(invited.id, other_world.world_id)
+                .active_player_character(
+                    invited.id,
+                    other_world.world_id,
+                    other_world.member.character_id
+                )
                 .await
                 .unwrap(),
             None,
@@ -2828,7 +2994,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .active_member_agent(invited.id, world.world_id)
+                .active_player_character(invited.id, world.world_id, member.character_id)
                 .await
                 .unwrap(),
             None,
@@ -2842,7 +3008,7 @@ mod tests {
                     member.user_id,
                     member.display_name.as_str(),
                     member.access.as_str(),
-                    member.character_name.as_str(),
+                    member.characters[0].name.as_str(),
                 ))
                 .collect::<Vec<_>>(),
             vec![

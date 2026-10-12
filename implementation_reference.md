@@ -68,19 +68,22 @@ when things were built.
 - `src/store.rs` and `migrations/` - SQLite store, WAL mode,
   identity-only sandbox worlds and chat-history agents; OAuth email identities
   with non-unique display names; durable world-owner, membership,
-  membership-player-agent, player-character, NPC-agent, and location-GM
+  character-owned player-agent, NPC-agent, and location-GM
   relationships; world/character/location/path/item/item-type/spell-type data
   with separate GM and Storyteller JSON notes. `install_scenario` creates the
   entire initial relationship graph in one transaction and `export_scenario`
   exports only reusable scenario data, never a player's history or membership.
-  The active-membership lookup is the single player-world authorization
-  boundary. A recipe refers
+  The active-character lookup verifies the account, membership, world, and
+  requested character together before any play access. `player_location_id`,
+  `player_location_gm_agent_id`, and `player_sheet` resolve location, GM, and
+  sheet through that character relationship. A recipe refers
   to static text, tools, a summary, and/or an agent message range;
   reconstruction rereads those rows and verifies the assembled input against
   its BLAKE3 hash. The live history selector is exactly newest summary plus
   messages after its `covers_to_seq`; all older message rows remain intact for
-  replay and debugging. SQLx applies the checked-in migrations when a database
-  opens, preserving existing database files as recording metadata evolves.
+  replay and debugging. Until real user databases exist, the checked-in schema
+  is rebuilt in place and existing local databases are intentionally replaced;
+  later schema evolution requires forward migrations.
 
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 
@@ -138,7 +141,7 @@ when things were built.
   templates have a valid first user turn without displaying or persisting a
   fake player message. The ordinary agent loop executes any creation-roll
   calls and stores its final text. The first viewer starts one server-owned
-  opening operation per membership; concurrent reconnects wait on that same
+  opening operation per character; concurrent reconnects wait on that same
   operation, then view its durable result rather than queueing game work.
   Completing character creation asks the resolved location GM for opening
   narration in that same tool turn, so beginning play never needs a second
@@ -150,12 +153,13 @@ when things were built.
   name; identity remains the verified email. The world detail page already
   creates, limits, lists, revokes, and accepts invitation links, and lets an
   owner remove an active member while retaining its durable association. It
-  renders every retained membership with its current character nested below it;
-  each active viewer receives the entry link for their own character. Landing,
+  renders every retained membership with its characters nested below it; an
+  active member can create another blank Adventurer, and every entry link names
+  its exact character. Landing,
   world, invitation, and membership routes all resolve access through `Store`
   rather than trusting a client user or agent id. The authenticated
-  `/world/:id/play` route loads that membership's durable player-visible
-  history and its final durable message id, while its
+  `/world/:id/characters/:character_id/play` route loads that character's
+  durable player-visible history and its final durable message id, while its
   websocket passes the same resolved membership and snapshot cursor into `Game`
   for each player message. After opening work settles, the socket sends every
   later durable entry before enabling submission, so SSR and a delayed socket

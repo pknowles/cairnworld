@@ -399,8 +399,9 @@ Pages and endpoints:
 
 - `/` - landing page (log in, name, world list, create world)
 - `/world/:id` - detail page (invites, players, dev mode toggle)
-- `/world/:id/play` - game page: one chat column with an input box
-- `WS /world/:id/ws` - the chat: client sends player text; server pushes chat
+- `/world/:id/characters/:character_id/play` - game page: one chat column for
+  the active account's requested owned character, with an input box
+- `WS /world/:id/characters/:character_id/ws` - the chat: client sends player text; server pushes chat
   entries, broadcasts, a `can_act` flag (drives the greyed-out send button),
   and token deltas keyed by message id for in-flight inferences
 
