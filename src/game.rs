@@ -20,6 +20,8 @@ use crate::{
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
 };
 
+const GM_ROLE: &str = "You are the GM for the characters in this group. Ground narration in the scene packet and address the characters as a group. Use the available tools to resolve proposed actions before narrating their outcomes.";
+
 /// The one game service that a browser event will invoke. It derives the player
 /// history from a previously authenticated membership; no tool accepts a
 /// client-selected agent or character id.
@@ -253,7 +255,11 @@ where
     /// releases it exactly once; disconnecting an id already removed (e.g. a
     /// double-release race) is a no-op rather than an error, matching a
     /// one/zero set membership check rather than a counter.
-    pub async fn disconnect(self: &Arc<Self>, member: &PlayerAgent, connection_id: i64) -> Result<()> {
+    pub async fn disconnect(
+        self: &Arc<Self>,
+        member: &PlayerAgent,
+        connection_id: i64,
+    ) -> Result<()> {
         let world = self.world_events(member.world_id).await;
         let became_absent = {
             let mut connections = world.connections.lock().await;
@@ -328,7 +334,10 @@ where
                         tracing::error!(character_id, error = %format!("{error:#}"), "handling presence change");
                     }
                 }
-                WorldEvent::PresenceDeadline { group_id, generation } => {
+                WorldEvent::PresenceDeadline {
+                    group_id,
+                    generation,
+                } => {
                     if let Err(error) = self
                         .handle_presence_deadline(group_id, generation, &broadcasts)
                         .await
@@ -338,6 +347,19 @@ where
                 }
             }
         }
+    }
+
+    /// The ready members of an online set. Presence is physical connectivity;
+    /// narrated arrival begins only once creation has made that character a
+    /// playable participant.
+    async fn ready_online_characters(&self, characters: &[i64]) -> Result<Vec<i64>> {
+        let mut ready = Vec::with_capacity(characters.len());
+        for character_id in characters {
+            if self.store.character_is_ready(*character_id).await? {
+                ready.push(*character_id);
+            }
+        }
+        Ok(ready)
     }
 
     /// React to a character's connect/disconnect: on first arrival into an
@@ -353,7 +375,8 @@ where
         broadcasts: &GroupBroadcasts,
     ) -> Result<()> {
         let group_id = self.store.character_group_id(character_id).await?;
-        let online = self.store.group_online_character_ids(group_id).await?;
+        let all_online = self.store.group_online_character_ids(group_id).await?;
+        let online = self.ready_online_characters(&all_online).await?;
         let narration = self.store.presence_narration(group_id).await?;
         if narration.due_at.is_some() {
             // A departure or empty-period arrival is already pending for
@@ -378,13 +401,20 @@ where
             let after_seconds = self.limits.presence_departure_seconds;
             let generation = self
                 .store
-                .schedule_presence_deadline(group_id, i64::try_from(after_seconds)?, narration.generation)
+                .schedule_presence_deadline(
+                    group_id,
+                    i64::try_from(after_seconds)?,
+                    narration.generation,
+                )
                 .await?;
             let sender = events_sender.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(after_seconds)).await;
                 let _ = sender
-                    .send(WorldEvent::PresenceDeadline { group_id, generation })
+                    .send(WorldEvent::PresenceDeadline {
+                        group_id,
+                        generation,
+                    })
                     .await;
             });
         }
@@ -428,6 +458,14 @@ where
         online: &[i64],
         broadcasts: &GroupBroadcasts,
     ) -> Result<()> {
+        let ready_online = self.ready_online_characters(online).await?;
+        if ready_online.is_empty() {
+            self.store
+                .announce_presence(group_id, &ready_online, narration.generation)
+                .await?;
+            return Ok(());
+        }
+        let online = ready_online;
         let world_id = self.store.world_id_for_group(group_id).await?;
         let location_id = self.store.group_location_id(group_id).await?;
         let gm_history = self.store.group_gm_history(group_id).await?;
@@ -459,12 +497,8 @@ where
                 .context("loading group GM scene for presence narration")?,
         )
         .context("serializing group GM presence scene")?;
-        let role = Message::text(
-            Role::System,
-            format!(
-                "You narrate play in this location for the characters present, listed in the scene packet. Describe only what the packet supports, addressing the characters as a group. The current scene packet is {scene}."
-            ),
-        );
+        let scene_packet = format!("Current scene packet:\n{scene}");
+        let role = Message::text(Role::System, GM_ROLE);
         let request = Message::text(
             Role::User,
             format!("{change} Narrate this to the characters present."),
@@ -477,14 +511,20 @@ where
         let result: Result<()> = async {
             let call = CallContext::root(Some(sequence.id));
             let budget = Budget::new(self.limits);
+            let branch = self.store.group_branch(group_id).await?;
+            self.store
+                .append_event(branch, &request, sequence.id)
+                .await
+                .context("storing presence transition event")?;
             let settled = agent::complete_with_call_context(
                 &self.store,
                 &self.backend,
                 &budget,
                 agent::Turn {
                     agent_id: gm_history.agent_id,
-                    branch_id: Some(gm_history.branch_id),
-                    static_messages: &[role, request],
+                    branch,
+                    static_messages: &[role],
+                    dynamic_context: &[scene_packet.as_str()],
                     tools: &[],
                     sampling: self.sampling.clone(),
                     model: &self.model,
@@ -504,7 +544,7 @@ where
                 .context("storing presence narration")?;
             let _ = group_broadcast(broadcasts, group_id).await.send(text);
             self.store
-                .announce_presence(group_id, online, narration.generation)
+                .announce_presence(group_id, &online, narration.generation)
                 .await
         }
         .await;
@@ -512,7 +552,11 @@ where
             .store
             .finish_sequence(
                 sequence.id,
-                result.as_ref().err().map(|error| format!("{error:#}")).as_deref(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("{error:#}"))
+                    .as_deref(),
             )
             .await
         {
@@ -590,8 +634,9 @@ where
                 &budget,
                 agent::Turn {
                     agent_id: member.agent_id,
-                    branch_id: None,
+                    branch: self.store.agent_branch(member.agent_id).await?,
                     static_messages: &[prompt],
+                    dynamic_context: &[],
                     tools: &tools,
                     sampling: self.sampling.clone(),
                     model: &self.model,
@@ -602,6 +647,7 @@ where
             )
             .await
             .context("resolving player agent")?;
+            self.warn_unexpected_silent_player_completion(&member, sequence.id, &settled);
             Ok(settled.response)
         }
         .await;
@@ -615,7 +661,11 @@ where
             .store
             .finish_sequence(
                 sequence.id,
-                result.as_ref().err().map(|error| format!("{error:#}")).as_deref(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("{error:#}"))
+                    .as_deref(),
             )
             .await
         {
@@ -671,26 +721,31 @@ where
         // including a failure building the prompt before the agent ever
         // runs - not only agent::complete_with_call_context's own result.
         let result: Result<Response> = async {
+            let branch = self.store.agent_branch(member.agent_id).await?;
             let prompt = self
                 .player_prompt(&member, false)
                 .await
                 .context("building player prompt")?;
-            // This is the game event that starts the agent's first turn. It
-            // is deliberately static context, not a player-visible or stored
-            // chat message: the agent must speak first, while tool-capable
-            // templates require a user message before their declarations.
             let entered = Message::text(
                 Role::User,
                 "The player has entered the world and has not chosen to roll yet. Speak directly to them.",
             );
+            // This starts the conversation: later player turns and a
+            // compaction summary need the same ordinary history event, while
+            // inspection must distinguish it from human input.
+            self.store
+                .append_instruction(branch, &entered, sequence.id)
+                .await
+                .context("storing opening player instruction")?;
             let settled = agent::complete_with_call_context(
                 &self.store,
                 &self.backend,
                 &budget,
                 agent::Turn {
                     agent_id: member.agent_id,
-                    branch_id: None,
-                    static_messages: &[prompt, entered],
+                    branch,
+                    static_messages: &[prompt],
+                    dynamic_context: &[],
                     tools: &tools,
                     sampling: self.sampling.clone(),
                     model: &self.model,
@@ -701,6 +756,7 @@ where
             )
             .await
             .context("opening player-agent conversation")?;
+            self.warn_unexpected_silent_player_completion(&member, sequence.id, &settled);
             Ok(settled.response)
         }
         .await;
@@ -711,7 +767,11 @@ where
             .store
             .finish_sequence(
                 sequence.id,
-                result.as_ref().err().map(|error| format!("{error:#}")).as_deref(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("{error:#}"))
+                    .as_deref(),
             )
             .await
         {
@@ -731,13 +791,10 @@ where
 
     /// Whether the player agent has already produced its stored opening reply.
     pub async fn opening_complete(&self, member: &PlayerAgent) -> Result<bool> {
-        Ok(self
-            .store
-            .player_chat(member)
+        self.store
+            .player_agent_has_assistant_reply(member.agent_id)
             .await
-            .context("checking stored player-agent opening reply")?
-            .iter()
-            .any(|entry| entry.role == Role::Assistant))
+            .context("checking stored player-agent opening reply")
     }
 
     /// Return the stored player-visible delta a browser missed after rendering
@@ -764,9 +821,33 @@ where
                 "Guide the player through the current scene. Use a declared action tool when the player asks their character to look or speak. The following is the current player-visible scene, derived from the world state; do not invent items, people, or facts outside it:\n{scene}"
             )
         } else {
-            "Speak first and guide the player through their Adventurer's Cairn character creation. Character creation requires Hit Protection first, then attributes. Introduce the next required step in short thematic language, and wait until the player is ready before using its roll tool. The roll tools make the real, recorded results. Immediately after attributes are rolled, call ready_to_begin; do not invent an opening scene or wait for another confirmation. Its result is the location GM's narration, already delivered verbatim to the player as a GM chat entry. Do not repeat or paraphrase it. Ask what the player wants to do next.".to_string()
+            "Speak first and guide the player through their Adventurer's Cairn character creation. Character creation requires Hit Protection first, then attributes. Introduce the next required step in short thematic language. Use a roll tool only when the player explicitly asks to roll that exact step; asking to begin play does not substitute for an unfinished roll. The roll tools make the real, recorded results. Immediately after attributes are rolled, call ready_to_begin; do not invent, repeat, or paraphrase the opening scene, which the location GM narrates.".to_string()
         };
-        Ok(Message::text(Role::System, text))
+        Ok(Message::text(
+            Role::System,
+            format!(
+                "{text}\n\nAn empty response ends the turn. Use it when a tool result or GM narration has already given the player the complete appropriate result; otherwise continue with another tool call or player-facing text."
+            ),
+        ))
+    }
+
+    fn warn_unexpected_silent_player_completion(
+        &self,
+        member: &PlayerAgent,
+        sequence_id: i64,
+        settled: &agent::Settled,
+    ) {
+        if !settled.used_tools
+            && matches!(&settled.response.content, Content::Text(text) if text.is_empty())
+        {
+            tracing::warn!(
+                world_id = member.world_id,
+                character_id = member.character_id,
+                sequence_id,
+                inference_id = settled.inference_id,
+                "player agent ended without text before making a tool call"
+            );
+        }
     }
 
     fn creation_tools(
@@ -858,13 +939,20 @@ where
                         .ready_to_begin(&member, sequence_id, Some(tool_execution_id))
                         .await?;
                     let narration = game
-                        .opening_narration(&member, budget, call.child(tool_execution_id))
+                        .opening_narration(
+                            &member,
+                            sequence_id,
+                            budget,
+                            call.child(tool_execution_id),
+                        )
                         .await?;
                     let delivery_game = Arc::clone(&game);
                     Ok(ToolOutcome::CompletedAfter {
-                        content: "The GM's narration reached the player as its own entry. Ask what they want to do next.".to_string(),
+                        content: "Character creation complete.".to_string(),
                         after_result: Box::pin(async move {
-                            delivery_game.deliver_narration(&member, &narration, &broadcasts).await
+                            delivery_game
+                                .deliver_narration(&member, &narration, &broadcasts)
+                                .await
                         }),
                     })
                 }) as ToolFuture
@@ -1012,12 +1100,14 @@ where
     async fn opening_narration(
         self: &Arc<Self>,
         member: &PlayerAgent,
+        sequence_id: i64,
         budget: Budget,
         call: CallContext,
     ) -> Result<Narration> {
         let location_id = self.store.player_location_id(member).await?;
         let group_id = self.store.character_group_id(member.character_id).await?;
         let gm_history = self.store.player_group_history(member).await?;
+        let branch = self.store.group_branch(group_id).await?;
         let scene = serde_json::to_string(
             &self
                 .store
@@ -1026,26 +1116,25 @@ where
                 .context("loading group GM scene for the opening")?,
         )
         .context("serializing group GM opening scene")?;
-        let role = Message::text(
-            Role::System,
-            format!(
-                "You narrate play in this location for the characters present, listed in the scene packet. Describe only what the packet supports, addressing the characters as a group. The current scene packet is {scene}."
-            ),
-        );
-        // The event that starts this turn: tool-capable chat templates need a
-        // user message before the agent speaks.
+        let scene_packet = format!("Current scene packet:\n{scene}");
+        let role = Message::text(Role::System, GM_ROLE);
         let request = Message::text(
             Role::User,
             "A player character has just begun play here. Narrate the scene, surroundings, and plot-relevant details the characters present can perceive.",
         );
+        self.store
+            .append_instruction(branch, &request, sequence_id)
+            .await
+            .context("storing opening narration event")?;
         let settled = agent::complete_with_call_context(
             &self.store,
             &self.backend,
             &budget,
             agent::Turn {
                 agent_id: gm_history.agent_id,
-                branch_id: Some(gm_history.branch_id),
-                static_messages: &[role, request],
+                branch,
+                static_messages: &[role],
+                dynamic_context: &[scene_packet.as_str()],
                 tools: &[],
                 sampling: self.sampling.clone(),
                 model: &self.model,
@@ -1079,6 +1168,16 @@ where
             .character_group_id(pending.character_id)
             .await
             .context("resolving acting character's group for arbitration")?;
+        let action_id = pending.id;
+        let branch = self.store.group_branch(group_id).await?;
+        ensure!(
+            branch.branch_id() == pending.gm_branch_id && branch.agent_id() == pending.gm_agent_id,
+            "pending action {action_id} names GM branch {} for agent {}, but its group now uses branch {} for agent {}",
+            pending.gm_branch_id,
+            pending.gm_agent_id,
+            branch.branch_id(),
+            branch.agent_id(),
+        );
         // approve_action and reject_action both resolve the same pending
         // action. resolve_pending_action's transaction is the sole authority
         // (design.md: "They cannot be approved twice") - no caller-side flag
@@ -1090,7 +1189,6 @@ where
         // not an error - a later rejection reason can never replace an
         // earlier approval's result, or vice versa.
         let game = Arc::clone(self);
-        let action_id = pending.id;
         let approval_pending = pending.clone();
         let gm_tool = Tool::new(
             ToolDefinition {
@@ -1266,29 +1364,28 @@ where
         )
         .context("serializing group GM scene for prompt")?;
         let actor = self.store.character_name(pending.character_id).await?;
-        let role = Message::text(
-            Role::System,
-            format!(
-                "You arbitrate this location for the characters present, listed in the scene packet. Judge each action from that packet, call approve_action with its id if it can happen or reject it with a reason, then narrate the outcome to the characters present. If the characters split up or a separated group reunites here, call split_group or merge_groups; either takes effect after this turn's other calls, against the group as it stood when this turn began. The current scene packet is {scene}."
-            ),
-        );
-        // The event that starts this turn: tool-capable chat templates need a
-        // user message before the agent speaks.
+        let scene_packet = format!("Current scene packet:\n{scene}");
+        let role = Message::text(Role::System, GM_ROLE);
         let request = Message::text(
             Role::User,
             format!(
-                "{actor} takes action {action_id}: a `{}` request with arguments {}.",
+                "{actor} takes action {action_id}: a `{}` request with arguments {}. Judge it from the current scene. Call approve_action with action_id {action_id} if it can happen, or reject_action with action_id {action_id} and a concise reason. Then narrate the outcome to the characters present.",
                 pending.tool, pending.args,
             ),
         );
+        self.store
+            .append_event(branch, &request, pending.sequence_id)
+            .await
+            .with_context(|| format!("storing arbitration event for action {action_id}"))?;
         let settled = agent::complete_with_call_context(
             &self.store,
             &self.backend,
             &budget,
             agent::Turn {
                 agent_id: pending.gm_agent_id,
-                branch_id: Some(pending.gm_branch_id),
-                static_messages: &[role, request],
+                branch,
+                static_messages: &[role],
+                dynamic_context: &[scene_packet.as_str()],
                 tools: &[gm_tool, reject_tool, split_tool, merge_tool],
                 sampling: self.sampling.clone(),
                 model: &self.model,
@@ -1517,6 +1614,89 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn player_prompt_allows_a_silent_finish_after_a_player_visible_result() {
+        let (backend, _) = ScriptedBackend::recording([]);
+        let (game, _store, _db, member) = blank_opening_game(backend).await;
+        let prompt = game.player_prompt(&member, false).await.unwrap();
+        let MessageContent::Text(text) = prompt.content else {
+            panic!("player prompt must be text")
+        };
+        assert!(
+            text.contains("An empty response ends the turn"),
+            "the player agent needs the general silent-finish rule: {text}"
+        );
+        assert!(
+            !text.contains("Ask what the player wants to do next"),
+            "the prompt must not force filler after a player-visible result: {text}"
+        );
+        assert!(
+            text.contains("explicitly asks to roll that exact step"),
+            "beginning play must not be interpreted as an omitted character-creation roll: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_to_begin_delivers_narration_then_allows_a_silent_player_finish() {
+        let (backend, requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "ready-1".into(),
+                name: "ready_to_begin".into(),
+                arguments: "{}".into(),
+            }])),
+            response(Content::Text("The charcoal hut is quiet.".into())),
+            response(Content::Text(String::new())),
+        ]);
+        let (game, store, _db, member) = blank_opening_game(backend).await;
+        let creation = store
+            .begin_sequence(member.world_id, "complete creation")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&member, creation.id, None)
+            .await
+            .unwrap();
+        let _connection = game.connect(&member).await.unwrap();
+
+        game.player_message(member.clone(), "Begin play.")
+            .await
+            .unwrap();
+
+        let chat = store.player_chat(&member).await.unwrap();
+        assert!(chat.iter().any(|entry| {
+            entry.role == Role::Narration && entry.text == "The charcoal hut is quiet."
+        }));
+        assert!(
+            !chat
+                .iter()
+                .any(|entry| entry.role == Role::Assistant && entry.text.is_empty()),
+            "the silent completion must not become a blank player-chat entry"
+        );
+        let requests = requests.lock().unwrap();
+        let final_request = requests
+            .last()
+            .expect("player agent must settle after the tool");
+        assert!(matches!(
+            final_request.messages.as_slice(),
+            messages if messages.windows(2).any(|pair| matches!(
+                pair,
+                [
+                    Message { content: MessageContent::ToolResult { content, .. }, .. },
+                    Message { role: Role::Narration, content: MessageContent::Text(narration), .. },
+                ] if content == "Character creation complete."
+                    && narration == "The charcoal hut is quiet."
+            ))
+        ));
+        assert!(
+            game.opening_complete(&member).await.unwrap(),
+            "a durable silent completion must prevent reopening character creation"
+        );
+    }
+
     struct DelayedBackend {
         started: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
@@ -1588,11 +1768,15 @@ mod tests {
     }
 
     async fn device_test_game() -> (MistralRsBackend, String, Sampling, Limits) {
+        device_test_game_for("dev-qwen35").await
+    }
+
+    async fn device_test_game_for(name: &str) -> (MistralRsBackend, String, Sampling, Limits) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("cairnworld=info")
             .with_test_writer()
             .try_init();
-        let settings = Settings::for_device_test("dev-qwen35").expect("default.toml should load");
+        let settings = Settings::for_device_test(name).expect("default.toml should load");
         let model = settings
             .model(None)
             .expect("default.toml should configure the device-test model");
@@ -1707,7 +1891,7 @@ mod tests {
             response(Content::Text(
                 "You lift the flour sack while Toma watches.".into(),
             )),
-            response(Content::Text("What do you do next?".into())),
+            response(Content::Text(String::new())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
         let game = Arc::new(Game::new(
@@ -1743,12 +1927,21 @@ mod tests {
                     && entry.text == "You lift the flour sack while Toma watches."
             })
             .expect("the GM narration must be stored for a browser reload");
+        let sequence: i64 = sqlx::query_scalar(
+            "SELECT id FROM sequence WHERE world_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(installed.world_id)
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            chat[narration].sequence_id,
+            Some(sequence),
+            "a delivered GM narration must retain its producing turn so its chat entry opens Developer Mode directly"
+        );
         assert!(
-            matches!(
-                chat.get(narration + 1),
-                Some(entry) if entry.role == Role::Assistant && entry.text == "What do you do next?"
-            ),
-            "the player agent must follow already-delivered GM narration instead of preceding it"
+            chat.get(narration + 1).is_none(),
+            "an empty post-tool completion leaves the GM narration as the final player-visible event"
         );
         assert!(
             store
@@ -1764,7 +1957,7 @@ mod tests {
             .request_for_segments(
                 installed.member.agent_id,
                 &store
-                    .live_segments(installed.member.agent_id, None)
+                    .live_segments(store.agent_branch(installed.member.agent_id).await.unwrap())
                     .await
                     .unwrap(),
                 Sampling {
@@ -1797,19 +1990,26 @@ mod tests {
         assert_eq!(player_inference.parent_inference_id, None);
         assert_eq!(gm_inference.sequence_id, player_inference.sequence_id);
         assert_eq!(gm_inference.parent_inference_id, Some(player_inference.id));
-        // A chat-entry inspect button needs the same sequence whether it
-        // resolves through the player's own triggering message or through the
-        // inference that produced a later reply.
+        assert!(
+            gm_inference
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, crate::store::Segment::Context { .. })),
+            "the recorded GM request must keep its current scene as a distinct context segment"
+        );
+        // The player message remains inspectable, while the silent completion
+        // stays in durable history rather than becoming a blank chat entry.
         let player_line = chat
             .iter()
             .find(|entry| entry.text == "I take the flour sack.")
             .expect("the player's own message is stored");
         assert_eq!(player_line.sequence_id, player_inference.sequence_id);
-        let assistant_line = chat
-            .iter()
-            .find(|entry| entry.text == "What do you do next?")
-            .expect("the player agent's reply is stored");
-        assert_eq!(assistant_line.sequence_id, player_inference.sequence_id);
+        assert!(
+            !chat
+                .iter()
+                .any(|entry| entry.role == Role::Assistant && entry.text.is_empty()),
+            "player chat must omit a silent completion"
+        );
         // The live socket handler re-fetches from a cursor after each turn
         // instead of reloading the page; that must resolve the same sequence
         // ids as the SSR path above, not the placeholder None a raw broadcast
@@ -1826,28 +2026,30 @@ mod tests {
                 .sequence_id,
             player_inference.sequence_id
         );
-        assert_eq!(
-            live_entries
+        assert!(
+            !live_entries
                 .iter()
-                .find(|entry| entry.text == "What do you do next?")
-                .expect("the live cursor sees the player agent's reply")
-                .sequence_id,
-            player_inference.sequence_id
+                .any(|entry| entry.role == Role::Assistant && entry.text.is_empty()),
+            "the live cursor must omit a silent completion too"
         );
         {
             let requests = recorded_requests.lock().unwrap();
-            let gm_packet = requests
+            let gm_request = requests
                 .iter()
-                .flat_map(|request| request.messages.iter())
-                .find_map(|message| match &message.content {
-                    MessageContent::Text(text)
-                        if text.starts_with("You arbitrate this location") =>
-                    {
-                        Some(text)
-                    }
-                    _ => None,
+                .find(|request| {
+                    request.messages.last().is_some_and(|message| {
+                        matches!(&message.content, MessageContent::Text(text)
+                            if text.starts_with("Adventurer") && text.contains("takes action"))
+                    })
                 })
-                .expect("the GM arbitration must receive its actual location packet");
+                .expect("the GM arbitration must end with the action that started it");
+            let MessageContent::Text(gm_packet) = &gm_request.messages[0].content else {
+                panic!("the GM request must begin with its role and scene packet");
+            };
+            assert!(
+                gm_packet.starts_with(GM_ROLE),
+                "the GM request must use the single GM role prompt: {gm_packet}"
+            );
             for name in &player_names {
                 assert!(
                     gm_packet.contains(&format!("\"name\":\"{name}\"")),
@@ -1856,16 +2058,48 @@ mod tests {
             }
             let acting = &player_names[0];
             assert!(
-                requests
-                    .iter()
-                    .flat_map(|request| request.messages.iter())
-                    .any(|message| {
-                        matches!(&message.content, MessageContent::Text(text)
-                        if text.starts_with(&format!("{acting} takes action")))
-                    }),
-                "the GM must be told which character took the action"
+                matches!(&gm_request.messages.last().unwrap().content, MessageContent::Text(text)
+                    if text.starts_with(&format!("{acting} takes action"))),
+                "the GM's newest message must name the character who took the action"
             );
         }
+
+        store
+            .set_developer_mode(owner.id, installed.world_id, true)
+            .await
+            .unwrap();
+        let gm_history = store.player_group_history(&installed.member).await.unwrap();
+        let gm_cursor = store
+            .first_raw_history_cursor(
+                owner.id,
+                installed.world_id,
+                gm_history.agent_id,
+                Some(gm_history.branch_id),
+            )
+            .await
+            .unwrap();
+        let (gm_history, _) = store
+            .agent_raw_history(owner.id, gm_cursor, 100)
+            .await
+            .unwrap();
+        assert!(
+            gm_history.iter().any(|entry| matches!(entry,
+                crate::store::RawHistoryEntry::Message {
+                    role: Role::User,
+                    content: MessageContent::Text(text),
+                    ..
+                } if text.contains("takes action 1"))),
+            "Developer Mode must show the action that started the GM turn"
+        );
+        assert!(
+            gm_history.iter().any(|entry| matches!(entry,
+                crate::store::RawHistoryEntry::Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Text(text),
+                    ..
+                } if text == "You lift the flour sack while Toma watches.")),
+            "Developer Mode must show the GM's response after its action event"
+        );
 
         // Provenance: the take action links to the player call that submitted
         // it and the GM call that approved it. The sequence tree walks from the
@@ -2029,14 +2263,16 @@ mod tests {
             .iter()
             .flat_map(|request| request.messages.iter())
             .find_map(|message| match &message.content {
-                MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "reject-1" => {
-                    Some(content.clone())
-                }
+                MessageContent::ToolResult {
+                    tool_call_id,
+                    content,
+                } if tool_call_id == "reject-1" => Some(content.clone()),
                 _ => None,
             })
             .expect("the GM's own next turn must see reject-1's tool result");
         assert!(
-            reject_result.contains("already approved") && reject_result.contains("cannot now be rejected"),
+            reject_result.contains("already approved")
+                && reject_result.contains("cannot now be rejected"),
             "the conflicting reject_action call must be reported as an ordinary tool rejection naming \
              the existing resolution, not silently succeed or surface a generic error: {reject_result}"
         );
@@ -2118,7 +2354,9 @@ mod tests {
                     arguments: split_args,
                 },
             ])),
-            response(Content::Text("Toma watches as you step outside with Mara.".into())),
+            response(Content::Text(
+                "Toma watches as you step outside with Mara.".into(),
+            )),
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
@@ -2144,9 +2382,10 @@ mod tests {
                 .iter()
                 .flat_map(|request| request.messages.iter())
                 .find_map(|message| match &message.content {
-                    MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "split-1" => {
-                        Some(content.clone())
-                    }
+                    MessageContent::ToolResult {
+                        tool_call_id,
+                        content,
+                    } if tool_call_id == "split-1" => Some(content.clone()),
                     _ => None,
                 })
                 .expect("the GM's own next turn must see split-1's tool result")
@@ -2181,23 +2420,23 @@ mod tests {
                 .await
                 .unwrap();
         assert!(retired_at.is_some(), "the source group must retire");
-        let parent_branch_id: i64 = sqlx::query_scalar("SELECT branch_id FROM \"group\" WHERE id = ?")
-            .bind(original_group_id)
-            .fetch_one(&store.pool())
-            .await
-            .unwrap();
+        let parent_branch_id: i64 =
+            sqlx::query_scalar("SELECT branch_id FROM \"group\" WHERE id = ?")
+                .bind(original_group_id)
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
         let new_branch_id: i64 = sqlx::query_scalar("SELECT branch_id FROM \"group\" WHERE id = ?")
             .bind(adventurer_group)
             .fetch_one(&store.pool())
             .await
             .unwrap();
-        let linked_parent: i64 = sqlx::query_scalar(
-            "SELECT parent_branch_id FROM history_parent WHERE branch_id = ?",
-        )
-        .bind(new_branch_id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
+        let linked_parent: i64 =
+            sqlx::query_scalar("SELECT parent_branch_id FROM history_parent WHERE branch_id = ?")
+                .bind(new_branch_id)
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
         assert_eq!(
             linked_parent, parent_branch_id,
             "each resulting group's branch must be parented on the source's branch"
@@ -2327,7 +2566,10 @@ mod tests {
             .await
             .unwrap();
         let toma_group = store.character_group_id(toma_id).await.unwrap();
-        assert_ne!(adventurer_group, toma_group, "the split must have taken effect");
+        assert_ne!(
+            adventurer_group, toma_group,
+            "the split must have taken effect"
+        );
 
         let merge_args = serde_json::json!({
             "group_ids": [adventurer_group, toma_group],
@@ -2378,14 +2620,54 @@ mod tests {
                 .iter()
                 .flat_map(|request| request.messages.iter())
                 .find_map(|message| match &message.content {
-                    MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "merge-1" => {
-                        Some(content.clone())
-                    }
+                    MessageContent::ToolResult {
+                        tool_call_id,
+                        content,
+                    } if tool_call_id == "merge-1" => Some(content.clone()),
                     _ => None,
                 })
                 .expect("the GM's own next turn must see merge-1's tool result")
         };
         assert!(merge_result.contains("merged into group"), "{merge_result}");
+        {
+            let requests = merge_requests.lock().unwrap();
+            let request = requests
+                .iter()
+                .find(|request| {
+                    matches!(request.messages.last().map(|message| &message.content),
+                        Some(MessageContent::Text(text)) if text.contains("takes action 2"))
+                })
+                .expect("the second GM turn must end with its action event");
+            let prior_event = request
+                .messages
+                .iter()
+                .position(|message| {
+                    matches!(&message.content, MessageContent::Text(text) if text.contains("takes action 1"))
+                })
+                .expect("the merged GM history must retain the first action event");
+            let prior_tool_call = request
+                .messages
+                .iter()
+                .position(|message| {
+                    matches!(&message.content, MessageContent::ToolCalls(calls)
+                        if calls.iter().any(|call| call.id == "approve-1"))
+                })
+                .expect("the merged GM history must retain the first action's tool call");
+            assert!(
+                prior_event < prior_tool_call,
+                "the first action event must precede the tool call that resolved it"
+            );
+            assert!(
+                matches!(request.messages.last().map(|message| &message.content),
+                    Some(MessageContent::Text(text)) if text.contains("takes action 2")),
+                "the newest GM message must be the second action event"
+            );
+            assert!(
+                matches!(request.messages.first().map(|message| &message.content),
+                    Some(MessageContent::Text(text)) if text.starts_with(GM_ROLE)),
+                "all GM turns must begin with the one GM role prompt"
+            );
+        }
 
         let merged_adventurer = store
             .character_group_id(installed.member.character_id)
@@ -2393,7 +2675,10 @@ mod tests {
             .unwrap();
         let merged_toma = store.character_group_id(toma_id).await.unwrap();
         let merged_mara = store.character_group_id(mara_id).await.unwrap();
-        assert_eq!(merged_adventurer, merged_toma, "the merge must reunite all characters");
+        assert_eq!(
+            merged_adventurer, merged_toma,
+            "the merge must reunite all characters"
+        );
         assert_eq!(merged_adventurer, merged_mara);
 
         (
@@ -2409,9 +2694,19 @@ mod tests {
 
     #[tokio::test]
     async fn merge_groups_unions_membership_and_bounds_both_source_branches() {
-        let (store, _db, _member, adventurer_group, toma_group, merged_adventurer, _original_group_id) =
-            split_then_merge_groups().await;
-        assert_ne!(merged_adventurer, adventurer_group, "merge retires the sources, not reuses one");
+        let (
+            store,
+            _db,
+            _member,
+            adventurer_group,
+            toma_group,
+            merged_adventurer,
+            _original_group_id,
+        ) = split_then_merge_groups().await;
+        assert_ne!(
+            merged_adventurer, adventurer_group,
+            "merge retires the sources, not reuses one"
+        );
         assert_ne!(merged_adventurer, toma_group);
 
         for source in [adventurer_group, toma_group] {
@@ -2438,7 +2733,11 @@ mod tests {
         .into_iter()
         .map(|(id,)| id)
         .collect();
-        assert_eq!(parents.len(), 2, "the merged branch must bound both source branches");
+        assert_eq!(
+            parents.len(),
+            2,
+            "the merged branch must bound both source branches"
+        );
         parents.sort_unstable();
         let mut source_branches: Vec<i64> = vec![
             sqlx::query_scalar::<_, i64>("SELECT branch_id FROM \"group\" WHERE id = ?")
@@ -2456,32 +2755,47 @@ mod tests {
         assert_eq!(parents, source_branches);
     }
 
-    /// The new part beyond `merge_groups_unions_membership_and_bounds_both_source_branches`
-    /// (which already proves the merge structurally): attaching a REAL model
-    /// to the resulting branch DAG for its next turn, so
-    /// live_segments/request_for_segments must actually assemble a valid
-    /// context (summary + uncovered tail per branch, as bounded history
-    /// ranges' step 3 changed) that a real chat template accepts - not just
-    /// that the scripted test backend received whatever `Vec<Segment>` was
-    /// handed to it.
+    /// Run a real GM against the merged branch DAG and a real pending `say`
+    /// action. The player-side tool call is recorded directly because this
+    /// test verifies GM context and action resolution, not a small model's
+    /// unrelated choice of player tools.
     #[tokio::test]
     #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_assembles_context_after_a_split_and_merge() {
         let (store, _db, member, ..) = split_then_merge_groups().await;
+        let sequence = store
+            .begin_sequence(member.world_id, "real GM context test")
+            .await
+            .unwrap();
+        let requesting_tool_execution_id = crate::store::record_tool_call_for_test(
+            &store,
+            member.agent_id,
+            Some(
+                store
+                    .agent_branch(member.agent_id)
+                    .await
+                    .unwrap()
+                    .branch_id(),
+            ),
+            Some(sequence.id),
+            "say-1",
+            "say",
+            r#"{"text":"Good to have us all back together."}"#,
+        )
+        .await;
+        let pending = store
+            .create_pending_action(
+                &member,
+                sequence.id,
+                requesting_tool_execution_id,
+                "say",
+                r#"{"text":"Good to have us all back together."}"#,
+            )
+            .await
+            .unwrap();
+        let location_id = store.player_location_id(&member).await.unwrap();
         let (real_backend, model_path, sampling, _limits) = device_test_game().await;
-        // This test's own point is context assembly succeeding across
-        // however many real inferences one player turn takes on the merged
-        // branch DAG, not constraining the model's agentic tool-use choices
-        // (Look/Say/etc, all legitimate) - a small local model reliably
-        // takes several tool round trips before settling on a reply, so
-        // max_inferences_per_chat (a Game-level per-chat budget, independent
-        // of the backend's own loaded max_context_tokens/KV cache) needs
-        // real gameplay's headroom, not the tight budget other tests use to
-        // assert a specific short interaction.
-        let limits = Limits {
-            max_inferences_per_chat: 24,
-            ..Limits::default()
-        };
+        let limits = Limits::default();
         let real_game = Arc::new(Game::new(
             store.clone(),
             InferenceScheduler::new(real_backend, Limits::default())
@@ -2492,18 +2806,47 @@ mod tests {
             sampling,
         ));
         real_game
-            .player_message(member.clone(), "I say: \"Good to have us all back together.\"")
+            .arbitrate(
+                pending.clone(),
+                location_id,
+                Budget::new(limits),
+                CallContext::root(Some(sequence.id)),
+            )
             .await
-            .expect("a real model turn must succeed on the merged branch DAG");
-        let player_chat = store
-            .player_chat(&member)
-            .await
-            .expect("player chat should load after the real turn");
+            .expect("a real GM turn must resolve the pending action on the merged branch DAG");
         assert!(
-            player_chat
-                .iter()
-                .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
-            "the real model turn must leave a player-visible assistant reply"
+            !store
+                .has_pending_action(member.world_id, pending.id)
+                .await
+                .unwrap(),
+            "the real GM must approve or reject the presented action"
+        );
+        let mut gm_request = None;
+        let gm_inference_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM inference WHERE sequence_id = ? AND agent_id = ? ORDER BY ordinal",
+        )
+        .bind(sequence.id)
+        .bind(pending.gm_agent_id)
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        for inference_id in gm_inference_ids {
+            let request = store
+                .reconstruct_inference(inference_id)
+                .await
+                .expect("the real GM request should be reconstructable");
+            if matches!(request.request.messages.last().map(|message| &message.content),
+                Some(MessageContent::Text(text)) if text.contains("takes action"))
+            {
+                gm_request = Some(request);
+                break;
+            }
+        }
+        let gm_request = gm_request.expect("the real GM must receive the action event");
+        assert!(
+            matches!(gm_request.request.messages.last().map(|message| &message.content),
+                Some(MessageContent::Text(text)) if text.contains("takes action")),
+            "the real GM request must end with the action event"
         );
     }
 
@@ -2596,9 +2939,10 @@ mod tests {
                 .iter()
                 .flat_map(|request| request.messages.iter())
                 .find_map(|message| match &message.content {
-                    MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "split-1" => {
-                        Some(content.clone())
-                    }
+                    MessageContent::ToolResult {
+                        tool_call_id,
+                        content,
+                    } if tool_call_id == "split-1" => Some(content.clone()),
                     _ => None,
                 })
                 .expect("the GM's own next turn must see split-1's tool result")
@@ -2621,7 +2965,10 @@ mod tests {
                 .fetch_one(&store.pool())
                 .await
                 .unwrap();
-        assert!(retired_at.is_none(), "a rejected split must not retire the group");
+        assert!(
+            retired_at.is_none(),
+            "a rejected split must not retire the group"
+        );
     }
 
     #[tokio::test]
@@ -2729,9 +3076,12 @@ mod tests {
                 ..Default::default()
             },
         ));
-        game.player_message(installed.member.clone(), "I look, then someone tries to split us twice.")
-            .await
-            .unwrap();
+        game.player_message(
+            installed.member.clone(),
+            "I look, then someone tries to split us twice.",
+        )
+        .await
+        .unwrap();
 
         let (first_result, second_result) = {
             let requests = recorded_requests.lock().unwrap();
@@ -2740,9 +3090,10 @@ mod tests {
                     .iter()
                     .flat_map(|request| request.messages.iter())
                     .find_map(|message| match &message.content {
-                        MessageContent::ToolResult { tool_call_id, content } if tool_call_id == call_id => {
-                            Some(content.clone())
-                        }
+                        MessageContent::ToolResult {
+                            tool_call_id,
+                            content,
+                        } if tool_call_id == call_id => Some(content.clone()),
                         _ => None,
                     })
             };
@@ -2777,11 +3128,34 @@ mod tests {
         let (backend, recorded_requests) = ScriptedBackend::recording([response(Content::Text(
             "Welcome. Let us make your Adventurer.".into(),
         ))]);
-        let (game, _store, _db, member) = blank_opening_game(backend).await;
+        let (game, store, _db, member) = blank_opening_game(backend).await;
 
         let response = game.enter(member.clone()).await.unwrap().unwrap();
         assert!(
             matches!(response.content, Content::Text(text) if text == "Welcome. Let us make your Adventurer.")
+        );
+        store
+            .set_developer_mode(member.user_id, member.world_id, true)
+            .await
+            .unwrap();
+        let cursor = store
+            .first_raw_history_cursor(member.user_id, member.world_id, member.agent_id, None)
+            .await
+            .unwrap();
+        let (history, _) = store
+            .agent_raw_history(member.user_id, cursor, 100)
+            .await
+            .unwrap();
+        assert!(
+            history.iter().any(|entry| matches!(entry,
+                crate::store::RawHistoryEntry::Message {
+                    role: Role::User,
+                    origin: crate::store::MessageOrigin::Instruction,
+                    content: MessageContent::Text(text),
+                    ..
+                } if text == "The player has entered the world and has not chosen to roll yet. Speak directly to them."
+            )),
+            "the opening event must appear as an instruction in agent history: {history:?}"
         );
         {
             let requests = recorded_requests.lock().unwrap();
@@ -2795,9 +3169,10 @@ mod tests {
                     },
                     Message {
                         role: Role::User,
+                        content: MessageContent::Text(text),
                         ..
                     },
-                ]
+                ] if text == "The player has entered the world and has not chosen to roll yet. Speak directly to them."
             ));
             assert_eq!(
                 requests[0]
@@ -2842,26 +3217,24 @@ mod tests {
         // A second tab for the same character is already present: it must
         // not bump the generation or otherwise re-announce arrival.
         let second_connection_id = game.connect(&member).await.unwrap();
-        let generation_after_second: i64 = sqlx::query_scalar(
-            "SELECT generation FROM character_presence WHERE character_id = ?",
-        )
-        .bind(member.character_id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
+        let generation_after_second: i64 =
+            sqlx::query_scalar("SELECT generation FROM character_presence WHERE character_id = ?")
+                .bind(member.character_id)
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
         assert_eq!(
             generation_after_second, 1,
             "a second connection for an already-present character is not a new transition"
         );
 
         game.disconnect(&member, connection_id).await.unwrap();
-        let generation_after_one_close: i64 = sqlx::query_scalar(
-            "SELECT generation FROM character_presence WHERE character_id = ?",
-        )
-        .bind(member.character_id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
+        let generation_after_one_close: i64 =
+            sqlx::query_scalar("SELECT generation FROM character_presence WHERE character_id = ?")
+                .bind(member.character_id)
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
         assert_eq!(
             generation_after_one_close, 1,
             "closing one of two tabs is not yet a departure"
@@ -2884,12 +3257,38 @@ mod tests {
         assert_eq!(generation, 2, "the departure is a second transition");
 
         // A disconnect for an id already released is a no-op, not an error.
-        game.disconnect(&member, second_connection_id).await.unwrap();
+        game.disconnect(&member, second_connection_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn presence_never_narrates_an_unready_adventurers_arrival() {
+        let (backend, requests) = ScriptedBackend::recording([]);
+        let (game, store, _db, member) = blank_opening_game(backend).await;
+        let group_id = store.character_group_id(member.character_id).await.unwrap();
+        let broadcasts = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let narration = store.presence_narration(group_id).await.unwrap();
+
+        game.narrate_presence_transition(group_id, &narration, &[member.character_id], &broadcasts)
+            .await
+            .unwrap();
+
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "character creation must finish through ready_to_begin before any presence narration can call the GM"
+        );
     }
 
     async fn two_player_bread_thief_game<B>(
         backend: B,
-    ) -> (Arc<Game<B>>, Store, crate::store::TestDatabase, PlayerAgent, PlayerAgent)
+    ) -> (
+        Arc<Game<B>>,
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        PlayerAgent,
+    )
     where
         B: Backend + Send + Sync + 'static,
     {
@@ -2909,6 +3308,28 @@ mod tests {
             .create_player_character(owner.id, installed.world_id)
             .await
             .unwrap();
+        // Presence narration only applies after character creation. Prepare
+        // both players through the real creation records so these tests model
+        // playable characters rather than silently exercising the unready
+        // guard.
+        for player in [&installed.member, &companion] {
+            let creation = store
+                .begin_sequence(installed.world_id, "presence test character creation")
+                .await
+                .unwrap();
+            store
+                .roll_hit_protection(player, creation.id, None)
+                .await
+                .unwrap();
+            store
+                .roll_attributes(player, creation.id, None)
+                .await
+                .unwrap();
+            store
+                .ready_to_begin(player, creation.id, None)
+                .await
+                .unwrap();
+        }
         // A short real deadline: presence timer tests wait on it in real
         // wall-clock time rather than paused virtual time, which fights the
         // SQLite connection pool's own internal timeout.
@@ -2939,9 +3360,8 @@ mod tests {
 
     #[tokio::test]
     async fn first_arrival_after_an_empty_period_narrates_after_its_deadline() {
-        let (backend, recorded_requests) = ScriptedBackend::recording([response(Content::Text(
-            "Someone arrives.".into(),
-        ))]);
+        let (backend, recorded_requests) =
+            ScriptedBackend::recording([response(Content::Text("Someone arrives.".into()))]);
         let (game, _store, _db, first, _second) = two_player_bread_thief_game(backend).await;
 
         // The group has never been announced online before: this is "first
@@ -3073,17 +3493,21 @@ mod tests {
             .map(|member| (member.online, member.name.as_str()))
             .collect();
         // Bread Thief's group also has Mara and Toma (NPCs, never online).
-        assert_eq!(party.len(), 4, "the Adventurer, the companion, Mara and Toma");
         assert_eq!(
-            names_online
-                .iter()
-                .filter(|(online, _)| *online)
-                .count(),
+            party.len(),
+            4,
+            "the Adventurer, the companion, Mara and Toma"
+        );
+        assert_eq!(
+            names_online.iter().filter(|(online, _)| *online).count(),
             1,
             "only the connected Adventurer is online"
         );
-        assert!(party.iter().any(|member| member.name.starts_with("Mara")
-            || member.name == "Mara"));
+        assert!(
+            party
+                .iter()
+                .any(|member| member.name.starts_with("Mara") || member.name == "Mara")
+        );
 
         game.disconnect(&first, first_connection).await.unwrap();
         let party_after = store.party_presence(second.character_id).await.unwrap();
@@ -3103,7 +3527,8 @@ mod tests {
         // install_scenario/split_group would produce, to exercise the
         // narration/broadcast isolation this fix adds ahead of D4 existing.
         let location_id = store.player_location_id(&second).await.unwrap();
-        let world_gm = store.group_gm_history(store.character_group_id(second.character_id).await.unwrap())
+        let world_gm = store
+            .group_gm_history(store.character_group_id(second.character_id).await.unwrap())
             .await
             .unwrap();
         let other_group_id: i64 = sqlx::query_scalar(
@@ -3178,7 +3603,7 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert!(
             !store
-                .live_segments(member.agent_id, None)
+                .live_segments(store.agent_branch(member.agent_id).await.unwrap())
                 .await
                 .unwrap()
                 .is_empty(),
@@ -3228,7 +3653,8 @@ mod tests {
         // socket awaits, rather than a direct backend request. A successful
         // return proves the agent settled and its player-visible reply
         // committed to stored history.
-        let (backend, model_path, sampling, _limits) = device_test_game().await;
+        let (mut backend, model_path, sampling, limits) = device_test_game_for("dev-qwen25").await;
+        let observed_prompts = backend.observe_prompts();
         let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
 
         game.wait_for_opening(member.clone())
@@ -3260,6 +3686,33 @@ mod tests {
             .model_prompt
             .as_ref()
             .expect("normal game inference retains model prompt evidence");
+        {
+            let observed_prompts = observed_prompts.lock().unwrap();
+            assert_eq!(
+                observed_prompts.len(),
+                1,
+                "the opening must format and tokenize exactly one model request"
+            );
+            let observed = &observed_prompts[0];
+            assert_eq!(
+                opening.request, observed.request,
+                "inspection must preserve the exact request Game sent to the model"
+            );
+            assert_eq!(
+                prompt, &observed.prompt,
+                "inspection must reconstruct the exact prompt the model received"
+            );
+            let evidence = opening
+                .prompt_evidence
+                .as_ref()
+                .expect("normal game inference retains prompt checksums");
+            assert_eq!(
+                evidence.tokens_hash,
+                crate::store::PromptEvidence::tokens_hash(&observed.tokens),
+                "inspection must retain the token checksum observed at the model boundary"
+            );
+            assert_eq!(evidence.max_output_tokens, limits.max_output_tokens);
+        }
         assert!(prompt.contains("roll_hit_protection") && prompt.contains("ready_to_begin"));
         let player_chat = store
             .player_chat(&member)

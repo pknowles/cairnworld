@@ -42,7 +42,7 @@ time = { version = "0.3.47", optional = true }
 js-sys = { version = "0.3.83", optional = true }
 wasm-bindgen = { version = "0.2.106", optional = true }
 wasm-bindgen-futures = { version = "0.4.56", optional = true }
-web-sys = { version = "0.3.83", optional = true, features = ["Clipboard", "Document", "Element", "Event", "HtmlFormElement", "HtmlInputElement", "Location", "MessageEvent", "Navigator", "Response", "WebSocket", "Window"] }
+web-sys = { version = "0.3.83", optional = true, features = ["Clipboard", "Document", "Element", "Event", "History", "HtmlFormElement", "HtmlInputElement", "IntersectionObserver", "IntersectionObserverEntry", "Location", "MessageEvent", "Navigator", "Response", "UrlSearchParams", "WebSocket", "Window"] }
 
 [dev-dependencies]
 # Drives real Axum handlers with an in-process request/response, for route

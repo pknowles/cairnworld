@@ -145,7 +145,9 @@ where
                 let job = store
                     .pending_compaction_for_branch(branch_id)
                     .await?
-                    .with_context(|| format!("missing pending compaction for branch {branch_id}"))?;
+                    .with_context(|| {
+                        format!("missing pending compaction for branch {branch_id}")
+                    })?;
                 let backend = scheduler.deferred();
                 compaction::run(&store, &backend, &job, scheduler.limits).await
             }
@@ -165,7 +167,11 @@ where
     /// ordinary agent's single branch (design.md's `GroupHistory`: agent_id
     /// alone cannot select which of a world_gm's branches is due).
     async fn wait_for_branch(&self, store: &Store, branch_id: i64) -> Result<()> {
-        if store.pending_compaction_for_branch(branch_id).await?.is_none() {
+        if store
+            .pending_compaction_for_branch(branch_id)
+            .await?
+            .is_none()
+        {
             return Ok(());
         }
         self.admit_deferred(store.clone(), branch_id).await;
@@ -179,7 +185,11 @@ where
                 !state.deferred_branches.contains(&branch_id)
             };
             if inactive {
-                if store.pending_compaction_for_branch(branch_id).await?.is_none() {
+                if store
+                    .pending_compaction_for_branch(branch_id)
+                    .await?
+                    .is_none()
+                {
                     return Ok(());
                 }
                 self.admit_deferred(store.clone(), branch_id).await;
@@ -282,7 +292,9 @@ where
             .await?
             .is_some()
         {
-            self.scheduler.admit_deferred(store.clone(), branch_id).await;
+            self.scheduler
+                .admit_deferred(store.clone(), branch_id)
+                .await;
         }
         Ok(())
     }

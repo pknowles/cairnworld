@@ -24,7 +24,7 @@ use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
     reqwest,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tower_http::services::ServeDir;
@@ -33,11 +33,12 @@ use tower_sessions_sqlx_store::{SqliteStore, sqlx::SqlitePool};
 
 use crate::{
     game::Game,
+    inspection::{ObjectType, RawHistoryPageResponse, WorldObjectCursor},
     llm::Backend,
     mistralrs_backend::MistralRsBackend,
     scenario::Scenario,
     settings,
-    store::{PlayerAgent, PlayerChatEntry, Store, World, WorldMember},
+    store::{PlayerAgent, PlayerChatEntry, Store, World, WorldMember, WorldObjectsQuery},
 };
 
 const USER_ID: &str = "user_id";
@@ -511,9 +512,52 @@ struct RawHistoryPage {
     /// world_gm agent (see `gm_branch_graph`), ignored once `after` names a
     /// page to resume, which already carries its own branch.
     branch: Option<i64>,
+    entry: Option<i64>,
     /// JSON-encoded `RawHistoryCursor`, as returned by a previous page.
     after: Option<String>,
     limit: Option<i64>,
+}
+
+/// Stable filtering and paging for the current-world object index. `type` and
+/// `id` are also the direct-object URL fields, so a relationship link fetches
+/// its precise target rather than relying on the browser's currently loaded
+/// page.
+#[derive(Deserialize)]
+struct WorldObjectsPage {
+    #[serde(rename = "type")]
+    object_type: Option<String>,
+    id: Option<i64>,
+    search: Option<String>,
+    after: Option<String>,
+    limit: Option<i64>,
+}
+
+impl WorldObjectsPage {
+    fn object_type(&self) -> Result<Option<ObjectType>, WebError> {
+        self.object_type
+            .as_deref()
+            .map(|value| {
+                ObjectType::parse(value).ok_or_else(|| {
+                    WebError::bad_request(format!("unknown world object type {value:?}"))
+                })
+            })
+            .transpose()
+    }
+
+    fn after(&self) -> Result<Option<WorldObjectCursor>, WebError> {
+        self.after
+            .as_deref()
+            .map(|cursor| {
+                serde_json::from_str(cursor).map_err(|error| {
+                    WebError::bad_request(format!("invalid world object cursor: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    fn limit(&self) -> i64 {
+        self.limit.unwrap_or(50).clamp(1, 200)
+    }
 }
 
 impl RawHistoryPage {
@@ -525,8 +569,9 @@ impl RawHistoryPage {
         self.after
             .as_deref()
             .map(|cursor| {
-                serde_json::from_str(cursor)
-                    .map_err(|error| WebError::bad_request(format!("invalid raw history cursor: {error}")))
+                serde_json::from_str(cursor).map_err(|error| {
+                    WebError::bad_request(format!("invalid raw history cursor: {error}"))
+                })
             })
             .transpose()
     }
@@ -590,9 +635,33 @@ async fn inspect_agent_history(
     Query(page): Query<RawHistoryPage>,
 ) -> Result<impl IntoResponse, WebError> {
     let viewer = session_user(&app.store, &session).await?;
+    let cursor = match page.after()? {
+        Some(cursor) => {
+            app.store
+                .resume_raw_history_cursor(viewer.id, world_id, agent_id, cursor)
+                .await?
+        }
+        None => match (page.branch, page.entry) {
+            (Some(branch_id), Some(entry_id)) => {
+                app.store
+                    .raw_history_cursor_at(viewer.id, world_id, agent_id, branch_id, entry_id)
+                    .await?
+            }
+            (_, Some(_)) => {
+                return Err(WebError::bad_request(
+                    "a raw history entry needs its branch",
+                ));
+            }
+            (branch_id, None) => {
+                app.store
+                    .first_raw_history_cursor(viewer.id, world_id, agent_id, branch_id)
+                    .await?
+            }
+        },
+    };
     let (entries, cursor) = app
         .store
-        .agent_raw_history(viewer.id, world_id, agent_id, page.branch, page.after()?, page.limit())
+        .agent_raw_history(viewer.id, cursor, page.limit())
         .await?;
     Ok(Json(RawHistoryPageResponse { entries, cursor }))
 }
@@ -607,22 +676,38 @@ async fn inspect_agent_branches(
     Path((world_id, agent_id)): Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, WebError> {
     let viewer = session_user(&app.store, &session).await?;
-    Ok(Json(app.store.gm_branch_graph(viewer.id, world_id, agent_id).await?))
-}
-
-#[derive(Serialize)]
-struct RawHistoryPageResponse {
-    entries: Vec<crate::store::RawHistoryEntry>,
-    cursor: Option<crate::store::RawHistoryCursor>,
+    Ok(Json(
+        app.store
+            .gm_branch_graph(viewer.id, world_id, agent_id)
+            .await?,
+    ))
 }
 
 async fn inspect_objects(
     State(app): State<App>,
     session: Session,
     Path(world_id): Path<i64>,
+    Query(page): Query<WorldObjectsPage>,
 ) -> Result<impl IntoResponse, WebError> {
     let viewer = session_user(&app.store, &session).await?;
-    Ok(Json(app.store.world_objects(viewer.id, world_id).await?))
+    let object_type = page.object_type()?;
+    let after = page.after()?;
+    let limit = page.limit();
+    Ok(Json(
+        app.store
+            .world_objects(
+                viewer.id,
+                world_id,
+                WorldObjectsQuery {
+                    object_type,
+                    object_id: page.id,
+                    search: page.search,
+                    after,
+                    limit,
+                },
+            )
+            .await?,
+    ))
 }
 
 /// Live Developer Mode events for one world: inference lifecycle, streamed
@@ -674,16 +759,19 @@ async fn dev_events_connection(
         // carries whichever event, if any, this iteration should still send
         // after the mode toggle itself, now that access is current again.
         let recheck = async |socket: &mut WebSocket,
-                              developer_mode: &mut bool,
-                              extra: Option<crate::store::DevEvent>,
-                              context: &str|
+                             developer_mode: &mut bool,
+                             extra: Option<crate::store::DevEvent>,
+                             context: &str|
                -> Result<bool> {
-            let access = store.access_for(viewer_id, world_id).await.inspect_err(|error| {
-                tracing::error!(
-                    viewer_id, world_id, error = %format!("{error:#}"),
-                    "terminating live inspection: access check failed {context}"
-                );
-            })?;
+            let access = store
+                .access_for(viewer_id, world_id)
+                .await
+                .inspect_err(|error| {
+                    tracing::error!(
+                        viewer_id, world_id, error = %format!("{error:#}"),
+                        "terminating live inspection: access check failed {context}"
+                    );
+                })?;
             if !access.active_member {
                 return Ok(false);
             }
@@ -692,7 +780,9 @@ async fn dev_events_connection(
             if mode_changed {
                 send_dev_event(
                     socket,
-                    crate::store::DevEvent::DeveloperModeChanged { enabled: *developer_mode },
+                    crate::store::DevEvent::DeveloperModeChanged {
+                        enabled: *developer_mode,
+                    },
                 )
                 .await?;
             }
@@ -1411,8 +1501,44 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires built frontend and Chrome; run npm run test:hydration"]
     async fn browser_checks() {
-        use crate::llm::{Content, Message, Response, Role, Sampling, ToolCall, Usage};
+        use crate::llm::{Content, Message, Response, Role, Sampling, Usage};
         use crate::store::{InferenceInput, InferenceOutcome};
+        use std::{collections::VecDeque, sync::Mutex};
+
+        struct ScriptedBackend {
+            responses: Mutex<VecDeque<Response>>,
+            requests: Arc<Mutex<Vec<crate::llm::Request>>>,
+        }
+
+        impl ScriptedBackend {
+            fn new(
+                responses: impl IntoIterator<Item = Response>,
+            ) -> (Self, Arc<Mutex<Vec<crate::llm::Request>>>) {
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                (
+                    Self {
+                        responses: Mutex::new(responses.into_iter().collect()),
+                        requests: Arc::clone(&requests),
+                    },
+                    requests,
+                )
+            }
+        }
+
+        impl crate::llm::Backend for ScriptedBackend {
+            async fn complete(
+                &self,
+                request: crate::llm::Request,
+                _on_token: impl FnMut(&str) + Send,
+            ) -> Result<Response> {
+                self.requests.lock().unwrap().push(request);
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .context("browser fixture received an unexpected inference")
+            }
+        }
 
         #[derive(Deserialize)]
         struct BrowserPage {
@@ -1478,7 +1604,10 @@ mod tests {
             .find_or_create_user("browser-viewer@example.test", "Browser viewer")
             .await
             .unwrap();
-        let invitation = store.create_invitation(owner.id, world_id, None).await.unwrap();
+        let invitation = store
+            .create_invitation(owner.id, world_id, None)
+            .await
+            .unwrap();
         let viewer_character_id = store
             .accept_invitation(&viewer, &invitation.token)
             .await
@@ -1506,7 +1635,13 @@ mod tests {
             .await
             .unwrap();
         let split_invocation = store
-            .start_invocation(Some(split_trigger.id), gm_history.agent_id, Some(gm_history.branch_id), None, None)
+            .start_invocation(
+                Some(split_trigger.id),
+                gm_history.agent_id,
+                Some(gm_history.branch_id),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let split_inference = store
@@ -1524,7 +1659,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let split_executions = store.create_tool_executions(split_inference, 1).await.unwrap();
+        let split_executions = store
+            .create_tool_executions(split_inference, 1)
+            .await
+            .unwrap();
         store
             .apply_topology_changes(
                 split_inference,
@@ -1555,94 +1693,85 @@ mod tests {
             )
             .await
             .unwrap();
-        let agent_id = installed.member.agent_id;
+        // This fixture used to construct an inference, tool execution and
+        // reply directly in Store. E2 must inspect the records normal play
+        // creates, so exercise Game's ordinary player-message loop instead.
+        // These responses were captured from one local configured-model run
+        // with forced compaction. Replaying them keeps this browser test
+        // repeatable while request assembly, tool execution, result delivery
+        // and recording stay in production code.
+        let browser_limits = crate::settings::Limits {
+            // The recorded opening narration exceeds this threshold and
+            // creates one deferred summary. The short post-tool reply does
+            // not, so this fixture is one complete turn rather than a chain
+            // of summaries of summaries.
+            compact_before_next_input_tokens: 700,
+            keep_tail_messages: 1,
+            ..Default::default()
+        };
+        let responses: Vec<Response> =
+            serde_json::from_str(include_str!("../testdata/real_model_creation_round.json"))
+                .unwrap();
+        let (backend, captured_requests) = ScriptedBackend::new(responses);
+        let scheduler = crate::inference::InferenceScheduler::new(backend, browser_limits).unwrap();
+        let game = Arc::new(Game::new(
+            store.clone(),
+            scheduler.foreground(),
+            browser_limits,
+            "browser-test".into(),
+            Sampling::default(),
+        ));
+        let creation = store
+            .begin_sequence(world_id, "browser completed creation")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        game.player_message(
+            installed.member.clone(),
+            "The required rolls are complete. Begin play now.",
+        )
+        .await
+        .unwrap();
         let sequence = store
-            .begin_sequence(world_id, "browser inspection fixture")
+            .world_sequences(owner.id, world_id, None, 1)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let nodes = store
+            .sequence_tree(owner.id, world_id, sequence.id)
             .await
             .unwrap();
-        store
-            .append_message(
-                agent_id,
-                &Message::text(Role::User, "I prepare for adventure."),
-            )
+        let inference_id = nodes[0].inference.id;
+        let recorded_request = nodes[0].inference.request.clone();
+        assert_eq!(
+            recorded_request,
+            captured_requests.lock().unwrap()[0],
+            "the inspection record must preserve the request Game sent to the model"
+        );
+        let agent_id = installed.member.agent_id;
+        // Live update checks drive Store's test-only event hooks one step at
+        // a time. Give them their own valid, un-compacted history instead of
+        // fabricating a new inference from the action above after its real
+        // deferred compaction has changed the branch.
+        let live_agent_id = store.create_agent(world_id).await.unwrap();
+        let live_sequence = store
+            .begin_sequence(world_id, "browser live inspection fixture")
             .await
             .unwrap();
-        let segments = store.live_segments(agent_id, None).await.unwrap();
-        let request = store
-            .request_for_segments(agent_id, &segments, Sampling::default())
-            .await
-            .unwrap();
-        let root_invocation_id = store
-            .start_invocation(Some(sequence.id), agent_id, None, None, None)
-            .await
-            .unwrap();
-        let inference_id = store
-            .start_inference(InferenceInput {
-                agent_id,
-                sequence_id: Some(sequence.id),
-                invocation_id: root_invocation_id,
-                segments: &segments,
-                request: &request,
-                model: "browser-test",
-            })
-            .await
-            .unwrap();
-        store
-            .finish_inference(
-                inference_id,
-                InferenceOutcome::Response(Response {
-                    content: Content::ToolCalls(vec![ToolCall {
-                        id: "hp-roll".into(),
-                        name: "roll_hit_protection".into(),
-                        arguments: "{}".into(),
-                    }]),
-                    reasoning: String::new(),
-                    usage: Usage {
-                        input_tokens: 1,
-                        output_tokens: 6,
-                    },
-                }),
-                12,
-            )
-            .await
-            .unwrap();
-        let hp_tool_execution_id = store
-            .create_tool_executions(inference_id, 1)
-            .await
-            .unwrap()[0];
-        let hp = store
-            .roll_hit_protection(&installed.member, sequence.id, Some(hp_tool_execution_id))
-            .await
-            .unwrap();
-        let reply_invocation_id = store
-            .start_invocation(Some(sequence.id), agent_id, None, Some(hp_tool_execution_id), None)
-            .await
-            .unwrap();
-        let reply_id = store
-            .start_inference(InferenceInput {
-                agent_id,
-                sequence_id: Some(sequence.id),
-                invocation_id: reply_invocation_id,
-                segments: &segments,
-                request: &request,
-                model: "browser-test",
-            })
-            .await
-            .unwrap();
-        store
-            .finish_inference(
-                reply_id,
-                InferenceOutcome::Response(Response {
-                    content: Content::Text(
-                        "Ready for adventure: <pack> & rope.\nStay alert.".into(),
-                    ),
-                    reasoning: String::new(),
-                    usage: Usage {
-                        input_tokens: 1,
-                        output_tokens: 10,
-                    },
-                }),
-                10,
+        let live_message_id = store
+            .append_message_with_sequence(
+                live_agent_id,
+                &Message::text(Role::User, "I am ready for a live inspection test."),
+                live_sequence.id,
             )
             .await
             .unwrap();
@@ -1665,12 +1794,17 @@ mod tests {
             token: Option<String>,
             #[serde(default)]
             offset: Option<usize>,
+            #[serde(default)]
+            content: Option<String>,
         }
         let live_store = store.clone();
         let start_live_inference = move |Json(step): Json<LiveInferenceStep>| {
             let store = live_store.clone();
             async move {
-                let segments = store.live_segments(step.agent_id, None).await.unwrap();
+                let segments = store
+                    .live_segments(store.agent_branch(step.agent_id).await.unwrap())
+                    .await
+                    .unwrap();
                 let request = store
                     .request_for_segments(step.agent_id, &segments, Sampling::default())
                     .await
@@ -1703,8 +1837,16 @@ mod tests {
         let token_live_inference = move |Json(step): Json<LiveInferenceStep>| {
             let store = live_store.clone();
             async move {
-                let world_id = store.world_id_for_inference(step.inference_id.unwrap()).await.unwrap();
-                store.publish_token(world_id, step.inference_id.unwrap(), step.offset.unwrap(), &step.token.unwrap());
+                let world_id = store
+                    .world_id_for_inference(step.inference_id.unwrap())
+                    .await
+                    .unwrap();
+                store.publish_token(
+                    world_id,
+                    step.inference_id.unwrap(),
+                    step.offset.unwrap(),
+                    &step.token.unwrap(),
+                );
             }
         };
         let live_store = store.clone();
@@ -1715,9 +1857,14 @@ mod tests {
                     .finish_inference(
                         step.inference_id.unwrap(),
                         InferenceOutcome::Response(Response {
-                            content: Content::Text("Live reply.".into()),
+                            content: Content::Text(
+                                step.content.unwrap_or_else(|| "Live reply.".to_string()),
+                            ),
                             reasoning: String::new(),
-                            usage: Usage { input_tokens: 1, output_tokens: 2 },
+                            usage: Usage {
+                                input_tokens: 1,
+                                output_tokens: 2,
+                            },
                         }),
                         5,
                     )
@@ -1725,6 +1872,41 @@ mod tests {
                     .unwrap();
             }
         };
+
+        // More than one object page is required to verify that an ordinary
+        // browser pagination action preserves the mounted chat draft. These
+        // rows are fixture-only current state, inserted after the scripted
+        // game path has recorded its evidence so they cannot alter that path.
+        let fixture_item_type: i64 =
+            sqlx::query_scalar("SELECT id FROM item_type WHERE world_id = ? AND name = 'gear'")
+                .bind(world_id)
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        let fixture_location: i64 =
+            sqlx::query_scalar("SELECT id FROM location WHERE world_id = ? ORDER BY id LIMIT 1")
+                .bind(world_id)
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        for number in 0..60 {
+            let item_id = sqlx::query_scalar::<_, i64>(
+                "INSERT INTO item (world_id, item_type_id, name, description) \
+                 VALUES (?, ?, ?, '') RETURNING id",
+            )
+            .bind(world_id)
+            .bind(fixture_item_type)
+            .bind(format!("pagination fixture item {number}"))
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO item_location (item_id, location_id) VALUES (?, ?)")
+                .bind(item_id)
+                .bind(fixture_location)
+                .execute(&store.pool())
+                .await
+                .unwrap();
+        }
 
         let app = app
             .route("/browser/render", post(render_browser_page))
@@ -1744,8 +1926,12 @@ mod tests {
             "base": base, "cookie": session_cookie(&store, owner.id).await,
             "viewer_id": viewer.id, "viewer_cookie": session_cookie(&store, viewer.id).await,
             "world_id": world_id, "sequence_id": sequence.id,
-            "inference_id": inference_id, "parent_tool_execution_id": hp_tool_execution_id,
-            "agent_id": agent_id, "hp": hp, "modal_world_id": modal_world_id,
+            "inference_id": inference_id,
+            "request": recorded_request,
+            "tool_call_id": "call-d95cbfac-d6c0-4d92-a5ab-58498440d128",
+            "agent_id": agent_id, "modal_world_id": modal_world_id,
+            "live_agent_id": live_agent_id, "live_sequence_id": live_sequence.id,
+            "live_message_id": live_message_id,
             "gm_agent_id": gm_history.agent_id,
         })
         .to_string();
@@ -1814,12 +2000,237 @@ mod tests {
         }
     }
 
+    /// The GPU test covers E2's direct model-to-browser path: it opens in a real browser
+    /// the exact record written by a normal Mistral-backed Game invocation.
+    /// Ordinary browser checks remain model-free so they can run on every
+    /// development machine.
+    #[tokio::test]
+    #[ignore = "device/browser test: needs a CUDA GPU, dev-qwen25, built frontend and Chrome"]
+    async fn real_model_browser_opens_exact_inference_evidence() {
+        use crate::{inference::InferenceScheduler, settings::Settings};
+
+        let game_load = GameLoad::loading();
+        let (app, store, _db) = test_app_with_game(game_load.clone()).await;
+        let owner = store
+            .find_or_create_user("real-browser@example.test", "Real browser")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        store
+            .set_developer_mode(owner.id, installed.world_id, true)
+            .await
+            .unwrap();
+
+        let settings = Settings::for_device_test("dev-qwen25").unwrap();
+        let model = settings.model(None).unwrap();
+        let model_path = model.path.clone();
+        let sampling = crate::llm::Sampling {
+            temperature: 0.0,
+            ..settings.sampling(&model)
+        };
+        let mut backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            model.source_model.as_deref(),
+            settings.limits,
+            false,
+        )
+        .await
+        .unwrap();
+        let observed_prompts = backend.observe_prompts();
+        let game = Arc::new(Game::new(
+            store.clone(),
+            InferenceScheduler::new(backend, settings.limits)
+                .unwrap()
+                .foreground(),
+            settings.limits,
+            model_path,
+            sampling,
+        ));
+        game_load.finish(Ok(Arc::clone(&game))).await;
+        game.wait_for_opening(installed.member.clone())
+            .await
+            .unwrap();
+
+        let creation = store
+            .begin_sequence(installed.world_id, "real-browser completed creation")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        for attempt in 1..=3 {
+            game.player_message(
+                installed.member.clone(),
+                "The required rolls are complete. Begin play now.",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("creation follow-up {attempt} failed: {error:#}"));
+            if store.is_ready_to_begin(&installed.member).await.unwrap() {
+                break;
+            }
+        }
+        assert!(
+            store.is_ready_to_begin(&installed.member).await.unwrap(),
+            "the real model did not call ready_to_begin after the completed rolls"
+        );
+        let sequence = store
+            .world_sequences(owner.id, installed.world_id, None, 8)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|sequence| sequence.trigger == "player message")
+            .unwrap();
+        let nodes = store
+            .sequence_tree(owner.id, installed.world_id, sequence.id)
+            .await
+            .unwrap();
+        let inference_id = nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.inference.outcome,
+                    crate::inspection::RecordedOutcome::Response(response)
+                        if matches!(&response.content, crate::llm::Content::ToolCalls(calls)
+                            if calls.iter().any(|call| call.name == "ready_to_begin"))
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!("creation sequence did not record ready_to_begin: {nodes:#?}")
+            })
+            .inference
+            .id;
+        let recorded = store.reconstruct_inference(inference_id).await.unwrap();
+        let prompt = recorded.model_prompt.clone().unwrap();
+        let evidence = recorded.prompt_evidence.clone().unwrap();
+        {
+            let observed_prompts = observed_prompts.lock().unwrap();
+            let observed = observed_prompts
+                .iter()
+                .find(|observed| observed.request == recorded.request)
+                .unwrap_or_else(|| {
+                    panic!("the captured tool inference was not observed at the model boundary")
+                });
+            assert_eq!(recorded.request, observed.request);
+            assert_eq!(prompt, observed.prompt);
+            assert_eq!(
+                evidence.tokens_hash,
+                crate::store::PromptEvidence::tokens_hash(&observed.tokens)
+            );
+        }
+
+        // This is current world state, deliberately outside the immutable
+        // recipe retained for a past inference. The old record must remain
+        // exactly reconstructable after it changes.
+        sqlx::query("UPDATE world SET gm_notes = ? WHERE id = ?")
+            .bind(r#"{"changed_after_capture":true}"#)
+            .bind(installed.world_id)
+            .execute(&store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.reconstruct_inference(inference_id).await.unwrap(),
+            recorded,
+            "current world notes changed a saved inference"
+        );
+
+        let after_message_id = store
+            .player_chat(&installed.member)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
+        let cookie = session_cookie(&store, owner.id).await;
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                &format!(
+                    "/world/{}/inspect/sequences/{}",
+                    installed.world_id, sequence.id
+                ),
+                Some(&cookie),
+            )
+            .await,
+            StatusCode::OK,
+            "the browser must be able to load the real tool sequence"
+        );
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                &format!(
+                    "/world/{}/inspect/inferences/{inference_id}",
+                    installed.world_id
+                ),
+                Some(&cookie),
+            )
+            .await,
+            StatusCode::OK,
+            "the browser must be able to load the real tool inference"
+        );
+        let app = app.route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let fixture = serde_json::json!({
+            "base": base,
+            "cookie": cookie,
+            "world_id": installed.world_id,
+            "character_id": installed.member.character_id,
+            "after_message_id": after_message_id,
+            "sequence_id": sequence.id,
+            "inference_id": inference_id,
+            "tool": "ready_to_begin",
+            "request_json": serde_json::to_string(&recorded.request).unwrap(),
+            "model_prompt": prompt,
+            "prompt_evidence": evidence,
+        })
+        .to_string();
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async { stopped.await.unwrap() })
+                .await
+                .unwrap();
+        });
+        let output = tokio::process::Command::new("node")
+            .arg("scripts/check_real_model_developer_evidence.cjs")
+            .env("CAIRNWORLD_BROWSER_FIXTURE", fixture)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+        assert!(
+            output.status.success(),
+            "real-model Developer Mode browser check: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// A real router over a real store and a real session middleware, wired
     /// exactly as `serve` wires it. `Google` never talks to the network: its
     /// provider metadata is constructed offline with `ProviderMetadata::new`,
     /// the same public constructor `discover_async` itself builds on, since
     /// route tests never exercise the OAuth handlers.
     async fn test_app() -> (Router, Store, crate::store::TestDatabase) {
+        test_app_with_game(GameLoad::loading()).await
+    }
+
+    async fn test_app_with_game(game: GameLoad) -> (Router, Store, crate::store::TestDatabase) {
         use openidconnect::{
             AuthUrl, EmptyAdditionalProviderMetadata, JsonWebKeySetUrl, ResponseTypes,
             core::{CoreJwsSigningAlgorithm, CoreResponseType, CoreSubjectIdentifierType},
@@ -1851,7 +2262,7 @@ mod tests {
             App {
                 store: store.clone(),
                 google,
-                game: GameLoad::loading(),
+                game,
             },
             sessions,
             true,

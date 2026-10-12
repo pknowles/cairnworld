@@ -6,7 +6,7 @@ use crate::{
     context,
     llm::{Backend, Content, Message, Response, Sampling},
     settings::Limits,
-    store::{CompactionPolicy, Store},
+    store::{AgentBranch, CompactionPolicy, Store},
     tools::{self, Tool},
 };
 
@@ -128,26 +128,28 @@ impl Drop for ActiveAgent {
 /// live output remain invocation-local rather than becoming persisted state.
 pub struct Turn<'a> {
     pub agent_id: i64,
-    /// The explicit branch this turn reads/appends to, when the agent's
-    /// single `agent_history` branch is not it - a world_gm agent plays
-    /// several groups, each its own branch (design.md's `GroupHistory {
-    /// agent_id, branch_id }`: "agent ID alone cannot select a GM history").
-    /// `None` for every other agent kind, which still has exactly one branch.
-    pub branch_id: Option<i64>,
+    /// The branch selected and validated before this invocation begins.
+    pub branch: AgentBranch,
     pub static_messages: &'a [Message],
+    pub dynamic_context: &'a [&'a str],
     pub tools: &'a [Tool],
     pub sampling: Sampling,
     pub model: &'a str,
 }
 
-/// A settled turn's final text reply and the recorded_content reference its
+/// A settled turn's final non-tool completion and the recorded_content reference its
 /// own message already stores - so a caller (e.g. GM narration) can deliver
 /// that exact reference to other recipients instead of re-recording the same
-/// text. Only returned once the loop has actually settled on text, not for
-/// an intermediate tool-calling turn.
+/// completion. Only returned once the loop has actually settled, not for an
+/// intermediate tool-calling turn.
 pub struct Settled {
     pub response: Response,
+    /// The final non-tool inference that ended this invocation.
+    pub inference_id: i64,
     pub output_content_id: i64,
+    /// Whether this invocation executed a model-requested tool before its
+    /// final response.
+    pub used_tools: bool,
 }
 
 /// RAII guard over one `invocation` row (design.md: "An invocation wrapper
@@ -172,7 +174,13 @@ impl<'a> InvocationGuard<'a> {
         parent_tool_execution_id: Option<i64>,
     ) -> Result<Self> {
         let invocation_id = store
-            .start_invocation(sequence_id, agent_id, branch_id, parent_tool_execution_id, None)
+            .start_invocation(
+                sequence_id,
+                agent_id,
+                branch_id,
+                parent_tool_execution_id,
+                None,
+            )
             .await
             .context("starting agent invocation")?;
         Ok(Self {
@@ -242,19 +250,20 @@ pub async fn complete_with_call_context<B: Backend>(
         store,
         call.sequence_id,
         turn.agent_id,
-        turn.branch_id,
+        Some(turn.branch.branch_id()),
         call.parent_tool_execution_id,
     )
     .await?;
     let invocation_id = invocation.invocation_id;
     let result: Result<Settled> = async {
         backend
-            .before_agent(store, turn.agent_id, turn.branch_id)
+            .before_agent(store, turn.agent_id, Some(turn.branch.branch_id()))
             .await
             .context("waiting for earlier deferred work for this agent")?;
         let definitions =
             tools::definitions(turn.tools).context("validating declared tool schemas")?;
         let mut chat_spent = 0;
+        let mut used_tools = false;
         loop {
             budget
                 .spend(chat_spent)
@@ -265,14 +274,17 @@ pub async fn complete_with_call_context<B: Backend>(
                 backend,
                 context::RecordedCompletion {
                     agent_id: turn.agent_id,
-                    branch_id: turn.branch_id,
+                    branch: turn.branch,
                     sequence_id: call.sequence_id,
                     invocation_id,
                     static_messages: turn.static_messages,
+                    dynamic_context: turn.dynamic_context,
                     tools: &definitions,
                     sampling: turn.sampling.clone(),
                     model: turn.model,
-                    compact_before_next_input_tokens: budget.limits().compact_before_next_input_tokens,
+                    compact_before_next_input_tokens: budget
+                        .limits()
+                        .compact_before_next_input_tokens,
                 },
                 &mut on_token,
             )
@@ -286,14 +298,20 @@ pub async fn complete_with_call_context<B: Backend>(
             // reply is done.
             let Content::ToolCalls(calls) = &response.content else {
                 backend
-                    .after_agent(store, turn.agent_id, turn.branch_id)
+                    .after_agent(store, turn.agent_id, Some(turn.branch.branch_id()))
                     .await
                     .context("admitting any due deferred compaction")?;
                 let output_content_id = completion
                     .output_content_id
                     .context("a settled reply always has an output content reference")?;
-                return Ok(Settled { response, output_content_id });
+                return Ok(Settled {
+                    response,
+                    inference_id: completion.inference_id,
+                    output_content_id,
+                    used_tools,
+                });
             };
+            used_tools = true;
             // Create every call's tool_execution row up front, keyed by its
             // output ordinal, before any of them execute (design.md: "Create
             // rows for every call before executing the batch") - so sibling
@@ -324,7 +342,10 @@ pub async fn complete_with_call_context<B: Backend>(
             // batch has settled with no error.
             let mut pending_changes = Vec::new();
             for (tool_call, tool_execution_id) in calls.iter().zip(&executions) {
-                on_activity(format!("tool call {}: {}", tool_call.name, tool_call.arguments));
+                on_activity(format!(
+                    "tool call {}: {}",
+                    tool_call.name, tool_call.arguments
+                ));
                 let mut committed = false;
                 let outcome: Result<()> = async {
                     let outcome = tools::execute(turn.tools, tool_call, *tool_execution_id)
@@ -332,12 +353,17 @@ pub async fn complete_with_call_context<B: Backend>(
                         .with_context(|| format!("executing tool call {}", tool_call.id))?;
                     let (status, result, after_result) = match outcome {
                         tools::ToolOutcome::Completed(content) => ("completed", content, None),
-                        tools::ToolOutcome::CompletedAfter { content, after_result } => {
-                            ("completed", content, Some(after_result))
-                        }
+                        tools::ToolOutcome::CompletedAfter {
+                            content,
+                            after_result,
+                        } => ("completed", content, Some(after_result)),
                         tools::ToolOutcome::Rejected(content) => ("rejected", content, None),
                         tools::ToolOutcome::PendingTopologyChange(change) => {
-                            pending_changes.push((tool_call.id.clone(), *tool_execution_id, change));
+                            pending_changes.push((
+                                tool_call.id.clone(),
+                                *tool_execution_id,
+                                change,
+                            ));
                             committed = true;
                             return Ok(());
                         }
@@ -350,13 +376,15 @@ pub async fn complete_with_call_context<B: Backend>(
                             &Message::tool_result(tool_call.id.clone(), result.clone()),
                         )
                         .await
-                        .with_context(|| format!("storing result for tool call {}", tool_call.id))?;
+                        .with_context(|| {
+                            format!("storing result for tool call {}", tool_call.id)
+                        })?;
                     committed = true;
                     let activity = format!("tool result {}: {result}", tool_call.id);
                     if let Some(after_result) = after_result {
-                        after_result
-                            .await
-                            .with_context(|| format!("delivering result of tool call {}", tool_call.id))?;
+                        after_result.await.with_context(|| {
+                            format!("delivering result of tool call {}", tool_call.id)
+                        })?;
                     }
                     on_activity(activity);
                     Ok(())
@@ -365,9 +393,16 @@ pub async fn complete_with_call_context<B: Backend>(
                 if let Err(error) = outcome {
                     if !committed {
                         store
-                            .complete_tool_execution(*tool_execution_id, "failed", None, Some(&format!("{error:#}")))
+                            .complete_tool_execution(
+                                *tool_execution_id,
+                                "failed",
+                                None,
+                                Some(&format!("{error:#}")),
+                            )
                             .await
-                            .with_context(|| format!("recording failed tool execution for call {}", tool_call.id))?;
+                            .with_context(|| {
+                                format!("recording failed tool execution for call {}", tool_call.id)
+                            })?;
                     }
                     batch_error = Some(error);
                     break;
@@ -449,7 +484,8 @@ async fn compact_merge_sources<B: Backend>(
                 continue;
             };
             let gm_history = store.group_gm_history(group_id).await?;
-            if store.uncovered_message_count(branch_id).await? > limits.merge_branch_messages as i64 {
+            if store.uncovered_message_count(branch_id).await? > limits.merge_branch_messages as i64
+            {
                 store
                     .enqueue_capacity_compaction(
                         gm_history.agent_id,
@@ -464,12 +500,16 @@ async fn compact_merge_sources<B: Backend>(
                         },
                     )
                     .await
-                    .with_context(|| format!("enqueueing merge-time compaction for branch {branch_id}"))?;
+                    .with_context(|| {
+                        format!("enqueueing merge-time compaction for branch {branch_id}")
+                    })?;
             }
             backend
                 .before_agent(store, gm_history.agent_id, Some(branch_id))
                 .await
-                .with_context(|| format!("waiting for compaction on merge source branch {branch_id}"))?;
+                .with_context(|| {
+                    format!("waiting for compaction on merge source branch {branch_id}")
+                })?;
         }
     }
     Ok(())
@@ -478,6 +518,8 @@ async fn compact_merge_sources<B: Backend>(
 #[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, sync::Mutex};
+
+    use sqlx::query;
 
     use super::*;
     use crate::llm::{MessageContent, Role, ToolCall, ToolDefinition, Usage};
@@ -538,11 +580,12 @@ mod tests {
         (store, db, agent)
     }
 
-    fn scripted_turn<'a>(agent_id: i64, tools: &'a [Tool]) -> Turn<'a> {
+    fn scripted_turn<'a>(branch: AgentBranch, tools: &'a [Tool]) -> Turn<'a> {
         Turn {
-            agent_id,
-            branch_id: None,
+            agent_id: branch.agent_id(),
+            branch,
             static_messages: &[],
+            dynamic_context: &[],
             tools,
             sampling: Sampling {
                 temperature: 0.0,
@@ -557,7 +600,10 @@ mod tests {
     }
 
     async fn history(store: &Store, agent: i64) -> Vec<Message> {
-        let segments = store.live_segments(agent, None).await.unwrap();
+        let segments = store
+            .live_segments(store.agent_branch(agent).await.unwrap())
+            .await
+            .unwrap();
         store
             .request_for_segments(
                 agent,
@@ -591,7 +637,10 @@ mod tests {
             &store,
             &backend,
             &Budget::new(Limits::default()),
-            scripted_turn(agent_id, &[tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[tools::test_echo()],
+            ),
             |_| {},
             |event| activity.push(event),
         )
@@ -643,8 +692,16 @@ mod tests {
             matches!(
                 produced.as_slice(),
                 [
-                    crate::store::InferenceMessage { role: Role::Assistant, answers_tool_execution_id: None, .. },
-                    crate::store::InferenceMessage { role: Role::Tool, answers_tool_execution_id: Some(_), .. },
+                    crate::store::InferenceMessage {
+                        role: Role::Assistant,
+                        answers_tool_execution_id: None,
+                        ..
+                    },
+                    crate::store::InferenceMessage {
+                        role: Role::Tool,
+                        answers_tool_execution_id: Some(_),
+                        ..
+                    },
                 ]
             ),
             "inference 1 produced the tool-call message and its result, keyed to its tool_execution: {produced:?}"
@@ -653,7 +710,11 @@ mod tests {
         assert!(
             matches!(
                 second.as_slice(),
-                [crate::store::InferenceMessage { role: Role::Assistant, answers_tool_execution_id: None, .. }]
+                [crate::store::InferenceMessage {
+                    role: Role::Assistant,
+                    answers_tool_execution_id: None,
+                    ..
+                }]
             ),
             "the final inference produced only its assistant reply: {second:?}"
         );
@@ -676,7 +737,10 @@ mod tests {
             &store,
             &backend,
             &Budget::new(Limits::default()),
-            scripted_turn(agent_id, &[tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[tools::test_echo()],
+            ),
             |_| {},
             |_| {},
         )
@@ -690,7 +754,14 @@ mod tests {
             "the recorded recipe must rebuild the exact tool list that was sent"
         );
 
-        store.corrupt_text_for_test("\"name\":\"test_echo\"").await;
+        let pool = store.pool();
+        let rows = query("UPDATE text SET content = '[]' WHERE content LIKE ?")
+            .bind("%\"name\":\"test_echo\"%")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(rows, 1, "the test fixture must corrupt one tool definition");
         let error = store
             .reconstruct_inference(1)
             .await
@@ -716,7 +787,10 @@ mod tests {
             &store,
             &backend,
             &Budget::new(Limits::default()),
-            scripted_turn(agent_id, &[tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[tools::test_echo()],
+            ),
             |_| {},
             |_| {},
         )
@@ -769,7 +843,10 @@ mod tests {
             &store,
             &backend,
             &Budget::new(Limits::default()),
-            scripted_turn(agent_id, &[tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[tools::test_echo()],
+            ),
             |_| {},
             |_| {},
         )
@@ -812,7 +889,10 @@ mod tests {
             &store,
             &backend,
             &Budget::new(Limits::default()),
-            scripted_turn(agent_id, &[tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[tools::test_echo()],
+            ),
             |_| {},
             |_| {},
         )
@@ -860,9 +940,9 @@ mod tests {
                 Box::pin(async move {
                     Ok(tools::ToolOutcome::CompletedAfter {
                         content: "delivered".to_string(),
-                        after_result: Box::pin(async move {
-                            anyhow::bail!("delivery channel closed")
-                        }),
+                        after_result: Box::pin(
+                            async move { anyhow::bail!("delivery channel closed") },
+                        ),
                     })
                 }) as tools::ToolFuture
             },
@@ -886,7 +966,10 @@ mod tests {
             &store,
             &backend,
             &Budget::new(Limits::default()),
-            scripted_turn(agent_id, &[delivers_then_fails, tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[delivers_then_fails, tools::test_echo()],
+            ),
             |_| {},
             |_| {},
         )
@@ -946,7 +1029,10 @@ mod tests {
             &store,
             &backend,
             &budget,
-            scripted_turn(agent_id, &[tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[tools::test_echo()],
+            ),
             |_| {},
             |_| {},
         )
@@ -993,7 +1079,10 @@ mod tests {
             &store,
             &backend,
             &budget,
-            scripted_turn(agent_id, &[tools::test_echo()]),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[tools::test_echo()],
+            ),
             |_| {},
             |_| {},
         )
@@ -1078,10 +1167,19 @@ mod tests {
         // Split the player off from Toma so each side gets its own branch:
         // the player's side is seeded with raw messages (over threshold),
         // Toma's stays empty (under threshold).
-        let split_trigger = store.begin_sequence(installed.world_id, "split").await.unwrap();
+        let split_trigger = store
+            .begin_sequence(installed.world_id, "split")
+            .await
+            .unwrap();
         let gm_history = store.group_gm_history(original_group_id).await.unwrap();
         let split_invocation = store
-            .start_invocation(Some(split_trigger.id), gm_history.agent_id, Some(gm_history.branch_id), None, None)
+            .start_invocation(
+                Some(split_trigger.id),
+                gm_history.agent_id,
+                Some(gm_history.branch_id),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let split_inference = store
@@ -1141,9 +1239,18 @@ mod tests {
         // Seed the player's side with two raw messages - over a
         // merge_branch_messages threshold of 1; Toma's side stays empty.
         for text in ["The room creaks.", "A shadow moves."] {
-            let trigger = store.begin_sequence(installed.world_id, "seed").await.unwrap();
+            let trigger = store
+                .begin_sequence(installed.world_id, "seed")
+                .await
+                .unwrap();
             let invocation = store
-                .start_invocation(Some(trigger.id), over_history.agent_id, Some(over_history.branch_id), None, None)
+                .start_invocation(
+                    Some(trigger.id),
+                    over_history.agent_id,
+                    Some(over_history.branch_id),
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
             let inference = store
@@ -1165,7 +1272,10 @@ mod tests {
                 .finish_chat_inference(
                     inference,
                     over_history.agent_id,
-                    crate::store::InferenceOutcome::Response(response(Content::Text(text.into()), "")),
+                    crate::store::InferenceOutcome::Response(response(
+                        Content::Text(text.into()),
+                        "",
+                    )),
                     1,
                     crate::store::CompactionPolicy {
                         sequence_id: Some(trigger.id),
@@ -1195,8 +1305,9 @@ mod tests {
         let backend = scheduler.foreground();
         let turn = Turn {
             agent_id: over_history.agent_id,
-            branch_id: Some(over_history.branch_id),
+            branch: store.group_branch(over_group_id).await.unwrap(),
             static_messages: &[],
+            dynamic_context: &[],
             tools: &[],
             sampling: Sampling::default(),
             model: "test-model",

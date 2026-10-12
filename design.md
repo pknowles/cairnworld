@@ -198,16 +198,15 @@ transaction; no payload is published before that transaction commits.
 | `history_branch` | `id, agent_id, next_position`; positions are allocated by UPDATE/RETURNING in the insertion transaction. |
 | `history_parent` | `branch_id, agent_id, ordinal, parent_branch_id, through_position`; primary key `(branch_id, ordinal)`. Immutable bounded references. Parents belong to the same agent and predate their child, enforced by composite foreign keys to `history_branch(id, agent_id)` and `parent_branch_id < branch_id`. |
 | `agent_history` | `agent_id PRIMARY KEY, branch_id UNIQUE`; the single writable branch of a linear player, NPC, Storyteller or sandbox history. GM heads instead belong to groups. |
-| `history_entry` | `id, branch_id, position, kind`; unique `(branch_id, position)`, kind is message, inference, summary or notice. This is the raw history index, not a duplicate transcript. |
+| `history_entry` | `id, branch_id, position, kind`; unique `(branch_id, position)`, kind is message, inference or summary. This is the raw history index, not a duplicate transcript. |
 | `message` | `id` is also its history_entry ID; `role, content, source_inference_id, source_tool_execution_id, trigger_sequence_id`. `content` is a plain `recorded_content` reference - every message uses its whole content, so no typed selection is needed. Only applicable provenance fields are set. |
 | `inference` | Its start has a unique `history_entry_id`; input recipe and outcome remain on inference. Completion updates that row, not the original position. |
-| `summary` | Its activation has a unique `history_entry_id`; `inference_id, covered_ranges` stores ordered branch/position ranges of original messages replaced. No summary text column. |
-| `chat_notice` | Its ID is its history_entry ID; `content, source_inference_id`. Notices are not selected into model context. `content` is a plain synthesized string, not a `recorded_content` reference - a notice is Rust-generated text (e.g. "Compacted history..."), never model output another view could reuse. |
-| `pending_compaction` | Keyed by branch ID; immutable input head/cut, source invocation, sampling/model and static recipe. Completion inserts summary activation and notice and deletes the obligation atomically. |
+| `summary` | Its activation has a unique `history_entry_id`; `inference_id, covered_ranges, reason, retained_messages` stores ordered branch/position ranges of original messages replaced and the compaction metadata. No summary text column. |
+| `pending_compaction` | Keyed by branch ID; immutable input head/cut, source invocation, sampling/model and static recipe. Completion inserts a summary activation and deletes the obligation atomically. |
 
 Normal chat completion writes the inference outcome, its assistant message
 reference and any due compaction obligation in one transaction. Summary completion
-writes the outcome, summary activation, notice and obligation removal together.
+writes the outcome, summary activation and obligation removal together.
 Detached replay writes only the outcome. The three producer operations share the
 private content insertion code; they do not perform a later copy-and-link step.
 Unexpected summary output remains a recorded response with a failed invocation,
@@ -659,7 +658,7 @@ Banning ends inspection access as well as play access. Authentication data,
 OAuth secrets, and other worlds are never game objects available to inspection.
 
 The left chat remains mounted while the right panel changes. Each player entry,
-reply, narration, roll, and compaction notice links to its originating sequence
+reply, narration, roll, and compaction summary links to its originating sequence
 or inference. The right panel has stable URLs and browser back/forward support:
 world overview → sequence → inference; inference → agent history at the relevant
 message; history message or summary → inference; object → related agent/history.
@@ -668,21 +667,24 @@ selection. Direct inspection URLs render the same views and enforce the same
 authorization. Lists use stable database cursors, including raw-history infinite
 scroll; loading another page never changes or skips the selected record.
 
-The sequence view is an ordered execution tree, not just a list of model calls.
-It shows the triggering event, each agent invocation, successive inferences,
-each tool call and result, nested agent invocations, actions and dice, and the
-final response or error. Sibling tool calls retain their returned order and
-tool-call identifiers. Repeated identical text cannot determine ancestry.
-Compaction is linked to its triggering reply and shown as deferred work when
-appropriate; it is not silently assigned to the next player turn.
+The **Turn** view is an ordered execution tree, not just a list of model calls.
+It names the triggering event and every actor by game role (player/NPC/Game
+Master plus character/group context), then summarizes each inference, tool call
+and result, nested agent invocation, action/die, and final response or error in
+execution order. Each summary links to its detailed **Inference** view. Sibling
+tool calls retain their returned order; opaque call identifiers are not primary
+labels. Compaction is linked to its triggering reply and shown as deferred work
+when appropriate; it is not silently assigned to the next player turn.
 
-Each node shows lifecycle, agent/object links, direct request/result, measured
-tokens and elapsed time. Sequence totals count each inference once; summed
+The Inference view presents reconstructed input before output/reasoning, then
+errors when present. Model, effective settings, timing, token use, formatter and
+integrity evidence live behind the card's top-right technical popover rather
+than preceding or duplicating the debugging content. Sequence totals count each inference once; summed
 inference duration and wall-clock sequence duration have distinct labels because
-deferred work can overlap. Missing usage on a failed attempt is unavailable,
-not zero. The inference panel separates exact input, returned output/reasoning,
-errors, model identity, effective settings, and usage. Raw fields are expandable
-and copyable without truncation; HTML escaping must preserve copied text.
+deferred work can overlap. Missing usage on a failed attempt is unavailable, not
+zero. Raw fields are expandable and copyable without truncation; HTML escaping
+must preserve copied text. HTTP JSON is the transport representation for these
+views and developer clients, not a pane rendered for humans.
 
 ### Browser selection and raw fields
 
@@ -913,8 +915,8 @@ another inference for that agent, but does not delay the completed reply:
 The trigger uses the completed inference's model-reported `input_tokens` plus
 `output_tokens`; it adds no tokenization work. Those are measured units, not
 a claim that newly supplied text will fit. The durable background job begins after the
-completed reply is delivered. If only the retained tail remains, it records an
-inline notice and retires the job; a later turn can queue a new one. It never
+completed reply is delivered. If only the retained tail remains, it retires the
+job without a history event; a later turn can queue a new one. It never
 interrupts the completed game response for context pressure alone.
 
 If an ordinary inference or compaction request is rejected for capacity, the
@@ -1044,6 +1046,9 @@ Live connection IDs are process-local and are never restored after restart.
 
 `presence_narration(group_id PRIMARY KEY, last_announced_character_ids,
 due_at, generation)` records the announced online set and outstanding transition.
+Only characters whose creation is ready participate in this protocol: opening
+play owns the first narration after `ready_to_begin`, while presence narration
+only describes later arrivals and departures.
 On first arrival into an already occupied group, queue an immediate GM arrival
 turn. On a departure, set due_at to the first departure plus 60 seconds;
 subsequent changes within that window share the deadline. Returning before the

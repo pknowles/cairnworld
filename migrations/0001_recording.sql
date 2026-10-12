@@ -355,6 +355,10 @@ CREATE TABLE tool_execution (
 CREATE TABLE message (
     id INTEGER PRIMARY KEY NOT NULL REFERENCES history_entry(id),
     role TEXT NOT NULL,
+    -- The human-facing provenance of a model-role message. An instruction is
+    -- still a user-role turn to the model, but was added by the game rather
+    -- than typed by a player.
+    origin TEXT NOT NULL DEFAULT 'conversation' CHECK (origin IN ('conversation', 'instruction')),
     content INTEGER NOT NULL REFERENCES recorded_content(id),
     -- The inference that produced this entry: an assistant reply or a tool
     -- result. NULL for player input and delivered narration, which no

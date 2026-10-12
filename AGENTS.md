@@ -84,8 +84,11 @@ before making a commit. This is a hard gate and MUST be followed:
      Does the implementation ordering flow so data and dependencies will simply
      already exist when needed or are constructs being introduced unnecessarily
      that would simply not be needed if the ordering were corrected or steps
-     were consolidated? Check there are there no vague items or abstract
-     descriptions that hand waive a complex or possibly inappropriate problem solution.
+     were consolidated? Is the balance of work in the steps appropriate (too
+     small and development time skyrockets unnecessarily; too large and agents
+     drop items, shortcuts and fail)? Check there are there no vague items or
+     abstract descriptions that hand waive a complex or possibly inappropriate
+     problem solution.
    - If you changed any LLM prompt, context packet, tool description, or model-facing instruction, did you complete the review checklist in prompt_standards.md?
    - Are your changes project-consistent, modular and did not introduce duplication?
    - Did you "fix" anything without evidence, i.e. proving the thing you fixed was actually the cause and true underlying problem? See Debugging below for details.
@@ -95,10 +98,10 @@ before making a commit. This is a hard gate and MUST be followed:
 
 All issues should be fixed appropriately before committing.
 
-# Debugging
+# Fixing Issues and Debugging
 
-LLMs frequently make wild guesses/speculations. That's fine, but DO NOT act on
-them. For each,
+Be cautious when making guesses speculations. These are fine, but DO NOT confuse
+them for fact and act on them. For each,
 
 - Describe a testable experiment that would either prove your hypothesis or
   further bisect the problem
@@ -115,6 +118,9 @@ them. For each,
 - Verify fixes actually fix the original issue by attempting to reproduce the
   original issue yourself. Given changes were made, verify impacted features
   (related to the changed code) still work.
+- As always check that the solution works, generically and holistically across
+  the requirements and use cases. Simply avoiding a specific failure case is a
+  shortcut and violates our standards. Sometimes a restructure is needed.
 
 # Implementation loop
 

@@ -154,7 +154,11 @@ pub fn definitions(tools: &[Tool]) -> Result<Vec<ToolDefinition>> {
         .collect()
 }
 
-pub async fn execute(tools: &[Tool], call: &ToolCall, tool_execution_id: i64) -> Result<ToolOutcome> {
+pub async fn execute(
+    tools: &[Tool],
+    call: &ToolCall,
+    tool_execution_id: i64,
+) -> Result<ToolOutcome> {
     let Some(tool) = tools.iter().find(|tool| tool.definition.name == call.name) else {
         return Ok(ToolOutcome::Rejected(format!(
             "Tool `{}` is unavailable in this conversation.",

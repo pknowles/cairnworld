@@ -10,27 +10,53 @@ use sqlx::{FromRow, Sqlite, Transaction};
 
 use super::Store;
 
-// `HistoryHead`, `PositionRange` and `Segment` live in `crate::inspection`
-// (shared with the browser); re-exported here since this module builds and
-// consumes them.
-pub use crate::inspection::{HistoryHead, PositionRange};
+// `PositionRange` and `Segment` live in `crate::inspection` (shared with the
+// browser); re-export the range since this module builds and consumes it.
+pub use crate::inspection::PositionRange;
 use crate::inspection::Segment;
 
-/// A `HistoryHead` already validated against the world/agent that owns it -
-/// holding one proves the check passed, so `history_range` and its callers
-/// never re-validate a head they were only just given. Private fields: the
-/// only way to get one is `Store::branch_head_for_agent`,
-/// `Store::branch_head_for_branch` or `Store::branch_head_from_cursor`.
+/// One branch proven to belong to one world and agent. The Store resolves this
+/// once at the boundary where a caller selects a history; all later readers
+/// receive the proof rather than raw IDs they would need to validate again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BranchHead {
+pub struct AgentBranch {
     world_id: i64,
     agent_id: i64,
-    head: HistoryHead,
+    branch_id: i64,
 }
 
-impl BranchHead {
-    pub fn head(&self) -> HistoryHead {
-        self.head
+impl AgentBranch {
+    pub fn agent_id(self) -> i64 {
+        self.agent_id
+    }
+
+    pub fn world_id(self) -> i64 {
+        self.world_id
+    }
+
+    pub fn branch_id(self) -> i64 {
+        self.branch_id
+    }
+}
+
+/// An immutable snapshot of an [`AgentBranch`] for a raw-history page. It is
+/// intentionally private: browser data becomes one only after `resume`
+/// validates its owner, cut and next key against the selected history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawCursor {
+    branch: AgentBranch,
+    cut: i64,
+    next_branch_id: i64,
+    next_position: i64,
+}
+
+impl RawCursor {
+    pub(super) fn branch(self) -> AgentBranch {
+        self.branch
+    }
+
+    pub(super) fn cut(self) -> i64 {
+        self.cut
     }
 }
 
@@ -40,7 +66,6 @@ pub enum EntryKind {
     Message,
     Inference,
     Summary,
-    Notice,
 }
 
 impl EntryKind {
@@ -49,7 +74,6 @@ impl EntryKind {
             EntryKind::Message => "message",
             EntryKind::Inference => "inference",
             EntryKind::Summary => "summary",
-            EntryKind::Notice => "notice",
         }
     }
 
@@ -58,7 +82,6 @@ impl EntryKind {
             "message" => EntryKind::Message,
             "inference" => EntryKind::Inference,
             "summary" => EntryKind::Summary,
-            "notice" => EntryKind::Notice,
             other => anyhow::bail!("unknown history_entry kind {other}"),
         })
     }
@@ -115,7 +138,8 @@ impl Store {
     }
 
     /// Insert one `history_entry` row at an already-allocated position and
-    /// return its id, which the caller's typed row (message/inference/notice)
+    /// return its id, which the caller's typed row (message, inference, or
+    /// summary activation)
     /// reuses as its own primary key.
     pub(super) async fn insert_history_entry(
         transaction: &mut Transaction<'_, Sqlite>,
@@ -136,7 +160,7 @@ impl Store {
 
     /// Allocate a position and insert its history_entry in one step, the
     /// common case for every producer (message append, inference start,
-    /// summary activation, notice).
+    /// summary activation).
     pub(super) async fn append_history_entry(
         transaction: &mut Transaction<'_, Sqlite>,
         branch_id: i64,
@@ -145,25 +169,6 @@ impl Store {
         let position = Self::allocate_position(transaction, branch_id).await?;
         let id = Self::insert_history_entry(transaction, branch_id, position, kind).await?;
         Ok((id, position))
-    }
-
-    /// The agent and world a branch belongs to. `history_branch.agent_id`
-    /// already names the owning agent directly for every branch, including a
-    /// world_gm agent's group branches - `spawn_group_branch` always binds
-    /// the world's single `world_gm.agent_id` at creation (design.md's
-    /// `GroupHistory { agent_id, branch_id }`) - so this needs no fallback
-    /// through `agent_history`/`group`.
-    pub(super) async fn branch_owner(&self, branch_id: i64) -> Result<(i64, i64)> {
-        sqlx::query_as::<_, (i64, i64)>(
-            "SELECT history_branch.agent_id, agent.world_id \
-             FROM history_branch JOIN agent ON agent.id = history_branch.agent_id \
-             WHERE history_branch.id = ?",
-        )
-        .bind(branch_id)
-        .fetch_optional(&self.pool)
-        .await
-        .with_context(|| format!("looking up owner of branch {branch_id}"))?
-        .with_context(|| format!("history branch {branch_id} does not exist"))
     }
 
     /// Every branch reachable from `head`, each bounded to the furthest
@@ -175,7 +180,7 @@ impl Store {
     /// `ORDER BY branch_id` is already a valid topological (ancestors-first)
     /// order, and the recursion always terminates without a visited-set of
     /// its own.
-    async fn reach(&self, head: HistoryHead) -> Result<Vec<HistoryHead>> {
+    async fn reach(&self, branch: AgentBranch, cut: i64) -> Result<Vec<(i64, i64)>> {
         let rows = sqlx::query_as::<_, (i64, i64)>(
             "WITH RECURSIVE reach(branch_id, cut) AS ( \
                  SELECT ?, ? \
@@ -185,120 +190,63 @@ impl Store {
              ) \
              SELECT branch_id, MAX(cut) FROM reach GROUP BY branch_id ORDER BY branch_id",
         )
-        .bind(head.branch_id)
-        .bind(head.cut)
+        .bind(branch.branch_id)
+        .bind(cut)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("computing reach of branch {}", head.branch_id))?;
-        Ok(rows
-            .into_iter()
-            .map(|(branch_id, cut)| HistoryHead { branch_id, cut })
-            .collect())
+        .with_context(|| format!("computing reach of branch {}", branch.branch_id))?;
+        Ok(rows)
     }
 
-    /// Every history entry reachable from `head`, in causal order: each
-    /// reached branch's own entries up to its bounded cut, ancestor-first
-    /// (`reach`'s order). No production caller needs this unfiltered a load
-    /// - `history_live_segments` and `raw_page` each select only what they
-    /// need directly - so this exists to test `reach`'s bounding/dedup
-    /// behavior precisely and directly, which neither of those two (each
-    /// with its own additional filtering) can exercise as exactly.
-    #[cfg(test)]
-    async fn history_range(&self, head: BranchHead) -> Result<Vec<HistoryEntry>> {
-        let mut entries = Vec::new();
-        for bounded in self.reach(head.head).await? {
-            let rows = sqlx::query_as::<_, HistoryEntryRow>(
-                "SELECT id, branch_id, position, kind FROM history_entry \
-                 WHERE branch_id = ? AND position <= ? ORDER BY position",
-            )
-            .bind(bounded.branch_id)
-            .bind(bounded.cut)
-            .fetch_all(&self.pool)
-            .await
-            .with_context(|| format!("loading entries of branch {}", bounded.branch_id))?;
-            for row in rows {
-                entries.push(HistoryEntry::try_from(row)?);
-            }
-        }
-        Ok(entries)
-    }
-
-    /// One page of raw history entries reachable from `head`, ancestor-first
+    /// One page of raw history entries reachable from the cursor's fixed
+    /// head, ancestor-first
     /// then by position (`reach`'s order), selected and paged entirely in
     /// SQL: `after` resumes a keyset scan at `(branch_id, position)` rather
-    /// than loading and re-slicing every entry on every page. A successful
-    /// inference's own entry is excluded
-    /// in the same query (its assistant message entry is what should
-    /// render); only a failed inference (no message was ever produced)
-    /// passes through. Returns up to `limit` entries plus, when there are
+    /// than loading and re-slicing every entry on every page. Inference
+    /// entries remain present so the raw history can link to every recorded
+    /// model call, including tool-only calls. Returns up to `limit` entries plus, when there are
     /// more, the `(branch_id, position)` to resume after.
     ///
-    /// `after`, when given, must name a real position within `head`'s reach;
-    /// a stale or foreign cursor is rejected rather than silently treated as
-    /// end-of-history.
+    /// The cursor's next position must be within its head's reach; a stale or
+    /// foreign cursor is rejected rather than silently treated as end-of-history.
     pub async fn raw_page(
         &self,
-        head: BranchHead,
-        after: Option<(i64, i64)>,
+        cursor: RawCursor,
         limit: i64,
     ) -> Result<(Vec<HistoryEntry>, Option<(i64, i64)>)> {
-        if let Some((branch_id, position)) = after {
-            let bounded_cut: Option<i64> = sqlx::query_scalar(
-                "WITH RECURSIVE reach(branch_id, cut) AS ( \
-                     SELECT ?, ? \
-                     UNION \
-                     SELECT p.parent_branch_id, p.through_position \
-                     FROM history_parent p JOIN reach r ON p.branch_id = r.branch_id \
-                 ) \
-                 SELECT MAX(cut) FROM reach WHERE branch_id = ?",
-            )
-            .bind(head.head.branch_id)
-            .bind(head.head.cut)
-            .bind(branch_id)
-            .fetch_one(&self.pool)
-            .await
-            .with_context(|| format!("checking raw history cursor branch {branch_id}"))?;
-            ensure!(
-                bounded_cut.is_some_and(|cut| position <= cut),
-                "raw history cursor position {position} on branch {branch_id} is outside this history"
-            );
-        }
-        let (after_branch_id, after_position) = after.unwrap_or((i64::MIN, i64::MIN));
         let limit_plus_one = limit + 1;
+        let reach = serde_json::to_string(&self.reach(cursor.branch, cursor.cut).await?)
+            .context("serializing raw history reach")?;
         let rows = sqlx::query_as::<_, HistoryEntryRow>(
-            "WITH RECURSIVE reach(branch_id, cut) AS ( \
-                 SELECT ?, ? \
-                 UNION \
-                 SELECT p.parent_branch_id, p.through_position \
-                 FROM history_parent p JOIN reach r ON p.branch_id = r.branch_id \
-             ), bounded AS ( \
-                 SELECT branch_id, MAX(cut) AS cut FROM reach GROUP BY branch_id \
+            "WITH bounded AS ( \
+                 SELECT json_extract(value, '$[0]') AS branch_id, \
+                        json_extract(value, '$[1]') AS cut \
+                 FROM json_each(?) \
              ) \
              SELECT history_entry.id, history_entry.branch_id, history_entry.position, history_entry.kind \
              FROM history_entry \
              JOIN bounded ON bounded.branch_id = history_entry.branch_id \
                  AND history_entry.position <= bounded.cut \
-             LEFT JOIN inference ON inference.history_entry_id = history_entry.id \
-             WHERE (history_entry.kind != 'inference' OR inference.error IS NOT NULL) \
-                 AND (history_entry.branch_id > ? \
+             WHERE (history_entry.branch_id > ? \
                       OR (history_entry.branch_id = ? AND history_entry.position >= ?)) \
              ORDER BY history_entry.branch_id, history_entry.position \
              LIMIT ?",
         )
-        .bind(head.head.branch_id)
-        .bind(head.head.cut)
-        .bind(after_branch_id)
-        .bind(after_branch_id)
-        .bind(after_position)
+        .bind(reach)
+        .bind(cursor.next_branch_id)
+        .bind(cursor.next_branch_id)
+        .bind(cursor.next_position)
         .bind(limit_plus_one)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("loading raw history page from branch {}", head.head.branch_id))?;
+        .with_context(|| format!("loading raw history page from branch {}", cursor.branch.branch_id))?;
         let mut entries: Vec<HistoryEntry> = rows
             .into_iter()
             .map(HistoryEntry::try_from)
             .collect::<Result<_>>()?;
-        let next = if entries.len() > usize::try_from(limit).context("raw history page limit must not be negative")? {
+        let next = if entries.len()
+            > usize::try_from(limit).context("raw history page limit must not be negative")?
+        {
             let next_entry = entries.pop().expect("checked len above");
             Some((next_entry.branch_id, next_entry.position))
         } else {
@@ -317,14 +265,15 @@ impl Store {
     /// a sibling branch's newer one. Older messages remain stored for replay
     /// and debugging.
     ///
-    /// Unlike `history_range`, this never loads a covered or non-message
+    /// Unlike raw inspection, this never loads a covered or non-message
     /// entry: one query finds each reached branch's newest summary (if any)
     /// within its bounded cut, `covered_ranges` decoding (bounded by branch
     /// count, not entry count) finds how far it covers *this* branch, and a
     /// second query per branch selects only the uncovered message positions.
-    pub async fn history_live_segments(&self, head: BranchHead) -> Result<Vec<Segment>> {
+    pub async fn history_live_segments(&self, branch: AgentBranch) -> Result<Vec<Segment>> {
         let mut segments = Vec::new();
-        for bounded in self.reach(head.head).await? {
+        let cut = self.current_cut(branch.branch_id).await?;
+        for (branch_id, cut) in self.reach(branch, cut).await? {
             let summary: Option<(i64, String)> = sqlx::query_as(
                 "SELECT summary.id, summary.covered_ranges \
                  FROM history_entry \
@@ -335,12 +284,12 @@ impl Store {
                      WHERE he.branch_id = ? AND he.position <= ? \
                  )",
             )
-            .bind(bounded.branch_id)
-            .bind(bounded.branch_id)
-            .bind(bounded.cut)
+            .bind(branch_id)
+            .bind(branch_id)
+            .bind(cut)
             .fetch_optional(&self.pool)
             .await
-            .with_context(|| format!("loading latest summary for branch {}", bounded.branch_id))?;
+            .with_context(|| format!("loading latest summary for branch {branch_id}"))?;
             // Not covered by the selected summary, not merely positioned
             // after it: a summary activation's own position in the unified
             // index can land after messages it does not cover, since it is
@@ -349,10 +298,12 @@ impl Store {
                 Some((summary_id, covered_ranges)) => {
                     let covered_ranges: Vec<PositionRange> = serde_json::from_str(&covered_ranges)
                         .context("decoding summary covered ranges")?;
-                    segments.push(Segment::Summary { summary: summary_id });
+                    segments.push(Segment::Summary {
+                        summary: summary_id,
+                    });
                     covered_ranges
                         .iter()
-                        .filter(|range| range.branch_id == bounded.branch_id)
+                        .filter(|range| range.branch_id == branch_id)
                         .map(|range| range.last_position)
                         .max()
                 }
@@ -363,16 +314,16 @@ impl Store {
                  WHERE branch_id = ? AND kind = 'message' AND position <= ? \
                  AND position > ?",
             )
-            .bind(bounded.branch_id)
-            .bind(bounded.cut)
+            .bind(branch_id)
+            .bind(cut)
             .bind(covered_through.unwrap_or(-1))
             .fetch_one(&self.pool)
             .await
-            .with_context(|| format!("finding uncovered message range for branch {}", bounded.branch_id))?;
+            .with_context(|| format!("finding uncovered message range for branch {branch_id}"))?;
             if let (Some(first_position), Some(last_position)) = range {
                 segments.push(Segment::Messages {
                     messages: PositionRange {
-                        branch_id: bounded.branch_id,
+                        branch_id,
                         first_position,
                         last_position,
                     },
@@ -382,18 +333,7 @@ impl Store {
         Ok(segments)
     }
 
-    /// The current head of an agent's single writable branch: its
-    /// `agent_history` branch, cut at that branch's latest position.
-    pub(super) async fn current_head(&self, agent_id: i64) -> Result<HistoryHead> {
-        let branch_id = self.branch_for_agent(agent_id).await?;
-        self.current_head_for_branch(branch_id).await
-    }
-
-    /// As `current_head`, for a branch chosen explicitly rather than an
-    /// agent's single `agent_history` row - a world_gm agent has one branch
-    /// per group, never an `agent_history` row (design.md's `GroupHistory {
-    /// agent_id, branch_id }`: "agent ID alone cannot select a GM history").
-    pub(super) async fn current_head_for_branch(&self, branch_id: i64) -> Result<HistoryHead> {
+    async fn current_cut(&self, branch_id: i64) -> Result<i64> {
         let next_position: i64 =
             sqlx::query_scalar("SELECT next_position FROM history_branch WHERE id = ?")
                 .bind(branch_id)
@@ -401,70 +341,152 @@ impl Store {
                 .await
                 .with_context(|| format!("loading history branch {branch_id}"))?
                 .with_context(|| format!("history branch {branch_id} does not exist"))?;
-        Ok(HistoryHead {
+        Ok(next_position - 1)
+    }
+
+    /// Resolve an ordinary agent's one writable branch. This is not a browser
+    /// boundary: both its world and branch come from durable relationships.
+    pub async fn agent_branch(&self, agent_id: i64) -> Result<AgentBranch> {
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT agent.world_id, agent_history.branch_id FROM agent \
+             JOIN agent_history ON agent_history.agent_id = agent.id WHERE agent.id = ?",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading history branch for agent {agent_id}"))?;
+        let (world_id, branch_id) =
+            row.with_context(|| format!("agent {agent_id} has no history branch"))?;
+        Ok(AgentBranch {
+            world_id,
+            agent_id,
             branch_id,
-            cut: next_position - 1,
         })
     }
 
-    /// An agent's own current writable head, validated against the world
-    /// claimed to own that agent - a caller-supplied `agent_id` alone is not
-    /// proof it belongs to the caller's authorized `world_id`.
-    pub async fn branch_head_for_agent(&self, world_id: i64, agent_id: i64) -> Result<BranchHead> {
-        let owner_world_id = self.world_id_for_agent(agent_id).await?;
-        ensure!(
-            owner_world_id == world_id,
-            "agent {agent_id} is not in world {world_id}"
-        );
-        let head = self.current_head(agent_id).await?;
-        Ok(BranchHead { world_id, agent_id, head })
+    /// Resolve a group's current GM branch. A world GM has several branches,
+    /// so the group relationship is the only valid selector.
+    pub async fn group_branch(&self, group_id: i64) -> Result<AgentBranch> {
+        let row: Option<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT \"group\".world_id, world_gm.agent_id, \"group\".branch_id \
+             FROM \"group\" JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             WHERE \"group\".id = ?",
+        )
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading GM history for group {group_id}"))?;
+        let (world_id, agent_id, branch_id) =
+            row.with_context(|| format!("group {group_id} does not exist"))?;
+        Ok(AgentBranch {
+            world_id,
+            agent_id,
+            branch_id,
+        })
     }
 
-    /// An explicit branch's current head, validated against the agent and
-    /// world claimed to own it - a world_gm agent selecting one of its own
-    /// group branches, or any other caller that already has a branch id but
-    /// still needs its ownership confirmed before trusting it.
-    pub async fn branch_head_for_branch(
+    /// Validate a browser-selected branch against its authorized world and
+    /// requested agent before any reader receives it.
+    pub async fn branch_for_viewer(
         &self,
+        viewer_id: i64,
+        world_id: i64,
+        agent_id: i64,
         branch_id: i64,
-        world_id: i64,
-        agent_id: i64,
-    ) -> Result<BranchHead> {
-        let head = self.current_head_for_branch(branch_id).await?;
-        self.validate_branch_head(head, world_id, agent_id).await
+    ) -> Result<AgentBranch> {
+        self.inspecting(viewer_id, world_id).await?;
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT history_branch.id FROM history_branch \
+             JOIN agent ON agent.id = history_branch.agent_id \
+             WHERE history_branch.id = ? AND history_branch.agent_id = ? AND agent.world_id = ?",
+        )
+        .bind(branch_id)
+        .bind(agent_id)
+        .bind(world_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("validating history branch {branch_id}"))?;
+        ensure!(
+            exists.is_some(),
+            "history branch {branch_id} does not belong to agent {agent_id} in world {world_id}"
+        );
+        Ok(AgentBranch {
+            world_id,
+            agent_id,
+            branch_id,
+        })
     }
 
-    /// A browser-supplied cursor's head, validated against the viewer's
-    /// authorized world/agent before any traversal trusts it - the same
-    /// validation `history_range` used to perform internally on every call,
-    /// now performed once when the head is constructed.
-    pub async fn branch_head_from_cursor(
-        &self,
-        head: HistoryHead,
-        world_id: i64,
-        agent_id: i64,
-    ) -> Result<BranchHead> {
-        self.validate_branch_head(head, world_id, agent_id).await
+    pub(super) async fn first_raw_cursor(&self, branch: AgentBranch) -> Result<RawCursor> {
+        let cut = self.current_cut(branch.branch_id).await?;
+        let (next_branch_id, _) = self
+            .reach(branch, cut)
+            .await?
+            .into_iter()
+            .next()
+            .expect("a branch always reaches itself");
+        Ok(RawCursor {
+            branch,
+            cut,
+            next_branch_id,
+            next_position: 0,
+        })
     }
 
-    async fn validate_branch_head(
+    pub(super) async fn raw_cursor_at(
         &self,
-        head: HistoryHead,
-        world_id: i64,
-        agent_id: i64,
-    ) -> Result<BranchHead> {
-        let (owner_agent_id, owner_world_id) = self.branch_owner(head.branch_id).await?;
+        branch: AgentBranch,
+        entry_id: i64,
+    ) -> Result<RawCursor> {
+        let cut = self.current_cut(branch.branch_id).await?;
+        let position: i64 = sqlx::query_scalar(
+            "SELECT position FROM history_entry WHERE id = ? AND branch_id = ? AND position <= ?",
+        )
+        .bind(entry_id)
+        .bind(branch.branch_id)
+        .bind(cut)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("locating history entry {entry_id}"))?
+        .with_context(|| {
+            format!(
+                "history entry {entry_id} is not visible on branch {}",
+                branch.branch_id
+            )
+        })?;
+        Ok(RawCursor {
+            branch,
+            cut,
+            next_branch_id: branch.branch_id,
+            next_position: position,
+        })
+    }
+
+    pub(super) async fn resume_raw_cursor(
+        &self,
+        branch: AgentBranch,
+        cut: i64,
+        next_branch_id: i64,
+        next_position: i64,
+    ) -> Result<RawCursor> {
         ensure!(
-            owner_world_id == world_id,
-            "history branch {} is not in world {world_id}",
-            head.branch_id
+            cut <= self.current_cut(branch.branch_id).await?,
+            "raw history cursor cut {cut} is beyond branch {}'s current head",
+            branch.branch_id
         );
+        let reach = self.reach(branch, cut).await?;
         ensure!(
-            owner_agent_id == agent_id,
-            "history branch {} does not belong to agent {agent_id}",
-            head.branch_id
+            reach.into_iter().any(|(reached_branch, reached_cut)| {
+                reached_branch == next_branch_id && next_position <= reached_cut
+            }),
+            "raw history cursor position {next_position} on branch {next_branch_id} is outside this history"
         );
-        Ok(BranchHead { world_id, agent_id, head })
+        Ok(RawCursor {
+            branch,
+            cut,
+            next_branch_id,
+            next_position,
+        })
     }
 
     /// The branch backing an agent's single writable history.
@@ -511,7 +533,7 @@ mod tests {
     async fn add_entries(store: &Store, branch_id: i64, count: i64) {
         let mut transaction = store.pool.begin().await.unwrap();
         for _ in 0..count {
-            Store::append_history_entry(&mut transaction, branch_id, EntryKind::Notice)
+            Store::append_history_entry(&mut transaction, branch_id, EntryKind::Inference)
                 .await
                 .unwrap();
         }
@@ -563,19 +585,21 @@ mod tests {
             .await
             .unwrap();
 
-        let head = store
-            .branch_head_from_cursor(HistoryHead { branch_id: child, cut: 1 }, world, agent)
+        let reach = store
+            .reach(
+                AgentBranch {
+                    world_id: world,
+                    agent_id: agent,
+                    branch_id: child,
+                },
+                1,
+            )
             .await
             .unwrap();
-        let entries = store.history_range(head).await.unwrap();
-        // Parent contributes only positions 0..=1 (bounded), then child's own
-        // positions 0..=1, in that order.
         assert_eq!(
-            entries
-                .iter()
-                .map(|entry| (entry.branch_id, entry.position))
-                .collect::<Vec<_>>(),
-            vec![(root, 0), (root, 1), (child, 0), (child, 1)]
+            reach,
+            vec![(root, 1), (child, 1)],
+            "the parent contributes only its bounded prefix before the child"
         );
     }
 
@@ -609,27 +633,20 @@ mod tests {
             .await
             .unwrap();
 
-        let head = store
-            .branch_head_from_cursor(HistoryHead { branch_id: leaf, cut: 0 }, world, agent)
-            .await
-            .unwrap();
-        let entries = store.history_range(head).await.unwrap();
-        // root's two entries appear exactly once even though both mid and
-        // leaf's own parent list reach them.
-        let root_entries = entries
-            .iter()
-            .filter(|entry| entry.branch_id == root)
-            .count();
         assert_eq!(
-            root_entries, 2,
-            "root entries must not be duplicated: {entries:?}"
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| (entry.branch_id, entry.position))
-                .collect::<Vec<_>>(),
-            vec![(root, 0), (root, 1), (mid, 0), (leaf, 0)]
+            store
+                .reach(
+                    AgentBranch {
+                        world_id: world,
+                        agent_id: agent,
+                        branch_id: leaf
+                    },
+                    0
+                )
+                .await
+                .unwrap(),
+            vec![(root, 1), (mid, 0), (leaf, 0)],
+            "shared parents appear once at their longest reached cut"
         );
     }
 
@@ -661,46 +678,15 @@ mod tests {
             .expect("an older same-agent parent is the valid link");
     }
 
-    /// `history_range` itself no longer validates - a `BranchHead` already
-    /// proves it belongs to its world/agent by construction, so this tests
-    /// the constructor that check now lives in.
+    /// Ownership is carried by AgentBranch; an ordinary agent's constructor
+    /// obtains both its world and writable branch from durable relationships.
     #[tokio::test]
-    async fn branch_head_from_cursor_rejects_a_foreign_agent_or_world() {
+    async fn agent_branch_resolves_an_agents_owned_history() {
         let db = TestDatabase::new("history-test");
         let store = Store::open(db.path()).await.unwrap();
         let world = store.create_world("test").await.unwrap();
-        let other_world = store.create_world("other").await.unwrap();
         let agent = store.create_agent(world).await.unwrap();
-        let other_agent = store.create_agent(world).await.unwrap();
-        let branch = new_branch(&store, agent).await;
-        // create_agent already inserted this agent's default branch/row;
-        // point its single writable head at the synthetic branch this test built.
-        sqlx::query("UPDATE agent_history SET branch_id = ? WHERE agent_id = ?")
-            .bind(branch)
-            .bind(agent)
-            .execute(&store.pool)
-            .await
-            .unwrap();
-
-        let head = HistoryHead {
-            branch_id: branch,
-            cut: -1,
-        };
-        assert!(
-            store
-                .branch_head_from_cursor(head, world, other_agent)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("does not belong to agent")
-        );
-        assert!(
-            store
-                .branch_head_from_cursor(head, other_world, agent)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("is not in world")
-        );
+        let branch = store.agent_branch(agent).await.unwrap();
+        assert_eq!(branch.world_id(), world);
     }
 }

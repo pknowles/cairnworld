@@ -15,16 +15,32 @@ access rules; [jscpd-rs](https://github.com/vv-bogdanov/jscpd-rs) provides the
 jscpd clone detector; [big-code-analysis](https://github.com/dekobon/big-code-analysis)
 provides bca function metrics/checks. Use these tools, not similarly named crates.
 
-Runs after [bounded history ranges](developer-inspection.md#bounded-history-ranges),
-which introduces the `BranchHead` validated-handle pattern this plan extends.
+Steps 1–3 are complete. Step 4 follows the completed Developer Mode work, by
+the user's 2026-09-27 priority decision. Its required bounded-history
+corrections and GM event recording are already complete.
 
 ## Findings
 
 Review of `8f32f75`, 2026-09-24. Clippy is clean and 102 Rust tests pass with 9
 opt-in skipped; the rest is from reading the code and has not been measured.
 
-- **Gates missing.** `cargo fmt --check` reports about 190 diffs. No crate root
-  sets `deny(warnings)`/`forbid(unsafe_code)`, and there is no check script.
+- **Gates fixed (2026-09-25).** `scripts/check-quality.sh` runs formatting plus
+  server and hydrated-WASM Clippy with warnings denied; both crate roots deny
+  warnings and forbid unsafe code. The gate exposed and the commit corrected
+  the inspection pane's over-parameterized fetch helper rather than suppressing
+  its warning.
+- **Real-path compaction tests (2026-09-26).** Compaction tests now start with
+  `context::complete_recipe`, which records the normal reply and queues any
+  due obligation through `finish_chat_inference`, before resolving it through
+  `compaction::run`. The test-only completion trigger and raw-SQL enqueue
+  helper are gone. Store tests likewise create ordinary inferences through the
+  public sequence, invocation, start and finish operations; the generic
+  test-only inference writer is gone. Tool-call test setup likewise uses those
+  public operations and `create_tool_executions`, outside `Store`. The
+  summary tests queue and finish real compaction work through
+  `finish_summary_inference`, rather than inserting a summary row. The one
+  deliberate corruption used by a negative reconstruction test is local to
+  that test; every `Store` test helper now only reads state.
 - **Store is one type for all persistence.** `src/store.rs` is ~5,500 lines of
   production code with ~97 public methods spanning membership, presence,
   groups, inference records, compaction jobs and inspection, grouped by
@@ -87,7 +103,7 @@ proves it, and let the schema or compiler reject what used to be checked.
 
 Recommendation: values with private fields and only validating constructors,
 e.g. `WorldInspection` (from the viewer's access check; inspection reads are
-its methods), `BranchHead` (from the bounded-history slice), and a group GM
+its methods), `AgentBranch` (from the bounded-history corrections), and a group GM
 handle. Replace `Option` parameters that select an operation with separate
 constructors, and `Option` fields present for one caller with separate result
 types. Triage every remaining `Option` in production code: keep it only where

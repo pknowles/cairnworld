@@ -7,22 +7,18 @@ use crate::{
         Backend, ContextCapacityExceeded, Message, MessageContent, Response, Sampling,
         ToolDefinition,
     },
-    store::{CompactionPolicy, InferenceInput, InferenceOutcome, Segment, Store},
+    store::{AgentBranch, CompactionPolicy, InferenceInput, InferenceOutcome, Segment, Store},
 };
 
 /// Everything required to record one agent inference from its visible context.
 pub struct RecordedCompletion<'a> {
     pub agent_id: i64,
-    /// The explicit branch this completion reads/appends to, when the
-    /// agent's single `agent_history` branch is not it - a world_gm agent
-    /// plays several groups, each its own branch (design.md's `GroupHistory
-    /// { agent_id, branch_id }`: "agent ID alone cannot select a GM
-    /// history"). `None` for every other agent kind, which still has exactly
-    /// one branch.
-    pub branch_id: Option<i64>,
+    /// The already-validated branch this completion reads and appends to.
+    pub branch: AgentBranch,
     pub sequence_id: Option<i64>,
     pub invocation_id: i64,
     pub static_messages: &'a [Message],
+    pub dynamic_context: &'a [&'a str],
     pub tools: &'a [ToolDefinition],
     pub sampling: Sampling,
     pub model: &'a str,
@@ -45,9 +41,9 @@ pub async fn complete_recorded<B: Backend>(
     loop {
         let segments = segments(
             store,
-            completion.agent_id,
-            completion.branch_id,
+            completion.branch,
             completion.static_messages,
+            completion.dynamic_context,
             completion.tools,
         )
         .await?;
@@ -98,7 +94,7 @@ pub async fn complete_recorded<B: Backend>(
                 store
                     .enqueue_capacity_compaction(
                         completion.agent_id,
-                        completion.branch_id,
+                        Some(completion.branch.branch_id()),
                         *requested_tokens,
                         CompactionPolicy {
                             sequence_id: completion.sequence_id,
@@ -112,17 +108,24 @@ pub async fn complete_recorded<B: Backend>(
                     .await
                     .context("persisting capacity recovery compaction")?;
                 backend
-                    .after_agent(store, completion.agent_id, completion.branch_id)
+                    .after_agent(
+                        store,
+                        completion.agent_id,
+                        Some(completion.branch.branch_id()),
+                    )
                     .await
                     .context("admitting capacity recovery compaction")?;
                 backend
-                    .before_agent(store, completion.agent_id, completion.branch_id)
+                    .before_agent(
+                        store,
+                        completion.agent_id,
+                        Some(completion.branch.branch_id()),
+                    )
                     .await
                     .context("waiting for capacity recovery compaction")?;
-                let still_pending = match completion.branch_id {
-                    Some(branch_id) => store.pending_compaction_for_branch(branch_id).await?,
-                    None => store.pending_compaction(completion.agent_id).await?,
-                };
+                let still_pending = store
+                    .pending_compaction_for_branch(completion.branch.branch_id())
+                    .await?;
                 ensure!(
                     still_pending.is_none(),
                     "backend did not resolve capacity recovery compaction for agent {}; use the scheduled model backend",
@@ -136,9 +139,9 @@ pub async fn complete_recorded<B: Backend>(
 
 pub async fn segments(
     store: &Store,
-    agent_id: i64,
-    branch_id: Option<i64>,
+    branch: AgentBranch,
     static_messages: &[Message],
+    dynamic_context: &[&str],
     tools: &[ToolDefinition],
 ) -> Result<Vec<Segment>> {
     let mut segments = Vec::new();
@@ -155,6 +158,14 @@ pub async fn segments(
             role: message.role.clone(),
         });
     }
+    for context in dynamic_context {
+        segments.push(Segment::Context {
+            context: store
+                .store_prompt_text(context)
+                .await
+                .context("storing dynamic context")?,
+        });
+    }
     if !tools.is_empty() {
         let definitions = serde_json::to_string(tools).context("serializing tool definitions")?;
         segments.push(Segment::Tools {
@@ -166,7 +177,7 @@ pub async fn segments(
     }
     segments.extend(
         store
-            .live_segments(agent_id, branch_id)
+            .live_segments(branch)
             .await
             .context("assembling agent message context")?,
     );
@@ -296,7 +307,13 @@ pub async fn complete_recipe<B: Backend>(
     let run = run_recipe(store, backend, completion, on_token).await?;
     let succeeded = run.result.is_ok();
     let outcome = store
-        .finish_chat_inference(run.inference_id, run.agent_id, run.outcome, run.duration_ms, policy)
+        .finish_chat_inference(
+            run.inference_id,
+            run.agent_id,
+            run.outcome,
+            run.duration_ms,
+            policy,
+        )
         .await
         .with_context(|| {
             if succeeded {
@@ -314,15 +331,16 @@ pub async fn complete_recipe<B: Backend>(
 
 /// Run a recipe and finish it as a compaction inference (design.md's
 /// `finish_summary_inference`): the outcome, its summary activation (when
-/// `covered_ranges` names an eligible range) and notice, and completion of
-/// `job`'s obligation, all in one transaction.
+/// `covered_ranges` names an eligible range) and completion of `job`'s
+/// obligation, all in one transaction.
 pub async fn complete_summary_recipe<B: Backend>(
     store: &Store,
     backend: &B,
     completion: RecipeCompletion<'_>,
     job: &crate::store::PendingCompaction,
     covered_ranges: Option<&[crate::store::PositionRange]>,
-    notice: &str,
+    reason: &str,
+    retained_messages: i64,
     on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
     let run = run_recipe(store, backend, completion, on_token).await?;
@@ -334,12 +352,16 @@ pub async fn complete_summary_recipe<B: Backend>(
             run.outcome,
             run.duration_ms,
             covered_ranges,
-            notice,
+            reason,
+            retained_messages,
         )
         .await
         .with_context(|| {
             if succeeded {
-                format!("recording completed compaction inference {}", run.inference_id)
+                format!(
+                    "recording completed compaction inference {}",
+                    run.inference_id
+                )
             } else {
                 format!("recording failed compaction inference {}", run.inference_id)
             }
@@ -446,10 +468,11 @@ mod tests {
             &StreamingBackend,
             RecordedCompletion {
                 agent_id: agent,
-                branch_id: None,
+                branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
                 invocation_id,
                 static_messages: &[Message::text(Role::System, "Be concise.")],
+                dynamic_context: &[],
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
@@ -482,10 +505,11 @@ mod tests {
             &FailingBackend,
             RecordedCompletion {
                 agent_id: agent,
-                branch_id: None,
+                branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
                 invocation_id,
                 static_messages: &[],
+                dynamic_context: &[],
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
@@ -567,10 +591,11 @@ mod tests {
             &backend,
             RecordedCompletion {
                 agent_id: agent,
-                branch_id: None,
+                branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
                 invocation_id,
                 static_messages: &[],
+                dynamic_context: &[],
                 tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,

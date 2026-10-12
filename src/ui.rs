@@ -1,17 +1,23 @@
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::inspection::{DevEvent, ObjectType};
+
 #[cfg(feature = "hydrate")]
 use {
     crate::inspection::{
-        AgentInfo, BranchHead, BranchNode, BranchParent, Content, GameObject, MessageContent,
-        RawHistoryCursor, RawHistoryEntry, RecordedInference, RecordedOutcome, Request,
-        SequenceNode, ToolCall, WorldObjects,
+        AgentInfo, BranchGroup, BranchNode, BranchParent, Content, MessageContent, MessageOrigin,
+        RawHistoryCursor, RawHistoryEntry, RawHistoryPageResponse, RecordedAction,
+        RecordedInference, RecordedOutcome, Request, Response, Role, SequenceNode, ToolCall,
+        WorldObjects,
     },
     std::{cell::RefCell, rc::Rc},
-    wasm_bindgen::{JsCast, closure::Closure},
+    wasm_bindgen::{JsCast, JsValue, closure::Closure},
     wasm_bindgen_futures::{JsFuture, spawn_local},
-    web_sys::{Event, HtmlElement, MessageEvent, Response as WebResponse, WebSocket},
+    web_sys::{
+        Event, HtmlElement, IntersectionObserver, IntersectionObserverEntry, MessageEvent,
+        Response as WebResponse, WebSocket,
+    },
 };
 
 /// Messages accepted from the browser's player-chat transport.
@@ -86,57 +92,201 @@ pub struct ChatEntry {
 /// history view, and the world object/agent navigator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum InspectSelection {
-    Sequence(i64),
+    Sequence {
+        id: i64,
+        entry_id: Option<i64>,
+    },
     Inference(i64),
-    AgentHistory(i64),
-    Agents,
-    Objects,
-}
-
-/// Mirrors `store::DevEvent`, the wire format for `/world/:id/inspect/events`.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum DevEvent {
-    DeveloperModeChanged {
-        enabled: bool,
-    },
-    /// A wake-up only: never itself an authorization decision. The server
-    /// already rechecked access before sending this; the client still
-    /// treats it as informational (mode toggles arrive as
-    /// `DeveloperModeChanged`, revocation as the socket closing).
-    AccessChanged,
-    InferenceStarted {
-        inference_id: i64,
+    AgentHistory {
         agent_id: i64,
-        sequence_id: Option<i64>,
-        parent_inference_id: Option<i64>,
+        branch_id: Option<i64>,
+        entry_id: Option<i64>,
     },
-    Token {
-        inference_id: i64,
-        offset: usize,
-        text: String,
-    },
-    InferenceCompleted {
-        inference_id: i64,
-        error: Option<String>,
-    },
-    Changed {
-        sequence_id: Option<i64>,
-        inference_id: Option<i64>,
-    },
-    ResyncRequired {
-        skipped: u64,
+    Agents,
+    Objects {
+        object_type: Option<ObjectType>,
+        id: Option<i64>,
     },
 }
 
-/// The JSON body `/inspect/agents/:id/history` returns: a page of entries
-/// plus the cursor to resume after, or `None` when the page reached the head.
-/// Mirrors `web::RawHistoryPageResponse`.
+/// The inspect part of the existing game-page URL. It is deliberately a
+/// small conversion beside the selection data, not a second client router:
+/// PlayerChat stays mounted while the inspected record changes.
 #[cfg(feature = "hydrate")]
-#[derive(Clone, Debug, Deserialize)]
-struct RawHistoryPageView {
-    entries: Vec<RawHistoryEntry>,
-    cursor: Option<RawHistoryCursor>,
+impl InspectSelection {
+    fn from_location() -> Result<Option<Self>, String> {
+        let window = web_sys::window().ok_or("no browser window is available")?;
+        let search = window
+            .location()
+            .search()
+            .map_err(|error| format!("could not read the page URL: {error:?}"))?;
+        let query = web_sys::UrlSearchParams::new_with_str(&search)
+            .map_err(|error| format!("could not read inspect URL parameters: {error:?}"))?;
+        let Some(kind) = query.get("inspect") else {
+            return Ok(None);
+        };
+        let id = |name: &str| {
+            query
+                .get(name)
+                .ok_or_else(|| format!("inspect={kind} needs {name}"))?
+                .parse::<i64>()
+                .map_err(|_| format!("inspect={kind} has an invalid {name}"))
+        };
+        match kind.as_str() {
+            "turn" => Ok(Some(Self::Sequence {
+                id: id("id")?,
+                entry_id: query
+                    .get("entry")
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|_| "inspect=turn has an invalid entry")?,
+            })),
+            "inference" => Ok(Some(Self::Inference(id("id")?))),
+            "history" => Ok(Some(Self::AgentHistory {
+                agent_id: id("agent")?,
+                branch_id: query
+                    .get("branch")
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|_| "inspect=history has an invalid branch")?,
+                entry_id: query
+                    .get("entry")
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|_| "inspect=history has an invalid entry")?,
+            })),
+            "agents" => Ok(Some(Self::Agents)),
+            "objects" => Ok(Some(Self::Objects {
+                object_type: query
+                    .get("type")
+                    .map(|value| {
+                        ObjectType::parse(&value)
+                            .ok_or_else(|| format!("inspect=objects has an invalid type {value:?}"))
+                    })
+                    .transpose()?,
+                id: query
+                    .get("id")
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|_| "inspect=objects has an invalid id")?,
+            })),
+            _ => Err(format!("unknown inspect view {kind:?}")),
+        }
+    }
+
+    fn write_to_location(selection: Option<Self>) -> Result<(), String> {
+        let window = web_sys::window().ok_or("no browser window is available")?;
+        let location = window.location();
+        let search = location
+            .search()
+            .map_err(|error| format!("could not read the page URL: {error:?}"))?;
+        let query = web_sys::UrlSearchParams::new_with_str(&search)
+            .map_err(|error| format!("could not read inspect URL parameters: {error:?}"))?;
+        if selection.is_some() && Self::from_location()? == selection {
+            return Ok(());
+        }
+        if selection.is_none() && query.get("inspect").is_none() {
+            return Ok(());
+        }
+        for name in ["inspect", "id", "agent", "branch", "entry", "type"] {
+            query.delete(name);
+        }
+        if let Some(selection) = selection {
+            match selection {
+                Self::Sequence { id, entry_id } => {
+                    query.set("inspect", "turn");
+                    query.set("id", &id.to_string());
+                    if let Some(entry_id) = entry_id {
+                        query.set("entry", &entry_id.to_string());
+                    }
+                }
+                Self::Inference(id) => {
+                    query.set("inspect", "inference");
+                    query.set("id", &id.to_string());
+                }
+                Self::AgentHistory {
+                    agent_id,
+                    branch_id,
+                    entry_id,
+                } => {
+                    query.set("inspect", "history");
+                    query.set("agent", &agent_id.to_string());
+                    if let Some(branch_id) = branch_id {
+                        query.set("branch", &branch_id.to_string());
+                    }
+                    if let Some(entry_id) = entry_id {
+                        query.set("entry", &entry_id.to_string());
+                    }
+                }
+                Self::Agents => query.set("inspect", "agents"),
+                Self::Objects { object_type, id } => {
+                    query.set("inspect", "objects");
+                    if let Some(object_type) = object_type {
+                        query.set("type", object_type.as_str());
+                    }
+                    if let Some(id) = id {
+                        query.set("id", &id.to_string());
+                    }
+                }
+            }
+        }
+        let query = query
+            .to_string()
+            .as_string()
+            .ok_or("could not serialize inspect URL parameters")?;
+        let path = location
+            .pathname()
+            .map_err(|error| format!("could not read the page path: {error:?}"))?;
+        let hash = location
+            .hash()
+            .map_err(|error| format!("could not read the page fragment: {error:?}"))?;
+        let url = format!(
+            "{path}{}{hash}",
+            if query.is_empty() {
+                String::new()
+            } else {
+                format!("?{query}")
+            }
+        );
+        window
+            .history()
+            .map_err(|error| format!("could not access browser history: {error:?}"))?
+            .push_state_with_url(&JsValue::NULL, "", Some(&url))
+            .map_err(|error| format!("could not update inspect URL: {error:?}"))
+    }
+
+    fn scroll_position() -> Option<i32> {
+        web_sys::window()?
+            .history()
+            .ok()?
+            .state()
+            .ok()?
+            .as_f64()
+            .and_then(|value| i32::try_from(value as i64).ok())
+    }
+
+    fn remember_scroll(scroll_top: i32) -> Result<(), String> {
+        let window = web_sys::window().ok_or("no browser window is available")?;
+        let location = window.location();
+        let path = location
+            .pathname()
+            .map_err(|error| format!("could not read the page path: {error:?}"))?;
+        let search = location
+            .search()
+            .map_err(|error| format!("could not read the page URL: {error:?}"))?;
+        let hash = location
+            .hash()
+            .map_err(|error| format!("could not read the page fragment: {error:?}"))?;
+        window
+            .history()
+            .map_err(|error| format!("could not access browser history: {error:?}"))?
+            .replace_state_with_url(
+                &JsValue::from_f64(f64::from(scroll_top)),
+                "",
+                Some(&format!("{path}{search}{hash}")),
+            )
+            .map_err(|error| format!("could not save inspect scroll position: {error:?}"))
+    }
 }
 
 /// One branch's own paged entries inside the whole-DAG response from
@@ -148,7 +298,7 @@ struct RawHistoryPageView {
 struct BranchSection {
     branch_id: i64,
     parents: Vec<BranchParent>,
-    head: Option<BranchHead>,
+    head: Option<BranchGroup>,
     entries: Vec<RawHistoryEntry>,
     cursor: Option<RawHistoryCursor>,
 }
@@ -157,15 +307,45 @@ struct BranchSection {
 #[cfg(feature = "hydrate")]
 #[derive(Clone, Debug)]
 enum InspectData {
-    Sequence(Vec<SequenceNode>),
+    Sequence {
+        id: i64,
+        nodes: Vec<SequenceNode>,
+    },
     Inference(RecordedInference),
     /// `branches` is never empty: a plain player/NPC/Storyteller agent has
     /// exactly one section here, with no parents and no head, rendered
     /// exactly as the single linear view always has been. A world_gm agent
     /// whose groups have split/merged has one section per branch in its DAG.
-    AgentHistory { agent_id: i64, branches: Vec<BranchSection> },
+    AgentHistory {
+        agent_id: i64,
+        branches: Vec<BranchSection>,
+    },
     Agents(Vec<AgentInfo>),
     Objects(WorldObjects),
+}
+
+/// Mutable state shared by inspection fetches. Keeping it together makes a
+/// fetch operate on one coherent pane generation rather than passing several
+/// unrelated signals through every recursive refresh path.
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Copy)]
+struct FetchState {
+    generation: RwSignal<u64>,
+    data: RwSignal<Option<InspectData>>,
+    error: RwSignal<Option<String>>,
+    invalidated_during_fetch: RwSignal<bool>,
+    in_flight: RwSignal<bool>,
+}
+
+/// Whether the pane is expanded or collapsed to its edge strip, and the
+/// current/last selections that drive both. Grouped together since every
+/// caller and the pane itself always needs the three as one unit - not
+/// unrelated signals passed separately (matches `FetchState`'s reasoning).
+#[derive(Clone, Copy)]
+struct PaneVisibility {
+    selection: RwSignal<Option<InspectSelection>>,
+    open: RwSignal<bool>,
+    last_selection: RwSignal<Option<InspectSelection>>,
 }
 
 /// The pane is owned by the chat island, so switching views only changes
@@ -174,16 +354,38 @@ enum InspectData {
 /// navigation" - none of them navigate away from the game page).
 fn inspect_pane(
     world_id: i64,
-    selection: RwSignal<Option<InspectSelection>>,
+    pane: PaneVisibility,
+    narrow_inspect: RwSignal<bool>,
     dev_events: RwSignal<Option<DevEvent>>,
     developer_mode: RwSignal<bool>,
     dev_error: RwSignal<Option<String>>,
     dev_reconnect_nonce: RwSignal<u32>,
+    scroll: NodeRef<leptos::html::Aside>,
+    restore_scroll: RwSignal<Option<i32>>,
 ) -> AnyView {
+    let selection = pane.selection;
+    let inspect_open = pane.open;
+    let last_inspecting = pane.last_selection;
     #[cfg(not(feature = "hydrate"))]
-    let _ = (world_id, dev_events, developer_mode, dev_error, dev_reconnect_nonce);
+    let _ = (
+        world_id,
+        inspect_open,
+        last_inspecting,
+        narrow_inspect,
+        dev_events,
+        developer_mode,
+        dev_error,
+        dev_reconnect_nonce,
+        scroll,
+        restore_scroll,
+    );
     #[cfg(feature = "hydrate")]
     let data = RwSignal::new(None::<InspectData>);
+    // The existing authorized agent list is the one source of human-facing
+    // identities for every inspection view. Inference records retain only the
+    // durable foreign key; do not introduce copied names into every record.
+    #[cfg(feature = "hydrate")]
+    let agents = RwSignal::new(Vec::<AgentInfo>::new());
     let error = RwSignal::new(None::<String>);
     // A persistent notice from a broadcast-lag resync, shown until the next
     // selection loads cleanly. Distinct from `error` (a failed fetch/parse):
@@ -218,6 +420,14 @@ fn inspect_pane(
     // now" without inferring it from `data`/`error`.
     #[cfg(feature = "hydrate")]
     let fetch_in_flight = RwSignal::new(false);
+    #[cfg(feature = "hydrate")]
+    let fetch_state = FetchState {
+        generation,
+        data,
+        error,
+        invalidated_during_fetch,
+        in_flight: fetch_in_flight,
+    };
 
     /// Fetches the view for `selected`, tagging the request with `generation`
     /// so a response arriving after the pane has moved to a different
@@ -226,64 +436,86 @@ fn inspect_pane(
     fn fetch_selection(
         world_id: i64,
         selected: InspectSelection,
-        generation: RwSignal<u64>,
         for_generation: u64,
-        data: RwSignal<Option<InspectData>>,
-        error: RwSignal<Option<String>>,
-        invalidated_during_fetch: RwSignal<bool>,
-        fetch_in_flight: RwSignal<bool>,
+        state: FetchState,
     ) {
-        invalidated_during_fetch.set(false);
-        fetch_in_flight.set(true);
+        state.invalidated_during_fetch.set(false);
+        state.in_flight.set(true);
         let apply = move |result: InspectData| {
             // Stale: the pane has since moved to a different selection.
-            if generation.get_untracked() != for_generation {
+            if state.generation.get_untracked() != for_generation {
                 return;
             }
-            fetch_in_flight.set(false);
-            data.set(Some(result));
+            state.in_flight.set(false);
+            state.data.set(Some(result));
             // A Changed event for this exact target arrived while this
             // fetch was in flight - the snapshot that just landed may
             // already be behind it, so reload once more.
-            if invalidated_during_fetch.get_untracked() {
-                fetch_selection(
-                    world_id, selected, generation, for_generation, data, error,
-                    invalidated_during_fetch, fetch_in_flight,
-                );
+            if state.invalidated_during_fetch.get_untracked() {
+                fetch_selection(world_id, selected, for_generation, state);
             }
         };
         match selected {
-            InspectSelection::Sequence(sequence_id) => fetch_json(
+            InspectSelection::Sequence {
+                id: sequence_id, ..
+            } => fetch_json(
                 format!("/world/{world_id}/inspect/sequences/{sequence_id}"),
                 "turn view",
-                move |nodes| apply(InspectData::Sequence(nodes)),
-                error,
+                move |nodes| {
+                    apply(InspectData::Sequence {
+                        id: sequence_id,
+                        nodes,
+                    })
+                },
+                state.error,
             ),
             InspectSelection::Inference(inference_id) => fetch_json(
                 format!("/world/{world_id}/inspect/inferences/{inference_id}"),
                 "inference view",
                 move |inference| apply(InspectData::Inference(inference)),
-                error,
+                state.error,
             ),
-            InspectSelection::AgentHistory(agent_id) => fetch_json(
+            InspectSelection::AgentHistory {
+                agent_id,
+                branch_id,
+                entry_id,
+            } => fetch_json(
                 format!("/world/{world_id}/inspect/agents/{agent_id}/branches"),
                 "agent branch graph",
                 move |nodes: Vec<BranchNode>| {
-                    fetch_branch_sections(world_id, agent_id, nodes, apply, error);
+                    fetch_branch_sections(
+                        world_id,
+                        agent_id,
+                        branch_id,
+                        entry_id,
+                        nodes,
+                        apply,
+                        state.error,
+                    );
                 },
-                error,
+                state.error,
             ),
             InspectSelection::Agents => fetch_json(
                 format!("/world/{world_id}/inspect/agents"),
                 "agent list",
                 move |agents| apply(InspectData::Agents(agents)),
-                error,
+                state.error,
             ),
-            InspectSelection::Objects => fetch_json(
-                format!("/world/{world_id}/inspect/objects"),
+            InspectSelection::Objects { object_type, id } => fetch_json(
+                format!(
+                    "/world/{world_id}/inspect/objects{}{}",
+                    object_type
+                        .map(|value| format!("?type={}", value.as_str()))
+                        .unwrap_or_default(),
+                    id.map(|value| format!(
+                        "{}id={value}",
+                        if object_type.is_some() { "&" } else { "?" }
+                    ))
+                    .unwrap_or_default()
+                ),
                 "world objects",
                 move |objects| apply(InspectData::Objects(objects)),
-                error,
+                state.error,
             ),
         }
     }
@@ -297,6 +529,8 @@ fn inspect_pane(
     fn fetch_branch_sections(
         world_id: i64,
         agent_id: i64,
+        selected_branch: Option<i64>,
+        selected_entry: Option<i64>,
         nodes: Vec<BranchNode>,
         apply: impl Fn(InspectData) + Clone + 'static,
         error: RwSignal<Option<String>>,
@@ -308,11 +542,23 @@ fn inspect_pane(
             let remaining = remaining.clone();
             let sections = sections.clone();
             let apply = apply.clone();
-            let BranchNode { branch_id, parents, head } = node;
+            let BranchNode {
+                branch_id,
+                parents,
+                head,
+            } = node;
+            let entry = (selected_branch == Some(branch_id))
+                .then_some(selected_entry)
+                .flatten();
             fetch_json(
-                format!("/world/{world_id}/inspect/agents/{agent_id}/history?branch={branch_id}"),
+                format!(
+                    "/world/{world_id}/inspect/agents/{agent_id}/history?branch={branch_id}{}",
+                    entry
+                        .map(|entry| format!("&entry={entry}"))
+                        .unwrap_or_default()
+                ),
                 "agent chat history",
-                move |page: RawHistoryPageView| {
+                move |page: RawHistoryPageResponse| {
                     sections.borrow_mut()[index] = Some(BranchSection {
                         branch_id,
                         parents: parents.clone(),
@@ -349,10 +595,29 @@ fn inspect_pane(
         error.set(None);
         resync_notice.set(None);
         live_tokens.set(std::collections::HashMap::new());
-        fetch_selection(
-            world_id, selected, generation, for_generation, data, error,
-            invalidated_during_fetch, fetch_in_flight,
-        );
+        if agents.get_untracked().is_empty() {
+            fetch_json(
+                format!("/world/{world_id}/inspect/agents"),
+                "agent identities",
+                move |items| agents.set(items),
+                error,
+            );
+        }
+        fetch_selection(world_id, selected, for_generation, fetch_state);
+    });
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(scroll_top) = restore_scroll.get() else {
+            return;
+        };
+        if data.get().is_some() {
+            if let Some(element) = scroll.get() {
+                let element: HtmlElement = element.unchecked_into();
+                element.set_scroll_top(scroll_top);
+            }
+            restore_scroll.set(None);
+        }
     });
 
     // fetch_json reports a failed/unparseable response only through `error`,
@@ -370,22 +635,41 @@ fn inspect_pane(
     /// `Changed` event names, so an unrelated turn/inference completing
     /// elsewhere in the world does not trigger a refetch here.
     #[cfg(feature = "hydrate")]
-    fn changed_matches(data: &InspectData, sequence_id: Option<i64>, inference_id: Option<i64>) -> bool {
+    fn changed_matches(
+        data: &InspectData,
+        sequence_id: Option<i64>,
+        inference_id: Option<i64>,
+    ) -> bool {
         match data {
-            InspectData::Sequence(nodes) => {
-                sequence_id.is_some_and(|id| nodes.iter().any(|node| node.inference.sequence_id == Some(id)))
-                    || inference_id.is_some_and(|id| nodes.iter().any(|node| node.inference.id == id))
+            InspectData::Sequence { nodes, .. } => {
+                sequence_id.is_some_and(|id| {
+                    nodes
+                        .iter()
+                        .any(|node| node.inference.sequence_id == Some(id))
+                }) || inference_id
+                    .is_some_and(|id| nodes.iter().any(|node| node.inference.id == id))
             }
             InspectData::Inference(inference) => inference_id == Some(inference.id),
-            InspectData::AgentHistory { .. } | InspectData::Agents(_) | InspectData::Objects(_) => false,
+            // A history page is a durable timeline for this world. Changed
+            // events do not carry every affected branch, so refresh an open
+            // history for any committed world change rather than leaving it
+            // stale until the developer reopens it.
+            InspectData::AgentHistory { .. } => true,
+            InspectData::Agents(_) | InspectData::Objects(_) => false,
         }
     }
 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
-        let Some(event) = dev_events.get() else { return };
+        let Some(event) = dev_events.get() else {
+            return;
+        };
         match event {
-            DevEvent::Token { inference_id, offset, text } => {
+            DevEvent::Token {
+                inference_id,
+                offset,
+                text,
+            } => {
                 live_tokens.update(|tokens| {
                     let accumulated = tokens.entry(inference_id).or_default();
                     // A gap between what this viewer has accumulated and the
@@ -404,7 +688,10 @@ fn inspect_pane(
                 sequence_id,
                 parent_inference_id,
             } => {
-                let Some(InspectSelection::Sequence(open_sequence_id)) = selection.get_untracked()
+                let Some(InspectSelection::Sequence {
+                    id: open_sequence_id,
+                    ..
+                }) = selection.get_untracked()
                 else {
                     return;
                 };
@@ -412,15 +699,18 @@ fn inspect_pane(
                     return;
                 }
                 data.update(|data| {
-                    if let Some(InspectData::Sequence(nodes)) = data
+                    if let Some(InspectData::Sequence { nodes, .. }) = data
                         && !nodes.iter().any(|node| node.inference.id == inference_id)
                     {
                         nodes.push(SequenceNode {
                             inference: RecordedInference {
                                 id: inference_id,
                                 agent_id,
+                                branch_id: 0,
+                                history_entry_id: 0,
                                 sequence_id,
                                 parent_inference_id,
+                                cause_inference_id: None,
                                 segments: Vec::new(),
                                 request: Request {
                                     messages: Vec::new(),
@@ -428,6 +718,7 @@ fn inspect_pane(
                                     sampling: Default::default(),
                                 },
                                 model_prompt: None,
+                                prompt_evidence: None,
                                 outcome: RecordedOutcome::Running,
                                 model: String::new(),
                                 duration_ms: None,
@@ -450,27 +741,44 @@ fn inspect_pane(
                 // completion refreshes either a selected turn or that
                 // standalone inference").
                 match selection.get_untracked() {
-                    Some(InspectSelection::Sequence(sequence_id)) => {
+                    Some(InspectSelection::Sequence {
+                        id: sequence_id, ..
+                    }) => {
                         let for_generation = generation.get_untracked();
                         fetch_selection(
-                            world_id, InspectSelection::Sequence(sequence_id), generation,
-                            for_generation, data, error, invalidated_during_fetch, fetch_in_flight,
+                            world_id,
+                            InspectSelection::Sequence {
+                                id: sequence_id,
+                                entry_id: None,
+                            },
+                            for_generation,
+                            fetch_state,
                         );
                     }
-                    Some(InspectSelection::Inference(selected_id)) if selected_id == inference_id => {
+                    Some(InspectSelection::Inference(selected_id))
+                        if selected_id == inference_id =>
+                    {
                         let for_generation = generation.get_untracked();
                         fetch_selection(
-                            world_id, InspectSelection::Inference(inference_id), generation,
-                            for_generation, data, error, invalidated_during_fetch, fetch_in_flight,
+                            world_id,
+                            InspectSelection::Inference(inference_id),
+                            for_generation,
+                            fetch_state,
                         );
                     }
                     _ => {}
                 }
             }
-            DevEvent::Changed { sequence_id, inference_id } => {
-                let Some(selected) = selection.get_untracked() else { return };
+            DevEvent::Changed {
+                sequence_id,
+                inference_id,
+            } => {
+                let Some(selected) = selection.get_untracked() else {
+                    return;
+                };
                 let matches = data.with_untracked(|data| {
-                    data.as_ref().is_some_and(|data| changed_matches(data, sequence_id, inference_id))
+                    data.as_ref()
+                        .is_some_and(|data| changed_matches(data, sequence_id, inference_id))
                 });
                 if !matches {
                     return;
@@ -483,10 +791,7 @@ fn inspect_pane(
                     invalidated_during_fetch.set(true);
                 } else {
                     let for_generation = generation.get_untracked();
-                    fetch_selection(
-                        world_id, selected, generation, for_generation, data, error,
-                        invalidated_during_fetch, fetch_in_flight,
-                    );
+                    fetch_selection(world_id, selected, for_generation, fetch_state);
                 }
             }
             DevEvent::ResyncRequired { skipped } => {
@@ -497,10 +802,7 @@ fn inspect_pane(
                 live_tokens.set(std::collections::HashMap::new());
                 if let Some(selected) = selection.get_untracked() {
                     let for_generation = generation.get_untracked();
-                    fetch_selection(
-                        world_id, selected, generation, for_generation, data, error,
-                        invalidated_during_fetch, fetch_in_flight,
-                    );
+                    fetch_selection(world_id, selected, for_generation, fetch_state);
                 }
             }
             DevEvent::DeveloperModeChanged { enabled } => {
@@ -523,14 +825,48 @@ fn inspect_pane(
     #[cfg(feature = "hydrate")]
     let _ = developer_mode;
 
+    // Closed is a thin, always-visible strip on the edge - never removed from
+    // the DOM and never requiring a separate reopen control elsewhere
+    // (user_exerpts.md 2026-09-25/2026-09-28: options 1+3 combined, not
+    // option 1's separate chat-header button alone). The last selection stays
+    // live underneath so expanding shows exactly what Close left.
+    let expand = move |_| {
+        inspect_open.set(true);
+        if selection.get_untracked().is_none() {
+            selection.set(
+                last_inspecting
+                    .get_untracked()
+                    .or(Some(InspectSelection::Agents)),
+            );
+        }
+    };
     view! {
-        <aside class="flex min-h-0 w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-base-300 p-3 sm:p-5">
+        <button
+            id="inspect-strip"
+            class=move || format!(
+                "btn btn-ghost btn-xs self-start border-l border-base-300 [writing-mode:vertical-lr] {}",
+                if inspect_open.get() { "hidden" } else { "" },
+            )
+            on:click=expand
+        >
+            "Inspect"
+        </button>
+        <aside node_ref=scroll class=move || format!(
+            "min-h-0 w-full max-w-md flex-col gap-3 overflow-y-auto border-l border-base-300 p-3 sm:p-5 {}",
+            if inspect_open.get() {
+                if narrow_inspect.get() { "flex" } else { "hidden sm:flex" }
+            } else {
+                "hidden"
+            },
+        )>
             <div class="flex items-center justify-between">
                 <h2 class="text-lg font-semibold">"Inspect"</h2>
                 <div class="flex gap-1">
                     <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Agents))>"Agents"</button>
-                    <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Objects))>"Objects"</button>
-                    <button class="btn btn-ghost btn-sm" on:click=move |_| selection.set(None)>"Close"</button>
+                    <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Objects { object_type: None, id: None }))>"Objects"</button>
+                    <button class="btn btn-ghost btn-sm" on:click=move |_| inspect_open.set(false)>
+                        "Close"
+                    </button>
                 </div>
             </div>
             {move || dev_error.get().map(|message| view! {
@@ -556,7 +892,7 @@ fn inspect_pane(
                 {
                     (move || match data.get() {
                         None => ().into_any(),
-                        Some(InspectData::Sequence(nodes)) => {
+                        Some(InspectData::Sequence { id, nodes }) => {
                             // Each inference appears once in this list (one
                             // SequenceNode per inference id), so summing
                             // it directly counts every inference exactly
@@ -578,29 +914,41 @@ fn inspect_pane(
                                 },
                             );
                             view! {
-                                <div class="flex flex-col gap-2">
-                                    <div class="flex flex-wrap gap-2 text-xs text-base-content/60">
-                                        <span>{format!("{} inferences", nodes.len())}</span>
-                                        <span>{format!("{input_tokens}+{output_tokens} tokens total")}</span>
-                                        <span>{format!("{duration_ms}ms summed inference time")}</span>
-                                    </div>
+                                <div class=move || format!(
+                                    "flex flex-col gap-2 {}",
+                                    if matches!(selection.get(), Some(InspectSelection::Sequence { entry_id: Some(_), .. })) {
+                                        "rounded ring-2 ring-primary"
+                                    } else {
+                                        ""
+                                    },
+                                )>
+                                    <h3 class="text-sm font-semibold">"Turn"</h3>
+                                    <details class="text-xs text-base-content/60">
+                                        <summary class="cursor-pointer select-none">"Technical details"</summary>
+                                        <div class="mt-1 flex flex-wrap gap-2">
+                                            <span>{format!("{} inferences", nodes.len())}</span>
+                                            <span>{format!("{input_tokens}+{output_tokens} tokens total")}</span>
+                                            <span>{format!("{duration_ms}ms summed inference time")}</span>
+                                            <span>{format!("record {id}")}</span>
+                                        </div>
+                                    </details>
                                     {nodes.into_iter().map(|node| view! {
-                                        <SequenceNodeCard node selection live_tokens/>
+                                        <SequenceNodeCard node selection agents live_tokens/>
                                     }).collect_view()}
                                 </div>
                             }
                         }.into_any(),
                         Some(InspectData::Inference(inference)) => view! {
-                            <InferenceCard inference selection standalone=true live_tokens/>
+                            <InferenceCard inference selection agents live_tokens/>
                         }.into_any(),
                         Some(InspectData::AgentHistory { agent_id, branches }) => view! {
-                            <AgentHistoryView world_id agent_id branches selection data/>
+                            <AgentHistoryView world_id agent_id branches agents selection data/>
                         }.into_any(),
                         Some(InspectData::Agents(agents)) => view! {
                             <AgentsList agents selection/>
                         }.into_any(),
                         Some(InspectData::Objects(objects)) => view! {
-                            <ObjectsView objects/>
+                            <ObjectsView world_id initial=objects selection/>
                         }.into_any(),
                     }).into_any()
                 }
@@ -614,20 +962,90 @@ fn inspect_pane(
     .into_any()
 }
 
-/// Renders `content` without collapsing it into one string: each tool call
-/// keeps its own `id`/`name`/`arguments` as a separate row, and every piece
-/// gets its own copy control for the exact recorded text (design.md: "Raw
-/// fields are expandable and copyable without truncation").
+/// Renders request/history content without collapsing it into one string.
+/// Tool-call identity remains a persistence relationship; the human view leads
+/// with the tool name and arguments, and scene context becomes game facts.
 #[cfg(feature = "hydrate")]
 #[component]
 fn ContentBlock(content: MessageContent) -> impl IntoView {
     match content {
-        MessageContent::Text(text) => view! { <CopyableText text/> }.into_any(),
-        MessageContent::ToolCalls(calls) => view! { <ToolCallList calls/> }.into_any(),
-        MessageContent::ToolResult { tool_call_id, content } => view! {
+        MessageContent::Text(text) => match text.strip_prefix("Current scene packet:\n") {
+            Some(scene) => view! { <ScenePacket scene=scene.to_string()/> }.into_any(),
+            None => view! { <CopyableText text/> }.into_any(),
+        },
+        MessageContent::ToolCalls(calls) => {
+            view! { <ToolCallList calls actions=Vec::new() selection=RwSignal::new(None)/> }
+                .into_any()
+        }
+        MessageContent::ToolResult {
+            tool_call_id: _,
+            content,
+        } if content.is_empty() => view! {}.into_any(),
+        MessageContent::ToolResult {
+            tool_call_id: _,
+            content,
+        } => view! {
             <div class="flex flex-wrap items-start gap-1">
-                <span class="badge badge-ghost badge-sm">{format!("answers call {tool_call_id}")}</span>
+                <span class="badge badge-ghost badge-sm">"Tool result"</span>
                 <CopyableText text=content/>
+            </div>
+        }
+        .into_any(),
+    }
+}
+
+/// A GM's scene context is structured state sent to the model. It is not a
+/// second prompt: show the same stored packet as labelled game facts rather
+/// than asking a developer to read its JSON encoding.
+#[cfg(feature = "hydrate")]
+#[component]
+fn ScenePacket(scene: String) -> impl IntoView {
+    fn label(key: &str) -> String {
+        key.replace('_', " ")
+    }
+
+    fn value_text(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Null => "none".to_string(),
+            serde_json::Value::Bool(value) => value.to_string(),
+            serde_json::Value::Number(value) => value.to_string(),
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Array(values) => {
+                values.iter().map(value_text).collect::<Vec<_>>().join("; ")
+            }
+            serde_json::Value::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| format!("{}: {}", label(key), value_text(value)))
+                .collect::<Vec<_>>()
+                .join("; "),
+        }
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&scene) {
+        Ok(serde_json::Value::Object(fields)) => view! {
+            <section class="rounded-box border border-base-300 p-2">
+                <h5 class="font-semibold">"Current scene"</h5>
+                <dl class="mt-1 grid gap-1">
+                    {fields.into_iter().map(|(key, value)| view! {
+                        <div>
+                            <dt class="font-semibold">{label(&key)}</dt>
+                            <dd class="whitespace-pre-wrap">{value_text(&value)}</dd>
+                        </div>
+                    }).collect_view()}
+                </dl>
+                <CopyButton text=scene/>
+            </section>
+        }
+        .into_any(),
+        Ok(value) => view! {
+            <div class="alert alert-error text-sm">
+                {format!("Current scene packet must be an object, found {}", value_text(&value))}
+            </div>
+        }
+        .into_any(),
+        Err(error) => view! {
+            <div class="alert alert-error text-sm">
+                {format!("Could not decode current scene packet: {error}")}
             </div>
         }
         .into_any(),
@@ -641,21 +1059,48 @@ fn ContentBlock(content: MessageContent) -> impl IntoView {
 #[component]
 fn ResponseContentBlock(content: Content) -> impl IntoView {
     match content {
+        Content::Text(text) if text.is_empty() => view! { <EmptyResponse/> }.into_any(),
         Content::Text(text) => view! { <CopyableText text/> }.into_any(),
-        Content::ToolCalls(calls) => view! { <ToolCallList calls/> }.into_any(),
+        Content::ToolCalls(calls) => {
+            view! { <ToolCallList calls actions=Vec::new() selection=RwSignal::new(None)/> }
+                .into_any()
+        }
     }
+}
+
+/// An empty normal completion ends an agent turn without adding player chat.
+/// It remains visible in inspection so a deliberate silent finish is distinct
+/// from a missing or failed inference.
+#[cfg(feature = "hydrate")]
+#[component]
+fn EmptyResponse() -> impl IntoView {
+    view! { <p class="italic text-base-content/60">"No player-facing response."</p> }
 }
 
 #[cfg(feature = "hydrate")]
 #[component]
-fn ToolCallList(calls: Vec<ToolCall>) -> impl IntoView {
+fn ToolCallList(
+    calls: Vec<ToolCall>,
+    actions: Vec<RecordedAction>,
+    selection: RwSignal<Option<InspectSelection>>,
+) -> impl IntoView {
     view! {
         <ul class="space-y-1">
             {calls.into_iter().map(|call| view! {
-                <li class="flex flex-wrap items-start gap-1">
-                    <span class="badge badge-ghost badge-sm">{format!("call {}", call.id)}</span>
-                    <span class="font-semibold">{call.name}</span>
-                    <CopyableText text=call.arguments/>
+                <li class="border-l-2 border-base-300 pl-2">
+                    <div class="flex flex-wrap items-start gap-1">
+                        <span class="font-semibold">{format!("Tool call: {}", call.name)}</span>
+                        <CopyableText text=call.arguments/>
+                    </div>
+                    {actions.iter().filter(|action| action.call_id.as_deref() == Some(call.id.as_str())).cloned().map(|action| view! {
+                        <div class="ml-3 mt-1 border-l-2 border-base-300 pl-2">
+                            <span class="font-semibold">"Result"</span>
+                            <CopyableText text=action.result/>
+                            {action.approval_inference_id.map(|inference_id| view! {
+                                <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>"GM decision"</button>
+                            })}
+                        </div>
+                    }).collect_view()}
                 </li>
             }).collect_view()}
         </ul>
@@ -686,7 +1131,9 @@ fn CopyButton(text: String) -> impl IntoView {
     let copied = RwSignal::new(false);
     let on_click = move |_| {
         let text = text.clone();
-        let Some(window) = web_sys::window() else { return };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         let promise = window.navigator().clipboard().write_text(&text);
         spawn_local(async move {
             if JsFuture::from(promise).await.is_ok() {
@@ -696,16 +1143,53 @@ fn CopyButton(text: String) -> impl IntoView {
         });
     };
     view! {
-        <button type="button" class="btn btn-ghost btn-xs" on:click=on_click>
-            {move || if copied.get() { "Copied" } else { "Copy" }}
+        <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-square"
+            aria-label=move || if copied.get() { "Copied text" } else { "Copy text" }
+            title=move || if copied.get() { "Copied" } else { "Copy text" }
+            on:click=on_click
+        >
+            {move || if copied.get() { "✓" } else { "⧉" }}
         </button>
+    }
+}
+
+/// Human labels come from the durable owner relationship already returned by
+/// the authorized agent list. Numeric IDs stay in links, never as a substitute
+/// for the actor a developer is trying to understand.
+#[cfg(feature = "hydrate")]
+fn agent_label(agent_id: i64, agents: RwSignal<Vec<AgentInfo>>) -> String {
+    let Some(agent) = agents.get().into_iter().find(|agent| agent.id == agent_id) else {
+        return "Loading agent…".to_string();
+    };
+    agent_info_label(&agent)
+}
+
+#[cfg(feature = "hydrate")]
+fn agent_info_label(agent: &AgentInfo) -> String {
+    match agent.role.as_str() {
+        "player" => agent
+            .character_name
+            .as_ref()
+            .map(|name| format!("Player agent — {name}"))
+            .unwrap_or_else(|| "Player agent".to_string()),
+        "npc" => agent
+            .character_name
+            .as_ref()
+            .map(|name| format!("NPC agent — {name}"))
+            .unwrap_or_else(|| "NPC agent".to_string()),
+        "world_gm" => "Game Master".to_string(),
+        role => format!("Unknown agent role ({role})"),
     }
 }
 
 /// Clears the "Copied" confirmation after a couple of seconds.
 #[cfg(feature = "hydrate")]
 fn reset_after_delay(copied: RwSignal<bool>) {
-    let Some(window) = web_sys::window() else { return };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
     let reset = Closure::<dyn FnMut()>::new(move || copied.set(false));
     let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
         reset.as_ref().unchecked_ref(),
@@ -714,65 +1198,177 @@ fn reset_after_delay(copied: RwSignal<bool>) {
     reset.forget();
 }
 
-/// One node of the turn view: an inference plus what it produced. Shares
-/// `InferenceCard`'s rendering of the inference itself, since the turn view
-/// and the dedicated inference view show the identical verbatim data.
+/// One node of the Turn execution story. The detailed Inference stays behind
+/// its explicit link; the Turn only shows the actor's generated result and
+/// any nested tool execution.
 #[cfg(feature = "hydrate")]
 #[component]
 fn SequenceNodeCard(
     node: SequenceNode,
     selection: RwSignal<Option<InspectSelection>>,
+    agents: RwSignal<Vec<AgentInfo>>,
     live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
 ) -> impl IntoView {
-    let produced = node.messages;
+    if let Some(cause_inference_id) = node.inference.cause_inference_id {
+        let text = match node.inference.outcome {
+            RecordedOutcome::Response(Response {
+                content: Content::Text(text),
+                ..
+            }) => text,
+            RecordedOutcome::Error(error) => error,
+            RecordedOutcome::Running | RecordedOutcome::Response(_) => {
+                "Compaction is running.".to_string()
+            }
+        };
+        return view! { <CompactionCard inference_id=node.inference.id cause_inference_id=Some(cause_inference_id) text/> }.into_any();
+    }
+    let produced_ids: Vec<i64> = node.messages.iter().map(|message| message.id).collect();
     view! {
-        <div class="card bg-base-200">
+        <div class=move || format!(
+            "card {}",
+            if matches!(selection.get(), Some(InspectSelection::Sequence { entry_id: Some(entry_id), .. }) if produced_ids.contains(&entry_id)) {
+                "bg-primary/20 ring-2 ring-primary"
+            } else {
+                "bg-base-200"
+            },
+        )>
             <div class="card-body gap-1 p-3 text-sm">
-                <InferenceCard inference=node.inference selection standalone=false live_tokens/>
-                {(!node.actions.is_empty()).then(|| view! {
-                    <ul class="mt-1 space-y-1 border-t border-base-300 pt-1">
-                        {node.actions.into_iter().map(|action| view! {
-                            <li><span class="font-semibold">{action.tool}</span>{format!("({}) -> {}", action.args, action.result)}</li>
-                        }).collect_view()}
-                    </ul>
-                })}
-                {(!produced.is_empty()).then(|| view! {
-                    <ul class="mt-1 space-y-1 border-t border-base-300 pt-1 text-base-content/60">
-                        {produced.into_iter().map(|message| view! {
-                            <li>{match message.answers_tool_execution_id {
-                                Some(tool_execution_id) => format!("{} (answers tool_execution {tool_execution_id})", message.role.as_str()),
-                                None => message.role.as_str().to_string(),
-                            }}</li>
-                        }).collect_view()}
-                    </ul>
-                })}
+                <InferenceSummaryCard inference=node.inference actions=node.actions selection agents live_tokens/>
             </div>
+        </div>
+    }.into_any()
+}
+
+/// One collapsed, yellow representation of a recorded summary. Both the Turn
+/// and raw history use it, so the model's summary is visibly the compaction
+/// event wherever it is inspected.
+#[cfg(feature = "hydrate")]
+#[component]
+fn CompactionCard(
+    inference_id: i64,
+    cause_inference_id: Option<i64>,
+    text: String,
+    #[prop(optional)] covered_ranges: Option<Vec<crate::inspection::PositionRange>>,
+    #[prop(optional)] selection: Option<RwSignal<Option<InspectSelection>>>,
+    #[prop(optional)] reason: Option<String>,
+    #[prop(optional)] retained_messages: Option<i64>,
+) -> impl IntoView {
+    let label = covered_ranges
+        .map(|ranges| {
+            if ranges.len() == 1 {
+                let range = &ranges[0];
+                format!(
+                    "Compacted history entries #{}-#{}",
+                    range.first_position, range.last_position
+                )
+            } else {
+                format!("Compacted history across {} histories", ranges.len())
+            }
+        })
+        .unwrap_or_else(|| "Compacted history".to_string());
+    view! {
+        <details class="rounded border border-warning bg-warning/20 p-2 text-sm">
+            <summary class="cursor-pointer select-none font-medium">{label}</summary>
+            {cause_inference_id.map(|id| view! { <p class="mt-1 text-xs text-base-content/60">{format!("Deferred after inference {id}.")}</p> })}
+            {reason.zip(retained_messages).map(|(reason, retained)| view! {
+                <p class="mt-1 text-xs text-base-content/60">{if reason == "capacity_recovery" { format!("Capacity recovery retained {retained} newest messages.") } else { format!("Threshold compaction retained {retained} newest messages.") }}</p>
+            })}
+            <p class="mt-1 whitespace-pre-wrap">{text}</p>
+            {selection.map(|selection| view! {
+                <button class="badge badge-outline badge-sm mt-1" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>"View inference"</button>
+            })}
+        </details>
+    }
+}
+
+/// A Turn contains the execution story, not a repeated full inference panel.
+/// Its compact cards lead with the actor and result and link to the exact
+/// inference when the developer needs to inspect the input that led to it.
+#[cfg(feature = "hydrate")]
+#[component]
+fn InferenceSummaryCard(
+    inference: RecordedInference,
+    actions: Vec<RecordedAction>,
+    selection: RwSignal<Option<InspectSelection>>,
+    agents: RwSignal<Vec<AgentInfo>>,
+    live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
+) -> impl IntoView {
+    let inference_id = inference.id;
+    let agent_id = inference.agent_id;
+    let branch_id = inference.branch_id;
+    let history_entry_id = inference.history_entry_id;
+    let is_running = matches!(inference.outcome, RecordedOutcome::Running);
+    let (outcome_text, outcome_content) = match inference.outcome {
+        RecordedOutcome::Running => (None, None),
+        RecordedOutcome::Error(error) => (Some(format!("Error: {error}")), None),
+        RecordedOutcome::Response(response) => match response.content {
+            Content::Text(text) => (Some(text), None),
+            content => (None, Some(content)),
+        },
+    };
+    let output_for_copy = outcome_text.clone();
+    view! {
+        <div class="flex flex-col gap-1">
+            <div class="flex flex-wrap items-center gap-1">
+                <button class="font-semibold text-left hover:underline" on:click=move |_| selection.set(Some(InspectSelection::AgentHistory { agent_id, branch_id: Some(branch_id), entry_id: Some(history_entry_id) }))>
+                    {move || agent_label(agent_id, agents)}
+                </button>
+                <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>
+                    "Inspect inference"
+                </button>
+            </div>
+            {outcome_content.map(|content| match content {
+                Content::ToolCalls(calls) => view! { <ToolCallList calls actions selection/> }.into_any(),
+                content => view! { <ResponseContentBlock content/> }.into_any(),
+            })}
+            {if is_running {
+                fn running_text(
+                    inference_id: i64,
+                    live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
+                ) -> String {
+                    live_tokens
+                        .get()
+                        .get(&inference_id)
+                        .cloned()
+                        .unwrap_or_else(|| "Running…".to_string())
+                }
+                view! {
+                    <div class="flex items-start gap-1">
+                        <p class="whitespace-pre-wrap">{move || live_tokens.get().get(&inference_id).cloned().unwrap_or_else(|| "Running…".to_string())}</p>
+                        <span class="text-xs text-base-content/60">"Streaming…"</span>
+                        {move || view! { <CopyButton text=running_text(inference_id, live_tokens)/> }}
+                    </div>
+                }.into_any()
+            } else {
+                output_for_copy.map(|text| {
+                    if text.is_empty() {
+                        view! { <EmptyResponse/> }.into_any()
+                    } else {
+                        view! { <CopyableText text/> }.into_any()
+                    }
+                }).into_any()
+            }}
         </div>
     }
 }
 
-/// Renders one inference's verbatim input/output - the "inference view" of
-/// user_declarations.md, shared between the turn view's per-node display and
-/// the dedicated `/inspect/inferences/:id` view. Badges link to the agent's
-/// raw chat history and (when standalone) back to the turn it belongs to,
-/// matching "links between views are important for navigation".
+/// Renders the detailed Inference view. It follows debugging order: the exact
+/// reconstructed input first, then its recorded result; technical evidence is
+/// available without obscuring either.
 #[cfg(feature = "hydrate")]
 #[component]
 fn InferenceCard(
     inference: RecordedInference,
     selection: RwSignal<Option<InspectSelection>>,
-    standalone: bool,
+    agents: RwSignal<Vec<AgentInfo>>,
     live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
 ) -> impl IntoView {
-    // The complete record, verbatim, for when the structured rendering below
-    // isn't enough (design.md: "Render raw JSON ... with ... clipboard
-    // controls") - every field this struct has, not a second, narrower
-    // projection of it.
-    let raw_json = serde_json::to_string_pretty(&inference).unwrap_or_default();
     let is_running = matches!(inference.outcome, RecordedOutcome::Running);
     let (outcome_text, outcome_content, reasoning, usage) = match inference.outcome {
         RecordedOutcome::Running => (None, None, String::new(), None),
-        RecordedOutcome::Error(error) => (Some(format!("error: {error}")), None, String::new(), None),
+        RecordedOutcome::Error(error) => {
+            (Some(format!("error: {error}")), None, String::new(), None)
+        }
         RecordedOutcome::Response(response) => match response.content {
             // Plain text can still be streaming into view live; render it
             // through the same reactive path as the running/error cases.
@@ -780,107 +1376,110 @@ fn InferenceCard(
             // Tool calls never stream as partial text - render their full
             // structure (each call's id/name/arguments) once the response
             // has actually completed.
-            content => (None, Some(content), response.reasoning, Some(response.usage)),
+            content => (
+                None,
+                Some(content),
+                response.reasoning,
+                Some(response.usage),
+            ),
         },
     };
     let request_messages = inference.request.messages;
     let model_prompt = inference.model_prompt;
     let inference_id = inference.id;
     let agent_id = inference.agent_id;
+    let branch_id = inference.branch_id;
+    let history_entry_id = inference.history_entry_id;
     let sequence_id = inference.sequence_id;
+    let output_for_copy = outcome_text.clone();
     view! {
-        <div>
+        <div class="flex flex-col gap-2">
             <div class="flex flex-wrap items-center gap-2">
-                {if standalone {
-                    view! { <span class="badge badge-outline">{format!("inference {inference_id}")}</span> }.into_any()
-                } else {
-                    view! {
-                        <button class="badge badge-outline" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>
-                            {format!("inference {inference_id}")}
-                        </button>
-                    }.into_any()
-                }}
-                <button class="badge badge-ghost" on:click=move |_| selection.set(Some(InspectSelection::AgentHistory(agent_id)))>
-                    {format!("agent {agent_id}")}
+                <h3 class="text-sm font-semibold">"Inference"</h3>
+                <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::AgentHistory { agent_id, branch_id: Some(branch_id), entry_id: Some(history_entry_id) }))>
+                    {move || agent_label(agent_id, agents)}
                 </button>
-                <span class="badge badge-ghost">{inference.model}</span>
-                {inference.duration_ms.map(|ms| view! { <span class="badge badge-ghost">{format!("{ms}ms")}</span> })}
-                {usage.map(|usage| view! {
-                    <span class="badge badge-ghost">{format!("{}+{} tokens", usage.input_tokens, usage.output_tokens)}</span>
-                })}
                 {inference.parent_inference_id.map(|parent| view! {
-                    <button class="badge badge-ghost" on:click=move |_| selection.set(Some(InspectSelection::Inference(parent)))>
-                        {format!("parent {parent}")}
+                    <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Inference(parent)))>
+                        "Parent inference"
                     </button>
                 })}
-                {standalone.then(|| sequence_id.map(|sequence_id| view! {
-                    <button class="badge badge-ghost" on:click=move |_| selection.set(Some(InspectSelection::Sequence(sequence_id)))>
-                        {format!("turn {sequence_id}")}
+                {sequence_id.map(|sequence_id| view! {
+                    <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Sequence { id: sequence_id, entry_id: None }))>
+                        "View turn"
                     </button>
-                }))}
-            </div>
-            {
-                fn running_text(
-                    outcome_text: &Option<String>,
-                    is_running: bool,
-                    inference_id: i64,
-                    live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
-                ) -> String {
-                    match outcome_text {
-                        Some(text) => text.clone(),
-                        None if is_running => live_tokens
-                            .get()
-                            .get(&inference_id)
-                            .cloned()
-                            .map(|streamed| format!("{streamed}…"))
-                            .unwrap_or_else(|| "running…".to_string()),
-                        None => String::new(),
-                    }
-                }
-                let outcome_for_button = outcome_text.clone();
-                view! {
-                    {outcome_content.map(|content| view! { <ResponseContentBlock content/> })}
-                    <div class="flex items-start gap-1">
-                        <p class="whitespace-pre-wrap">
-                            {move || running_text(&outcome_text, is_running, inference_id, live_tokens)}
-                        </p>
-                        {move || {
-                            let text = running_text(&outcome_for_button, is_running, inference_id, live_tokens);
-                            (!text.is_empty()).then(|| view! { <CopyButton text/> })
-                        }}
+                })}
+                <details class="dropdown dropdown-end ml-auto text-xs text-base-content/60">
+                    <summary class="btn btn-ghost btn-xs btn-square" aria-label="Technical details" title="Technical details">"…"</summary>
+                    <div class="dropdown-content z-10 mt-1 w-96 max-w-[80vw] rounded-box border border-base-300 bg-base-100 p-3 shadow">
+                        <span>{format!("Model: {}", inference.model)}</span>
+                        {inference.duration_ms.map(|ms| view! { <span class="block">{format!("Inference time: {ms}ms")}</span> })}
+                        {usage.map(|usage| view! { <span class="block">{format!("Token use: {} input + {} output", usage.input_tokens, usage.output_tokens)}</span> })}
+                        {inference.prompt_evidence.map(|_| view! { <span class="block">"Prompt reconstruction verified against generation evidence."</span> })}
+                        {model_prompt.map(|prompt| view! {
+                            <details class="mt-2 border-t border-base-300 pt-2">
+                                <summary class="cursor-pointer select-none">"Exact formatted prompt"</summary>
+                                <p class="mt-1 whitespace-pre-wrap font-mono text-xs">{prompt.clone()}</p>
+                                <CopyButton text=prompt/>
+                            </details>
+                        })}
                     </div>
-                }
-            }
-            {(!reasoning.is_empty()).then(|| view! {
-                <p class="whitespace-pre-wrap text-base-content/60">{format!("reasoning: {reasoning}")}</p>
-            })}
-            <details class="mt-1 border-t border-base-300 pt-1">
-                <summary class="cursor-pointer select-none">"Input"</summary>
+                </details>
+            </div>
+            <section class="border-t border-base-300 pt-1">
+                <h4 class="font-semibold">"Input"</h4>
                 <ul class="mt-1 space-y-1">
                     {request_messages.into_iter().map(|message| view! {
                         <li>
                             <span class="font-semibold">{message.role.as_str()}</span>
                             <ContentBlock content=message.content/>
                             {(!message.reasoning.is_empty()).then(|| view! {
-                                <span class="block whitespace-pre-wrap text-base-content/60">{format!("reasoning: {}", message.reasoning)}</span>
+                                <details class="text-base-content/60">
+                                    <summary class="cursor-pointer select-none">"Model working text (not sent to the player)"</summary>
+                                    <p class="mt-1 whitespace-pre-wrap">{message.reasoning}</p>
+                                </details>
                             })}
                         </li>
                     }).collect_view()}
                 </ul>
-                {model_prompt.map(|prompt| view! {
-                    <div class="mt-1 flex items-start gap-1 border-t border-base-300 pt-1">
-                        <p class="whitespace-pre-wrap font-mono text-xs">{prompt.clone()}</p>
-                        <CopyButton text=prompt/>
-                    </div>
-                })}
-            </details>
-            <details class="mt-1 border-t border-base-300 pt-1">
-                <summary class="cursor-pointer select-none">"Raw JSON"</summary>
-                <div class="mt-1 flex items-start gap-1">
-                    <pre class="whitespace-pre-wrap font-mono text-xs">{raw_json.clone()}</pre>
-                    <CopyButton text=raw_json/>
-                </div>
-            </details>
+            </section>
+            <section class="border-t border-base-300 pt-1">
+                <h4 class="font-semibold">"Output"</h4>
+                {outcome_content.map(|content| view! { <ResponseContentBlock content/> })}
+                {if is_running {
+                    fn running_text(
+                        inference_id: i64,
+                        live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
+                    ) -> String {
+                        live_tokens
+                            .get()
+                            .get(&inference_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Running…".to_string())
+                    }
+                    view! {
+                        <div class="flex items-start gap-1">
+                            <p class="whitespace-pre-wrap">{move || live_tokens.get().get(&inference_id).cloned().unwrap_or_else(|| "Running…".to_string())}</p>
+                            <span class="text-xs text-base-content/60">"Streaming…"</span>
+                            {move || view! { <CopyButton text=running_text(inference_id, live_tokens)/> }}
+                        </div>
+                    }.into_any()
+            } else {
+                output_for_copy.map(|text| {
+                    if text.is_empty() {
+                        view! { <EmptyResponse/> }.into_any()
+                    } else {
+                        view! { <CopyableText text/> }.into_any()
+                    }
+                }).into_any()
+                }}
+            </section>
+            {(!reasoning.is_empty()).then(|| view! {
+                <details class="border-t border-base-300 pt-1">
+                    <summary class="cursor-pointer select-none">"Model working text (not sent to the player)"</summary>
+                    <p class="mt-1 whitespace-pre-wrap text-base-content/60">{reasoning}</p>
+                </details>
+            })}
         </div>
     }
     .into_any()
@@ -901,13 +1500,14 @@ fn AgentHistoryView(
     world_id: i64,
     agent_id: i64,
     branches: Vec<BranchSection>,
+    agents: RwSignal<Vec<AgentInfo>>,
     selection: RwSignal<Option<InspectSelection>>,
     data: RwSignal<Option<InspectData>>,
 ) -> impl IntoView {
     let single = branches.len() == 1;
     view! {
         <div class="flex flex-col gap-3">
-            <h3 class="text-sm font-semibold">{format!("Agent {agent_id} chat history")}</h3>
+            <h3 class="text-sm font-semibold">{move || format!("{} chat history", agent_label(agent_id, agents))}</h3>
             {branches.into_iter().map(|section| view! {
                 <BranchSectionView world_id agent_id section show_heading=!single selection data/>
             }).collect_view()}
@@ -932,18 +1532,20 @@ fn BranchSectionView(
     let branch_id = section.branch_id;
     let loading_more = RwSignal::new(false);
     let load_more_error = RwSignal::new(None::<String>);
-    let load_more = move |cursor: RawHistoryCursor| {
+    let load_more = Rc::new(move |cursor: RawHistoryCursor| {
         loading_more.set(true);
-        let query = serde_json::to_string(&cursor).unwrap_or_default();
+        let query = serde_json::to_string(&cursor).expect("raw history cursor serializes");
         let encoded = js_sys::encode_uri_component(&query);
         fetch_json(
             format!("/world/{world_id}/inspect/agents/{agent_id}/history?after={encoded}"),
             "next agent chat history page",
-            move |page: RawHistoryPageView| {
+            move |page: RawHistoryPageResponse| {
                 loading_more.set(false);
                 data.update(|data| {
                     if let Some(InspectData::AgentHistory { branches, .. }) = data
-                        && let Some(section) = branches.iter_mut().find(|section| section.branch_id == branch_id)
+                        && let Some(section) = branches
+                            .iter_mut()
+                            .find(|section| section.branch_id == branch_id)
                     {
                         section.entries.extend(page.entries);
                         section.cursor = page.cursor;
@@ -952,7 +1554,39 @@ fn BranchSectionView(
             },
             load_more_error,
         );
-    };
+    });
+    let sentinel = NodeRef::<leptos::html::Div>::new();
+    if let Some(cursor) = section.cursor {
+        let auto_load = load_more.clone();
+        Effect::new(move |_| {
+            let auto_load = auto_load.clone();
+            let Some(element) = sentinel.get() else {
+                return;
+            };
+            let callback = Closure::<dyn FnMut(js_sys::Array, IntersectionObserver)>::new(
+                move |entries: js_sys::Array, _: IntersectionObserver| {
+                    if entries
+                        .iter()
+                        .filter_map(|entry| entry.dyn_into::<IntersectionObserverEntry>().ok())
+                        .any(|entry| entry.is_intersecting())
+                        && !loading_more.get_untracked()
+                    {
+                        auto_load(cursor);
+                    }
+                },
+            );
+            match IntersectionObserver::new(callback.as_ref().unchecked_ref()) {
+                Ok(observer) => {
+                    observer.observe(&element);
+                    callback.forget();
+                    std::mem::forget(observer);
+                }
+                Err(error) => load_more_error.set(Some(format!(
+                    "Could not observe more agent history: {error:?}"
+                ))),
+            }
+        });
+    }
     let heading = show_heading.then(|| {
         let label = match &section.head {
             Some(head) => format!("Branch {branch_id} - {} (current)", head.group_name),
@@ -983,6 +1617,7 @@ fn BranchSectionView(
                 {section.entries.into_iter().map(|entry| view! { <RawHistoryEntryRow entry selection/> }).collect_view()}
             </ul>
             {section.cursor.map(|cursor| view! {
+                <div node_ref=sentinel class="h-px" aria-hidden="true"></div>
                 <button
                     class="btn btn-ghost btn-sm"
                     disabled=move || loading_more.get()
@@ -1000,83 +1635,94 @@ fn BranchSectionView(
 
 #[cfg(feature = "hydrate")]
 #[component]
-fn RawHistoryEntryRow(entry: RawHistoryEntry, selection: RwSignal<Option<InspectSelection>>) -> impl IntoView {
+fn RawHistoryEntryRow(
+    entry: RawHistoryEntry,
+    selection: RwSignal<Option<InspectSelection>>,
+) -> impl IntoView {
     match entry {
-        RawHistoryEntry::Message { id, role, content, reasoning, source_inference_id, answers_tool_execution_id } => view! {
-            <li class="rounded bg-base-200 p-2">
+        RawHistoryEntry::Message { id, role, origin, content, reasoning, source_inference_id, answers_tool_execution_id } => {
+            let silent_assistant_response = role == Role::Assistant
+                && matches!(&content, MessageContent::Text(text) if text.is_empty());
+            let empty_tool_result = matches!(&content, MessageContent::ToolResult { content, .. } if content.is_empty());
+            if empty_tool_result {
+                return view! {}.into_any();
+            }
+            view! {
+            <li class=move || history_entry_class(id, selection)>
                 <div class="flex flex-wrap items-center gap-2">
                     <span class="badge badge-ghost badge-sm">{format!("message {id}")}</span>
-                    <span class="font-semibold">{role.as_str()}</span>
-                    {answers_tool_execution_id.map(|tool_execution_id| view! { <span class="badge badge-ghost badge-sm">{format!("answers tool_execution {tool_execution_id}")}</span> })}
-                    {source_inference_id.map(|inference_id| view! {
+                    <span class="font-semibold">{if origin == MessageOrigin::Instruction { "instruction" } else { role.as_str() }}</span>
+                    {answers_tool_execution_id.map(|_| view! { <span class="badge badge-ghost badge-sm">"Tool result"</span> })}
+                    {source_inference_id.filter(|_| answers_tool_execution_id.is_none()).map(|inference_id| view! {
                         <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>
-                            {format!("inference {inference_id}")}
+                            "View inference"
                         </button>
                     })}
                 </div>
-                <ContentBlock content/>
+                {if silent_assistant_response {
+                    view! { <EmptyResponse/> }.into_any()
+                } else {
+                    view! { <ContentBlock content/> }.into_any()
+                }}
                 {(!reasoning.is_empty()).then(|| view! {
-                    <p class="whitespace-pre-wrap text-base-content/60">{format!("reasoning: {reasoning}")}</p>
+                    <details class="text-base-content/60">
+                        <summary class="cursor-pointer select-none">"Model working text (not sent to the player)"</summary>
+                        <p class="mt-1 whitespace-pre-wrap">{reasoning}</p>
+                    </details>
                 })}
             </li>
-        }.into_any(),
-        RawHistoryEntry::Notice { id, content, source_inference_id } => view! {
-            <li class="alert alert-warning text-sm">
-                <span class="badge badge-ghost badge-sm">{format!("notice {id}")}</span>
-                <span>{content}</span>
-                {source_inference_id.map(|inference_id| view! {
-                    <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>
-                        {format!("inference {inference_id}")}
-                    </button>
-                })}
+        }.into_any()
+        },
+        RawHistoryEntry::Summary { id, covered_ranges, inference_id, text, reason, retained_messages } => view! {
+            <li class=move || history_entry_class(id, selection)>
+                <CompactionCard inference_id cause_inference_id=None text covered_ranges selection reason retained_messages/>
             </li>
         }.into_any(),
-        RawHistoryEntry::Summary { id, covered_ranges, inference_id, text } => view! {
-            <li>
-                <details class="rounded border border-base-300 p-2">
-                    <summary class="cursor-pointer select-none text-base-content/60">
-                        {format!(
-                            "summary {id} covers {}",
-                            covered_ranges
-                                .iter()
-                                .map(|range| format!(
-                                    "branch {} #{}-#{}",
-                                    range.branch_id, range.first_position, range.last_position,
-                                ))
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        )}
-                    </summary>
-                    <p class="mt-1 whitespace-pre-wrap">{text}</p>
-                    <button class="badge badge-outline badge-sm mt-1" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>
-                        {format!("inference {inference_id}")}
-                    </button>
-                </details>
-            </li>
-        }.into_any(),
-        RawHistoryEntry::FailedInference { id, error } => view! {
-            <li class="alert alert-error text-sm">
+        RawHistoryEntry::Inference { id, history_entry_id, error } => {
+            let Some(error) = error else { return view! {}.into_any(); };
+            view! {
+            <li class=move || format!("alert alert-error text-sm {}", if history_entry_selected(history_entry_id, selection) { "ring-2 ring-primary" } else { "" })>
                 <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>
-                    {format!("inference {id} failed")}
+                    "View inference"
                 </button>
                 <span>{error}</span>
             </li>
-        }.into_any(),
+            }.into_any()
+        },
     }
+}
+
+#[cfg(feature = "hydrate")]
+fn history_entry_selected(id: i64, selection: RwSignal<Option<InspectSelection>>) -> bool {
+    matches!(selection.get(), Some(InspectSelection::AgentHistory { entry_id: Some(entry_id), .. }) if entry_id == id)
+}
+
+#[cfg(feature = "hydrate")]
+fn history_entry_class(id: i64, selection: RwSignal<Option<InspectSelection>>) -> String {
+    format!(
+        "rounded p-2 {}",
+        if history_entry_selected(id, selection) {
+            "bg-primary/20 ring-2 ring-primary"
+        } else {
+            "bg-base-200"
+        },
+    )
 }
 
 /// The world agents/GMs navigator (user_declarations.md: "Browseable world
 /// objects, descriptions, tools, agents and links to their chat histories").
 #[cfg(feature = "hydrate")]
 #[component]
-fn AgentsList(agents: Vec<AgentInfo>, selection: RwSignal<Option<InspectSelection>>) -> impl IntoView {
+fn AgentsList(
+    agents: Vec<AgentInfo>,
+    selection: RwSignal<Option<InspectSelection>>,
+) -> impl IntoView {
     view! {
         <ul class="flex flex-col gap-1 text-sm">
             {agents.into_iter().map(|agent| view! {
                 <li>
-                    <button class="btn btn-ghost btn-sm w-full justify-start" on:click=move |_| selection.set(Some(InspectSelection::AgentHistory(agent.id)))>
-                        <span class="badge badge-ghost badge-sm">{agent.role}</span>
-                        {agent.character_name.unwrap_or_else(|| format!("agent {}", agent.id))}
+                    <button class="btn btn-ghost btn-sm w-full justify-start" on:click=move |_| selection.set(Some(InspectSelection::AgentHistory { agent_id: agent.id, branch_id: None, entry_id: None }))>
+                        {agent_info_label(&agent)}
                         {agent.location_name.map(|location| format!(" @ {location}"))}
                     </button>
                 </li>
@@ -1089,69 +1735,78 @@ fn AgentsList(agents: Vec<AgentInfo>, selection: RwSignal<Option<InspectSelectio
 /// relations without projecting them into a simplified display).
 #[cfg(feature = "hydrate")]
 #[component]
-fn ObjectsView(objects: WorldObjects) -> impl IntoView {
-    fn object_row(object: GameObject) -> impl IntoView {
+fn ObjectsView(
+    world_id: i64,
+    initial: WorldObjects,
+    selection: RwSignal<Option<InspectSelection>>,
+) -> impl IntoView {
+    let world_title = format!("{} (time {})", initial.name, initial.time);
+    let storyteller_summary = initial.storyteller_summary.clone();
+    let initial_prompt = initial.initial_prompt.clone();
+    let gm_notes = initial.gm_notes.clone();
+    let storyteller_notes = initial.storyteller_notes.clone();
+    let objects = RwSignal::new(initial);
+    let search = RwSignal::new(String::new());
+    let load_error = RwSignal::new(None::<String>);
+    let object_rows = move || {
+        objects.get().objects.into_iter().map(|object| {
+        let object_type = object.object_type;
+        let id = object.id;
         view! {
-            <li class="rounded bg-base-200 p-2">
-                <p class="font-semibold">{format!("{} ({})", object.name, object.id)}</p>
+            <li class=move || if matches!(selection.get(), Some(InspectSelection::Objects { object_type: Some(kind), id: Some(selected_id) }) if kind == object_type && selected_id == id) { "rounded bg-primary/20 p-2" } else { "rounded bg-base-200 p-2" }>
+                <button class="font-semibold text-left hover:underline" on:click=move |_| selection.set(Some(InspectSelection::Objects { object_type: Some(object_type), id: Some(id) }))>
+                    {format!("{} {} ({})", object.object_type.as_str(), object.name, object.id)}
+                </button>
                 <p class="whitespace-pre-wrap">{object.description}</p>
-                {(!object.gm_notes.is_empty()).then(|| view! {
-                    <p class="whitespace-pre-wrap text-base-content/60">{format!("GM notes: {}", object.gm_notes)}</p>
+                {(!object.fields.is_empty()).then(|| view! {
+                    <dl class="mt-1 text-base-content/60">{object.fields.into_iter().map(|field| view! { <div>{format!("{}: {}", field.label, field.value)}</div> }).collect_view()}</dl>
                 })}
-                {(!object.storyteller_notes.is_empty()).then(|| view! {
-                    <p class="whitespace-pre-wrap text-base-content/60">{format!("Storyteller notes: {}", object.storyteller_notes)}</p>
+                {(!object.relationships.is_empty()).then(|| view! {
+                    <div class="mt-1 flex flex-wrap gap-1">{object.relationships.into_iter().map(|link| {
+                        let link_type = link.object_type;
+                        let link_id = link.id;
+                        view! { <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Objects { object_type: Some(link_type), id: Some(link_id) }))>{format!("{} {} ({})", link_type.as_str(), link.label, link_id)}</button> }
+                    }).collect_view()}</div>
                 })}
+                {(!object.gm_notes.is_empty()).then(|| view! { <p class="whitespace-pre-wrap text-base-content/60">{format!("GM notes: {}", object.gm_notes)}</p> })}
+                {(!object.storyteller_notes.is_empty()).then(|| view! { <p class="whitespace-pre-wrap text-base-content/60">{format!("Storyteller notes: {}", object.storyteller_notes)}</p> })}
             </li>
         }
-    }
+    }).collect_view()
+    };
     view! {
         <div class="flex flex-col gap-3 text-sm">
             <div class="rounded bg-base-200 p-2">
-                <p class="font-semibold">{format!("{} (time {})", objects.name, objects.time)}</p>
-                <p class="whitespace-pre-wrap text-base-content/60">{objects.storyteller_summary}</p>
-                {(!objects.initial_prompt.is_empty()).then(|| view! {
+                <p class="font-semibold">{world_title}</p>
+                <p class="whitespace-pre-wrap text-base-content/60">{storyteller_summary}</p>
+                {(!initial_prompt.is_empty()).then(|| view! {
                     <details class="mt-1">
                         <summary class="cursor-pointer select-none text-base-content/60">"Initial prompt"</summary>
-                        <p class="whitespace-pre-wrap">{objects.initial_prompt}</p>
+                        <p class="whitespace-pre-wrap">{initial_prompt}</p>
                     </details>
                 })}
-                {(!objects.gm_notes.is_empty()).then(|| view! {
-                    <p class="whitespace-pre-wrap text-base-content/60">{format!("GM notes: {}", objects.gm_notes)}</p>
-                })}
-                {(!objects.storyteller_notes.is_empty()).then(|| view! {
-                    <p class="whitespace-pre-wrap text-base-content/60">{format!("Storyteller notes: {}", objects.storyteller_notes)}</p>
-                })}
+                {(!gm_notes.is_empty()).then(|| view! { <p class="whitespace-pre-wrap text-base-content/60">{format!("GM notes: {gm_notes}")}</p> })}
+                {(!storyteller_notes.is_empty()).then(|| view! { <p class="whitespace-pre-wrap text-base-content/60">{format!("Storyteller notes: {storyteller_notes}")}</p> })}
             </div>
-            <div>
-                <h3 class="text-sm font-semibold">"Characters"</h3>
-                <ul class="mt-1 flex flex-col gap-1">{objects.characters.into_iter().map(object_row).collect_view()}</ul>
-            </div>
-            <div>
-                <h3 class="text-sm font-semibold">"Locations"</h3>
-                <ul class="mt-1 flex flex-col gap-1">{objects.locations.into_iter().map(object_row).collect_view()}</ul>
-            </div>
-            <div>
-                <h3 class="text-sm font-semibold">"Items"</h3>
-                <ul class="mt-1 flex flex-col gap-1">{objects.items.into_iter().map(object_row).collect_view()}</ul>
-            </div>
-            <div>
-                <h3 class="text-sm font-semibold">"Connections"</h3>
-                <ul class="mt-1 flex flex-col gap-1">
-                    {objects.connections.into_iter().map(|connection| view! {
-                        <li class="rounded bg-base-200 p-2">
-                            <p class="font-semibold">{format!("{} <-> {} ({})", connection.from, connection.to, connection.id)}</p>
-                            <p class="whitespace-pre-wrap">{connection.description}</p>
-                            <p class="text-base-content/60">{format!("travel time: {}", connection.travel_time)}</p>
-                            {(!connection.gm_notes.is_empty()).then(|| view! {
-                                <p class="whitespace-pre-wrap text-base-content/60">{format!("GM notes: {}", connection.gm_notes)}</p>
-                            })}
-                            {(!connection.storyteller_notes.is_empty()).then(|| view! {
-                                <p class="whitespace-pre-wrap text-base-content/60">{format!("Storyteller notes: {}", connection.storyteller_notes)}</p>
-                            })}
-                        </li>
-                    }).collect_view()}
-                </ul>
-            </div>
+            <form class="flex gap-1" on:submit=move |event| {
+                event.prevent_default();
+                let encoded = js_sys::encode_uri_component(&search.get_untracked()).as_string().expect("encoded world object search is a string");
+                fetch_json(format!("/world/{world_id}/inspect/objects?search={encoded}"), "world object search", move |page| objects.set(page), load_error);
+            }>
+                <input class="input input-sm min-w-0 flex-1" placeholder="Search name, type, or ID" prop:value=move || search.get() on:input=move |event| search.set(event_target_value(&event))/>
+                <button class="btn btn-sm" type="submit">"Search"</button>
+            </form>
+            {move || load_error.get().map(|error| view! { <p class="text-error">{error}</p> })}
+            <ul class="flex flex-col gap-1">{object_rows}</ul>
+            {move || objects.get().cursor.map(|cursor| view! {
+                <button class="btn btn-outline btn-sm self-start" on:click=move |_| {
+                    let cursor = js_sys::encode_uri_component(&serde_json::to_string(&cursor).expect("world object cursor serializes")).as_string().expect("encoded world object cursor is a string");
+                    let search = js_sys::encode_uri_component(&search.get_untracked()).as_string().expect("encoded world object search is a string");
+                    fetch_json(format!("/world/{world_id}/inspect/objects?after={cursor}&search={search}"), "next world object page", move |next: WorldObjects| objects.update(|current| { current.objects.extend(next.objects); current.cursor = next.cursor; }), load_error);
+                }>
+                    "Load more"
+                </button>
+            })}
         </div>
     }
 }
@@ -1318,8 +1973,28 @@ pub fn PlayerChat(
     let activity = RwSignal::new(None::<ChatActivity>);
     let disconnected = RwSignal::new(false);
     let chat = NodeRef::<leptos::html::Ol>::new();
+    let inspect_scroll = NodeRef::<leptos::html::Aside>::new();
     let input = NodeRef::<leptos::html::Input>::new();
-    let inspecting = RwSignal::new(None::<InspectSelection>);
+    let dev_error = RwSignal::new(None::<String>);
+    #[cfg(feature = "hydrate")]
+    let initial_inspecting = match InspectSelection::from_location() {
+        Ok(selection) => selection,
+        Err(error) => {
+            dev_error.set(Some(format!("Invalid inspect URL: {error}")));
+            None
+        }
+    };
+    #[cfg(not(feature = "hydrate"))]
+    let initial_inspecting = None;
+    let inspecting = RwSignal::new(initial_inspecting);
+    let restore_inspect_scroll = RwSignal::new(None::<i32>);
+    let inspect_open =
+        RwSignal::new(initial_inspecting.is_some() || dev_error.get_untracked().is_some());
+    let last_inspecting = RwSignal::new(initial_inspecting);
+    // Narrow screens show one of the already-mounted panes. This is distinct
+    // from `inspect_open`: Close still collapses Inspect to its edge strip,
+    // whereas these tabs only choose which pane CSS makes visible below `sm`.
+    let narrow_inspect = RwSignal::new(initial_inspecting.is_some());
     // A signal, not the plain prop: an owner may toggle Developer Mode while
     // this page stays open, and every active member's page must reflect it
     // immediately (user_declarations.md), not only on reload.
@@ -1327,7 +2002,6 @@ pub fn PlayerChat(
     // The most recent live event from /inspect/events, for the currently
     // open inspect pane to patch itself with instead of a network re-fetch.
     let dev_events = RwSignal::new(None::<DevEvent>);
-    let dev_error = RwSignal::new(None::<String>);
     let dev_reconnect_nonce = RwSignal::new(0u32);
 
     #[cfg(feature = "hydrate")]
@@ -1342,7 +2016,80 @@ pub fn PlayerChat(
     );
 
     #[cfg(feature = "hydrate")]
-    connect_dev_events(world_id, developer_mode, dev_events, dev_error, dev_reconnect_nonce);
+    connect_dev_events(
+        world_id,
+        developer_mode,
+        dev_events,
+        dev_error,
+        dev_reconnect_nonce,
+    );
+
+    #[cfg(feature = "hydrate")]
+    {
+        // A normal selection writes one browser-history entry. A popstate
+        // selection skips that write, so Back/Forward changes only the pane
+        // and never makes another entry to bounce through.
+        let applying_popstate = RwSignal::new(false);
+        Effect::new(move |_| {
+            let selected = inspecting.get();
+            if applying_popstate.get_untracked() {
+                applying_popstate.set(false);
+                return;
+            }
+            if let Some(inspect) = inspect_scroll.get() {
+                let inspect: HtmlElement = inspect.unchecked_into();
+                if let Err(error) = InspectSelection::remember_scroll(inspect.scroll_top()) {
+                    dev_error.set(Some(error));
+                    return;
+                }
+            }
+            if let Err(error) = InspectSelection::write_to_location(selected) {
+                dev_error.set(Some(error));
+            }
+        });
+        Effect::new(move |_| {
+            if let Some(selected) = inspecting.get() {
+                last_inspecting.set(Some(selected));
+                inspect_open.set(true);
+                narrow_inspect.set(true);
+            }
+        });
+        Effect::new(move |_| {
+            if !developer_mode.get() {
+                inspect_open.set(false);
+                inspecting.set(None);
+            }
+        });
+        let on_popstate = Closure::<dyn Fn(Event)>::new(move |_| {
+            applying_popstate.set(true);
+            restore_inspect_scroll.set(InspectSelection::scroll_position());
+            match InspectSelection::from_location() {
+                Ok(selection) => {
+                    dev_error.set(None);
+                    inspecting.set(selection);
+                }
+                Err(error) => {
+                    dev_error.set(Some(format!("Invalid inspect URL: {error}")));
+                    inspecting.set(None);
+                }
+            }
+        });
+        if let Some(window) = web_sys::window() {
+            match window
+                .add_event_listener_with_callback("popstate", on_popstate.as_ref().unchecked_ref())
+            {
+                Ok(()) => on_popstate.forget(),
+                Err(error) => dev_error.set(Some(format!(
+                    "Could not listen for browser history changes: {error:?}"
+                ))),
+            }
+        } else {
+            dev_error.set(Some(
+                "Could not listen for browser history changes: no browser window is available."
+                    .into(),
+            ));
+        }
+    }
 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
@@ -1401,11 +2148,11 @@ pub fn PlayerChat(
     };
 
     #[cfg(feature = "hydrate")]
-    watch_inspect_clicks(chat, inspecting, developer_mode);
+    watch_inspect_clicks(chat, inspecting, developer_mode, dev_error);
 
     let body = view! {
         <div class="flex min-h-0 flex-1 gap-3">
-            <div class="flex min-h-0 flex-1 flex-col">
+            <div class=move || if developer_mode.get() && narrow_inspect.get() { "hidden min-h-0 flex-1 flex-col sm:flex" } else { "flex min-h-0 flex-1 flex-col" }>
                 <ol id="chat" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-1 py-4" node_ref=chat aria-live="polite">
                     {children()}
                     {move || {
@@ -1421,7 +2168,16 @@ pub fn PlayerChat(
                     <button class="btn btn-primary join-item" type="submit" disabled=move || !can_act.get() || disconnected.get()>"Send"</button>
                 </form>
             </div>
-            {move || developer_mode.get().then(|| inspect_pane(world_id, inspecting, dev_events, developer_mode, dev_error, dev_reconnect_nonce))}
+            {move || {
+                let pane = PaneVisibility {
+                    selection: inspecting,
+                    open: inspect_open,
+                    last_selection: last_inspecting,
+                };
+                developer_mode.get().then(|| {
+                    inspect_pane(world_id, pane, narrow_inspect, dev_events, developer_mode, dev_error, dev_reconnect_nonce, inspect_scroll, restore_inspect_scroll)
+                })
+            }}
         </div>
     }
     .into_any();
@@ -1437,6 +2193,20 @@ pub fn PlayerChat(
                     <span class="ml-auto badge badge-primary badge-outline">"Adventure chat"</span>
                     {move || developer_mode.get().then(|| view! { <span class="badge badge-error ml-2">"Developer Mode"</span> })}
                 </header>
+                {move || developer_mode.get().then(|| view! {
+                    <div class="join mx-3 mt-3 sm:hidden" role="tablist" aria-label="Game panes">
+                        <button id="chat-tab" class="btn join-item flex-1" class:btn-primary=move || !narrow_inspect.get() on:click=move |_| narrow_inspect.set(false) role="tab" aria-selected=move || !narrow_inspect.get()>"Chat"</button>
+                        <button id="inspect-tab" class="btn join-item flex-1" class:btn-primary=move || narrow_inspect.get() on:click=move |_| {
+                            narrow_inspect.set(true);
+                            if !inspect_open.get_untracked() {
+                                inspect_open.set(true);
+                                if inspecting.get_untracked().is_none() {
+                                    inspecting.set(last_inspecting.get_untracked().or(Some(InspectSelection::Agents)));
+                                }
+                            }
+                        } role="tab" aria-selected=move || narrow_inspect.get()>"Inspect"</button>
+                    </div>
+                })}
                 <div class="flex min-h-0 flex-1 p-3 sm:p-5">{body}</div>
             </section>
         </main>
@@ -1453,6 +2223,7 @@ fn watch_inspect_clicks(
     chat: NodeRef<leptos::html::Ol>,
     inspecting: RwSignal<Option<InspectSelection>>,
     developer_mode: RwSignal<bool>,
+    dev_error: RwSignal<Option<String>>,
 ) {
     Effect::new(move |_| {
         let Some(chat) = chat.get() else { return };
@@ -1480,10 +2251,20 @@ fn watch_inspect_clicks(
             else {
                 return;
             };
-            inspecting.set(Some(InspectSelection::Sequence(sequence_id)));
+            let entry_id = entry
+                .get_attribute("data-inspect-entry")
+                .and_then(|id| id.parse().ok());
+            inspecting.set(Some(InspectSelection::Sequence {
+                id: sequence_id,
+                entry_id,
+            }));
         });
-        let _ = chat.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
-        on_click.forget();
+        match chat.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref()) {
+            Ok(()) => on_click.forget(),
+            Err(error) => dev_error.set(Some(format!(
+                "Could not listen for inspection links: {error:?}"
+            ))),
+        }
     });
 }
 
@@ -1608,7 +2389,7 @@ fn ChatEntryView(entry: ChatEntry, #[prop(default = false)] developer_mode: bool
         class.to_string()
     };
     view! {
-        <li class=class data-role=chat_role_name(entry.role) data-inspect-sequence=inspect.map(|id| id.to_string())>
+        <li class=class data-role=chat_role_name(entry.role) data-inspect-sequence=inspect.map(|id| id.to_string()) data-inspect-entry=entry.id.map(|id| id.to_string())>
             {gm.then(|| view! { <span class="badge badge-outline badge-sm mb-2">"GM"</span> })}
             <div class=bubble>{entry.text}</div>
         </li>
@@ -1704,14 +2485,15 @@ fn connect_player_chat(
                 text,
                 id,
                 sequence_id,
-            }) => on_message_entries.update(|entries| {
-                entries.push(ChatEntry {
+            }) => upsert_chat_entry(
+                on_message_entries,
+                ChatEntry {
                     role,
                     text,
                     id,
                     sequence_id,
-                });
-            }),
+                },
+            ),
             Ok(ServerEvent::Activity { activity }) => {
                 on_message_activity.set(Some(activity));
             }
@@ -1746,6 +2528,25 @@ fn connect_player_chat(
 
     *socket_for_connection.borrow_mut() = Some(websocket);
     socket
+}
+
+/// A submitted player message is shown immediately, then the server sends the
+/// same durable event back with its database identity. Replace that one local
+/// placeholder so the visible message becomes inspectable without a duplicate.
+#[cfg(feature = "hydrate")]
+fn upsert_chat_entry(entries: RwSignal<Vec<ChatEntry>>, entry: ChatEntry) {
+    entries.update(|entries| {
+        if let Some(id) = entry.id
+            && let Some(existing) = entries.iter_mut().rfind(|existing| {
+                existing.id.is_none() && existing.role == entry.role && existing.text == entry.text
+            })
+        {
+            existing.id = Some(id);
+            existing.sequence_id = entry.sequence_id;
+        } else {
+            entries.push(entry);
+        }
+    });
 }
 
 /// One live inspection socket and the closures keeping its handlers alive.
@@ -1806,7 +2607,9 @@ fn connect_dev_events(
         }
         dev_error.set(None);
         let Some(window) = web_sys::window() else {
-            dev_error.set(Some("Could not open live updates: no browser window is available.".into()));
+            dev_error.set(Some(
+                "Could not open live updates: no browser window is available.".into(),
+            ));
             return;
         };
         let location = window.location();
@@ -1816,10 +2619,14 @@ fn connect_dev_events(
             "ws"
         };
         let Ok(host) = location.host() else {
-            dev_error.set(Some("Could not determine the browser host for live updates.".into()));
+            dev_error.set(Some(
+                "Could not determine the browser host for live updates.".into(),
+            ));
             return;
         };
-        let websocket = match WebSocket::new(&format!("{scheme}://{host}/world/{world_id}/inspect/events")) {
+        let websocket = match WebSocket::new(&format!(
+            "{scheme}://{host}/world/{world_id}/inspect/events"
+        )) {
             Ok(websocket) => websocket,
             Err(error) => {
                 dev_error.set(Some(format!("Could not open live updates: {error:?}")));
@@ -1843,7 +2650,9 @@ fn connect_dev_events(
                     dev_events.set(Some(event));
                 }
                 Err(error) => {
-                    dev_error.set(Some(format!("Live updates sent an invalid message: {error}")));
+                    dev_error.set(Some(format!(
+                        "Live updates sent an invalid message: {error}"
+                    )));
                 }
             }
         });

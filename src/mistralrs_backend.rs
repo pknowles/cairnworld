@@ -1,5 +1,8 @@
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result, ensure};
 use mistralrs::{
     CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Delta, DeviceLayerMapMetadata,
@@ -18,6 +21,18 @@ pub struct MistralRsBackend {
     model: Model,
     max_context_tokens: usize,
     max_output_tokens: usize,
+    #[cfg(test)]
+    observed_prompts: Option<Arc<Mutex<Vec<ObservedPrompt>>>>,
+}
+
+/// A test-only capture at mistral.rs's formatting and tokenization boundary.
+/// Production retains only the checksums needed to verify reconstruction.
+#[cfg(test)]
+#[derive(Debug, PartialEq)]
+pub(crate) struct ObservedPrompt {
+    pub request: Request,
+    pub prompt: String,
+    pub tokens: Vec<u32>,
 }
 
 impl MistralRsBackend {
@@ -120,7 +135,16 @@ impl MistralRsBackend {
             model,
             max_context_tokens: limits.max_context_tokens,
             max_output_tokens: limits.max_output_tokens,
+            #[cfg(test)]
+            observed_prompts: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_prompts(&mut self) -> Arc<Mutex<Vec<ObservedPrompt>>> {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        self.observed_prompts = Some(Arc::clone(&observed));
+        observed
     }
 }
 
@@ -229,16 +253,39 @@ impl Backend for MistralRsBackend {
         inference_id: i64,
     ) -> Result<Response> {
         let max_output_tokens = self.max_output_tokens;
+        #[cfg(test)]
+        let observed_prompts = self.observed_prompts.clone();
+        #[cfg(test)]
+        let observed_request = request.clone();
         let builder = request_builder(&request, max_output_tokens)?.with_prompt_observer({
             let store = store.clone();
             std::sync::Arc::new(move |prompt, tokens, format| {
+                #[cfg(test)]
+                let observed = if let Some(observed_prompts) = &observed_prompts {
+                    observed_prompts
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("prompt observation lock poisoned"))
+                        .map(|mut observed_prompts| {
+                            observed_prompts.push(ObservedPrompt {
+                                request: observed_request.clone(),
+                                prompt: prompt.to_owned(),
+                                tokens: tokens.to_vec(),
+                            });
+                        })
+                } else {
+                    Ok(())
+                };
                 let store = store.clone();
                 let evidence = format
                     .context("model did not provide reconstructable prompt formatting")
                     .and_then(|format| {
                         crate::store::PromptEvidence::new(format, prompt, tokens, max_output_tokens)
                     });
-                Box::pin(async move { store.record_prompt(inference_id, evidence?).await })
+                Box::pin(async move {
+                    #[cfg(test)]
+                    observed?;
+                    store.record_prompt(inference_id, evidence?).await
+                })
             })
         });
         // Resolved once before streaming starts, not per token: Developer
@@ -557,10 +604,15 @@ mod tests {
         let store = crate::store::Store::open(database.path()).await.unwrap();
         let world = store.create_world("prompt evidence").await.unwrap();
         let agent = store.create_agent(world).await.unwrap();
-        let segments =
-            crate::context::segments(&store, agent, None, &request.messages, &request.tools)
-                .await
-                .unwrap();
+        let segments = crate::context::segments(
+            &store,
+            store.agent_branch(agent).await.unwrap(),
+            &request.messages,
+            &[],
+            &request.tools,
+        )
+        .await
+        .unwrap();
         let invocation_id = store
             .start_invocation(None, agent, None, None, None)
             .await

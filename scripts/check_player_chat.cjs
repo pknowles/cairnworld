@@ -72,6 +72,10 @@ sockets.on("connection", (socket) => {
       assert.equal(typeof event.text, "string");
       assert.notEqual(event.text.trim(), "");
       entries.push({ role: "user", text: event.text });
+      // The production socket echoes the durable player event after the
+      // client has already shown its optimistic placeholder. Its ID makes
+      // that one visible entry inspectable in Developer Mode.
+      socket.send(JSON.stringify({ type: "entry", role: "user", text: event.text, id: 25, sequence_id: 1 }));
       socket.send(JSON.stringify({ type: "activity", activity: "responding" }));
       socket.send(JSON.stringify({ type: "can_act", value: false }));
       const text = ++messages === 1 ? "Mara nods." : "A bell rings.";
@@ -126,6 +130,8 @@ checkBrowser(server, async (tab, port) => {
     await tab.locator('input[name="text"]').fill("I listen.");
     await tab.locator('input[name="text"]').press("Enter");
     await tab.locator("#chat-status").getByText("The game is responding…").waitFor();
+    await tab.locator('#chat [data-role="user"]').getByText("I listen.", { exact: true }).waitFor();
+    assert.equal(await tab.locator('#chat [data-role="user"]').getByText("I listen.", { exact: true }).count(), 1, "the durable socket echo replaces the optimistic player entry instead of rendering a duplicate");
     assert.equal(await tab.locator('input[name="text"]').isDisabled(), false);
     assert.equal(await tab.locator('button[type="submit"]').isDisabled(), true);
     assert.equal(await tab.locator('input[name="text"]').evaluate((input) => document.activeElement === input), true);

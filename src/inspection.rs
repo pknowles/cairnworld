@@ -50,6 +50,33 @@ pub enum Role {
     Narration,
 }
 
+/// Why a message was added to a chat history. This does not alter its model
+/// role: an instruction remains a user turn to the model while inspection
+/// names its actual game-side source.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    Conversation,
+    Instruction,
+}
+
+impl MessageOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Instruction => "instruction",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "conversation" => Ok(Self::Conversation),
+            "instruction" => Ok(Self::Instruction),
+            _ => Err(format!("unknown message origin {value:?}")),
+        }
+    }
+}
+
 impl Role {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -151,10 +178,56 @@ pub struct Usage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Segment {
-    Text { text: i64, role: Role },
-    Tools { text: i64 },
-    Summary { summary: i64 },
-    Messages { messages: PositionRange },
+    Text {
+        text: i64,
+        role: Role,
+    },
+    /// Current state supplied for this inference, folded into the leading
+    /// system message without becoming conversation history.
+    Context {
+        context: i64,
+    },
+    Tools {
+        text: i64,
+    },
+    Summary {
+        summary: i64,
+    },
+    Messages {
+        messages: PositionRange,
+    },
+}
+
+/// Live Developer Mode event shared by the server and hydrated browser.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DevEvent {
+    DeveloperModeChanged {
+        enabled: bool,
+    },
+    AccessChanged,
+    InferenceStarted {
+        inference_id: i64,
+        agent_id: i64,
+        sequence_id: Option<i64>,
+        parent_inference_id: Option<i64>,
+    },
+    Token {
+        inference_id: i64,
+        offset: usize,
+        text: String,
+    },
+    InferenceCompleted {
+        inference_id: i64,
+        error: Option<String>,
+    },
+    Changed {
+        sequence_id: Option<i64>,
+        inference_id: Option<i64>,
+    },
+    ResyncRequired {
+        skipped: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -162,12 +235,6 @@ pub struct PositionRange {
     pub branch_id: i64,
     pub first_position: i64,
     pub last_position: i64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub struct HistoryHead {
-    pub branch_id: i64,
-    pub cut: i64,
 }
 
 // --- Developer Mode inspection view types (moved from store.rs) -----------
@@ -179,11 +246,24 @@ pub enum RecordedOutcome {
     Error(String),
 }
 
+/// Independent evidence captured at the model boundary for a rendered prompt.
+/// `None` on an inference means that backend did not supply prompt evidence.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PromptEvidenceView {
+    pub format_id: i64,
+    pub rendered_at: String,
+    pub prompt_hash: String,
+    pub tokens_hash: String,
+    pub max_output_tokens: usize,
+}
+
 /// The complete stored record of one model invocation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RecordedInference {
     pub id: i64,
     pub agent_id: i64,
+    pub branch_id: i64,
+    pub history_entry_id: i64,
     pub sequence_id: Option<i64>,
     /// The inference whose tool call caused this one, resolved by joining
     /// this inference's invocation back to its parent_tool_execution_id
@@ -191,9 +271,12 @@ pub struct RecordedInference {
     /// inference-to-inference pointer). `None` for a root or deferred
     /// invocation's inference, which has no requesting tool call.
     pub parent_inference_id: Option<i64>,
+    /// Set only for a deferred compaction caused by a completed inference.
+    pub cause_inference_id: Option<i64>,
     pub segments: Vec<Segment>,
     pub request: Request,
     pub model_prompt: Option<String>,
+    pub prompt_evidence: Option<PromptEvidenceView>,
     pub outcome: RecordedOutcome,
     pub model: String,
     pub duration_ms: Option<u64>,
@@ -250,34 +333,41 @@ pub struct AgentInfo {
     pub location_name: Option<String>,
 }
 
-/// One entry of a raw agent history page. Raw messages, the notices and
-/// summary markers that anchor after a message, and failed inferences appear
-/// in recorded order. Distinct from context assembly: no summary folding.
+/// One entry of a raw agent history page. Raw messages, summary markers that
+/// anchor after a message, and failed inferences appear in recorded order.
+/// Distinct from context assembly: no summary folding.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum RawHistoryEntry {
     Message {
         id: i64,
         role: Role,
+        origin: MessageOrigin,
         content: MessageContent,
         reasoning: String,
         source_inference_id: Option<i64>,
         answers_tool_execution_id: Option<i64>,
-    },
-    Notice {
-        id: i64,
-        content: String,
-        source_inference_id: Option<i64>,
     },
     Summary {
         id: i64,
         covered_ranges: Vec<PositionRange>,
         inference_id: i64,
         text: String,
+        reason: String,
+        retained_messages: i64,
     },
-    FailedInference {
+    Inference {
         id: i64,
-        error: String,
+        history_entry_id: i64,
+        error: Option<String>,
     },
+}
+
+/// One cursor-paged raw history response shared by the inspection route and
+/// the browser that resumes it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RawHistoryPageResponse {
+    pub entries: Vec<RawHistoryEntry>,
+    pub cursor: Option<RawHistoryCursor>,
 }
 
 /// An opaque paging cursor over one agent's raw history: the head it is
@@ -285,7 +375,8 @@ pub enum RawHistoryEntry {
 /// the branch/position to resume after.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RawHistoryCursor {
-    pub head: HistoryHead,
+    pub branch_id: i64,
+    pub cut: i64,
     pub next_branch_id: i64,
     pub next_position: i64,
 }
@@ -304,7 +395,7 @@ pub struct BranchNode {
     /// branch's history is each parent's own entries up to `through_position`,
     /// in this order, followed by this branch's own entries.
     pub parents: Vec<BranchParent>,
-    pub head: Option<BranchHead>,
+    pub head: Option<BranchGroup>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -314,13 +405,87 @@ pub struct BranchParent {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct BranchHead {
+pub struct BranchGroup {
     pub group_id: i64,
     pub group_name: String,
 }
 
-/// A world's current game objects and notes. Present state only - never a
-/// `Segment`, never assembled into a model request.
+/// A stable object kind. Together with the database id this identifies one
+/// current game object and makes a relationship navigable without guessing
+/// from its display name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectType {
+    Character,
+    Connection,
+    Group,
+    Item,
+    ItemType,
+    Location,
+}
+
+impl ObjectType {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "character" => Some(Self::Character),
+            "connection" => Some(Self::Connection),
+            "group" => Some(Self::Group),
+            "item" => Some(Self::Item),
+            "item_type" => Some(Self::ItemType),
+            "location" => Some(Self::Location),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Character => "character",
+            Self::Connection => "connection",
+            Self::Group => "group",
+            Self::Item => "item",
+            Self::ItemType => "item_type",
+            Self::Location => "location",
+        }
+    }
+}
+
+/// An opaque stable boundary for the world-object index.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct WorldObjectCursor {
+    pub object_type: ObjectType,
+    pub id: i64,
+}
+
+/// A typed current-state reference, rendered as a direct object link.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ObjectLink {
+    pub object_type: ObjectType,
+    pub id: i64,
+    pub label: String,
+}
+
+/// A verbatim current-state field whose value is not itself an object link.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ObjectField {
+    pub label: String,
+    pub value: String,
+}
+
+/// One current object. Present state only - never a `Segment`, never
+/// assembled into a model request.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct GameObject {
+    pub object_type: ObjectType,
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub gm_notes: String,
+    pub storyteller_notes: String,
+    pub fields: Vec<ObjectField>,
+    pub relationships: Vec<ObjectLink>,
+}
+
+/// One stable page of a world's current objects and world-level notes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WorldObjects {
     pub name: String,
@@ -329,29 +494,6 @@ pub struct WorldObjects {
     pub storyteller_summary: String,
     pub gm_notes: String,
     pub storyteller_notes: String,
-    pub characters: Vec<GameObject>,
-    pub locations: Vec<GameObject>,
-    pub items: Vec<GameObject>,
-    pub connections: Vec<ConnectionObject>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct GameObject {
-    pub id: i64,
-    pub name: String,
-    pub description: String,
-    pub gm_notes: String,
-    pub storyteller_notes: String,
-}
-
-/// A connection has no name; it is identified by the locations it joins.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ConnectionObject {
-    pub id: i64,
-    pub from: String,
-    pub to: String,
-    pub travel_time: i64,
-    pub description: String,
-    pub gm_notes: String,
-    pub storyteller_notes: String,
+    pub objects: Vec<GameObject>,
+    pub cursor: Option<WorldObjectCursor>,
 }

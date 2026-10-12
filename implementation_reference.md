@@ -7,7 +7,7 @@ work; their completion claims do not override the source.
 
 Developer Mode has the A–C recording/query foundations, but their completion is
 not verified. Review of `a7191bd` on 2026-09-17 found several defects; the
-corrections below have landed except bounded history ranges
+corrections below have landed, including bounded history ranges
 ([plan](plans/developer-inspection.md#bounded-history-ranges)). Status:
 
 - **Fixed:** `game.rs::arbitrate` no longer mirrors durable resolution in a
@@ -47,14 +47,27 @@ corrections below have landed except bounded history ranges
   different primary key) for a `FailedInference` row, and `ui.rs` renders it
   as a clickable link to that inference's view, matching the existing pattern
   for a summary's source-inference link.
-- **Still open:** history traversal loads the whole entry index and validates
-  only the current head's ownership; raw paging queries every inference
-  before slicing the page; foreign parent ownership is not checked. A
-  `CompletedAfter` delivery error leaves unreached sibling tools `running`.
+- **Fixed:** `store::history::AgentBranch` is the private-field proof that a
+  selected branch belongs to its world and agent. Turns, context assembly and
+  live history take it directly; `agent_branch`, `group_branch`, and the
+  browser-gated `branch_for_viewer` are its only constructors. `RawCursor`
+  validates its fixed head and next key before paging. `reach()` is the single
+  recursive traversal definition, whose JSON result feeds the literal raw-page
+  query; there is no whole-index load, sentinel cursor or production-only test
+  traversal. The browser suite confirms the shared inspection types hydrate.
 
-The code still uses location-owned linear GM histories; D introduces groups and
-their heads, and E–F complete raw fields/evidence and navigation. Planned
-behavior is not implied to exist here.
+D (groups and their heads) and E (raw fields/evidence, including the
+product-path verification against real model boundary captures) are complete.
+F's navigation is in progress: the query-string `InspectSelection` adapter
+(pushState/popstate, no history entries on back/forward) and the Close/reopen
+fix are done - Close collapses the pane to a thin, always-visible strip on the
+edge (never removed from the DOM, no separate reopen control elsewhere);
+clicking the strip expands back to the last selection. Exact node
+highlighting/history-position links, cursor-driven history and object paging,
+and object search are done. At widths below `sm`, Chat and Inspect tabs use
+CSS visibility to show one pane without unmounting either; an inspect
+selection activates Inspect, and a tab switch preserves the chat draft and
+its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 
 ## Inference layer (design.md: Inference layer)
 
@@ -118,7 +131,7 @@ behavior is not implied to exist here.
   it does not establish that compaction can reduce the failed allocation.
 - `src/agent.rs` - resolves one recorded chat turn: persists each assistant
   response, runs calls from the invocation-local tool list, persists their
-  results, and repeats until final text. A final reply and any due compaction
+  results, and repeats until its final non-tool completion. A final reply and any due compaction
   job are committed together. `complete_with_call_context` explicitly finishes
   its invocation on success/error. Its InvocationGuard Drop only debug-asserts
   that finish was called; it does not persist cleanup on cancellation.
@@ -149,13 +162,14 @@ behavior is not implied to exist here.
   Option<i64>`, `None` for every non-GM agent kind.
 - `src/compaction.rs` - resolves a persisted compaction job as ordinary
   recorded summarisation, preserving exactly `keep_tail_messages` newest raw
-  rows. The compaction inference and its chat notice carry the job's
-  `sequence_id`, so a summary links back to the reply that queued it. The input
+  rows. The compaction inference and summary carry the job's `sequence_id`, so
+  a summary links back to the reply that queued it. The input
   is the previous summary and that raw range, closed by the compaction
   instruction as a user-role message. If that request is rejected for capacity,
   it retains one more raw row and tries the real summary request again. If no
-  older row remains, it fails; it never predicts token use or retries unchanged
-  history. `run()` passes the job's own `branch_id` into `start_invocation`
+  older row remains on a threshold pass, it retires the no-op job; if recovering
+  capacity, it fails. It never predicts token use or retries unchanged history.
+  `run()` passes the job's own `branch_id` into `start_invocation`
   explicitly rather than falling back to `branch_for_agent(job.agent_id)`,
   which fails for a world_gm agent (no single `agent_history` row).
   `summary_segments`, `Store::latest_summary_for_branch` and
@@ -217,20 +231,20 @@ behavior is not implied to exist here.
   single `agent_history` row - each group's `history_branch` is created
   directly and owned by `"group".branch_id` instead (design.md's
   `GroupHistory { agent_id, branch_id }`: "agent ID alone cannot select a GM
-  history"). `agent::Turn`/`start_invocation`/`context::segments`/
-  `store::live_segments` all accept an explicit `branch_id: Option<i64>`
-  override for this case; every other agent kind passes `None` and resolves
-  its one `agent_history` branch as before. `store::history::branch_owner`
+  history"). `AgentBranch` proves the selected world, agent and branch once;
+  `agent::Turn`/`context::segments`/`store::live_segments` carry that proof,
+  so a GM call cannot fall back to an unrelated agent-history branch.
+  `store::history::branch_owner`
   resolves a branch's owning agent/world directly from
   `history_branch.agent_id JOIN agent` - `spawn_group_branch` always binds a
   world_gm agent's own `agent_id` to every group branch it creates, so this
   needs no fallback through `agent_history`/`group`, unlike before D4.
   `history_entry(branch_id, position, kind)` is the
-  one ordered index every message, inference start, summary activation and
-  notice appends to (`src/store/history.rs`'s `allocate_position`/
+  one ordered index every message, inference start, and summary activation
+  appends to (`src/store/history.rs`'s `allocate_position`/
   `append_history_entry`, using `UPDATE history_branch SET next_position =
   next_position + 1 ... RETURNING` in the same transaction as the row it
-  backs). `message.id` and `chat_notice.id` are their own history_entry id;
+  backs). `message.id` is its own history_entry id;
   `inference.history_entry_id` and `summary.history_entry_id` are separate
   unique columns, since an inference's start and completion are the same row
   while a summary's activation is a distinct entry from the message range it
@@ -268,13 +282,16 @@ behavior is not implied to exist here.
   additional filtering) can exercise as exactly.
   `store::history::Store::raw_page(head: BranchHead, after: Option<(branch_id,
   position)>, limit)` is `agent_raw_history`'s keyset-paged raw selector: one
-  query joins `reach` against `history_entry`, excludes a successful
-  inference's own entry (`LEFT JOIN inference ... WHERE kind != 'inference' OR
-  inference.error IS NOT NULL` - a failed inference's history-entry row is
-  what design.md's `FailedInference` needs; a succeeded one renders nothing
-  of its own, only its assistant message), and resumes from `after` via the
+  query joins `reach` against `history_entry`, retaining every inference
+  entry so raw history can link each recorded model call (including tool-only
+  calls) to its exact inference view, and resumes from `after` via the
   standard `(branch_id > ?) OR (branch_id = ? AND position >= ?)` keyset
   condition rather than reloading and re-slicing every prior page.
+  A direct history link names both its branch and entry; `raw_cursor_at`
+  validates that entry against the same branch and fixed cut before paging
+  from it, so an old/foreign entry cannot be treated as a valid snapshot.
+  Each branch section keeps that cursor independent; its intersection sentinel
+  invokes the same next-page request as the accessible Load more control.
   `LIMIT limit + 1` reveals whether another page follows. When `after` is
   given, its position is first checked against `head`'s own reach and
   rejected (`ensure!`, not silently treated as end-of-history) if it names a
@@ -319,7 +336,7 @@ behavior is not implied to exist here.
   outcome settled with `Content::Text` and its exact next-context size
   (input+output, no re-tokenizing) reaches the caller's `CompactionPolicy`.
   `finish_summary_inference` completes the inference row and, only on
-  success, writes the summary activation, its notice, and retires the
+  success, writes the summary activation and retires the
   `pending_compaction` job atomically; a capacity-rejected attempt still
   records its failed inference in full but leaves the job untouched so
   `compaction::run`'s retry loop can resubmit a smaller recipe. `context.rs`'s
@@ -330,10 +347,10 @@ behavior is not implied to exist here.
   through it.
 - `Store::agent_raw_history` resolves `agent_id`/`branch_id`/`after` to a
   validated `BranchHead`, pages it through `raw_page` (above), then resolves
-  each returned entry's `message`/`chat_notice`/`summary`/failed-`inference`
+  each returned entry's `message`/`summary`/failed-`inference`
   payload and returns an opaque `RawHistoryCursor{head, next_branch_id,
-  next_position}`, so a page boundary landing exactly on a failure, summary
-  or notice is neither skipped nor duplicated in the existing paging tests.
+  next_position}`, so a page boundary landing exactly on a failure or summary
+  is neither skipped nor duplicated in the existing paging tests.
   A failed inference resolves its own real `inference.id` (not the
   `history_entry.id` primary key its row shares) as the ID a browser
   inference-view link must name.
@@ -365,7 +382,7 @@ behavior is not implied to exist here.
   immutable prompt/schema/formatter artifacts (role prompts, tool-definition
   JSON, the compaction prompt) - ordinary conversational content no longer
   routes through it. `message.content` and `tool_execution.result_content_id`
-  are bare recorded_content IDs; chat_notice instead stores Rust-generated text. No
+  are bare recorded_content IDs. No
   producer needs a typed sub-selection of a content row, since reasoning is
   always read alongside its own content (never referenced independently by a
   different history entry) and GM narration is the GM's own settled text
@@ -378,7 +395,9 @@ behavior is not implied to exist here.
   message row is written - the latter takes an already-resolved content id
   directly rather than re-interning, used by `append_location_narration` so
   every present character's delivered copy shares the GM inference output row
-  (verified by `narration_delivered_to_several_recipients_shares_one_content_row`).
+  and carries that output's `source_inference_id` back to its producing Turn
+  (verified by `narration_delivered_to_several_recipients_shares_one_content_row`
+  and `player_take_is_approved_by_its_location_gm_and_transferred_by_rust`).
   `branch_for_agent_tx`/`recorded_content_tx` are transaction-scoped
   counterparts to `branch_for_agent`/`recorded_content`, required because the
   store's SQLite pool is one connection: any `&self.pool` query issued while
@@ -407,7 +426,7 @@ behavior is not implied to exist here.
   `action.pending_action_id` (not a foreign key - the source `pending_action`
   row is deleted on resolve) lets that idempotent-retry lookup find the
   already-resolved row. `pending_compaction.sequence_id` and
-  `chat_notice.source_inference_id` complete the compaction trail. The
+  `summary.inference_id` complete the compaction trail. The
   `sequence_inference_ids`, `inference_message_ids` and `inference_actions`
   read helpers walk these links for Developer Mode inspection.
 - Execution ancestry (design.md's Durable execution relationships).
@@ -451,13 +470,27 @@ behavior is not implied to exist here.
   call's original clock, output limit and independent text/token checksums before
   generation. It stores no assembled prompt or token-array copy. Reconstruction
   uses the bounded request and retained template/time and rejects a text checksum
-  mismatch. The GPU fidelity test compares the reconstructed prompt and token IDs
-  with those observed during actual generation. `inference.model` already
+  mismatch. `RecordedInference` carries the corresponding `PromptEvidenceView`
+  (formatter artifact ID, clock, checksums and output limit), so the hydrated
+  pane exposes the exact evidence it used without a second query. The GPU
+  fidelity test drives a normal `Game` opening and compares its reconstructed
+  request/prompt and retained token checksum with values observed at the model
+  boundary. The ignored real-model browser check drives the normal creation
+  tool round trip, then opens that exact saved tool inference through the
+  production play page, chat socket and inspection route, comparing its raw
+  request, prompt and evidence with those independently observed values. It
+  then changes the current world notes and proves the saved inference still
+  reconstructs identically before reopening it in the browser. The
+  regular browser fixture replays a reviewed response round captured from the
+  configured local model through the same Game-recorded tool/reply/
+  deferred-compaction sequence and compares its raw request with the backend
+  capture; its separately seeded history is only for live websocket events.
+  `inference.model` already
   records the configured model name that served each call; no separate
-  model/tokenizer identity or digest tracking is retained (design.md's Exact
-  model input and verification). Historical tokenizer retention across
-  formatter code changes, complete causal navigation and the Developer Mode
-  interface remain in the active Developer Mode plan.
+  model/tokenizer identity or digest tracking is retained. This follows
+  design.md's Exact model input and verification decision: the retained
+  formatter artifact and boundary evidence reconstruct with the current runtime;
+  historical formatter/tokenizer revision dispatch is deliberately out of scope.
 - `src/inspection.rs` - the plain data types Developer Mode's server and
   browser both use: model request/response (`Request`, `Response`, `Message`,
   etc., moved from `src/llm.rs`, which re-exports them) and the inspection
@@ -469,6 +502,14 @@ behavior is not implied to exist here.
   `use` these types directly instead of hand-mirroring a second, narrower copy
   that could silently drop a field - `src/store.rs` and `src/web.rs` remain
   the only code that builds them from the database or serves them over HTTP.
+  `MessageOrigin` records a game-authored **Instruction** separately from a
+  conversational message while retaining the model-facing `Role::User` where
+  that is the correct chat-template role. `Game::resolve_enter` stores its
+  one-time player-entry instruction before the opening inference, so later
+  player turns and compaction process it as ordinary history; only the current
+  player system prompt remains input-only. `RecordedInference` carries the
+  existing compaction `cause_inference_id` so the browser does not infer that
+  meaning from text.
 
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 
@@ -529,11 +570,21 @@ behavior is not implied to exist here.
 
 - `src/game.rs` - the membership-scoped game service used by browser events.
   It serializes each world's events, opens a blank Adventurer's player agent
-  proactively, and gives every agent turn a user-role event message - the
-  player's entry, or the request that starts a GM's opening narration or
-  arbitration - so tool-capable templates have a valid first user turn without
-  displaying or persisting a fake player message. The ordinary agent loop executes any creation-roll
-  calls and stores its final text. The first viewer starts one server-owned
+  proactively. Each GM opening, presence, or arbitration trigger is appended
+  to its validated group branch before inference, carrying the sequence that
+  began it; the stored event is therefore the newest GM history message and is
+  visible in Developer Mode. The GM role prompt is one fixed text, while its
+  rebuilt scene packet is a separate `Segment::Context` folded into the leading
+  system message and never becomes history. The player agent's initial entry
+  remains temporary because player chat correctly renders stored user messages
+  as player speech. The ordinary agent loop executes any creation-roll
+  calls and stores its final completion, including a deliberate empty text
+  completion. Empty player-agent completions end the turn without a chat
+  entry; Developer Mode names them "No player-facing response." in turns,
+  inference detail and raw history. `agent::Settled` retains whether tools
+  ran and the final inference ID, so an empty first reply logs durable
+  sequence/inference context as anomalous without blocking a player re-prompt.
+  The first viewer starts one server-owned
   opening operation per character; concurrent reconnects wait on that same
   operation, then view its durable result rather than queueing game work.
   Completing character creation asks the character's resolved group's world_gm
@@ -558,7 +609,8 @@ behavior is not implied to exist here.
   later reschedule or an already-settled announcement) - this is how
   returning before the deadline cancels a pending departure without ever
   narrating it. At the deadline, an empty group retains the difference
-  without an inference; otherwise `narrate_presence_transition` runs an
+  without an inference; only creation-ready characters participate, otherwise
+  `narrate_presence_transition` runs an
   ordinary no-tools GM turn (its own `sequence`/`begin_sequence`) naming who
   arrived/left, delivers it through the existing `append_location_narration`,
   and persists the new announced set together with that narration.
@@ -739,12 +791,19 @@ behavior is not implied to exist here.
   a client-side `RwSignal<Option<InspectSelection>>` covering all four views
   user_declarations.md's Developer Mode section calls for; switching between
   them only re-fetches and re-renders the pane, never navigating or touching
-  the chat's websocket.
+  the chat's websocket. Its native URL/history adapter reports a listener or
+  URL-serialization failure visibly rather than silently leaving navigation
+  partially active; Back and Forward restore the existing pane selection
+  without inserting replacement history entries.
+  Chat-entry turn URLs retain the durable entry id (`entry=`), and the turn
+  visibly retains that selected-entry context rather than relying on repeated
+  text to identify it.
   - The turn view (`InspectSelection::Sequence`) fetches
     `/world/{id}/inspect/sequences/{id}` and renders every inference in that
-    turn's tree (`SequenceNodeCard`, which embeds `InferenceCard`): agent,
-    model, parent link, output (`ContentBlock`), reasoning, actions performed,
-    and the messages it produced.
+    turn's tree as its actor and generated output. A generated tool call
+    contains its Rust execution result and any linked GM decision; it is not
+    repeated as a separate action/message summary. Child inference links retain
+    the invocation nesting.
   - The inference view (`InspectSelection::Inference`) fetches
     `/world/{id}/inspect/inferences/{id}` and renders the same `InferenceCard`
     standalone, plus a link back to its turn - clicking an "inference N" badge
@@ -758,10 +817,11 @@ behavior is not implied to exist here.
     parallel, and renders each branch's raw messages with compaction
     summaries and inference failures inlined at the point they actually
     occurred in the ordered history index (`store/history.rs`'s traversal -
-    see "Persistence and recording" above), each with its own "Load more"
-    button fetching its own next page via its own opaque `RawHistoryCursor`
-    (JSON-encoded in the `after` query param) and appending only to that
-    branch's section. A plain player/NPC/Storyteller agent has exactly one
+    see "Persistence and recording" above). Each section observes its cursor
+    sentinel with `IntersectionObserver` to load its next page, while retaining
+    an accessible "Load more" button; both use that section's opaque
+    `RawHistoryCursor` (JSON-encoded in the `after` query param) and append
+    only to that branch's section. A plain player/NPC/Storyteller agent has exactly one
     branch and renders with no heading, identical to the view before D6; a
     world_gm agent whose groups have split/merged renders every branch as
     its own section labelled by its current group head or "retired", with a
@@ -773,26 +833,27 @@ behavior is not implied to exist here.
     merge can cover ranges from more than one branch.
   - The world object/agent navigator (`InspectSelection::Agents`/`Objects`,
     `AgentsList`/`ObjectsView`) is always reachable from the pane header and
-    fetches `/world/{id}/inspect/agents` or `/world/{id}/inspect/objects`,
-    presenting every field verbatim rather than a simplified projection
-    (no search/filter yet).
-  `InferenceCard` shows per-node token usage (prompt/completion/total) and a
-  cumulative total folded over every node in the current turn view; both are
+    fetches `/world/{id}/inspect/agents` or a stable cursor page from
+    `/world/{id}/inspect/objects`. The object index is ordered by typed
+    `(type, id)` keys; the server filters name/type/ID searches before paging,
+    and returns typed relationship targets (current holder/type, group,
+    location, connection, and members) as direct `?inspect=objects&type=…&id=…`
+    links. The browser appends each requested page and preserves the active
+    search while doing so; selecting a relationship reloads its exact target
+    and highlights it.
+  `InferenceCard` shows reconstructed input before output, rendering a GM
+  `Current scene packet` as labelled scene fields rather than JSON. Its model
+  prompt, token usage and verification evidence live in the top-right `…`
+  technical popover. Per-node usage and the cumulative current-Turn total are
   omitted when usage was not recorded rather than showing a misleading zero.
-  `ContentBlock` renders model/message content (an inference's outcome, each
-  request message, a raw history entry) without collapsing it to one string:
-  plain text renders as-is, and each tool call keeps its own `id`/`name`/
-  `arguments` as a separate row rather than being joined with any others into
-  one line - a `CopyButton` sits next to every exact-text piece it renders
-  (an outcome's text, each tool call's arguments, a tool result's content,
-  each request message, the post-template model prompt) - it writes to the
-  clipboard via `navigator.clipboard.write_text` and flips to a checkmark for
-  a moment, skipped entirely when the field is empty. `InferenceCard` also
-  serializes the complete `RecordedInference` it was given (every field -
-  segments, request, outcome, model, duration, not a projection of them) as
-  pretty-printed JSON into its own collapsed "Raw JSON" `<details>`, with the
-  same `CopyButton` treatment, satisfying design.md's "Render raw JSON ...
-  with ... clipboard controls" independent of the structured rendering above.
+  `ContentBlock` renders model/message content without collapsing it to one
+  string. Plain text and scene facts are copyable; a tool call leads with its
+  name and arguments, while its execution result and linked GM decision are
+  nested beneath it in a Turn. Opaque call IDs remain durable relationships and
+  are not rendered. The HTTP endpoints still serialize `RecordedInference` for
+  developer clients, but the human pane does not render transport JSON or its
+  opaque hashes. Copy controls are compact accessible icons beside the exact
+  text they copy.
   Step 6's live updates implement design.md's Live inspection protocol in
   full (Developer Inspection plan slice A). `Store` owns a `dev_events:
   Arc<Mutex<HashMap<world_id, broadcast::Sender<DevEvent>>>>` registry
@@ -805,7 +866,10 @@ behavior is not implied to exist here.
   developer_mode }` is the one indexed query behind every inspection
   authorization decision - both `inspecting` (HTTP routes) and the websocket
   build on it, so membership and mode stay authoritative from one source
-  rather than a cache. `DevEvent` adds `AccessChanged` (a wake-up published
+  rather than a cache. `inspection::DevEvent` and
+  `RawHistoryPageResponse` are the one serialized shapes used by the store,
+  route and hydrated browser, rather than mirrored server/browser types.
+  `DevEvent` adds `AccessChanged` (a wake-up published
   after `set_developer_mode`/`remove_member` commit, never itself an
   authorization decision), `Changed { sequence_id, inference_id }` (published
   after `finish_inference` and `resolve_pending_action` commit), and
@@ -849,16 +913,12 @@ behavior is not implied to exist here.
   independent of, and without touching, the chat's own websocket.
   Both the "Input" panel (turn/inference views) and the raw history show the
   exact, untruncated `request.messages`/message content, reasoning, and
-  post-template `model_prompt` when recorded. `SequenceNodeView`,
-  `InferenceSummary`, `RawHistoryEntryView`, `AgentInfoView` and
-  `WorldObjectsView` are hand-written mirrors of `store::SequenceNode`,
-  `RecordedInference`, `RawHistoryEntry`, `AgentInfo` and `WorldObjects`
-  respectively (`serde` ignores fields the pane does not render yet, such as
-  `segments`/`tools`/`sampling`). Tool-call IDs and some object relationships
-  are also omitted from browser types. The existing library can host shared
-  serialization types; the active plan removes unnecessary manual mirroring. All
-  of this inspect-pane code is `#[cfg(feature = "hydrate")]`-only, since it
-  never renders anything server-side.
+  post-template `model_prompt` when recorded. `inspection::DevEvent` and
+  `inspection::RawHistoryPageResponse` are shared by the server and hydrated
+  browser; inspect views render those shared records rather than maintaining
+  narrower client-side wire mirrors. All inspect-pane code is
+  `#[cfg(feature = "hydrate")]`-only, since it never renders anything
+  server-side.
 - `style/app.css`, `package.json`, and `package-lock.json` - Tailwind CSS 4
   with daisyUI's maintained component/theme layer. The default `forest` theme
   establishes the dark palette; the shared Leptos markup uses responsive

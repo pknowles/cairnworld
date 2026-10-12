@@ -150,9 +150,18 @@ together decide whether compaction is queued after a turn. The threshold is
 kept below the fixed context capacity with room for the configured output, so a
 turn that has not queued compaction can safely run again.
 
-An inline, non-model-facing chat notice records every compaction and the case
-where only the retained tail remains. Repeated notices make a bad threshold or
-one-off huge message visible without interrupting play.
+Compaction metadata belongs to the summary itself. When only the retained tail
+remains, the pending job retires without a history event; capacity inability
+remains an error.
+
+## 2026-10-08: One compaction event
+
+> creating a separate chat message to store metadata for an event sounds like
+> a really bad idea. I would prefer consolidation in the storage, not just the
+> UI, since it really is the same operation, no?
+
+The summary activation is the one durable compaction event. Its reason and
+retained-tail count are fields on `summary`; there is no second notice record.
 
 ## 2026-09-01: Capacity fallback tokenization
 
@@ -314,3 +323,116 @@ shared ancestor is reachable through several parents.
 
 The code moves to sqlx's checked query macros to match design.md
 (plans/code-quality.md).
+
+## 2026-09-25: Inspect pane close/reopen
+
+> the current desktop view also has a broken quirk where there is a "close"
+> button that doesn't actually close the panel
+
+The Inspect pane's "Close" button only clears the current selection
+(`selection.set(None)`); the `<aside>` panel itself is never conditionally
+hidden, so it stays visible and empty. Asked to brainstorm; presented 10
+options (fix-in-place with a reopen tab, floating/draggable panel, slim
+collapsible sidebar, bottom drawer, separate browser tab, modal overlay,
+resizable split, localStorage-persisted state, keyboard shortcut, and a
+URL-selection-backed reopen button) with pros/cons for each.
+
+> 1+3 sounds fine
+
+Chosen: options 1 (fix-in-place with a reopen tab) and 3 (slim collapsible
+sidebar) combined, not option 1 alone - over a floating/draggable panel, on
+the grounds of fixing the actual bug with the least new surface area. Filed
+as plans/developer-inspection.md's section F, item 3.
+
+> [2026-09-28 correction] An earlier write-up of this entry named only
+> option 1 (a separate chat-header reopen button) and was implemented that
+> way. The user clarified "1+3" meant both combined: Close collapses the
+> panel to a thin, always-visible strip (option 3) rather than removing it
+> and relying on a separate button to bring it back (option 1 alone). Fixed
+> in plans/developer-inspection.md and rebuilt.
+
+## 2026-09-30: Developer Mode inspection clarity
+
+> It's confusing knowing which view I'm currently looking at. "Agent 4" does
+> not imply my player agent ... Similarly Agent 1 does not imply the GM.
+
+> I see no "Turn" view ... I would expect "input" to be some part of the
+> inference view, not muddled in the turn view. I would also expect input to
+> come before output.
+
+> Humans don't compute hashes ... Lets make "copy" just an tiny icon in the
+> corner that doesn't take up any horizontal space.
+
+Developer Mode must foreground game concepts over database identifiers. Agent
+links and history headings name the player/NPC/Game Master role and character or
+group context when applicable. A chat entry opens a titled Turn: an ordered
+execution summary whose inference links lead to the detailed Inference view.
+Only that detailed view shows the reconstructed input, before its output. Model,
+timing, token, formatter and integrity evidence belong in a compact technical
+details disclosure. Record serialization is an HTTP transport format, not an
+inspection view, and is not rendered as raw JSON. Tool calls lead with their
+tool name; opaque call IDs remain available only where needed to follow a real
+relationship. Copying exact text remains available through an accessible icon.
+
+## 2026-10-01: Developer Mode turn clarity
+
+> The GM's inference has a "Current scene packet" in json which is not human
+> readable ... Either way there is unnecessary duplication here.
+
+> The GM appears to have narrated the user entrance before their character was
+> ready or called begin game. What triggered this inference??
+
+> Clicking on the GM's narration didn't work.
+
+> Can we make technical details section hidden in a "..." triggered popover
+> from the top right of the card?
+
+> How can this tool call be better displayed where we see what the model
+> generates and then tool call results. If there is nesting, then I would like
+> the UI to be able to show that too visually nested.
+
+GM scene state is model input rendered as labelled game facts, while the exact
+backend-formatted prompt is technical evidence and must not duplicate it in the
+main inference view. Only creation-ready characters participate in presence
+narration. A delivered GM narration keeps its producing inference relationship
+so it opens its Turn. A Turn shows each model-generated tool call once, with its
+Rust result and linked GM decision nested beneath it; opaque call IDs remain
+durable persistence validation, not user-facing content.
+
+## 2026-10-04: Developer Mode finishing polish
+
+> My messages in green are always printed twice ... Reloading the page shows
+> just one message.
+
+> The agent chat history does not update automatically when I have it open.
+
+> [The GM opening] is not actually me, the user ... What about calling it an
+> "instruction"?
+
+> When I use the back button ... can we remember the scroll position or would
+> that need to be recorded in the GET args and get messy?
+
+Developer Mode reconciles the immediate local chat echo with its durable server
+event, refreshes an open raw history after committed inspection changes, and
+labels game-authored model input as **Instruction**. Scroll position belongs in
+browser history state, so URLs continue to name only shareable inspection
+records. Compaction has one yellow, collapsed presentation in turns and raw
+history; the durable underlying timeline remains unchanged.
+
+## 2026-10-06: Silent player-agent completions
+
+> In developer mode I would like to see an empty response as something
+> explicit. In chat, we just drop the empty response entirely and the player
+> can type in their next message.
+
+> An empty response as the first reply to a turn would be an error. Not fatal,
+> because the player can re-prompt, but this would be highly unexpected from
+> the agent and it should invite scrutiny to investigate why it happened.
+
+An empty normal model completion ends a player-agent turn. It remains a durable
+inference and assistant-history event for Developer Mode, which names it as no
+player-facing response; player chat omits it. A completion with no preceding
+tool call is anomalous rather than fatal and logs durable turn/inference context
+for investigation. The player prompt explains the silent completion option
+when another game message, such as a GM narration, already communicates the
+result.

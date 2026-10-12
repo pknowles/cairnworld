@@ -6,13 +6,11 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Code quality](code-quality.md): formatting/lint gates, then
-  correctness-by-construction refactors (validated handles, persistence by
-  feature with checked SQL, read/write pools, `World` objects with lossless
-  presence, relational segments, constructed-once recipes), then
-  architecture/duplication/complexity gates.
-- [Developer Mode](developer-inspection.md): E2 (exact evidence through the
-  product path) and F (navigation and completion). D and E1 are done.
+- [Code quality](code-quality.md) (steps 2 onward): correctness-by-construction
+  refactors (validated handles, persistence by feature with checked SQL,
+  read/write pools, `World` objects with lossless presence, relational
+  segments, constructed-once recipes), then architecture/duplication/complexity
+  gates. Developer Mode was completed first by the user's 2026-09-27 direction.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and

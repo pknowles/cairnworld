@@ -1,3 +1,9 @@
+#![deny(warnings)]
+#![forbid(unsafe_code)]
+// Leptos's typed view tree nests one generic layer per element/conditional;
+// PlayerChat's inspect pane is now deep enough to exceed rustc's default.
+#![recursion_limit = "256"]
+
 mod agent;
 mod compaction;
 mod context;
@@ -396,8 +402,9 @@ async fn run_chat(
             &budget,
             agent::Turn {
                 agent_id: agent,
-                branch_id: None,
+                branch: store.agent_branch(agent).await?,
                 static_messages: &static_messages,
+                dynamic_context: &[],
                 tools: &tools,
                 sampling: sampling.clone(),
                 model: &model.path,
@@ -495,7 +502,11 @@ async fn run_replay(
         .finish_inference(run.inference_id, run.outcome, run.duration_ms)
         .await
         .context("recording replayed inference outcome")?;
-    let outcome = if run.result.is_ok() { "settled" } else { "error" };
+    let outcome = if run.result.is_ok() {
+        "settled"
+    } else {
+        "error"
+    };
     store
         .finish_invocation(invocation_id, outcome)
         .await
@@ -503,7 +514,11 @@ async fn run_replay(
     store
         .finish_sequence(
             sequence.id,
-            run.result.as_ref().err().map(|error| format!("{error:#}")).as_deref(),
+            run.result
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"))
+                .as_deref(),
         )
         .await
         .context("finishing detached replay sequence")?;

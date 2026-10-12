@@ -7,47 +7,10 @@ use crate::{
     store::{PendingCompaction, PositionRange, Segment, Store},
 };
 
-#[cfg(test)]
-use crate::llm::Sampling;
-
 /// This request only sees the material it replaces. Static role context and
 /// tools are deliberately absent: they are supplied to every normal inference
 /// and would waste both summary space and model attention.
 const PROMPT: &str = "The conversation above is your own history. Replace it with a summary your next turn will read in its place: keep the facts, decisions, open questions, and commitments that still matter, and drop small talk and anything your standing instructions or tools already provide.";
-
-/// Compact a completed turn only after the next inference would reach the
-/// configured lazy-history threshold. No message is deleted; the new summary
-/// becomes the first selected history segment on the next turn.
-#[cfg(test)]
-struct CompletedTurn<'a> {
-    agent_id: i64,
-    next_input_tokens: usize,
-    sampling: Sampling,
-    model: &'a str,
-    limits: Limits,
-}
-
-#[cfg(test)]
-async fn after_turn<B: Backend>(store: &Store, backend: &B, turn: CompletedTurn<'_>) -> Result<()> {
-    if turn.next_input_tokens < turn.limits.compact_before_next_input_tokens {
-        return Ok(());
-    }
-    let branch_id = store.branch_id_for_agent(turn.agent_id).await?;
-    let position = store.tail_split_for_branch(branch_id, 0).await?;
-    let job = PendingCompaction {
-        agent_id: turn.agent_id,
-        branch_id,
-        position,
-        sequence_id: None,
-        cause_inference_id: None,
-        next_input_tokens: turn.next_input_tokens,
-        sampling: turn.sampling,
-        model: turn.model.to_string(),
-        static_segments: Vec::new(),
-    };
-    store.enqueue_compaction_for_test(&job).await?;
-    run(store, backend, &job, turn.limits).await
-}
 
 /// Resolve one persisted compaction obligation. The normal path performs one
 /// ordinary deferred summary without tokenizing: the just-finished inference
@@ -119,15 +82,7 @@ async fn run_invocation<B: Backend>(
                     "compaction cannot reduce this context: retaining {keep} newest messages leaves no older history to summarize"
                 );
             }
-            return store
-                .abandon_pending_compaction(
-                    job,
-                    &format!(
-                        "The next context would start at {} tokens; no history older than the retained {keep} messages was eligible for compaction.",
-                        job.next_input_tokens
-                    ),
-                )
-                .await;
+            return store.abandon_pending_compaction(job).await;
         }
 
         let covered_ranges = [PositionRange {
@@ -135,15 +90,10 @@ async fn run_invocation<B: Backend>(
             first_position: covered + 1,
             last_position: split,
         }];
-        let notice = if recovering_capacity {
-            format!(
-                "Compacted history through a capacity recovery; retained the newest {keep} messages."
-            )
+        let reason = if recovering_capacity {
+            "capacity_recovery"
         } else {
-            format!(
-                "Compacted history before the next context reached {} tokens; retained the newest {keep} messages.",
-                job.next_input_tokens
-            )
+            "threshold"
         };
         let completion = context::complete_summary_recipe(
             store,
@@ -159,14 +109,17 @@ async fn run_invocation<B: Backend>(
             },
             job,
             Some(&covered_ranges),
-            &notice,
+            reason,
+            i64::try_from(keep).context("retained message count exceeds SQLite range")?,
             |_| {},
         )
         .await;
         return match completion {
             Ok(completion) => {
                 let Content::Text(_) = completion.response.content else {
-                    anyhow::bail!("compaction inference returned tool calls instead of summary text");
+                    anyhow::bail!(
+                        "compaction inference returned tool calls instead of summary text"
+                    );
                 };
                 Ok(())
             }
@@ -186,15 +139,15 @@ async fn summary_segments(
     keep_tail_messages: usize,
 ) -> Result<(Vec<Segment>, i64, i64, i64)> {
     let previous = store.latest_summary_for_branch(branch_id).await?;
-    let covered = previous
-        .as_ref()
-        .map_or(-1, |summary| {
-            summary
-                .covered_ranges
-                .last()
-                .map_or(-1, |range| range.last_position)
-        });
-    let split = store.tail_split_for_branch(branch_id, keep_tail_messages).await?;
+    let covered = previous.as_ref().map_or(-1, |summary| {
+        summary
+            .covered_ranges
+            .last()
+            .map_or(-1, |range| range.last_position)
+    });
+    let split = store
+        .tail_split_for_branch(branch_id, keep_tail_messages)
+        .await?;
     let prompt = store
         .store_prompt_text(PROMPT)
         .await
@@ -228,7 +181,10 @@ mod tests {
     use std::{collections::VecDeque, sync::Mutex};
 
     use super::*;
-    use crate::llm::{ContextCapacityExceeded, Message, MessageContent, Response, Usage};
+    use crate::{
+        llm::{ContextCapacityExceeded, Message, MessageContent, Response, Sampling, Usage},
+        store::CompactionPolicy,
+    };
 
     struct ScriptedBackend {
         responses: Mutex<VecDeque<Response>>,
@@ -275,14 +231,78 @@ mod tests {
     }
 
     fn response(summary: &str) -> Response {
+        response_with_usage(summary, 1, 1)
+    }
+
+    fn response_with_usage(text: &str, input_tokens: usize, output_tokens: usize) -> Response {
         Response {
-            content: Content::Text(summary.to_string()),
+            content: Content::Text(text.to_string()),
             reasoning: String::new(),
             usage: Usage {
-                input_tokens: 1,
-                output_tokens: 1,
+                input_tokens,
+                output_tokens,
             },
         }
+    }
+
+    async fn complete_turn<B: Backend>(
+        store: &Store,
+        backend: &B,
+        agent_id: i64,
+        limits: Limits,
+        static_messages: &[Message],
+    ) {
+        let branch = store.agent_branch(agent_id).await.unwrap();
+        let segments = context::segments(store, branch, static_messages, &[], &[])
+            .await
+            .unwrap();
+        let static_segments = context::static_segments(&segments);
+        let invocation_id = store
+            .start_invocation(None, agent_id, Some(branch.branch_id()), None, None)
+            .await
+            .unwrap();
+        context::complete_recipe(
+            store,
+            backend,
+            context::RecipeCompletion {
+                agent_id,
+                sequence_id: None,
+                invocation_id,
+                segments: &segments,
+                sampling: Sampling {
+                    temperature: 0.0,
+                    ..Default::default()
+                },
+                model: "scripted",
+            },
+            CompactionPolicy {
+                sequence_id: None,
+                compact_before_next_input_tokens: limits.compact_before_next_input_tokens,
+                sampling: &Sampling {
+                    temperature: 0.0,
+                    ..Default::default()
+                },
+                model: "scripted",
+                static_segments: &static_segments,
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn complete_and_compact<B: Backend>(
+        store: &Store,
+        backend: &B,
+        agent_id: i64,
+        limits: Limits,
+    ) -> Result<()> {
+        complete_turn(store, backend, agent_id, limits, &[]).await;
+        let job = store
+            .pending_compaction_for_branch(store.agent_branch(agent_id).await?.branch_id())
+            .await?
+            .context("completed turn did not queue compaction")?;
+        run(store, backend, &job, limits).await
     }
 
     async fn agent_with_history(store: &Store) -> i64 {
@@ -309,35 +329,46 @@ mod tests {
         agent
     }
 
+    fn limits(keep_tail_messages: usize) -> Limits {
+        Limits {
+            max_concurrent_inferences: 4,
+            max_inferences_per_chat: 8,
+            max_inferences_total: 64,
+            max_context_tokens: 110,
+            max_output_tokens: 10,
+            compact_before_next_input_tokens: 100,
+            keep_tail_messages,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
+        }
+    }
+
     #[tokio::test]
     async fn capacity_job_retains_its_static_recipe_across_reload() {
         let db = database();
         let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
-        let prompt = store
-            .store_prompt_text("standing instruction")
-            .await
-            .unwrap();
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
-        let job = PendingCompaction {
-            agent_id: agent,
-            branch_id,
-            position: 2,
-            sequence_id: None,
-            cause_inference_id: None,
-            next_input_tokens: 100,
-            sampling: Sampling {
-                temperature: 0.0,
-                ..Default::default()
-            },
-            model: "scripted".to_string(),
-            static_segments: vec![Segment::Text {
-                text: prompt,
-                role: Role::System,
-            }],
+        let backend = ScriptedBackend {
+            responses: Mutex::new(VecDeque::from([response_with_usage("reply", 50, 50)])),
+            requests: Mutex::new(Vec::new()),
         };
-        store.enqueue_compaction_for_test(&job).await.unwrap();
-        assert_eq!(store.pending_compaction(agent).await.unwrap(), Some(job));
+        complete_turn(
+            &store,
+            &backend,
+            agent,
+            limits(2),
+            &[Message::text(Role::System, "standing instruction")],
+        )
+        .await;
+        let reopened = Store::open(db.path()).await.unwrap();
+        let job = reopened.pending_compaction(agent).await.unwrap().unwrap();
+        assert!(matches!(
+            job.static_segments.as_slice(),
+            [Segment::Text {
+                role: Role::System,
+                ..
+            }]
+        ));
     }
 
     #[tokio::test]
@@ -347,6 +378,7 @@ mod tests {
         let agent = agent_with_four_messages(&store).await;
         let backend = CapacityRecoveryBackend {
             responses: Mutex::new(VecDeque::from([
+                Ok(response_with_usage("reply", 50, 50)),
                 Err(ContextCapacityExceeded::FixedKv {
                     requested_tokens: 101,
                     max_context_tokens: 110,
@@ -356,35 +388,12 @@ mod tests {
             ])),
             requests: Mutex::new(Vec::new()),
         };
-        let limits = Limits {
-            max_concurrent_inferences: 1,
-            max_inferences_per_chat: 8,
-            max_inferences_total: 64,
-            max_context_tokens: 110,
-            max_output_tokens: 10,
-            compact_before_next_input_tokens: 100,
-            keep_tail_messages: 2,
-            merge_branch_messages: 64,
-            presence_departure_seconds: 60,
-        };
-        after_turn(
-            &store,
-            &backend,
-            CompletedTurn {
-                agent_id: agent,
-                next_input_tokens: 100,
-                sampling: Sampling {
-                    temperature: 0.0,
-                    ..Default::default()
-                },
-                model: "scripted",
-                limits,
-            },
-        )
-        .await
-        .unwrap();
+        let limits = limits(2);
+        complete_and_compact(&store, &backend, agent, limits)
+            .await
+            .unwrap();
 
-        assert_eq!(backend.requests.lock().unwrap().len(), 2);
+        assert_eq!(backend.requests.lock().unwrap().len(), 3);
         assert_eq!(
             store
                 .latest_summary(agent)
@@ -395,7 +404,7 @@ mod tests {
                 .last()
                 .unwrap()
                 .last_position,
-            0
+            1
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
     }
@@ -406,46 +415,29 @@ mod tests {
         let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = CapacityRecoveryBackend {
-            responses: Mutex::new(VecDeque::from([Err(ContextCapacityExceeded::FixedKv {
-                requested_tokens: 101,
-                max_context_tokens: 100,
-            }
-            .into())])),
+            responses: Mutex::new(VecDeque::from([
+                Ok(response_with_usage("reply", 50, 50)),
+                Err(ContextCapacityExceeded::FixedKv {
+                    requested_tokens: 101,
+                    max_context_tokens: 100,
+                }
+                .into()),
+            ])),
             requests: Mutex::new(Vec::new()),
         };
-        let error = after_turn(
-            &store,
-            &backend,
-            CompletedTurn {
-                agent_id: agent,
-                next_input_tokens: 100,
-                sampling: Sampling {
-                    temperature: 0.0,
-                    ..Default::default()
-                },
-                model: "scripted",
-                limits: Limits {
-                    max_concurrent_inferences: 1,
-                    max_inferences_per_chat: 8,
-                    max_inferences_total: 64,
-                    max_context_tokens: 110,
-                    max_output_tokens: 10,
-                    compact_before_next_input_tokens: 100,
-                    keep_tail_messages: 2,
-                    merge_branch_messages: 64,
-                    presence_departure_seconds: 60,
-                },
-            },
-        )
-        .await
-        .expect_err("capacity recovery must not retry unchanged history");
+        let limits = limits(3);
+        complete_turn(&store, &backend, agent, limits, &[]).await;
+        let job = store.pending_compaction(agent).await.unwrap().unwrap();
+        let error = run(&store, &backend, &job, limits)
+            .await
+            .expect_err("capacity recovery must not retry unchanged history");
 
         assert!(
             error
                 .to_string()
                 .contains("leaves no older history to summarize")
         );
-        assert_eq!(backend.requests.lock().unwrap().len(), 1);
+        assert_eq!(backend.requests.lock().unwrap().len(), 2);
         assert!(store.latest_summary(agent).await.unwrap().is_none());
         assert!(store.pending_compaction(agent).await.unwrap().is_some());
     }
@@ -456,49 +448,32 @@ mod tests {
         let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = ScriptedBackend {
-            responses: Mutex::new(VecDeque::from([response("lasting fact and decision")])),
+            responses: Mutex::new(VecDeque::from([
+                response_with_usage("reply", 50, 50),
+                response("lasting fact and decision"),
+            ])),
             requests: Mutex::new(Vec::new()),
         };
-        let limits = Limits {
-            max_concurrent_inferences: 4,
-            max_inferences_per_chat: 8,
-            max_inferences_total: 64,
-            max_context_tokens: 110,
-            max_output_tokens: 10,
-            compact_before_next_input_tokens: 100,
-            keep_tail_messages: 2,
-            merge_branch_messages: 64,
-            presence_departure_seconds: 60,
-        };
-        after_turn(
-            &store,
-            &backend,
-            CompletedTurn {
-                agent_id: agent,
-                next_input_tokens: 100,
-                sampling: Sampling {
-                    temperature: 0.0,
-                    ..Default::default()
-                },
-                model: "scripted",
-                limits,
-            },
-        )
-        .await
-        .unwrap();
+        let limits = limits(2);
+        complete_and_compact(&store, &backend, agent, limits)
+            .await
+            .unwrap();
 
         {
             let requests = backend.requests.lock().unwrap();
-            assert_eq!(requests.len(), 1);
-            let compacted = &requests[0];
+            assert_eq!(requests.len(), 2);
+            let compacted = &requests[1];
             assert!(compacted.messages.iter().all(|message| {
                 !matches!(&message.content, MessageContent::Text(text) if text == "newest question")
             }));
         }
 
         let summary = store.latest_summary(agent).await.unwrap().unwrap();
-        assert_eq!(summary.covered_ranges.last().unwrap().last_position, 0);
-        let live = store.live_segments(agent, None).await.unwrap();
+        assert_eq!(summary.covered_ranges.last().unwrap().last_position, 1);
+        let live = store
+            .live_segments(store.agent_branch(agent).await.unwrap())
+            .await
+            .unwrap();
         let request = store
             .request_for_segments(
                 agent,
@@ -518,10 +493,10 @@ mod tests {
         );
         assert_eq!(request.messages[0].role, Role::System);
         assert!(
-            matches!(&request.messages[1].content, MessageContent::Text(text) if text == "middle decision")
+            matches!(&request.messages[1].content, MessageContent::Text(text) if text == "newest question")
         );
         assert!(
-            matches!(&request.messages[2].content, MessageContent::Text(text) if text == "newest question")
+            matches!(&request.messages[2].content, MessageContent::Text(text) if text == "reply")
         );
         assert_eq!(
             store
@@ -532,11 +507,30 @@ mod tests {
                 .len(),
             2
         );
-        assert_eq!(
-            store.chat_notice_contents(agent).await.unwrap()[0],
-            "Compacted history before the next context reached 100 tokens; retained the newest 2 messages."
-        );
+        let summary = store.latest_summary(agent).await.unwrap().unwrap();
+        assert_eq!(summary.reason, "threshold");
+        assert_eq!(summary.retained_messages, 2);
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
+        let notice_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chat_notice'",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            notice_table, 0,
+            "compaction metadata must live on its one summary record, not in a second notice table"
+        );
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM history_entry WHERE kind = 'notice'",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            notices, 0,
+            "one compaction must not create a second history entry"
+        );
     }
 
     #[tokio::test]
@@ -545,81 +539,29 @@ mod tests {
         let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = ScriptedBackend {
-            responses: Mutex::new(VecDeque::new()),
+            responses: Mutex::new(VecDeque::from([response_with_usage("reply", 49, 50)])),
             requests: Mutex::new(Vec::new()),
         };
-        after_turn(
-            &store,
-            &backend,
-            CompletedTurn {
-                agent_id: agent,
-                next_input_tokens: 99,
-                sampling: Sampling {
-                    temperature: 0.0,
-                    ..Default::default()
-                },
-                model: "scripted",
-                limits: Limits {
-                    max_concurrent_inferences: 4,
-                    max_inferences_per_chat: 8,
-                    max_inferences_total: 64,
-                    max_context_tokens: 110,
-                    max_output_tokens: 10,
-                    compact_before_next_input_tokens: 100,
-                    keep_tail_messages: 2,
-                    merge_branch_messages: 64,
-                    presence_departure_seconds: 60,
-                },
-            },
-        )
-        .await
-        .unwrap();
-        assert!(backend.requests.lock().unwrap().is_empty());
+        complete_turn(&store, &backend, agent, limits(2), &[]).await;
+        assert_eq!(backend.requests.lock().unwrap().len(), 1);
         assert!(store.latest_summary(agent).await.unwrap().is_none());
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn compaction_records_a_notice_when_only_the_tail_remains() {
+    async fn compaction_with_only_the_tail_retires_without_a_history_event() {
         let db = database();
         let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = ScriptedBackend {
-            responses: Mutex::new(VecDeque::new()),
+            responses: Mutex::new(VecDeque::from([response_with_usage("reply", 50, 50)])),
             requests: Mutex::new(Vec::new()),
         };
-        after_turn(
-            &store,
-            &backend,
-            CompletedTurn {
-                agent_id: agent,
-                next_input_tokens: 100,
-                sampling: Sampling {
-                    temperature: 0.0,
-                    ..Default::default()
-                },
-                model: "scripted",
-                limits: Limits {
-                    max_concurrent_inferences: 4,
-                    max_inferences_per_chat: 8,
-                    max_inferences_total: 64,
-                    max_context_tokens: 110,
-                    max_output_tokens: 10,
-                    compact_before_next_input_tokens: 100,
-                    keep_tail_messages: 3,
-                    merge_branch_messages: 64,
-                    presence_departure_seconds: 60,
-                },
-            },
-        )
-        .await
-        .unwrap();
-        assert!(backend.requests.lock().unwrap().is_empty());
+        complete_and_compact(&store, &backend, agent, limits(4))
+            .await
+            .unwrap();
+        assert_eq!(backend.requests.lock().unwrap().len(), 1);
         assert!(store.latest_summary(agent).await.unwrap().is_none());
-        assert_eq!(
-            store.chat_notice_contents(agent).await.unwrap()[0],
-            "The next context would start at 100 tokens; no history older than the retained 3 messages was eligible for compaction."
-        );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
     }
 
@@ -649,24 +591,17 @@ mod tests {
 
         // First compaction: summarize the two oldest of the three messages.
         let first_backend = ScriptedBackend {
-            responses: Mutex::new(VecDeque::from([response("first summary")])),
+            responses: Mutex::new(VecDeque::from([
+                response_with_usage("reply", 50, 50),
+                response("first summary"),
+            ])),
             requests: Mutex::new(Vec::new()),
         };
-        after_turn(
-            &store,
-            &first_backend,
-            CompletedTurn {
-                agent_id: agent,
-                next_input_tokens: 100,
-                sampling: Sampling { temperature: 0.0, ..Default::default() },
-                model: "scripted",
-                limits,
-            },
-        )
-        .await
-        .unwrap();
+        complete_and_compact(&store, &first_backend, agent, limits)
+            .await
+            .unwrap();
         let first_summary = store.latest_summary(agent).await.unwrap().unwrap();
-        let first_captured_request = first_backend.requests.lock().unwrap()[0].clone();
+        let first_captured_request = first_backend.requests.lock().unwrap()[1].clone();
 
         // More history accrues, then a second compaction folds the first
         // summary plus the new messages into a second one.
@@ -677,25 +612,21 @@ mod tests {
                 .unwrap();
         }
         let second_backend = ScriptedBackend {
-            responses: Mutex::new(VecDeque::from([response("second summary")])),
+            responses: Mutex::new(VecDeque::from([
+                response_with_usage("reply", 50, 50),
+                response("second summary"),
+            ])),
             requests: Mutex::new(Vec::new()),
         };
-        after_turn(
-            &store,
-            &second_backend,
-            CompletedTurn {
-                agent_id: agent,
-                next_input_tokens: 100,
-                sampling: Sampling { temperature: 0.0, ..Default::default() },
-                model: "scripted",
-                limits,
-            },
-        )
-        .await
-        .unwrap();
+        complete_and_compact(&store, &second_backend, agent, limits)
+            .await
+            .unwrap();
         let second_summary = store.latest_summary(agent).await.unwrap().unwrap();
-        assert_ne!(second_summary.id, first_summary.id, "the second compaction produces a new summary");
-        let second_captured_request = second_backend.requests.lock().unwrap()[0].clone();
+        assert_ne!(
+            second_summary.id, first_summary.id,
+            "the second compaction produces a new summary"
+        );
+        let second_captured_request = second_backend.requests.lock().unwrap()[1].clone();
 
         // Reopen the same database file, as a restarted process would.
         let reopened = Store::open(db.path()).await.unwrap();

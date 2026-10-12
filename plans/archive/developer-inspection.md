@@ -1,22 +1,29 @@
 # Developer Mode implementation
 
+**Completed and verified 2026-09-29.** All A–F outcomes are implemented. The
+production-path browser suite covers selection, paging, relationship navigation,
+Close/reopen, and narrow layouts; the configured CUDA-model check covers exact
+recorded evidence through normal play. This archived plan is not a reference for
+new work.
+
 ## Deliverable and traceability
 
 A player can inspect the exact turn/tool tree, model input/output, linear agent
 history, GM group-history DAG and current objects while chat remains usable.
-Implement the data/protocol choices in [design.md](../design.md#chat-schema);
-this plan specifies changes and their order. It does not mark the feature done.
+The implementation follows the data/protocol choices in
+[design.md](../../design.md#chat-schema).
 
 | Requirement | Declaration | Design | Steps |
 | --- | --- | --- | --- |
-| Owner toggle and continuing member access | [World detail](../user_declarations.md#world-detail-page) | Membership and presence; Live inspection protocol | A, F |
-| Every original message, summary and failed inference, exact reconstructed input | [Debugging and Telemetry](../user_declarations.md#debugging-and-telemetry), [Chat compaction](../user_declarations.md#chat-compaction) | Chat schema; Inference records | B, C, E |
-| One GM context per interacting group, split/merge histories | [GM interaction](../user_declarations.md#gm-interaction), [Game state](../user_declarations.md#game-state) | Groups and shared GM history | B, D |
-| Calls/results in their actual tree and order | [Agent syntax and tool calls](../user_declarations.md#agent-syntax-and-tool-calls), [Developer Mode](../user_declarations.md#developer-mode) | Durable execution relationships | C, F |
-| Live inspectable raw data, usage, navigation | [Developer Mode](../user_declarations.md#developer-mode) | Live inspection protocol; Browser selection and raw fields | A, E, F |
+| Owner toggle and continuing member access | [World detail](../../user_declarations.md#world-detail-page) | Membership and presence; Live inspection protocol | A, F |
+| Every original message, summary and failed inference, exact reconstructed input | [Debugging and Telemetry](../../user_declarations.md#debugging-and-telemetry), [Chat compaction](../../user_declarations.md#chat-compaction) | Chat schema; Inference records | B, C, E |
+| One GM context per interacting group, split/merge histories | [GM interaction](../../user_declarations.md#gm-interaction), [Game state](../../user_declarations.md#game-state) | Groups and shared GM history | B, D |
+| Calls/results in their actual tree and order | [Agent syntax and tool calls](../../user_declarations.md#agent-syntax-and-tool-calls), [Developer Mode](../../user_declarations.md#developer-mode) | Durable execution relationships | C, F |
+| Live inspectable raw data, usage, navigation | [Developer Mode](../../user_declarations.md#developer-mode) | Live inspection protocol; Browser selection and raw fields | A, E, F |
 
-The next increment is [Bounded history ranges](#bounded-history-ranges), then
-E2 and F. D and E1 are implemented.
+The bounded-history corrections, D, E (E1 and E2), and all F navigation and
+completion slices are implemented. The user explicitly prioritized completing
+Developer Mode on 2026-09-27; the broad Code quality refactors follow it.
 
 A–F are ordered complete implementation slices. Each includes its own working
 queries/UI integration and verification. Schema changes and their producers and
@@ -142,9 +149,9 @@ and requires the user's Product decision before changing model messages.
 ## Bounded history ranges
 
 **Requirement:** Original, inspectable histories and isolated GM branches
-([Developer Mode](../user_declarations.md#developer-mode),
-[GM interaction](../user_declarations.md#gm-interaction)); player latency
-([Scheduling](../user_declarations.md#scheduling)); design's Chat schema ("Raw
+([Developer Mode](../../user_declarations.md#developer-mode),
+[GM interaction](../../user_declarations.md#gm-interaction)); player latency
+([Scheduling](../../user_declarations.md#scheduling)); design's Chat schema ("Raw
 history queries traverse bounded parent branches, then their own entries in
 position order") and Context assembly.
 
@@ -153,16 +160,22 @@ The other corrections to A–C landed (browser harness `778f865`, output identit
 `a6be8ce`), and parent-link validity is a schema property (`8f32f75`). This is
 the last one, and it is on every inference's path, not only Developer Mode's.
 
-**2026-09-25 status.** Steps 1 (reach as one recursive query, `5809f24`), 2
-(validated `BranchHead`, `8d00d01`), 3 (live context without entry rows,
-`7ba72c0`), 4 (raw pages by keyset, `1a87f14`) and 5 (`request_for_segments`
-ownership check once per request, next commit) are all done. `branch_owner`'s
-fallback was also confirmed dead and removed as part of step 2: every
-`history_branch`-creating call site already binds `agent_id` directly
-(`spawn_group_branch` always uses the world's `world_gm.agent_id`), so
-`history_branch.agent_id JOIN agent` alone was already correct - no fallback
-through `agent_history`/`group` was ever needed. Step 5
-(`request_for_segments` ownership check once per request) remains.
+**2026-09-25 status.** Steps 1 (`5809f24`), 3 (`7ba72c0`), 4 (`1a87f14`) and 5
+(`15afd86`) are done and measured (`fbe2108`: a 64-path merge fan-in resolves
+live context in about 9.5 ms; live context stays at about 0.4 ms from 100 to
+10,000 compacted entries; query plans use indexes). Step 2 (`8d00d01`) is only
+partly done, and review found further defects; see
+[Remaining corrections](#remaining-corrections). This section is not complete
+until they land.
+
+**2026-09-25 implementation update.** The remaining ownership corrections are
+implemented: `AgentBranch` is constructed only from an ordinary agent, a
+group, or an authorized browser selection; turns and context assembly carry it
+instead of optional branch IDs. `RawCursor` is validated before every raw page,
+and `reach()` is the sole recursive query. `history_range` is removed and its
+tests assert reach bounds directly. The full Rust suite and hydration/browser
+suite pass; the prior 64-path and 10,000-entry measurements remain applicable
+because the reach algorithm and live-context query shape are unchanged.
 
 **Problems** (as of `8f32f75`, before this section's own work):
 
@@ -203,7 +216,7 @@ through `agent_history`/`group` was ever needed. Step 5
   `live_segments`/`agent_raw_history` (real callers thread a genuine
   agent-vs-explicit-group-branch choice through `agent.rs`/`context.rs`'s
   `Invocation`, not just this module) - see
-  [code-quality.md](code-quality.md#design-refactors)'s broader `Option`
+  [code-quality.md](../code-quality.md#design-refactors)'s broader `Option`
   triage for that.
 
 A 2026-09-17 probe measured a two-row raw page at about 5.5 ms for 100
@@ -292,7 +305,7 @@ make its validity a property of its type.
    payloads for the returned rows only. A cursor outside the reach is an error.
 5. `request_for_segments` checks ownership once per request (one query over all
    message ranges), not once per segment. It stops checking entirely when
-   [code quality's relational segments](code-quality.md#design-refactors) make
+   [code quality's relational segments](../code-quality.md#design-refactors) make
    segment references foreign keys.
 
 **Alternatives.**
@@ -316,6 +329,84 @@ Reconstructed requests must match before/after for recorded inferences. Run a
 real configured-model chat with compaction and a split/merge, and the browser
 suite.
 
+### Remaining corrections
+
+Review of `1c0cf1d`, 2026-09-25. Intent is unchanged from step 2: validity and
+ownership are established once, by construction, and every reader takes the
+proof instead of re-checking or choosing behavior from an `Option`.
+
+**Problems.**
+
+- The `Option` parameters step 2 was to remove remain:
+  `live_segments(agent_id, Option<branch_id>)`,
+  `agent_raw_history(..., Option<branch_id>, Option<cursor>)`,
+  `agent::Turn { branch_id: Option<i64> }`, and
+  `raw_page(after: Option<(i64, i64)>)` with an `i64::MIN` sentinel for "no
+  cursor".
+- The planned `for_group` constructor became `branch_head_for_branch(branch_id,
+  world_id, agent_id)`, which accepts any caller-supplied branch.
+- On the live path, validation is circular: `live_segments` derives `world_id`
+  from `agent_id`, then checks the agent belongs to that same world.
+- `BranchHead.world_id`/`agent_id` are never read. A different
+  `inspection::BranchHead { group_id, group_name }` shares the name.
+- The recursive reach query is written out three times in `store/history.rs`
+  (`reach`, and twice in `raw_page`). This also blocks
+  [checked SQL](../code-quality.md#compile-time-checked-sql), whose macros need
+  one literal per query.
+- `history_range` survives as `#[cfg(test)]` production-shaped code that no
+  production path runs, contrary to the testing standards.
+- `split_then_merge_groups` returns a seven-element tuple.
+- New code is not rustfmt-formatted (8 diffs in `store/history.rs`).
+
+**A branch's identity versus its head.** A turn appends entries while it runs,
+so a type holding a cut cannot be what a turn carries. The fix separates the
+identity (`world_id, agent_id, branch_id`) from a head (identity plus cut) read
+from it when needed.
+
+| Option | Pros | Cons / risks |
+| --- | --- | --- |
+| Keep `BranchHead` and add `for_group`; leave `Option` callers | Smallest change | `Turn` and the wrappers keep `Option`; the circular check stays |
+| `AgentBranch { world_id, agent_id, branch_id }`, private fields, constructed only by `for_agent(agent_id)` (world and branch derived, nothing to check), `for_group(group_id)` (agent and branch from the group row) and `for_viewer(viewer, world, agent, branch)` for browser input; `head()` reads the current cut (recommended) | One type carried by `Turn`, context assembly, compaction and inspection; fields are used; checks exist only where input is external | Touches every `Turn`/`live_segments` call site |
+| Enum selector `History::Agent(id) / Group(id)` resolved inside each reader | No new validated type | Every reader re-resolves and re-validates; the selector is data, not proof |
+
+**One reach definition.**
+
+| Option | Pros | Cons / risks |
+| --- | --- | --- |
+| `reach()` runs the recursive query once; callers pass its result to later queries as a JSON parameter read with `json_each`, and check the cursor in Rust against it (recommended) | One definition; every query stays a literal the checked-SQL macros accept | Two round trips per page instead of one |
+| Shared SQL string constant concatenated into each query | One round trip | Runtime-built SQL cannot use checked macros |
+| Recursive view over all branches | One definition in schema | SQLite cannot push `head = ?` into a recursive CTE, so every query computes every branch's reach |
+| Persisted closure table written by `spawn_group_branch` | Plain joins | A second, derived copy of the topology to keep consistent |
+
+**Raw page cursor.**
+
+| Option | Pros | Cons / risks |
+| --- | --- | --- |
+| Validated `RawCursor { branch: AgentBranch, cut, next: (branch_id, position) }` built by `first(branch)` or `resume(viewer input)`, which checks `next` lies within the reach; `raw_page(cursor, limit)` has one path (recommended) | No `Option`, no sentinel; invalid cursors cannot reach the query | Adds a small type |
+| Keep `Option` with the sentinel | No change | Two meanings in one parameter; a sentinel in keyset SQL |
+
+**Steps.**
+
+1. Add `AgentBranch` with its three constructors in `store/history.rs`. Replace
+   `BranchHead` with `AgentBranch::head()`, and rename
+   `inspection::BranchHead` to `BranchGroup`.
+2. Replace `Turn.branch_id`, the `live_segments` wrapper and
+   `agent_raw_history`'s `Option` parameters with `AgentBranch`, and delete
+   `branch_head_for_branch`. Callers that have a group use `for_group`.
+3. Make `reach()` the only recursive query. `raw_page` takes a `RawCursor` and
+   joins the reach through `json_each`. Delete the other two copies.
+4. Delete `#[cfg(test)] history_range`. Its tests assert `reach()`'s ranges
+   directly (the bounding/dedup property they were written for).
+5. Replace the seven-element tuple with a named fixture struct. Format the
+   touched files.
+
+**Verification.** Existing traversal, paging and merge tests pass unchanged in
+intent. Add: `for_viewer` rejects another world's branch and another agent's
+branch; `resume` rejects a cursor outside the reach; a second GM turn on a
+split branch reads the group's branch (not the agent's). Re-run the 64-path and
+10,000-entry measurements to confirm no regression, then the browser suite.
+Complete the [AGENTS.md checklist](../../AGENTS.md#post-feature-and-pre-commit-checklist).
+
 ## D. Groups and real GM branches
 
 D1–D6 are one coupled slice. Run the embedded presence plan's split/merge cases
@@ -338,7 +429,7 @@ after D4; archive presence only with the passing D completion review.
    the acting character's actual group and its HistoryHead) built on top of
    branch selection D1 already made explicit, not the first place agent_id
    stops being sufficient.
-2. Implement the [presence plan](multiplayer-presence.md) now, using the group
+2. Implement the [presence plan](../multiplayer-presence.md) now, using the group
    rows from D1 and the live connection/access work from A. This delivers the
    online recipient facts needed for group narration; it is a dependency inside
    this feature, not deferred to after inspection is called complete.
@@ -569,17 +660,29 @@ from the earlier direct runtime test alone does not satisfy this product-path ga
    Preserve the head/cut and selected entry across loading; a live refresh starts
    a new head snapshot explicitly. Add name/type/ID search and stable object-ID
    paging to world_objects; render every returned relationship as a typed link.
-3. Add narrow-screen Chat/Inspect tabs using the existing sm breakpoint and CSS
+3. Fix the Inspect pane's "Close" button: it currently only clears the current
+   selection (`selection.set(None)`), leaving an empty panel permanently
+   visible, since the `<aside>` itself is never conditionally hidden. The
+   user's chosen combination is options 1+3 from 2026-09-25's brainstorm in
+   user_exerpts.md, not option 1 alone: Close collapses the full panel down to
+   a thin, always-visible vertical strip on the right edge (an icon/label, no
+   selection content), never removing it from the DOM entirely and never
+   requiring a separate chat-header button. Clicking the strip expands back to
+   the full panel and the last selection (already preserved by step 1's
+   URL-driven selection state). Chosen over a floating/draggable panel: fixes
+   the actual bug with the least new surface area, while keeping a persistent
+   affordance rather than an easily-missed reopen control.
+4. Add narrow-screen Chat/Inspect tabs using the existing sm breakpoint and CSS
    visibility. Both panes remain mounted. Verify draft text and one chat socket
    survive navigation, pagination, toggling and responsive switches.
-4. Run the complete production-path verification above, update README and
+5. Run the complete production-path verification above, update README and
    implementation_reference.md, and remove obsolete viewer/query helpers.
 
 ## Acceptance and commit gate
 
-For each slice, re-read [coding standards](../coding_standards.md) and
-[prompt standards](../prompt_standards.md), and complete the
-[AGENTS.md post-feature/pre-commit checklist](../AGENTS.md#post-feature-and-pre-commit-checklist).
+For each slice, re-read [coding standards](../../coding_standards.md) and
+[prompt standards](../../prompt_standards.md), and complete the
+[AGENTS.md post-feature/pre-commit checklist](../../AGENTS.md#post-feature-and-pre-commit-checklist).
 The cases above form the test design for user review before implementing any
 LLM-facing changes. Exercise real configured-model chats for grouping/context,
 tool and compaction changes; scripts may control only the external backend,

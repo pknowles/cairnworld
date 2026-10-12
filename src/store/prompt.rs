@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use mistralrs::{ChatTemplateFormat, RequestLike, RequestMessage};
 
 use super::Store;
-use crate::llm::Request;
+use crate::{inspection::PromptEvidenceView, llm::Request};
 
 /// Only formatting inputs and independent checksums are retained. The clock is
 /// separate so every call can reuse the same immutable template artifact.
@@ -15,6 +15,14 @@ pub struct PromptEvidence {
 }
 
 impl PromptEvidence {
+    pub(crate) fn tokens_hash(tokens: &[u32]) -> String {
+        let mut token_hash = blake3::Hasher::new();
+        for token in tokens {
+            token_hash.update(&token.to_le_bytes());
+        }
+        token_hash.finalize().to_hex().to_string()
+    }
+
     pub fn new(
         format: &ChatTemplateFormat,
         prompt: &str,
@@ -27,16 +35,12 @@ impl PromptEvidence {
             .as_object_mut()
             .context("formatting artifact is not an object")?
             .remove("rendered_at");
-        let mut token_hash = blake3::Hasher::new();
-        for token in tokens {
-            token_hash.update(&token.to_le_bytes());
-        }
         Ok(Self {
             format: serde_json::to_string(&artifact)
                 .context("serializing immutable formatting artifact")?,
             rendered_at: format.rendered_at.clone(),
             prompt_hash: blake3::hash(prompt.as_bytes()).to_hex().to_string(),
-            tokens_hash: token_hash.finalize().to_hex().to_string(),
+            tokens_hash: Self::tokens_hash(tokens),
             max_output_tokens: i64::try_from(max_output_tokens)
                 .context("output limit exceeds SQLite range")?,
         })
@@ -62,28 +66,55 @@ impl Store {
         Ok(())
     }
 
-    pub async fn reconstruct_model_prompt(
+    pub(crate) async fn prompt_evidence(
+        &self,
+        inference_id: i64,
+    ) -> Result<Option<PromptEvidenceView>> {
+        sqlx::query_as::<_, (i64, String, String, String, i64)>(
+            "SELECT format_id, rendered_at, prompt_hash, tokens_hash, max_output_tokens \
+             FROM inference_prompt WHERE inference_id = ?",
+        )
+        .bind(inference_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading prompt evidence for inference {inference_id}"))?
+        .map(
+            |(format_id, rendered_at, prompt_hash, tokens_hash, max_output_tokens)| -> Result<
+                PromptEvidenceView,
+            > {
+                Ok(PromptEvidenceView {
+                    format_id,
+                    rendered_at,
+                    prompt_hash,
+                    tokens_hash,
+                    max_output_tokens: usize::try_from(max_output_tokens)
+                        .context("negative recorded prompt output limit")?,
+                })
+            },
+        )
+        .transpose()
+    }
+
+    pub(crate) async fn reconstruct_model_prompt(
         &self,
         inference_id: i64,
         request: &Request,
+        evidence: Option<&PromptEvidenceView>,
     ) -> Result<Option<String>> {
-        let row: Option<(i64, String, String, i64)> = sqlx::query_as("SELECT format_id, rendered_at, prompt_hash, max_output_tokens FROM inference_prompt WHERE inference_id = ?")
-            .bind(inference_id).fetch_optional(&self.pool).await.context("loading model prompt evidence")?;
-        let Some((format_id, rendered_at, expected_hash, max_output_tokens)) = row else {
+        let Some(evidence) = evidence else {
             return Ok(None);
         };
-        let mut artifact: serde_json::Value = serde_json::from_str(&self.text(format_id).await?)
-            .context("decoding retained model formatting artifact")?;
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&self.text(evidence.format_id).await?)
+                .context("decoding retained model formatting artifact")?;
         artifact
             .as_object_mut()
             .context("formatting artifact is not an object")?
-            .insert("rendered_at".into(), rendered_at.into());
+            .insert("rendered_at".into(), evidence.rendered_at.clone().into());
         let format: ChatTemplateFormat =
             serde_json::from_value(artifact).context("restoring original prompt formatting")?;
-        let mut builder = crate::mistralrs_backend::request_builder(
-            request,
-            usize::try_from(max_output_tokens).context("negative recorded output limit")?,
-        )?;
+        let mut builder =
+            crate::mistralrs_backend::request_builder(request, evidence.max_output_tokens)?;
         let tools = builder
             .take_tools()
             .map(|(tools, _)| tools)
@@ -95,7 +126,7 @@ impl Store {
             format!("rendering original model prompt for inference {inference_id}")
         })?;
         ensure!(
-            blake3::hash(prompt.as_bytes()).to_hex().as_str() == expected_hash,
+            blake3::hash(prompt.as_bytes()).to_hex().as_str() == evidence.prompt_hash,
             "inference {inference_id} reconstructed model prompt does not match the observed generation input"
         );
         Ok(Some(prompt))
@@ -122,9 +153,15 @@ mod tests {
             tools: vec![],
             sampling: Sampling::default(),
         };
-        let segments = context::segments(&store, agent, None, &request.messages, &[])
-            .await
-            .unwrap();
+        let segments = context::segments(
+            &store,
+            store.agent_branch(agent).await.unwrap(),
+            &request.messages,
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
         let invocation_id = store
             .start_invocation(None, agent, None, None, None)
             .await
@@ -167,15 +204,14 @@ mod tests {
         assert_eq!(artifacts, 1, "per-call clocks must not duplicate templates");
         let reopened = Store::open(db.path()).await.unwrap();
         for (id, expected) in &ids {
-            assert_eq!(
-                reopened
-                    .reconstruct_inference(*id)
-                    .await
-                    .unwrap()
-                    .model_prompt
-                    .as_ref(),
-                Some(expected)
-            );
+            let inference = reopened.reconstruct_inference(*id).await.unwrap();
+            assert_eq!(inference.model_prompt.as_ref(), Some(expected));
+            let evidence = inference
+                .prompt_evidence
+                .expect("recorded prompt must expose its evidence");
+            assert!(!evidence.prompt_hash.is_empty());
+            assert!(!evidence.tokens_hash.is_empty());
+            assert_eq!(evidence.max_output_tokens, 16);
         }
         sqlx::query("UPDATE inference_prompt SET rendered_at = '2030-01-01T00:00:00Z' WHERE inference_id = ?")
             .bind(ids[0].0).execute(&reopened.pool).await.unwrap();

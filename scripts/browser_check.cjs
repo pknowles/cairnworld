@@ -79,7 +79,11 @@ async function checkBrowser(server, check) {
   const failures = [];
   let rejectFailure;
   const failure = new Promise((_, reject) => (rejectFailure = reject));
-  const fail = (error) => { failures.push(error); rejectFailure(error); };
+  const fail = (error) => {
+    failures.push(error);
+    if (failures.length === 1) console.error(error.stack ?? error);
+    rejectFailure(error);
+  };
   server.on("error", fail);
   let browser;
   try {
