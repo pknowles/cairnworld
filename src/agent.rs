@@ -6,7 +6,7 @@ use crate::{
     context,
     llm::{Backend, Content, Message, Response, Sampling},
     settings::Limits,
-    store::Store,
+    store::{CompactionPolicy, Store},
     tools::{self, Tool},
 };
 
@@ -128,6 +128,12 @@ impl Drop for ActiveAgent {
 /// live output remain invocation-local rather than becoming persisted state.
 pub struct Turn<'a> {
     pub agent_id: i64,
+    /// The explicit branch this turn reads/appends to, when the agent's
+    /// single `agent_history` branch is not it - a world_gm agent plays
+    /// several groups, each its own branch (design.md's `GroupHistory {
+    /// agent_id, branch_id }`: "agent ID alone cannot select a GM history").
+    /// `None` for every other agent kind, which still has exactly one branch.
+    pub branch_id: Option<i64>,
     pub static_messages: &'a [Message],
     pub tools: &'a [Tool],
     pub sampling: Sampling,
@@ -162,10 +168,11 @@ impl<'a> InvocationGuard<'a> {
         store: &'a Store,
         sequence_id: Option<i64>,
         agent_id: i64,
+        branch_id: Option<i64>,
         parent_tool_execution_id: Option<i64>,
     ) -> Result<Self> {
         let invocation_id = store
-            .start_invocation(sequence_id, agent_id, parent_tool_execution_id, None)
+            .start_invocation(sequence_id, agent_id, branch_id, parent_tool_execution_id, None)
             .await
             .context("starting agent invocation")?;
         Ok(Self {
@@ -235,13 +242,14 @@ pub async fn complete_with_call_context<B: Backend>(
         store,
         call.sequence_id,
         turn.agent_id,
+        turn.branch_id,
         call.parent_tool_execution_id,
     )
     .await?;
     let invocation_id = invocation.invocation_id;
     let result: Result<Settled> = async {
         backend
-            .before_agent(store, turn.agent_id)
+            .before_agent(store, turn.agent_id, turn.branch_id)
             .await
             .context("waiting for earlier deferred work for this agent")?;
         let definitions =
@@ -257,6 +265,7 @@ pub async fn complete_with_call_context<B: Backend>(
                 backend,
                 context::RecordedCompletion {
                     agent_id: turn.agent_id,
+                    branch_id: turn.branch_id,
                     sequence_id: call.sequence_id,
                     invocation_id,
                     static_messages: turn.static_messages,
@@ -277,7 +286,7 @@ pub async fn complete_with_call_context<B: Backend>(
             // reply is done.
             let Content::ToolCalls(calls) = &response.content else {
                 backend
-                    .after_agent(store, turn.agent_id)
+                    .after_agent(store, turn.agent_id, turn.branch_id)
                     .await
                     .context("admitting any due deferred compaction")?;
                 let output_content_id = completion
@@ -307,6 +316,13 @@ pub async fn complete_with_call_context<B: Backend>(
             // reported - never re-recorded as this call's own failure, never
             // re-run.
             let mut batch_error = None;
+            // Grouping proposals are never committed here (design.md's "Tool
+            // boundary"): a topology change would retarget every sibling call
+            // still to come in this same batch away from the group the model
+            // actually saw when it wrote them. Collected in call order and
+            // applied together, once, only after every ordinary call in the
+            // batch has settled with no error.
+            let mut pending_changes = Vec::new();
             for (tool_call, tool_execution_id) in calls.iter().zip(&executions) {
                 on_activity(format!("tool call {}: {}", tool_call.name, tool_call.arguments));
                 let mut committed = false;
@@ -314,16 +330,20 @@ pub async fn complete_with_call_context<B: Backend>(
                     let outcome = tools::execute(turn.tools, tool_call, *tool_execution_id)
                         .await
                         .with_context(|| format!("executing tool call {}", tool_call.id))?;
-                    let status = match &outcome {
-                        tools::ToolOutcome::Completed(_) | tools::ToolOutcome::CompletedAfter { .. } => {
-                            "completed"
+                    let (status, result, after_result) = match outcome {
+                        tools::ToolOutcome::Completed(content) => ("completed", content, None),
+                        tools::ToolOutcome::CompletedAfter { content, after_result } => {
+                            ("completed", content, Some(after_result))
                         }
-                        tools::ToolOutcome::Rejected(_) => "rejected",
+                        tools::ToolOutcome::Rejected(content) => ("rejected", content, None),
+                        tools::ToolOutcome::PendingTopologyChange(change) => {
+                            pending_changes.push((tool_call.id.clone(), *tool_execution_id, change));
+                            committed = true;
+                            return Ok(());
+                        }
                     };
-                    let (result, after_result) = outcome.into_parts();
                     store
                         .complete_tool_result(
-                            turn.agent_id,
                             completion.inference_id,
                             *tool_execution_id,
                             status,
@@ -360,6 +380,15 @@ pub async fn complete_with_call_context<B: Backend>(
                     .context("marking unreached tool executions after a batch abort")?;
                 return Err(error);
             }
+            if !pending_changes.is_empty() {
+                compact_merge_sources(store, backend, &pending_changes, budget.limits(), &turn)
+                    .await
+                    .context("compacting merge source branches before applying topology changes")?;
+                store
+                    .apply_topology_changes(completion.inference_id, pending_changes)
+                    .await
+                    .context("applying group topology changes")?;
+            }
         }
     }
     .await;
@@ -382,6 +411,68 @@ pub async fn complete_with_call_context<B: Backend>(
             Err(error)
         }
     }
+}
+
+/// Before a merge commits, each source group's own branch may need
+/// compacting first (design.md's "Groups and shared GM history": "Before
+/// committing a merge, each incoming branch's unique suffix is eligible for
+/// compaction if its raw-message count exceeds `merge_branch_messages`...
+/// Run these jobs before capturing the final parent cuts, so their
+/// activation entries belong to the inherited history" and "group changes
+/// wait for affected pending compactions"). This runs before
+/// `apply_topology_changes`'s own transaction - no database transaction may
+/// span inference execution - so `apply_merge` naturally reads each source
+/// branch's already-updated settled position as its parent cut, with no
+/// change needed there. A group that turns out invalid or already retired
+/// is left alone here; `apply_merge`'s own validation still produces the
+/// real rejection for it.
+///
+/// A branch may already have a pending job unrelated to this merge (e.g. an
+/// ordinary token-threshold trigger, independent of raw message count) even
+/// when its own count is under `merge_branch_messages` - `backend
+/// .before_agent` is used rather than calling `compaction::run` directly so
+/// an already-pending job is waited on through the same admission path a
+/// concurrently running deferred compaction uses, never resolved twice.
+async fn compact_merge_sources<B: Backend>(
+    store: &Store,
+    backend: &B,
+    changes: &[(String, i64, tools::TopologyChange)],
+    limits: Limits,
+    turn: &Turn<'_>,
+) -> Result<()> {
+    for (_, _, change) in changes {
+        let tools::TopologyChange::Merge { group_ids, .. } = change else {
+            continue;
+        };
+        for &group_id in group_ids {
+            let Some(branch_id) = store.active_group_branch(group_id).await? else {
+                continue;
+            };
+            let gm_history = store.group_gm_history(group_id).await?;
+            if store.uncovered_message_count(branch_id).await? > limits.merge_branch_messages as i64 {
+                store
+                    .enqueue_capacity_compaction(
+                        gm_history.agent_id,
+                        Some(branch_id),
+                        0,
+                        CompactionPolicy {
+                            sequence_id: None,
+                            compact_before_next_input_tokens: 0,
+                            sampling: &turn.sampling,
+                            model: turn.model,
+                            static_segments: &[],
+                        },
+                    )
+                    .await
+                    .with_context(|| format!("enqueueing merge-time compaction for branch {branch_id}"))?;
+            }
+            backend
+                .before_agent(store, gm_history.agent_id, Some(branch_id))
+                .await
+                .with_context(|| format!("waiting for compaction on merge source branch {branch_id}"))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -450,6 +541,7 @@ mod tests {
     fn scripted_turn<'a>(agent_id: i64, tools: &'a [Tool]) -> Turn<'a> {
         Turn {
             agent_id,
+            branch_id: None,
             static_messages: &[],
             tools,
             sampling: Sampling {
@@ -465,7 +557,7 @@ mod tests {
     }
 
     async fn history(store: &Store, agent: i64) -> Vec<Message> {
-        let segments = store.live_segments(agent).await.unwrap();
+        let segments = store.live_segments(agent, None).await.unwrap();
         store
             .request_for_segments(
                 agent,
@@ -835,6 +927,8 @@ mod tests {
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 32_768,
             keep_tail_messages: 32,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         };
         let repeat = || {
             response(
@@ -881,6 +975,8 @@ mod tests {
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 32_768,
             keep_tail_messages: 32,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         });
         let repeat = || {
             response(
@@ -941,9 +1037,198 @@ mod tests {
     #[should_panic(expected = "dropped without an explicit outcome")]
     async fn invocation_guard_panics_in_debug_if_dropped_unfinished() {
         let (store, _db, agent_id) = test_store().await;
-        let guard = InvocationGuard::start(&store, None, agent_id, None)
+        let guard = InvocationGuard::start(&store, None, agent_id, None, None)
             .await
             .unwrap();
         drop(guard);
+    }
+
+    /// A merge source branch whose own uncovered messages exceed
+    /// `merge_branch_messages` must be compacted before the merge commits;
+    /// one that stays under the threshold must be left alone (design.md:
+    /// "each incoming branch's unique suffix is eligible for compaction if
+    /// its raw-message count exceeds merge_branch_messages").
+    #[tokio::test]
+    async fn compact_merge_sources_compacts_only_branches_over_the_threshold() {
+        let db = crate::store::TestDatabase::new("agent-test");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let scenario = crate::scenario::Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let original_group_id = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let toma_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        let mara_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Mara'")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+
+        // Split the player off from Toma so each side gets its own branch:
+        // the player's side is seeded with raw messages (over threshold),
+        // Toma's stays empty (under threshold).
+        let split_trigger = store.begin_sequence(installed.world_id, "split").await.unwrap();
+        let gm_history = store.group_gm_history(original_group_id).await.unwrap();
+        let split_invocation = store
+            .start_invocation(Some(split_trigger.id), gm_history.agent_id, Some(gm_history.branch_id), None, None)
+            .await
+            .unwrap();
+        let split_inference = store
+            .start_inference(crate::store::InferenceInput {
+                agent_id: gm_history.agent_id,
+                sequence_id: Some(split_trigger.id),
+                invocation_id: split_invocation,
+                segments: &[],
+                request: &crate::llm::Request {
+                    messages: vec![Message::text(crate::llm::Role::User, "split")],
+                    tools: Vec::new(),
+                    sampling: Sampling::default(),
+                },
+                model: "test-model",
+            })
+            .await
+            .unwrap();
+        let executions = store
+            .create_tool_executions(split_inference, 1)
+            .await
+            .unwrap();
+        store
+            .apply_topology_changes(
+                split_inference,
+                vec![(
+                    "split-1".to_string(),
+                    executions[0],
+                    tools::TopologyChange::Split {
+                        group_id: original_group_id,
+                        partitions: vec![
+                            tools::GroupPartition {
+                                character_ids: vec![installed.member.character_id, mara_id],
+                                name: "player side".into(),
+                                description: "outside".into(),
+                            },
+                            tools::GroupPartition {
+                                character_ids: vec![toma_id],
+                                name: "Toma side".into(),
+                                description: "inside".into(),
+                            },
+                        ],
+                        continue_with_character_id: Some(installed.member.character_id),
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+
+        let over_group_id = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let under_group_id = store.character_group_id(toma_id).await.unwrap();
+        let over_history = store.group_gm_history(over_group_id).await.unwrap();
+        let under_history = store.group_gm_history(under_group_id).await.unwrap();
+
+        // Seed the player's side with two raw messages - over a
+        // merge_branch_messages threshold of 1; Toma's side stays empty.
+        for text in ["The room creaks.", "A shadow moves."] {
+            let trigger = store.begin_sequence(installed.world_id, "seed").await.unwrap();
+            let invocation = store
+                .start_invocation(Some(trigger.id), over_history.agent_id, Some(over_history.branch_id), None, None)
+                .await
+                .unwrap();
+            let inference = store
+                .start_inference(crate::store::InferenceInput {
+                    agent_id: over_history.agent_id,
+                    sequence_id: Some(trigger.id),
+                    invocation_id: invocation,
+                    segments: &[],
+                    request: &crate::llm::Request {
+                        messages: vec![Message::text(crate::llm::Role::User, "narrate")],
+                        tools: Vec::new(),
+                        sampling: Sampling::default(),
+                    },
+                    model: "test-model",
+                })
+                .await
+                .unwrap();
+            store
+                .finish_chat_inference(
+                    inference,
+                    over_history.agent_id,
+                    crate::store::InferenceOutcome::Response(response(Content::Text(text.into()), "")),
+                    1,
+                    crate::store::CompactionPolicy {
+                        sequence_id: Some(trigger.id),
+                        compact_before_next_input_tokens: usize::MAX,
+                        sampling: &Sampling::default(),
+                        model: "test-model",
+                        static_segments: &[],
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let limits = Limits {
+            merge_branch_messages: 1,
+            ..Limits::default()
+        };
+        // A plain ScriptedBackend's before_agent is a no-op (only
+        // ScheduledBackend actually resolves a pending job) - the same
+        // wrapping real production code always uses, so the enqueued merge
+        // compaction is actually run rather than silently left pending.
+        let inner = ScriptedBackend::new([response(
+            Content::Text("Earlier: the room and the shadow.".into()),
+            "",
+        )]);
+        let scheduler = crate::inference::InferenceScheduler::new(inner, limits).unwrap();
+        let backend = scheduler.foreground();
+        let turn = Turn {
+            agent_id: over_history.agent_id,
+            branch_id: Some(over_history.branch_id),
+            static_messages: &[],
+            tools: &[],
+            sampling: Sampling::default(),
+            model: "test-model",
+        };
+        let changes = vec![(
+            "merge-1".to_string(),
+            1,
+            tools::TopologyChange::Merge {
+                group_ids: vec![over_group_id, under_group_id],
+                name: "merged".into(),
+                description: "reunited".into(),
+            },
+        )];
+        compact_merge_sources(&store, &backend, &changes, limits, &turn)
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .latest_summary_for_branch(over_history.branch_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "the over-threshold source branch must be compacted before the merge commits"
+        );
+        assert!(
+            store
+                .latest_summary_for_branch(under_history.branch_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "an empty branch has nothing eligible and must be left untouched"
+        );
     }
 }

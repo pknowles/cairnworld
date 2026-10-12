@@ -142,6 +142,12 @@ behavior is not implied to exist here.
   At execution-host startup it marks unfinished inferences interrupted, without
   inventing usage or duration, then resumes pending jobs and keeps same-agent
   history ordered. Opening a database for replay does not interrupt live work.
+  `InferenceScheduler`'s admission-tracking state (`deferred_branches`,
+  `wait_for_branch`, `admit_deferred`) is keyed by branch_id, not agent_id: a
+  world_gm agent has one branch per group (design.md's `GroupHistory`), so
+  agent_id alone cannot resolve which compaction job is pending. The `Backend`
+  trait's `before_agent`/`after_agent` take an explicit `branch_id:
+  Option<i64>`, `None` for every non-GM agent kind.
 - `src/compaction.rs` - resolves a persisted compaction job as ordinary
   recorded summarisation, preserving exactly `keep_tail_messages` newest raw
   rows. The compaction inference and its chat notice carry the job's
@@ -150,7 +156,19 @@ behavior is not implied to exist here.
   instruction as a user-role message. If that request is rejected for capacity,
   it retains one more raw row and tries the real summary request again. If no
   older row remains, it fails; it never predicts token use or retries unchanged
-  history.
+  history. `run()` passes the job's own `branch_id` into `start_invocation`
+  explicitly rather than falling back to `branch_for_agent(job.agent_id)`,
+  which fails for a world_gm agent (no single `agent_history` row).
+  `summary_segments`, `Store::latest_summary_for_branch` and
+  `Store::tail_split_for_branch` take that same explicit branch_id; the
+  agent_id-keyed `pending_compaction`/`latest_summary` remain only as thin
+  wrappers (`latest_summary` is `#[cfg(test)]`-only) over
+  `branch_for_agent` for the ordinary one-agent-one-branch case.
+  `Store::pending_compactions()` (the unfiltered listing used by `resume()`)
+  and `Store::finish_chat_inference`'s enqueue both resolve a branch's
+  world_gm agent_id via a `LEFT JOIN "group" ... LEFT JOIN world_gm`, since
+  `agent_history` has no row for it; the enqueue's INSERT carries
+  `ON CONFLICT(branch_id) DO NOTHING`, matching `enqueue_capacity_compaction`.
 - `src/tools.rs` - the ordinary invocation-local lookup used to derive
   `ToolDefinition`s and run the matching Rust callback. Each callback receives
   a `ToolCallContext` with the arguments and the already-created
@@ -166,28 +184,47 @@ behavior is not implied to exist here.
 - `src/store.rs` and `migrations/` - SQLite store, WAL mode,
   identity-only sandbox worlds and chat-history agents; OAuth email identities
   with non-unique display names; durable world-owner, membership,
-  character-owned player-agent, NPC-agent, and location-GM
-  relationships; world/character/location/path/item/item-type/spell-type data
-  with separate GM and Storyteller JSON notes. Blank player characters are
-  named `AdventurerN` from their globally unique `charN` suffix, and a location
-  GM's fresh scene packet includes every player character currently there with
-  its sheet, and its role prompt tells it to narrate to the characters as a
-  group; an arbitration request names the acting character. `install_scenario` creates the
-  entire initial relationship graph in one transaction and `export_scenario`
-  exports only reusable scenario data, never a player's history or membership.
-  The active-character lookup verifies the account, membership, world, and
+  character-owned player-agent, NPC-agent, and group relationships;
+  world/character/location/connection/item/item-type/spell-type data with
+  separate GM and Storyteller JSON notes. Blank player characters are named
+  `AdventurerN` from their globally unique `charN` suffix. `world_gm(world_id,
+  agent_id)` is one GM agent per world; `"group"(id, world_id, name,
+  location_id, description, branch_id, gm_notes, storyteller_notes,
+  retired_at)` owns one GM history branch each, and `character_group`
+  replaces the removed `character_location` - every active character has
+  exactly one group. A group's fresh scene packet includes every player
+  character currently in it with its sheet, and its role prompt tells the
+  world_gm to narrate to the characters as a group; an arbitration request
+  names the acting character. `install_scenario` creates the entire initial
+  relationship graph - including the world_gm agent and every scenario-declared
+  group and its branch - in one transaction, and `export_scenario` exports
+  only reusable scenario data, never a player's history or membership. The
+  active-character lookup verifies the account, membership, world, and
   requested character together before any play access. `player_location_id`,
-  `player_location_gm_agent_id`, and `player_sheet` resolve location, GM, and
-  sheet through that character relationship. Until real user databases exist, the checked-in schema
-  is rebuilt in place and existing local databases are intentionally replaced;
-  later schema evolution requires forward migrations.
+  `player_group_history`, and `player_sheet` resolve location, the group's
+  `GroupHistory { agent_id, branch_id }`, and sheet through that character
+  relationship. `pending_action.gm_agent_id`/`gm_branch_id` record the acting
+  character's resolved group GM identity at submission time, used unchanged
+  through arbitration and resolution. Until real user databases exist, the
+  checked-in schema is rebuilt in place and existing local databases are
+  intentionally replaced; later schema evolution requires forward migrations.
 
 - Ordered raw history (design.md: Chat schema; plan slice B). Every chat agent
-  (player, NPC, GM, Storyteller) owns one `history_branch` at construction
+  (player, NPC, Storyteller) owns one `history_branch` at construction
   (`Store::create_agent`'s single choke point, and `install_scenario`'s direct
-  location-GM/NPC/player-agent inserts, all through the shared
-  `create_agent_history` helper) plus one `agent_history` row naming its
-  current writable branch. `history_entry(branch_id, position, kind)` is the
+  NPC/player-agent inserts, all through the shared `create_agent_history`
+  helper) plus one `agent_history` row naming its current writable branch. A
+  world_gm agent is the exception: it plays several groups, so it has no
+  single `agent_history` row - each group's `history_branch` is created
+  directly and owned by `"group".branch_id` instead (design.md's
+  `GroupHistory { agent_id, branch_id }`: "agent ID alone cannot select a GM
+  history"). `agent::Turn`/`start_invocation`/`context::segments`/
+  `store::live_segments` all accept an explicit `branch_id: Option<i64>`
+  override for this case; every other agent kind passes `None` and resolves
+  its one `agent_history` branch as before. `store::history::branch_owner`
+  resolves a branch's owning agent/world through either relation, so raw
+  history traversal and request reconstruction validate a world_gm's group
+  branches the same way. `history_entry(branch_id, position, kind)` is the
   one ordered index every message, inference start, summary activation and
   notice appends to (`src/store/history.rs`'s `allocate_position`/
   `append_history_entry`, using `UPDATE history_branch SET next_position =
@@ -199,8 +236,10 @@ behavior is not implied to exist here.
   covers (`summary.covered_ranges`, JSON `[{branch_id, first_position,
   last_position}, ...]` - always length 1 until slice D's branch splits/merges
   exist). `history_parent(branch_id, ordinal, parent_branch_id,
-  through_position)` is the (currently always-empty) bounded-parent list a
-  future branch split/merge will populate.
+  through_position)` is the bounded-parent list `split_group`/`merge_groups`
+  (D4, `Store::spawn_group_branch`) populate: a split's resulting branches
+  each get one parent (the source), a merge's resulting branch gets one
+  parent per source group.
   `src/store/history.rs::history_range(HistoryHead{branch_id, cut}, world_id,
   agent_id)` is the shared bounded parent-first traversal every raw and live
   selector is built on: it validates the head's world/agent, walks
@@ -209,15 +248,24 @@ behavior is not implied to exist here.
   the schema's own foreign key, loads all entries up to each cut, and removes
   duplicates by scanning accumulated entries. It does not yet subtract intervals
   before reading entries or validate each parent's agent/world ownership.
-- `Store::live_segments` walks that traversal, selects the newest summary
-  activation (if any), resolves its `covered_ranges` to find the actual
-  highest still-covered position **on the branch being read** (distinct from
-  the activation's own position in the unified index, which can sit after
-  messages the summary does not cover), and returns every message entry past
-  that as one `Segment::Messages{PositionRange}` - a position range spans the
-  branch's whole unified index, so non-message entries (inference starts,
-  notices) inside it are expected gaps, not missing rows; only a `kind =
-  'message'` entry missing its `message` row is real corruption.
+- `Store::live_segments` groups that traversal's entries by branch (already
+  emitted as contiguous per-branch runs - ancestors before the branch that
+  owns them) and, per branch, selects that branch's own newest summary
+  activation (if any) - a branch's own summaries are already monotonic, so
+  cross-branch overlap cannot occur (`PositionRange` is scoped to one
+  branch_id). For each branch it resolves the summary's `covered_ranges` to
+  find the actual highest still-covered position **on that branch**
+  (distinct from the activation's own position in the unified index, which
+  can sit after messages the summary does not cover), and returns every
+  message entry past that as one `Segment::Messages{PositionRange}` - a
+  position range spans the branch's whole unified index, so non-message
+  entries (inference starts, notices) inside it are expected gaps, not
+  missing rows; only a `kind = 'message'` entry missing its `message` row is
+  real corruption. After a merge, this means each parent branch contributes
+  its own summary + uncovered tail independently, rather than only the
+  single newest summary across the whole merged DAG silently absorbing every
+  other parent's raw messages uncompacted (plans/developer-inspection.md's
+  D5 "longest-disjoint-summary selector").
   `Store::tail_split` and `enqueue_capacity_compaction`/`abandon_pending_compaction`
   work in the same position space. `pending_compaction` is keyed by
   `branch_id` (still 1:1 with an agent in this slice) with a plain `position`
@@ -250,9 +298,25 @@ behavior is not implied to exist here.
   notice is neither skipped nor duplicated in the existing paging tests. It
   queries each inference outcome across the full history before slicing, and
   failed rows currently mislabel their history-entry ID as an inference ID.
-  `web.rs`'s `RawHistoryPage` query
-  param carries the cursor JSON-encoded; `ui.rs`'s `AgentHistoryView` has a
-  "Load more" button that fetches and appends the next page.
+  `web.rs`'s `RawHistoryPage` query param carries the cursor JSON-encoded
+  plus an optional `branch` (D6) used only when `after` is absent, to page a
+  specific one of a world_gm agent's several branches rather than the
+  `current_head(agent_id)` a player/NPC/Storyteller agent still resolves by
+  default. `Store::gm_branch_graph(viewer_id, world_id, agent_id)` (D6)
+  returns every branch that agent owns (`BranchNode{branch_id, parents:
+  Vec<BranchParent{branch_id, through_position}>, head:
+  Option<BranchHead{group_id, group_name}>}`) - unpaged, since branch count
+  only grows with split/merge events. `ui.rs`'s `AgentHistoryView` fetches
+  that graph first, then every returned branch's own first history page in
+  parallel, combining them into `InspectData::AgentHistory{agent_id,
+  branches: Vec<BranchSection>}` once all have arrived; a plain
+  single-branch agent (`branches.len() == 1`) renders with no heading,
+  identical to the pre-D6 view, while a real DAG renders each branch as its
+  own `BranchSectionView` (its own independent "Load more" state) labelled
+  by its current group head or "retired", with a "continues from branch ...
+  @position" note naming its parents - a shared ancestor branch is one
+  `BranchSection`, never duplicated across the children that continue from
+  it.
 - `src/store/content.rs` - `recorded_content.body` serializes one event's
   whole `MessageContent` and reasoning together (`ContentBody`), written
   fresh on every `content_in` call with **no uniqueness constraint**: two
@@ -294,13 +358,13 @@ behavior is not implied to exist here.
   inference output (design.md: "Its model call ID/name/arguments resolve from
   the original output") and `result_content_id`. `action.approved` records
   whether this resolution actually ran the state mutation.
-- GM arbitration (`src/game.rs::arbitrate`) shares an in-memory `Mutex<bool>`
-  between approve/reject tool closures, with claim/release helpers. Store also
-  checks the durable resolution in its transaction. The two boundaries differ:
-  the local flag rejects any second call, whereas Store accepts matching repeats
-  and errors on conflicting decisions. Existing tests cover each behavior, but
-  this duplicates authority. The correction plan replaces the local flag with
-  a typed Store result and tool-level conflict rejection.
+- GM arbitration (`src/game.rs::arbitrate`) resolves through
+  `resolve_pending_action`'s transaction as the sole authority (design.md:
+  "They cannot be approved twice"); no in-memory flag mirrors that state. Its
+  approve/reject tool closures compare the decision they requested against
+  the decision `resolve_pending_action` actually returns - a match reports
+  that recorded outcome, a conflicting decision becomes an ordinary tool
+  rejection describing the existing resolution.
   `action.pending_action_id` (not a foreign key - the source `pending_action`
   row is deleted on resolve) lets that idempotent-retry lookup find the
   already-resolved row. `pending_compaction.sequence_id` and
@@ -419,10 +483,93 @@ behavior is not implied to exist here.
   calls and stores its final text. The first viewer starts one server-owned
   opening operation per character; concurrent reconnects wait on that same
   operation, then view its durable result rather than queueing game work.
-  Completing character creation asks the resolved location GM for opening
-  narration in that same tool turn, so beginning play never needs a second
-  player message. Subsequent player messages expose creation or location-action
-  tools according to durable character state.
+  Completing character creation asks the character's resolved group's world_gm
+  (its `GroupHistory { agent_id, branch_id }`) for opening narration in that
+  same tool turn, so beginning play never needs a second player message.
+  Subsequent player messages expose creation or location-action tools
+  according to durable character state.
+- Presence (Developer Mode plan D2; design.md's Membership and presence).
+  `WorldEvents` owns a short-lock-protected `connections: HashMap<character_id,
+  HashSet<connection_id>>`. `Game::connect`/`disconnect` update it and, on a
+  durable zero/one transition (`character_presence`), post a
+  `WorldEvent::PresenceChanged` to the world's serialized queue without
+  waiting for it to be processed. `handle_presence_changed` reads current
+  group/presence state (never the event's own payload, since later changes
+  may have queued behind it): arrival into a group already announced as
+  occupied narrates immediately; any other change (a departure, or first
+  arrival after an empty period) schedules a `presence_narration.due_at`
+  deadline `limits.presence_departure_seconds` out and spawns a
+  `tokio::time::sleep` posting `WorldEvent::PresenceDeadline{group_id,
+  generation}` back to the same queue. `handle_presence_deadline` re-checks
+  the row's current generation and does nothing if stale (superseded by a
+  later reschedule or an already-settled announcement) - this is how
+  returning before the deadline cancels a pending departure without ever
+  narrating it. At the deadline, an empty group retains the difference
+  without an inference; otherwise `narrate_presence_transition` runs an
+  ordinary no-tools GM turn (its own `sequence`/`begin_sequence`) naming who
+  arrived/left, delivers it through the existing `append_location_narration`,
+  and persists the new announced set together with that narration.
+  `append_location_narration`'s own recipient query now requires an active
+  `character_presence` row with no `absent_since` (connected), not just
+  active membership - narration recipients are connected PCs in the group,
+  matching the accepted policy; NPC narration delivery does not exist.
+  `party_presence()` (a plain read-only player tool) and `Store::party_presence`
+  return every character in the caller's group with its name and online state.
+  Process restart is not yet handled: connection sets are always empty on a
+  fresh process, but stale `character_presence`/`presence_narration` rows
+  from a prior process are not reconciled (design.md's "at restart, clear all
+  connection sets and timestamp formerly connected characters as absent" -
+  plan step 4, not yet implemented). Nor does prompt context yet record
+  whether a narration was actually delivered to a given character (plan step
+  5's last sentence).
+- Group-scoped live narration (Developer Mode plan D3). `WorldEvents.broadcasts`
+  and `Game::subscribe`/`deliver_narration`/`narrate_presence_transition` key
+  the live `GroupBroadcasts` channel by `group_id` (`Store::character_group_id`),
+  not `location_id` - two groups sharing one location no longer cross-leak
+  live narration to each other's connected viewers, matching the durable
+  recipient filtering `append_location_narration` already enforces. Durable
+  storage still resolves `location_id` separately (`Narration` carries both
+  fields) since `append_location_narration`'s own recipient query is keyed by
+  location plus group plus connectedness. `gm_scene` also now returns the
+  interacting group's own `description`/`gm_notes` (`GmScene.group_description`/
+  `group_gm_notes`), distinct from the physical location's - previously the
+  GM only ever saw location-level notes, never the group's own. Not yet
+  implemented: an existing browser socket does not resubscribe when its
+  character's group changes.
+- `split_group`/`merge_groups` (Developer Mode plan D4). Two GM tool calls,
+  never applied at the point they execute (design.md's "Tool boundary"):
+  `agent::complete_with_call_context`'s batch loop collects
+  `tools::ToolOutcome::PendingTopologyChange` outcomes in call order and
+  applies them all together, once, only after every ordinary call in the
+  batch has settled with no error - so every sibling call still to come in
+  the same batch executes against the pre-transition group, the context the
+  model actually generated them against. `Store::apply_topology_changes`
+  validates each proposal against state as it stands at that point (which
+  may already reflect an earlier proposal in the same batch) and appends its
+  tool-result message in call order alongside the batch's ordinary results;
+  a stale or invalid proposal is rejected rather than applied.
+  `Store::apply_split` requires a complete, disjoint partition of the
+  group's exact current membership and (for a GM event with no single
+  triggering character) an explicit `continue_with_character_id`.
+  `Store::apply_merge` requires at least two distinct, non-retired groups in
+  the same world and location. Both call `Store::spawn_group_branch`, which
+  creates one new `history_branch`, one `history_parent` row per listed
+  `(parent_branch_id, through_position)` pair, and the new `"group"` row;
+  split spawns one branch per partition (one parent each, the source),
+  merge spawns one branch with one parent per source group. The source
+  group(s) are retired (`"group".retired_at`) and their members'
+  `character_group` rows move to the new group(s). Before a merge's
+  transaction starts, `agent::compact_merge_sources` compacts each source
+  branch whose own unique suffix (`Store::uncovered_message_count`) exceeds
+  `limits.merge_branch_messages`, so `apply_merge`'s own fresh
+  `next_position - 1` read of the source branch's settled position already
+  includes the new summary/notice - no special casing needed in
+  `apply_merge` itself. It enqueues via the existing branch-explicit
+  `enqueue_capacity_compaction`, then calls `backend.before_agent(store,
+  agent_id, Some(branch_id))` rather than running compaction directly, so a
+  branch with an unrelated already-pending job (e.g. a token-threshold
+  trigger) is waited on through the same admission path a concurrently
+  running deferred compaction uses, never resolved twice.
 - `src/web.rs` - `cairnworld serve`'s Axum routes. Google OIDC discovers and
   exchanges through `openidconnect`; SQLite-backed `tower-sessions` holds the
   verified account id. The landing page updates only a non-unique display
@@ -551,16 +698,23 @@ behavior is not implied to exist here.
     anywhere (turn view, agent history) opens this, matching "messages in the
     debug view should link to an inference view."
   - The agent chat history view (`InspectSelection::AgentHistory`,
-    `AgentHistoryView`/`RawHistoryEntryRow`) fetches
-    `/world/{id}/inspect/agents/{id}/history` and renders the linear raw
-    messages an agent's own inferences saw, with compaction summaries and
-    inference failures inlined at the point they actually occurred in the
-    ordered history index (`store/history.rs`'s traversal - see "Persistence
-    and recording" above), plus a "Load more" button that fetches the next
-    page via the opaque `RawHistoryCursor` (JSON-encoded in the `after` query
-    param) and appends. This is linear for every agent including the
-    location GM's - the declared DAG with one head per Group needs Groups,
-    which do not exist yet (plans/todo.md).
+    `AgentHistoryView`/`BranchSectionView`/`RawHistoryEntryRow`) fetches
+    `/world/{id}/inspect/agents/{id}/branches` (D6) for the whole branch DAG,
+    then every returned branch's own first page from
+    `/world/{id}/inspect/agents/{id}/history?branch={branch_id}` in
+    parallel, and renders each branch's raw messages with compaction
+    summaries and inference failures inlined at the point they actually
+    occurred in the ordered history index (`store/history.rs`'s traversal -
+    see "Persistence and recording" above), each with its own "Load more"
+    button fetching its own next page via its own opaque `RawHistoryCursor`
+    (JSON-encoded in the `after` query param) and appending only to that
+    branch's section. A plain player/NPC/Storyteller agent has exactly one
+    branch and renders with no heading, identical to the view before D6; a
+    world_gm agent whose groups have split/merged renders every branch as
+    its own section labelled by its current group head or "retired", with a
+    "continues from branch ... @position" note - a shared ancestor branch
+    is one section, never duplicated across the children that continue from
+    it.
   - The world object/agent navigator (`InspectSelection::Agents`/`Objects`,
     `AgentsList`/`ObjectsView`) is always reachable from the pane header and
     fetches `/world/{id}/inspect/agents` or `/world/{id}/inspect/objects`,

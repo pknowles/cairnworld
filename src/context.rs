@@ -13,6 +13,13 @@ use crate::{
 /// Everything required to record one agent inference from its visible context.
 pub struct RecordedCompletion<'a> {
     pub agent_id: i64,
+    /// The explicit branch this completion reads/appends to, when the
+    /// agent's single `agent_history` branch is not it - a world_gm agent
+    /// plays several groups, each its own branch (design.md's `GroupHistory
+    /// { agent_id, branch_id }`: "agent ID alone cannot select a GM
+    /// history"). `None` for every other agent kind, which still has exactly
+    /// one branch.
+    pub branch_id: Option<i64>,
     pub sequence_id: Option<i64>,
     pub invocation_id: i64,
     pub static_messages: &'a [Message],
@@ -39,6 +46,7 @@ pub async fn complete_recorded<B: Backend>(
         let segments = segments(
             store,
             completion.agent_id,
+            completion.branch_id,
             completion.static_messages,
             completion.tools,
         )
@@ -90,27 +98,33 @@ pub async fn complete_recorded<B: Backend>(
                 store
                     .enqueue_capacity_compaction(
                         completion.agent_id,
-                        completion.sequence_id,
+                        completion.branch_id,
                         *requested_tokens,
-                        &completion.sampling,
-                        completion.model,
-                        &static_segments,
+                        CompactionPolicy {
+                            sequence_id: completion.sequence_id,
+                            compact_before_next_input_tokens: completion
+                                .compact_before_next_input_tokens,
+                            sampling: &completion.sampling,
+                            model: completion.model,
+                            static_segments: &static_segments,
+                        },
                     )
                     .await
                     .context("persisting capacity recovery compaction")?;
                 backend
-                    .after_agent(store, completion.agent_id)
+                    .after_agent(store, completion.agent_id, completion.branch_id)
                     .await
                     .context("admitting capacity recovery compaction")?;
                 backend
-                    .before_agent(store, completion.agent_id)
+                    .before_agent(store, completion.agent_id, completion.branch_id)
                     .await
                     .context("waiting for capacity recovery compaction")?;
+                let still_pending = match completion.branch_id {
+                    Some(branch_id) => store.pending_compaction_for_branch(branch_id).await?,
+                    None => store.pending_compaction(completion.agent_id).await?,
+                };
                 ensure!(
-                    store
-                        .pending_compaction(completion.agent_id)
-                        .await?
-                        .is_none(),
+                    still_pending.is_none(),
                     "backend did not resolve capacity recovery compaction for agent {}; use the scheduled model backend",
                     completion.agent_id
                 );
@@ -123,6 +137,7 @@ pub async fn complete_recorded<B: Backend>(
 pub async fn segments(
     store: &Store,
     agent_id: i64,
+    branch_id: Option<i64>,
     static_messages: &[Message],
     tools: &[ToolDefinition],
 ) -> Result<Vec<Segment>> {
@@ -151,7 +166,7 @@ pub async fn segments(
     }
     segments.extend(
         store
-            .live_segments(agent_id)
+            .live_segments(agent_id, branch_id)
             .await
             .context("assembling agent message context")?,
     );
@@ -414,7 +429,7 @@ mod tests {
         let world_id = store.world_id_for_agent(agent).await.unwrap();
         let sequence = store.begin_sequence(world_id, "test").await.unwrap();
         store
-            .start_invocation(Some(sequence.id), agent, None, None)
+            .start_invocation(Some(sequence.id), agent, None, None, None)
             .await
             .unwrap()
     }
@@ -431,6 +446,7 @@ mod tests {
             &StreamingBackend,
             RecordedCompletion {
                 agent_id: agent,
+                branch_id: None,
                 sequence_id: None,
                 invocation_id,
                 static_messages: &[Message::text(Role::System, "Be concise.")],
@@ -466,6 +482,7 @@ mod tests {
             &FailingBackend,
             RecordedCompletion {
                 agent_id: agent,
+                branch_id: None,
                 sequence_id: None,
                 invocation_id,
                 static_messages: &[],
@@ -539,6 +556,8 @@ mod tests {
                 max_output_tokens: 10,
                 compact_before_next_input_tokens: 90,
                 keep_tail_messages: 1,
+                merge_branch_messages: 64,
+                presence_departure_seconds: 60,
             },
         )
         .unwrap()
@@ -548,6 +567,7 @@ mod tests {
             &backend,
             RecordedCompletion {
                 agent_id: agent,
+                branch_id: None,
                 sequence_id: None,
                 invocation_id,
                 static_messages: &[],

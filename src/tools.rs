@@ -22,6 +22,31 @@ pub struct ToolCallContext<'a> {
 type ToolExecution = dyn Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync;
 pub type AfterToolResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
+/// A group partition or merge, proposed by a grouping tool call. Never
+/// applied at the point the tool executes - the batch loop collects these in
+/// call order and applies them all in one transaction at the end of the
+/// current model-returned tool batch (design.md's "Tool boundary": "Other
+/// calls in that batch execute in returned order against the pre-transition
+/// group, which is the context in which the model generated them").
+pub enum TopologyChange {
+    Split {
+        group_id: i64,
+        partitions: Vec<GroupPartition>,
+        continue_with_character_id: Option<i64>,
+    },
+    Merge {
+        group_ids: Vec<i64>,
+        name: String,
+        description: String,
+    },
+}
+
+pub struct GroupPartition {
+    pub character_ids: Vec<i64>,
+    pub name: String,
+    pub description: String,
+}
+
 /// The model receives a rejected call as an ordinary tool result and can
 /// correct its request. Infrastructure failures remain `Err` so they retain
 /// their full causal chain and immediately reach the player.
@@ -32,21 +57,13 @@ pub enum ToolOutcome {
         after_result: AfterToolResult,
     },
     Rejected(String),
+    /// A proposed split/merge, not yet applied - see `TopologyChange`.
+    PendingTopologyChange(TopologyChange),
 }
 
 impl ToolOutcome {
     pub fn rejected(error: anyhow::Error) -> Self {
         Self::Rejected(format!("Tool arguments were rejected: {error:#}"))
-    }
-
-    pub fn into_parts(self) -> (String, Option<AfterToolResult>) {
-        match self {
-            Self::Completed(content) | Self::Rejected(content) => (content, None),
-            Self::CompletedAfter {
-                content,
-                after_result,
-            } => (content, Some(after_result)),
-        }
     }
 }
 

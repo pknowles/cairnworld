@@ -172,8 +172,12 @@ impl Store {
 
     /// The agent and world a branch belongs to, for the world/agent boundary
     /// check every traversal entry point performs before walking anything.
-    async fn branch_owner(&self, branch_id: i64) -> Result<(i64, i64)> {
-        sqlx::query_as::<_, (i64, i64)>(
+    /// A branch belongs to its `agent_history` row, or - for a world_gm
+    /// agent, which plays several groups and so has no single `agent_history`
+    /// row - to the group that owns it (design.md's `GroupHistory { agent_id,
+    /// branch_id }`).
+    pub(super) async fn branch_owner(&self, branch_id: i64) -> Result<(i64, i64)> {
+        if let Some(owner) = sqlx::query_as::<_, (i64, i64)>(
             "SELECT agent_history.agent_id, agent.world_id \
              FROM agent_history JOIN agent ON agent.id = agent_history.agent_id \
              WHERE agent_history.branch_id = ?",
@@ -182,6 +186,18 @@ impl Store {
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("looking up owner of branch {branch_id}"))?
+        {
+            return Ok(owner);
+        }
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT world_gm.agent_id, \"group\".world_id \
+             FROM \"group\" JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             WHERE \"group\".branch_id = ?",
+        )
+        .bind(branch_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("looking up group owner of branch {branch_id}"))?
         .with_context(|| format!("history branch {branch_id} does not exist"))
     }
 
@@ -291,16 +307,22 @@ impl Store {
     /// The current head of an agent's single writable branch: its
     /// `agent_history` branch, cut at that branch's latest position.
     pub(super) async fn current_head(&self, agent_id: i64) -> Result<HistoryHead> {
-        let (branch_id, next_position): (i64, i64) = sqlx::query_as(
-            "SELECT history_branch.id, history_branch.next_position \
-             FROM agent_history JOIN history_branch ON history_branch.id = agent_history.branch_id \
-             WHERE agent_history.agent_id = ?",
-        )
-        .bind(agent_id)
-        .fetch_optional(&self.pool)
-        .await
-        .with_context(|| format!("loading history head for agent {agent_id}"))?
-        .with_context(|| format!("agent {agent_id} has no history branch"))?;
+        let branch_id = self.branch_for_agent(agent_id).await?;
+        self.current_head_for_branch(branch_id).await
+    }
+
+    /// As `current_head`, for a branch chosen explicitly rather than an
+    /// agent's single `agent_history` row - a world_gm agent has one branch
+    /// per group, never an `agent_history` row (design.md's `GroupHistory {
+    /// agent_id, branch_id }`: "agent ID alone cannot select a GM history").
+    pub(super) async fn current_head_for_branch(&self, branch_id: i64) -> Result<HistoryHead> {
+        let next_position: i64 =
+            sqlx::query_scalar("SELECT next_position FROM history_branch WHERE id = ?")
+                .bind(branch_id)
+                .fetch_optional(&self.pool)
+                .await
+                .with_context(|| format!("loading history branch {branch_id}"))?
+                .with_context(|| format!("history branch {branch_id} does not exist"))?;
         Ok(HistoryHead {
             branch_id,
             cut: next_position - 1,

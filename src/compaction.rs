@@ -33,7 +33,7 @@ async fn after_turn<B: Backend>(store: &Store, backend: &B, turn: CompletedTurn<
         return Ok(());
     }
     let branch_id = store.branch_id_for_agent(turn.agent_id).await?;
-    let position = store.tail_split(turn.agent_id, 0).await?;
+    let position = store.tail_split_for_branch(branch_id, 0).await?;
     let job = PendingCompaction {
         agent_id: turn.agent_id,
         branch_id,
@@ -72,7 +72,13 @@ pub async fn run<B: Backend>(
     // wall time". `job.sequence_id` is carried for display/linkage only;
     // this invocation's own start/finish never touches that sequence's row.
     let invocation_id = store
-        .start_invocation(job.sequence_id, job.agent_id, None, job.cause_inference_id)
+        .start_invocation(
+            job.sequence_id,
+            job.agent_id,
+            Some(job.branch_id),
+            None,
+            job.cause_inference_id,
+        )
         .await
         .context("starting deferred compaction invocation")?;
     let result = run_invocation(store, backend, job, limits, invocation_id).await;
@@ -106,7 +112,7 @@ async fn run_invocation<B: Backend>(
     let mut recovering_capacity = false;
     loop {
         let (segments, branch_id, split, covered) =
-            summary_segments(store, job.agent_id, keep).await?;
+            summary_segments(store, job.branch_id, keep).await?;
         if split <= covered {
             if recovering_capacity {
                 anyhow::bail!(
@@ -176,11 +182,10 @@ async fn run_invocation<B: Backend>(
 
 async fn summary_segments(
     store: &Store,
-    agent_id: i64,
+    branch_id: i64,
     keep_tail_messages: usize,
 ) -> Result<(Vec<Segment>, i64, i64, i64)> {
-    let branch_id = store.branch_id_for_agent(agent_id).await?;
-    let previous = store.latest_summary(agent_id).await?;
+    let previous = store.latest_summary_for_branch(branch_id).await?;
     let covered = previous
         .as_ref()
         .map_or(-1, |summary| {
@@ -189,7 +194,7 @@ async fn summary_segments(
                 .last()
                 .map_or(-1, |range| range.last_position)
         });
-    let split = store.tail_split(agent_id, keep_tail_messages).await?;
+    let split = store.tail_split_for_branch(branch_id, keep_tail_messages).await?;
     let prompt = store
         .store_prompt_text(PROMPT)
         .await
@@ -359,6 +364,8 @@ mod tests {
             max_output_tokens: 10,
             compact_before_next_input_tokens: 100,
             keep_tail_messages: 2,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         };
         after_turn(
             &store,
@@ -425,6 +432,8 @@ mod tests {
                     max_output_tokens: 10,
                     compact_before_next_input_tokens: 100,
                     keep_tail_messages: 2,
+                    merge_branch_messages: 64,
+                    presence_departure_seconds: 60,
                 },
             },
         )
@@ -458,6 +467,8 @@ mod tests {
             max_output_tokens: 10,
             compact_before_next_input_tokens: 100,
             keep_tail_messages: 2,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         };
         after_turn(
             &store,
@@ -487,7 +498,7 @@ mod tests {
 
         let summary = store.latest_summary(agent).await.unwrap().unwrap();
         assert_eq!(summary.covered_ranges.last().unwrap().last_position, 0);
-        let live = store.live_segments(agent).await.unwrap();
+        let live = store.live_segments(agent, None).await.unwrap();
         let request = store
             .request_for_segments(
                 agent,
@@ -556,6 +567,8 @@ mod tests {
                     max_output_tokens: 10,
                     compact_before_next_input_tokens: 100,
                     keep_tail_messages: 2,
+                    merge_branch_messages: 64,
+                    presence_departure_seconds: 60,
                 },
             },
         )
@@ -594,6 +607,8 @@ mod tests {
                     max_output_tokens: 10,
                     compact_before_next_input_tokens: 100,
                     keep_tail_messages: 3,
+                    merge_branch_messages: 64,
+                    presence_departure_seconds: 60,
                 },
             },
         )
@@ -628,6 +643,8 @@ mod tests {
             max_output_tokens: 10,
             compact_before_next_input_tokens: 100,
             keep_tail_messages: 1,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         };
 
         // First compaction: summarize the two oldest of the three messages.

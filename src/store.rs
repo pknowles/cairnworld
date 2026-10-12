@@ -24,7 +24,11 @@ use crate::llm::{
     Content, Message, MessageContent, Request, Response, Role, Sampling, ToolCall, ToolDefinition,
     Usage,
 };
-use crate::scenario::{Item, ItemType, Location, Notes, Npc, Path as ScenarioPath, Scenario};
+use crate::scenario::{
+    Connection as ScenarioConnection, Group as ScenarioGroup, Item, ItemType, Location, Notes,
+    Npc, Scenario,
+};
+use crate::tools;
 
 /// Live Developer Mode events for one world, independent of the recorded,
 /// durable data any inspection query reads. A viewer that reconnects or never
@@ -144,6 +148,56 @@ pub struct PlayerAgent {
     pub agent_id: i64,
 }
 
+/// A GM agent's identity plus the exact branch to use, passed explicitly to
+/// context assembly since agent_id alone cannot select a GM history once a
+/// world_gm plays several groups (design.md's "Groups and shared GM history").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupHistory {
+    pub agent_id: i64,
+    pub branch_id: i64,
+}
+
+/// One character in `party_presence()`'s result: identity, display name and
+/// current online state.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PartyMember {
+    pub character_id: i64,
+    pub name: String,
+    pub online: bool,
+}
+
+/// A group's announced online set and any outstanding arrival/departure
+/// transition (design.md's `presence_narration`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresenceNarration {
+    pub group_id: i64,
+    pub last_announced_character_ids: Vec<i64>,
+    pub due_at: Option<String>,
+    pub generation: i64,
+}
+
+#[derive(FromRow)]
+struct PresenceNarrationRow {
+    group_id: i64,
+    last_announced_character_ids: String,
+    due_at: Option<String>,
+    generation: i64,
+}
+
+impl TryFrom<PresenceNarrationRow> for PresenceNarration {
+    type Error = anyhow::Error;
+
+    fn try_from(row: PresenceNarrationRow) -> Result<Self> {
+        Ok(Self {
+            group_id: row.group_id,
+            last_announced_character_ids: serde_json::from_str(&row.last_announced_character_ids)
+                .context("decoding announced character ids")?,
+            due_at: row.due_at,
+            generation: row.generation,
+        })
+    }
+}
+
 #[derive(Clone, Debug, FromRow, PartialEq)]
 pub struct Invitation {
     pub token: String,
@@ -226,7 +280,8 @@ pub struct PendingAction {
     /// needed (design.md: "point to the original call").
     pub requesting_tool_execution_id: i64,
     pub character_id: i64,
-    pub location_gm_agent_id: i64,
+    pub gm_agent_id: i64,
+    pub gm_branch_id: i64,
     pub tool: String,
     pub args: String,
 }
@@ -278,6 +333,11 @@ pub struct GmScene {
     pub location_name: String,
     pub location_description: String,
     pub gm_notes: serde_json::Value,
+    /// The interacting group's own description and GM notes - distinct from
+    /// the physical location's, since multiple groups may share one location
+    /// (design.md's "Groups and shared GM history").
+    pub group_description: String,
+    pub group_gm_notes: serde_json::Value,
     pub items: Vec<SceneItem>,
     pub npcs: Vec<GmSceneNpc>,
     pub players: Vec<GmScenePlayer>,
@@ -333,7 +393,8 @@ struct PendingActionRow {
     sequence_id: i64,
     requesting_tool_execution_id: i64,
     character_id: i64,
-    location_gm_agent_id: i64,
+    gm_agent_id: i64,
+    gm_branch_id: i64,
     tool: String,
     args: String,
 }
@@ -352,7 +413,8 @@ impl From<PendingActionRow> for PendingAction {
             sequence_id: row.sequence_id,
             requesting_tool_execution_id: row.requesting_tool_execution_id,
             character_id: row.character_id,
-            location_gm_agent_id: row.location_gm_agent_id,
+            gm_agent_id: row.gm_agent_id,
+            gm_branch_id: row.gm_branch_id,
             tool: row.tool,
             args: row.args,
         }
@@ -657,6 +719,35 @@ pub struct RawHistoryCursor {
     pub next_position: i64,
 }
 
+/// One branch in a world_gm agent's history DAG: its ordered bounded parents
+/// (design.md's split/merge), and, when a non-retired group currently uses it
+/// as its writable head, that group's id/name (user_declarations.md: "the
+/// GM's chat history view needs to authentically display the DAG, including
+/// multiple heads - one per Group"). A retired source branch (a completed
+/// split/merge's prior group) has no head - it still renders, just without a
+/// "current" label.
+#[derive(Clone, Debug, Serialize)]
+pub struct BranchNode {
+    pub branch_id: i64,
+    /// Ordered bounded parents (`history_parent`'s own ordinal order): this
+    /// branch's history is each parent's own entries up to `through_position`,
+    /// in this order, followed by this branch's own entries.
+    pub parents: Vec<BranchParent>,
+    pub head: Option<BranchHead>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BranchParent {
+    pub branch_id: i64,
+    pub through_position: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BranchHead {
+    pub group_id: i64,
+    pub group_name: String,
+}
+
 #[derive(Debug, FromRow)]
 struct RawMessageRow {
     id: i64,
@@ -694,7 +785,7 @@ pub struct WorldObjects {
     pub characters: Vec<GameObject>,
     pub locations: Vec<GameObject>,
     pub items: Vec<GameObject>,
-    pub paths: Vec<PathObject>,
+    pub connections: Vec<ConnectionObject>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -706,9 +797,9 @@ pub struct GameObject {
     pub storyteller_notes: String,
 }
 
-/// A path has no name; it is identified by the locations it joins.
+/// A connection has no name; it is identified by the locations it joins.
 #[derive(Debug, PartialEq, Serialize)]
-pub struct PathObject {
+pub struct ConnectionObject {
     pub id: i64,
     pub from: String,
     pub to: String,
@@ -750,7 +841,7 @@ impl From<ObjectRow> for GameObject {
 }
 
 #[derive(Debug, FromRow)]
-struct PathObjectRow {
+struct ConnectionObjectRow {
     id: i64,
     from_name: String,
     to_name: String,
@@ -760,8 +851,8 @@ struct PathObjectRow {
     storyteller_notes: String,
 }
 
-impl From<PathObjectRow> for PathObject {
-    fn from(row: PathObjectRow) -> Self {
+impl From<ConnectionObjectRow> for ConnectionObject {
+    fn from(row: ConnectionObjectRow) -> Self {
         Self {
             id: row.id,
             from: row.from_name,
@@ -1172,16 +1263,20 @@ impl Store {
         .context("consuming invitation slot")?
         .rows_affected();
         ensure!(consumed == 1, "invitation `{token}` has no remaining slots");
-        let starting_location_id: i64 = sqlx::query_scalar(
-            "SELECT location_id FROM world_starting_location WHERE world_id = ?",
+        let starting_group_id: i64 = sqlx::query_scalar(
+            "SELECT character_group.group_id FROM player_character \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN world_member ON world_member.id = player_character.member_id \
+             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
+             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
         )
         .bind(invitation.world_id)
         .fetch_optional(&mut *transaction)
         .await
-        .context("finding invitation world starting location")?
+        .context("finding invitation world starting group")?
         .with_context(|| {
             format!(
-                "world {} has no owner Adventurer location",
+                "world {} has no owner Adventurer group",
                 invitation.world_id
             )
         })?;
@@ -1189,7 +1284,7 @@ impl Store {
             &mut transaction,
             user,
             invitation.world_id,
-            starting_location_id,
+            starting_group_id,
         )
         .await
         .context("creating invited player membership")?;
@@ -1291,18 +1386,21 @@ impl Store {
     /// sequence (`parent_tool_execution_id` NULL, `cause_inference_id` NULL),
     /// a nested call spawned by an exact tool_execution, or deferred
     /// compaction (its triggering inference as `cause_inference_id`).
-    /// `branch_id` is resolved once here via the plain agent_history lookup -
-    /// still correct while GM heads remain per-location/linear; groups
-    /// (slice D) are what make resolving an invocation's starting branch
-    /// require more than this.
+    /// `branch_id` selects an explicit branch (a world_gm agent has one per
+    /// group - design.md's `GroupHistory { agent_id, branch_id }`); `None`
+    /// resolves the agent's single `agent_history` branch as before.
     pub async fn start_invocation(
         &self,
         sequence_id: Option<i64>,
         agent_id: i64,
+        branch_id: Option<i64>,
         parent_tool_execution_id: Option<i64>,
         cause_inference_id: Option<i64>,
     ) -> Result<i64> {
-        let branch_id = self.branch_for_agent(agent_id).await?;
+        let branch_id = match branch_id {
+            Some(branch_id) => branch_id,
+            None => self.branch_for_agent(agent_id).await?,
+        };
         let result = sqlx::query(
             "INSERT INTO invocation (sequence_id, agent_id, branch_id, parent_tool_execution_id, cause_inference_id) \
              VALUES (?, ?, ?, ?, ?)",
@@ -1521,37 +1619,63 @@ impl Store {
             .await
             .with_context(|| format!("creating location {}", location.name))?
             .last_insert_rowid();
-            let gm_agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
-                .bind(world_id)
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| format!("creating GM for location {}", location.name))?
-                .last_insert_rowid();
-            Self::create_agent_history(&mut transaction, gm_agent_id).await?;
-            sqlx::query("INSERT INTO location_gm (location_id, agent_id) VALUES (?, ?)")
-                .bind(location_id)
-                .bind(gm_agent_id)
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| format!("linking GM for location {}", location.name))?;
             locations.insert(location.name.as_str(), location_id);
         }
 
-        for path in &scenario.paths {
+        for connection in &scenario.connections {
             sqlx::query(
-                "INSERT INTO path (world_id, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) \
+                "INSERT INTO connection (world_id, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) \
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(world_id)
-            .bind(locations[path.from.as_str()])
-            .bind(locations[path.to.as_str()])
-            .bind(path.travel_time)
-            .bind(&path.description)
-            .bind(serde_json::to_string(&path.notes.gm)?)
-            .bind(serde_json::to_string(&path.notes.storyteller)?)
+            .bind(locations[connection.from.as_str()])
+            .bind(locations[connection.to.as_str()])
+            .bind(connection.travel_time)
+            .bind(&connection.description)
+            .bind(serde_json::to_string(&connection.notes.gm)?)
+            .bind(serde_json::to_string(&connection.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
-            .context("creating scenario path")?;
+            .context("creating scenario connection")?;
+        }
+
+        let world_gm_agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
+            .bind(world_id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("creating world GM for world {world_id}"))?
+            .last_insert_rowid();
+        sqlx::query("INSERT INTO world_gm (world_id, agent_id) VALUES (?, ?)")
+            .bind(world_id)
+            .bind(world_gm_agent_id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("linking world GM for world {world_id}"))?;
+
+        let mut groups = HashMap::new();
+        for group in &scenario.groups {
+            let branch_id = sqlx::query("INSERT INTO history_branch (agent_id) VALUES (?)")
+                .bind(world_gm_agent_id)
+                .execute(&mut *transaction)
+                .await
+                .with_context(|| format!("creating history branch for group {}", group.name))?
+                .last_insert_rowid();
+            let group_id = sqlx::query(
+                "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id, gm_notes, storyteller_notes) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(world_id)
+            .bind(&group.name)
+            .bind(locations[group.location.as_str()])
+            .bind(&group.description)
+            .bind(branch_id)
+            .bind(serde_json::to_string(&group.notes.gm)?)
+            .bind(serde_json::to_string(&group.notes.storyteller)?)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("creating group {}", group.name))?
+            .last_insert_rowid();
+            groups.insert(group.name.as_str(), group_id);
         }
 
         let mut item_types = HashMap::new();
@@ -1625,10 +1749,10 @@ impl Store {
             )
             .await?;
             sqlx::query(
-                "INSERT INTO character_location (character_id, location_id, description) VALUES (?, ?, '')",
+                "INSERT INTO character_group (character_id, group_id, description) VALUES (?, ?, '')",
             )
             .bind(character_id)
-            .bind(locations[npc.location.as_str()])
+            .bind(groups[npc.group.as_str()])
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("placing NPC {}", npc.name))?;
@@ -1658,7 +1782,7 @@ impl Store {
             &mut transaction,
             owner,
             world_id,
-            locations[scenario.starting_location.as_str()],
+            groups[scenario.starting_group.as_str()],
         )
         .await?;
         transaction
@@ -1734,16 +1858,20 @@ impl Store {
         .await
         .context("resolving active membership for new character")?
         .with_context(|| format!("user {user_id} has no active access to world {world_id}"))?;
-        let starting_location_id: i64 = sqlx::query_scalar(
-            "SELECT location_id FROM world_starting_location WHERE world_id = ?",
+        let starting_group_id: i64 = sqlx::query_scalar(
+            "SELECT character_group.group_id FROM player_character \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN world_member ON world_member.id = player_character.member_id \
+             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
+             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
         )
         .bind(world_id)
         .fetch_optional(&mut *transaction)
         .await
-        .context("loading world starting location")?
-        .with_context(|| format!("world {world_id} has no starting location"))?;
+        .context("loading world starting group")?
+        .with_context(|| format!("world {world_id} has no starting group"))?;
         let (character_id, agent_id, _) =
-            Self::create_adventurer(&mut transaction, member_id, world_id, starting_location_id)
+            Self::create_adventurer(&mut transaction, member_id, world_id, starting_group_id)
                 .await?;
         transaction
             .commit()
@@ -1768,8 +1896,9 @@ impl Store {
              FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
-             JOIN character_location ON character_location.character_id = character.id \
-             JOIN location ON location.id = character_location.location_id \
+             JOIN character_group ON character_group.character_id = character.id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN location ON location.id = \"group\".location_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
         )
         .bind(member.member_id)
@@ -1798,9 +1927,10 @@ impl Store {
     /// internal database id in the model-facing scene packet.
     pub async fn player_location_id(&self, member: &PlayerAgent) -> Result<i64> {
         sqlx::query_scalar(
-            "SELECT character_location.location_id FROM world_member AS member \
+            "SELECT \"group\".location_id FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
-             JOIN character_location ON character_location.character_id = player_character.character_id \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
         )
         .bind(member.member_id)
@@ -1813,6 +1943,642 @@ impl Store {
         .with_context(|| format!("member {} has no active location", member.member_id))
     }
 
+    /// Record a character's zero-to-one connected transition, bumping its
+    /// presence generation so a later, now-stale timer event can recognize
+    /// itself as superseded (design.md's Membership and presence). Returns
+    /// the new generation.
+    pub async fn mark_character_present(&self, character_id: i64) -> Result<i64> {
+        sqlx::query_scalar(
+            "INSERT INTO character_presence (character_id, last_connected_at, absent_since, generation) \
+             VALUES (?, CURRENT_TIMESTAMP, NULL, 1) \
+             ON CONFLICT (character_id) DO UPDATE SET \
+                 last_connected_at = CURRENT_TIMESTAMP, absent_since = NULL, generation = generation + 1 \
+             RETURNING generation",
+        )
+        .bind(character_id)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("recording presence for character {character_id}"))
+    }
+
+    /// Record a character's one-to-zero connected transition. Returns the new
+    /// generation.
+    pub async fn mark_character_absent(&self, character_id: i64) -> Result<i64> {
+        sqlx::query_scalar(
+            "UPDATE character_presence SET absent_since = CURRENT_TIMESTAMP, generation = generation + 1 \
+             WHERE character_id = ? RETURNING generation",
+        )
+        .bind(character_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("recording absence for character {character_id}"))?
+        .with_context(|| format!("character {character_id} was never marked present"))
+    }
+
+    /// The group a character currently belongs to. Every active character
+    /// (player or NPC) has exactly one.
+    pub async fn character_group_id(&self, character_id: i64) -> Result<i64> {
+        sqlx::query_scalar("SELECT group_id FROM character_group WHERE character_id = ?")
+            .bind(character_id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("loading group for character {character_id}"))?
+            .with_context(|| format!("character {character_id} has no group"))
+    }
+
+    /// The world a group belongs to.
+    pub async fn world_id_for_group(&self, group_id: i64) -> Result<i64> {
+        sqlx::query_scalar("SELECT world_id FROM \"group\" WHERE id = ?")
+            .bind(group_id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("looking up world for group {group_id}"))?
+            .with_context(|| format!("group {group_id} does not exist"))
+    }
+
+    /// This group's own branch, if it currently exists and is not retired -
+    /// `None` otherwise, for a caller that only wants to act on a group
+    /// still eligible to participate in a topology change (the real
+    /// existence/retirement rejection is `apply_merge`/`apply_split`'s own
+    /// job inside their transaction; this is a read-only pre-check for work
+    /// that must happen before that transaction, e.g. merge-time compaction,
+    /// so it fails soft rather than erroring on a proposal that will end up
+    /// rejected anyway).
+    pub async fn active_group_branch(&self, group_id: i64) -> Result<Option<i64>> {
+        sqlx::query_scalar(
+            "SELECT branch_id FROM \"group\" WHERE id = ? AND retired_at IS NULL",
+        )
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("checking group {group_id} is active"))
+    }
+
+    /// The location a group is currently at.
+    pub async fn group_location_id(&self, group_id: i64) -> Result<i64> {
+        sqlx::query_scalar("SELECT location_id FROM \"group\" WHERE id = ?")
+            .bind(group_id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("looking up location for group {group_id}"))?
+            .with_context(|| format!("group {group_id} does not exist"))
+    }
+
+    /// A group's world_gm identity and its own branch (design.md's
+    /// `GroupHistory { agent_id, branch_id }` - agent_id alone cannot select
+    /// a GM history once a world_gm plays several groups).
+    pub async fn group_gm_history(&self, group_id: i64) -> Result<GroupHistory> {
+        let (agent_id, branch_id): (i64, i64) = sqlx::query_as(
+            "SELECT world_gm.agent_id, \"group\".branch_id FROM \"group\" \
+             JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             WHERE \"group\".id = ?",
+        )
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("looking up GM for group {group_id}"))?
+        .with_context(|| format!("group {group_id} does not exist"))?;
+        Ok(GroupHistory { agent_id, branch_id })
+    }
+
+    /// Every branch this agent owns, with its ordered bounded parents and
+    /// (when a non-retired group currently uses it as its writable head)
+    /// that group's identity - the whole DAG a world_gm agent's history can
+    /// form once groups split and merge (user_declarations.md: "the GM's
+    /// chat history view needs to authentically display the DAG, including
+    /// multiple heads - one per Group"). A plain player/NPC/Storyteller
+    /// agent still returns its one branch here, with no parents and no head
+    /// (its head is `agent_history`, not a group) - the caller distinguishes
+    /// "one branch, no parents" from a real DAG to decide how to render it.
+    /// Unpaged: branch count only grows with split/merge events, never with
+    /// ordinary chat volume.
+    pub async fn gm_branch_graph(
+        &self,
+        viewer_id: i64,
+        world_id: i64,
+        agent_id: i64,
+    ) -> Result<Vec<BranchNode>> {
+        self.inspecting(viewer_id, world_id).await?;
+        ensure!(
+            self.world_id_for_agent(agent_id).await? == world_id,
+            "agent {agent_id} is not in world {world_id}"
+        );
+        let branch_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM history_branch WHERE agent_id = ? ORDER BY id",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading branches for agent {agent_id}"))?;
+        let mut nodes = Vec::with_capacity(branch_ids.len());
+        for branch_id in branch_ids {
+            let parents = sqlx::query_as::<_, (i64, i64)>(
+                "SELECT parent_branch_id, through_position FROM history_parent \
+                 WHERE branch_id = ? ORDER BY ordinal",
+            )
+            .bind(branch_id)
+            .fetch_all(&self.pool)
+            .await
+            .with_context(|| format!("loading parents of branch {branch_id}"))?
+            .into_iter()
+            .map(|(branch_id, through_position)| BranchParent { branch_id, through_position })
+            .collect();
+            let head: Option<(i64, String)> = sqlx::query_as(
+                "SELECT id, name FROM \"group\" WHERE branch_id = ? AND retired_at IS NULL",
+            )
+            .bind(branch_id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("checking current group head for branch {branch_id}"))?;
+            nodes.push(BranchNode {
+                branch_id,
+                parents,
+                head: head.map(|(group_id, group_name)| BranchHead { group_id, group_name }),
+            });
+        }
+        Ok(nodes)
+    }
+
+    /// Validate and apply every grouping proposal collected from one tool
+    /// batch, in call order, in a single transaction (design.md's "Tool
+    /// boundary"): each split/merge is checked against state as it stands at
+    /// this point (which may already reflect an earlier proposal in the same
+    /// batch), a stale or invalid one is rejected rather than applied, and
+    /// every proposal's tool-result message is appended in call order
+    /// alongside the ordinary calls this same batch already committed.
+    pub async fn apply_topology_changes(
+        &self,
+        inference_id: i64,
+        changes: Vec<(String, i64, tools::TopologyChange)>,
+    ) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting topology change transaction")?;
+        // The branch every proposal's own tool-result message is appended
+        // to - the same branch every ordinary call in this batch already
+        // used (complete_tool_result's own comment: the inference's own
+        // recorded branch, not a fresh agent_history lookup).
+        let branch_id: i64 = sqlx::query_scalar(
+            "SELECT history_entry.branch_id FROM inference \
+             JOIN history_entry ON history_entry.id = inference.history_entry_id \
+             WHERE inference.id = ?",
+        )
+        .bind(inference_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading topology change batch's own branch")?
+        .with_context(|| format!("inference {inference_id} does not exist"))?;
+        for (tool_call_id, tool_execution_id, change) in changes {
+            let result = match change {
+                tools::TopologyChange::Split {
+                    group_id,
+                    partitions,
+                    continue_with_character_id,
+                } => {
+                    Self::apply_split(&mut transaction, group_id, partitions, continue_with_character_id)
+                        .await?
+                }
+                tools::TopologyChange::Merge {
+                    group_ids,
+                    name,
+                    description,
+                } => Self::apply_merge(&mut transaction, group_ids, name, description).await?,
+            };
+            let status = if result.is_ok() { "completed" } else { "rejected" };
+            let content = result.unwrap_or_else(|rejection| rejection);
+            let (_message_id, content_id) = Self::insert_message(
+                &mut transaction,
+                branch_id,
+                &Message::tool_result(tool_call_id.clone(), content),
+                Some(inference_id),
+                Some(tool_execution_id),
+                None,
+            )
+            .await?;
+            let updated = sqlx::query(
+                "UPDATE tool_execution SET status = ?, result_content_id = ?, finished_at = CURRENT_TIMESTAMP \
+                 WHERE id = ? AND finished_at IS NULL",
+            )
+            .bind(status)
+            .bind(content_id)
+            .bind(tool_execution_id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("completing topology change tool_execution {tool_execution_id}"))?;
+            ensure!(
+                updated.rows_affected() == 1,
+                "tool_execution {tool_execution_id} is missing or already finished"
+            );
+        }
+        transaction
+            .commit()
+            .await
+            .context("committing topology changes")?;
+        Ok(())
+    }
+
+    /// Create one resulting group from a bounded parent, sharing the given
+    /// world/location and cut through the parent branch's currently settled
+    /// position. Returns the new group's id and branch id.
+    async fn spawn_group_branch(
+        transaction: &mut Transaction<'_, Sqlite>,
+        world_id: i64,
+        world_gm_agent_id: i64,
+        location_id: i64,
+        name: &str,
+        description: &str,
+        parents: &[(i64, i64)],
+    ) -> Result<(i64, i64)> {
+        let branch_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO history_branch (agent_id) VALUES (?) RETURNING id",
+        )
+        .bind(world_gm_agent_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .context("creating history branch for new group")?;
+        for (ordinal, (parent_branch_id, through_position)) in parents.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO history_parent (branch_id, ordinal, parent_branch_id, through_position) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(branch_id)
+            .bind(i64::try_from(ordinal).expect("parent ordinal fits in i64"))
+            .bind(parent_branch_id)
+            .bind(through_position)
+            .execute(&mut **transaction)
+            .await
+            .context("linking new group's branch to its parent")?;
+        }
+        let group_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id) \
+             VALUES (?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(world_id)
+        .bind(name)
+        .bind(location_id)
+        .bind(description)
+        .bind(branch_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .context("creating new group")?;
+        Ok((group_id, branch_id))
+    }
+
+    /// `split_group`: partition an active group's exact current membership
+    /// into the proposed groups, each a new branch parented on the source's
+    /// settled position, then retire the source (design.md's "Split").
+    /// Returns the tool result text - `Ok` for the model-visible success
+    /// text, `Err` for an ordinary rejection (never an infrastructure error,
+    /// which still propagates via `?`).
+    async fn apply_split(
+        transaction: &mut Transaction<'_, Sqlite>,
+        group_id: i64,
+        partitions: Vec<tools::GroupPartition>,
+        continue_with_character_id: Option<i64>,
+    ) -> Result<Result<String, String>> {
+        let Some((world_id, location_id, branch_id, retired_at)): Option<(i64, i64, i64, Option<String>)> =
+            sqlx::query_as(
+                "SELECT world_id, location_id, branch_id, retired_at FROM \"group\" WHERE id = ?",
+            )
+            .bind(group_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .with_context(|| format!("loading group {group_id} for split"))?
+        else {
+            return Ok(Err(format!("Tool arguments were rejected: group {group_id} does not exist")));
+        };
+        if retired_at.is_some() {
+            return Ok(Err(format!(
+                "Tool arguments were rejected: group {group_id} is already retired"
+            )));
+        }
+        let current: Vec<i64> = sqlx::query_scalar(
+            "SELECT character_id FROM character_group WHERE group_id = ? ORDER BY character_id",
+        )
+        .bind(group_id)
+        .fetch_all(&mut **transaction)
+        .await
+        .with_context(|| format!("loading group {group_id}'s current membership"))?;
+        let mut partitioned: Vec<i64> = partitions
+            .iter()
+            .flat_map(|partition| partition.character_ids.iter().copied())
+            .collect();
+        partitioned.sort_unstable();
+        let mut current_sorted = current.clone();
+        current_sorted.sort_unstable();
+        let is_disjoint = partitioned.len()
+            == partitions
+                .iter()
+                .map(|partition| partition.character_ids.len())
+                .sum::<usize>();
+        if partitions.is_empty()
+            || partitions.iter().any(|partition| partition.character_ids.is_empty())
+            || !is_disjoint
+            || partitioned != current_sorted
+        {
+            return Ok(Err(format!(
+                "Tool arguments were rejected: partitions must be a complete, nonempty, disjoint split of group {group_id}'s current membership"
+            )));
+        }
+        if let Some(continue_with) = continue_with_character_id
+            && !current.contains(&continue_with)
+        {
+            return Ok(Err(format!(
+                "Tool arguments were rejected: continue_with_character_id {continue_with} is not a member of group {group_id}"
+            )));
+        }
+        let through_position: i64 =
+            sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
+                .bind(branch_id)
+                .fetch_one(&mut **transaction)
+                .await
+                .context("loading source branch's settled position")?;
+        let world_gm_agent_id = Self::world_gm_agent_id_tx(transaction, world_id).await?;
+        let mut result_group_ids = Vec::new();
+        for partition in &partitions {
+            let (new_group_id, _new_branch_id) = Self::spawn_group_branch(
+                transaction,
+                world_id,
+                world_gm_agent_id,
+                location_id,
+                &partition.name,
+                &partition.description,
+                &[(branch_id, through_position)],
+            )
+            .await?;
+            for character_id in &partition.character_ids {
+                sqlx::query("UPDATE character_group SET group_id = ?, description = ? WHERE character_id = ?")
+                    .bind(new_group_id)
+                    .bind(&partition.description)
+                    .bind(character_id)
+                    .execute(&mut **transaction)
+                    .await
+                    .with_context(|| format!("moving character {character_id} into split group {new_group_id}"))?;
+            }
+            result_group_ids.push(new_group_id);
+        }
+        sqlx::query("UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(group_id)
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| format!("retiring split group {group_id}"))?;
+        Ok(Ok(format!(
+            "Group {group_id} split into groups {}.",
+            result_group_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+
+    /// `merge_groups`: union distinct, active, co-located groups in one world
+    /// into a new group whose branch bounds all of their settled positions,
+    /// sorted ascending for parent order, then retire the sources (design.md's
+    /// "Merge").
+    async fn apply_merge(
+        transaction: &mut Transaction<'_, Sqlite>,
+        mut group_ids: Vec<i64>,
+        name: String,
+        description: String,
+    ) -> Result<Result<String, String>> {
+        group_ids.sort_unstable();
+        group_ids.dedup();
+        if group_ids.len() < 2 {
+            return Ok(Err(
+                "Tool arguments were rejected: merge_groups requires at least two distinct groups"
+                    .to_string(),
+            ));
+        }
+        let mut world_id = None;
+        let mut location_id = None;
+        let mut parents = Vec::new();
+        for group_id in &group_ids {
+            let Some((group_world_id, group_location_id, branch_id, retired_at)): Option<(
+                i64,
+                i64,
+                i64,
+                Option<String>,
+            )> = sqlx::query_as(
+                "SELECT world_id, location_id, branch_id, retired_at FROM \"group\" WHERE id = ?",
+            )
+            .bind(group_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .with_context(|| format!("loading group {group_id} for merge"))?
+            else {
+                return Ok(Err(format!(
+                    "Tool arguments were rejected: group {group_id} does not exist"
+                )));
+            };
+            if retired_at.is_some() {
+                return Ok(Err(format!(
+                    "Tool arguments were rejected: group {group_id} is already retired"
+                )));
+            }
+            if *world_id.get_or_insert(group_world_id) != group_world_id {
+                return Ok(Err(
+                    "Tool arguments were rejected: merge_groups requires groups in the same world"
+                        .to_string(),
+                ));
+            }
+            if *location_id.get_or_insert(group_location_id) != group_location_id {
+                return Ok(Err(
+                    "Tool arguments were rejected: merge_groups requires groups at one location"
+                        .to_string(),
+                ));
+            }
+            let through_position: i64 =
+                sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
+                    .bind(branch_id)
+                    .fetch_one(&mut **transaction)
+                    .await
+                    .context("loading source branch's settled position")?;
+            parents.push((branch_id, through_position));
+        }
+        let world_id = world_id.expect("at least two group ids were validated above");
+        let location_id = location_id.expect("at least two group ids were validated above");
+        let world_gm_agent_id = Self::world_gm_agent_id_tx(transaction, world_id).await?;
+        let (new_group_id, _new_branch_id) = Self::spawn_group_branch(
+            transaction,
+            world_id,
+            world_gm_agent_id,
+            location_id,
+            &name,
+            &description,
+            &parents,
+        )
+        .await?;
+        for group_id in &group_ids {
+            sqlx::query("UPDATE character_group SET group_id = ? WHERE group_id = ?")
+                .bind(new_group_id)
+                .bind(group_id)
+                .execute(&mut **transaction)
+                .await
+                .with_context(|| format!("moving group {group_id}'s characters into merged group {new_group_id}"))?;
+            sqlx::query("UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP WHERE id = ?")
+                .bind(group_id)
+                .execute(&mut **transaction)
+                .await
+                .with_context(|| format!("retiring merged group {group_id}"))?;
+        }
+        Ok(Ok(format!(
+            "Groups {} merged into group {new_group_id}.",
+            group_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+        )))
+    }
+
+    async fn world_gm_agent_id_tx(
+        transaction: &mut Transaction<'_, Sqlite>,
+        world_id: i64,
+    ) -> Result<i64> {
+        sqlx::query_scalar("SELECT agent_id FROM world_gm WHERE world_id = ?")
+            .bind(world_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .with_context(|| format!("looking up world GM for world {world_id}"))?
+            .with_context(|| format!("world {world_id} has no world GM"))
+    }
+
+    /// Display names for a set of characters, in the order given by the
+    /// database (not necessarily `character_ids`' own order) - used only to
+    /// compose an arrival/departure narration prompt, never to identify a
+    /// specific character positionally.
+    pub async fn character_names(&self, character_ids: &[i64]) -> Result<Vec<String>> {
+        if character_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = serde_json::to_string(character_ids).context("serializing character ids")?;
+        sqlx::query_scalar(
+            "SELECT character.name FROM character \
+             JOIN json_each(?) AS requested ON requested.value = character.id \
+             ORDER BY character.id",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("loading character names")
+    }
+
+    /// The caller's group's characters, their names and online state
+    /// (design.md's `party_presence()`: "resolves the caller's group and
+    /// returns character IDs, names and online state from this data"). Does
+    /// not mutate group membership.
+    pub async fn party_presence(&self, character_id: i64) -> Result<Vec<PartyMember>> {
+        let group_id = self.character_group_id(character_id).await?;
+        let rows: Vec<(i64, String, bool)> = sqlx::query_as(
+            "SELECT character.id, character.name, \
+                    character_presence.character_id IS NOT NULL AND character_presence.absent_since IS NULL AS online \
+             FROM character_group \
+             JOIN character ON character.id = character_group.character_id \
+             LEFT JOIN character_presence ON character_presence.character_id = character_group.character_id \
+             WHERE character_group.group_id = ? ORDER BY character.id",
+        )
+        .bind(group_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading party presence for group {group_id}"))?;
+        Ok(rows
+            .into_iter()
+            .map(|(character_id, name, online)| PartyMember {
+                character_id,
+                name,
+                online,
+            })
+            .collect())
+    }
+
+    /// Every character in a group whose `character_presence` is currently
+    /// connected (a non-null `last_connected_at` with no later
+    /// `absent_since`), for computing the announced-set difference.
+    pub async fn group_online_character_ids(&self, group_id: i64) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            "SELECT character_group.character_id FROM character_group \
+             JOIN character_presence ON character_presence.character_id = character_group.character_id \
+             WHERE character_group.group_id = ? \
+               AND character_presence.absent_since IS NULL \
+             ORDER BY character_group.character_id",
+        )
+        .bind(group_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading online characters for group {group_id}"))
+    }
+
+    /// The current announced set and any outstanding transition deadline for
+    /// a group, creating the row (empty announced set, no deadline) if this
+    /// is its first presence event.
+    pub async fn presence_narration(&self, group_id: i64) -> Result<PresenceNarration> {
+        sqlx::query_as::<_, PresenceNarrationRow>(
+            "INSERT INTO presence_narration (group_id) VALUES (?) \
+             ON CONFLICT (group_id) DO UPDATE SET group_id = group_id \
+             RETURNING group_id, last_announced_character_ids, due_at, generation",
+        )
+        .bind(group_id)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("loading presence narration state for group {group_id}"))?
+        .try_into()
+    }
+
+    /// Persist a group's newly announced set, clearing any pending deadline
+    /// (an immediate arrival, or a deadline firing with someone still
+    /// online). Fails the update if `generation` no longer matches - a stale
+    /// caller must reload and recheck rather than overwrite a newer change.
+    pub async fn announce_presence(
+        &self,
+        group_id: i64,
+        character_ids: &[i64],
+        generation: i64,
+    ) -> Result<()> {
+        let ids = serde_json::to_string(character_ids).context("serializing announced set")?;
+        let updated = sqlx::query(
+            "UPDATE presence_narration SET last_announced_character_ids = ?, due_at = NULL, generation = generation + 1 \
+             WHERE group_id = ? AND generation = ?",
+        )
+        .bind(ids)
+        .bind(group_id)
+        .bind(generation)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("announcing presence for group {group_id}"))?
+        .rows_affected();
+        ensure!(
+            updated == 1,
+            "presence narration for group {group_id} changed before announcing"
+        );
+        Ok(())
+    }
+
+    /// Schedule (or reschedule) a group's pending deadline `after_seconds`
+    /// from now, bumping its generation so an earlier-scheduled timer
+    /// recognizes itself as stale. Fails if `generation` no longer matches -
+    /// a stale caller must reload. Returns the new generation; the caller's
+    /// own `tokio::time::sleep(Duration::from_secs(after_seconds))` is the
+    /// actual scheduling mechanism, so `due_at` here is a durable record for
+    /// recovery/display, not something re-parsed back for timing.
+    pub async fn schedule_presence_deadline(
+        &self,
+        group_id: i64,
+        after_seconds: i64,
+        generation: i64,
+    ) -> Result<i64> {
+        sqlx::query_scalar(
+            "UPDATE presence_narration \
+             SET due_at = datetime(CURRENT_TIMESTAMP, ? || ' seconds'), generation = generation + 1 \
+             WHERE group_id = ? AND generation = ? RETURNING generation",
+        )
+        .bind(after_seconds)
+        .bind(group_id)
+        .bind(generation)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("scheduling presence deadline for group {group_id}"))?
+        .with_context(|| format!("presence narration for group {group_id} changed before scheduling"))
+    }
+
     /// The display name of one character, for attributing an action to the GM.
     pub async fn character_name(&self, character_id: i64) -> Result<String> {
         sqlx::query_scalar("SELECT name FROM character WHERE id = ?")
@@ -1823,14 +2589,18 @@ impl Store {
             .with_context(|| format!("character {character_id} does not exist"))
     }
 
-    /// Resolve the current location's GM from the authenticated player character.
-    /// The player agent never chooses which GM receives the opening request.
-    pub async fn player_location_gm_agent_id(&self, member: &PlayerAgent) -> Result<i64> {
-        sqlx::query_scalar(
-            "SELECT location_gm.agent_id FROM world_member AS member \
+    /// Resolve the world GM from the authenticated player character's current
+    /// group. The player agent never chooses which GM receives the opening
+    /// request. `agent_id` alone cannot select a GM history once a world_gm
+    /// plays several groups (design.md's `GroupHistory { agent_id, branch_id
+    /// }`), so this also returns the group's own branch.
+    pub async fn player_group_history(&self, member: &PlayerAgent) -> Result<GroupHistory> {
+        let (agent_id, branch_id): (i64, i64) = sqlx::query_as(
+            "SELECT world_gm.agent_id, \"group\".branch_id FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
-             JOIN character_location ON character_location.character_id = player_character.character_id \
-             JOIN location_gm ON location_gm.location_id = character_location.location_id \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
         )
         .bind(member.member_id)
@@ -1839,8 +2609,9 @@ impl Store {
         .bind(member.character_id)
         .fetch_optional(&self.pool)
         .await
-        .context("loading member location GM")?
-        .with_context(|| format!("member {} has no active location GM", member.member_id))
+        .context("loading member group GM")?
+        .with_context(|| format!("member {} has no active group GM", member.member_id))?;
+        Ok(GroupHistory { agent_id, branch_id })
     }
 
     /// Load the text-only portion of one active membership's player-agent
@@ -1932,18 +2703,26 @@ impl Store {
         location_id: i64,
         content_id: i64,
     ) -> Result<()> {
+        // Recipients are connected PCs in the interacting group (design.md's
+        // Membership and presence: "Narration recipients are NPCs and
+        // connected PCs in the interacting group; offline PCs do not receive
+        // it"). NPCs have no player-agent history to append to here; their
+        // own narration delivery is not yet implemented.
         let agents: Vec<i64> = sqlx::query_scalar(
             "SELECT player_character.agent_id FROM world_member \
              JOIN player_character ON player_character.member_id = world_member.id \
-             JOIN character_location ON character_location.character_id = player_character.character_id \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN character_presence ON character_presence.character_id = player_character.character_id \
              WHERE world_member.world_id = ? AND world_member.access = 'active' \
-             AND character_location.location_id = ? ORDER BY player_character.agent_id",
+             AND \"group\".location_id = ? AND character_presence.absent_since IS NULL \
+             ORDER BY player_character.agent_id",
         )
         .bind(world_id)
         .bind(location_id)
         .fetch_all(&self.pool)
         .await
-        .context("finding active player agents at narrated location")?;
+        .context("finding connected player agents at narrated location")?;
         for agent_id in agents {
             let mut transaction = self.pool.begin().await.with_context(|| {
                 format!("starting narration delivery transaction for agent {agent_id}")
@@ -1967,33 +2746,41 @@ impl Store {
         Ok(())
     }
 
-    /// Load the context a location GM may use to judge one action. This is
-    /// addressed through the location-GM relation, never a model-provided
-    /// location id.
-    pub async fn gm_scene(&self, world_id: i64, agent_id: i64) -> Result<GmScene> {
-        let (location_id, location_name, location_description, gm_notes): (
+    /// Load the context a group's GM may use to judge one action. This is
+    /// addressed through the group's own branch, never a model-provided
+    /// location id - a world_gm plays several groups, so agent_id alone
+    /// cannot select which one (design.md's `GroupHistory`).
+    pub async fn gm_scene(&self, world_id: i64, branch_id: i64) -> Result<GmScene> {
+        let (group_id, location_id, location_name, location_description, gm_notes, group_description, group_gm_notes): (
+            i64,
             i64,
             String,
             String,
             String,
+            String,
+            String,
         ) = sqlx::query_as(
-            "SELECT location.id, location.name, location.description, location.gm_notes \
-             FROM location_gm JOIN location ON location.id = location_gm.location_id \
-             WHERE location_gm.agent_id = ? AND location.world_id = ?",
+            "SELECT \"group\".id, location.id, location.name, location.description, location.gm_notes, \
+                    \"group\".description, \"group\".gm_notes \
+             FROM \"group\" JOIN location ON location.id = \"group\".location_id \
+             WHERE \"group\".branch_id = ? AND \"group\".world_id = ?",
         )
-        .bind(agent_id)
+        .bind(branch_id)
         .bind(world_id)
         .fetch_optional(&self.pool)
         .await
-        .context("loading location GM scene")?
-        .with_context(|| format!("agent {agent_id} is not a GM in world {world_id}"))?;
+        .context("loading group GM scene")?
+        .with_context(|| format!("branch {branch_id} is not a group's GM history in world {world_id}"))?;
         Ok(GmScene {
             location_name,
             location_description,
             gm_notes: serde_json::from_str(&gm_notes).context("decoding location GM notes")?,
+            group_description,
+            group_gm_notes: serde_json::from_str(&group_gm_notes)
+                .context("decoding group GM notes")?,
             items: Self::location_items(&self.pool, location_id).await?,
-            npcs: Self::location_gm_npcs(&self.pool, location_id).await?,
-            players: Self::location_gm_players(&self.pool, location_id).await?,
+            npcs: Self::group_gm_npcs(&self.pool, group_id).await?,
+            players: Self::group_gm_players(&self.pool, group_id).await?,
         })
     }
 
@@ -2023,9 +2810,10 @@ impl Store {
 
     async fn location_npcs(pool: &SqlitePool, location_id: i64) -> Result<Vec<SceneNpc>> {
         sqlx::query_as(
-            "SELECT character.name, character.description FROM character_location \
-             JOIN character ON character.id = character_location.character_id \
-             WHERE character_location.location_id = ? AND character.role = 'npc' ORDER BY character.id",
+            "SELECT character.name, character.description FROM character_group \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN character ON character.id = character_group.character_id \
+             WHERE \"group\".location_id = ? AND character.role = 'npc' ORDER BY character.id",
         )
         .bind(location_id)
         .fetch_all(pool)
@@ -2033,16 +2821,16 @@ impl Store {
         .context("loading location NPCs")
     }
 
-    async fn location_gm_npcs(pool: &SqlitePool, location_id: i64) -> Result<Vec<GmSceneNpc>> {
+    async fn group_gm_npcs(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmSceneNpc>> {
         let rows: Vec<GmSceneNpcRow> = sqlx::query_as(
             "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.gm_notes \
-             FROM character_location JOIN character ON character.id = character_location.character_id \
-             WHERE character_location.location_id = ? AND character.role = 'npc' ORDER BY character.id",
+             FROM character_group JOIN character ON character.id = character_group.character_id \
+             WHERE character_group.group_id = ? AND character.role = 'npc' ORDER BY character.id",
         )
-        .bind(location_id)
+        .bind(group_id)
         .fetch_all(pool)
         .await
-        .context("loading location GM NPCs")?;
+        .context("loading group GM NPCs")?;
         rows.into_iter()
             .map(|row| {
                 Ok(GmSceneNpc {
@@ -2058,21 +2846,18 @@ impl Store {
             .collect()
     }
 
-    async fn location_gm_players(
-        pool: &SqlitePool,
-        location_id: i64,
-    ) -> Result<Vec<GmScenePlayer>> {
+    async fn group_gm_players(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmScenePlayer>> {
         let rows: Vec<GmScenePlayerRow> = sqlx::query_as(
             "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.sheet \
-             FROM character_location \
-             JOIN player_character ON player_character.character_id = character_location.character_id \
+             FROM character_group \
+             JOIN player_character ON player_character.character_id = character_group.character_id \
              JOIN character ON character.id = player_character.character_id \
-             WHERE character_location.location_id = ? ORDER BY character.id",
+             WHERE character_group.group_id = ? ORDER BY character.id",
         )
-        .bind(location_id)
+        .bind(group_id)
         .fetch_all(pool)
         .await
-        .context("loading location player characters for GM")?;
+        .context("loading group player characters for GM")?;
         rows.into_iter()
             .map(|row| {
                 let sheet = serde_json::from_str(&row.sheet)
@@ -2251,13 +3036,14 @@ impl Store {
                 member.member_id
             )
         })?;
-        let (character_id, location_gm_agent_id): (i64, i64) = sqlx::query_as(
-            "SELECT character.id, location_gm.agent_id \
+        let (character_id, gm_agent_id, gm_branch_id): (i64, i64, i64) = sqlx::query_as(
+            "SELECT character.id, world_gm.agent_id, \"group\".branch_id \
              FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
-             JOIN character_location ON character_location.character_id = character.id \
-             JOIN location_gm ON location_gm.location_id = character_location.location_id \
+             JOIN character_group ON character_group.character_id = character.id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
                AND member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ?",
         )
@@ -2268,8 +3054,8 @@ impl Store {
         .bind(member.agent_id)
         .fetch_optional(&mut *transaction)
         .await
-        .context("resolving action character and location GM")?
-        .context("active membership has no playable character and location GM")?;
+        .context("resolving action character and group GM")?
+        .context("active membership has no playable character and group GM")?;
         let sequence_matches: Option<i64> =
             sqlx::query_scalar("SELECT id FROM sequence WHERE id = ? AND world_id = ?")
                 .bind(sequence_id)
@@ -2292,15 +3078,16 @@ impl Store {
         .with_context(|| format!("allocating action id in world {}", member.world_id))?;
         sqlx::query(
             "INSERT INTO pending_action \
-             (world_id, id, sequence_id, requesting_tool_execution_id, character_id, location_gm_agent_id, tool, args) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(member.world_id)
         .bind(action_id)
         .bind(sequence_id)
         .bind(requesting_tool_execution_id)
         .bind(character_id)
-        .bind(location_gm_agent_id)
+        .bind(gm_agent_id)
+        .bind(gm_branch_id)
         .bind(tool)
         .bind(args)
         .execute(&mut *transaction)
@@ -2316,7 +3103,8 @@ impl Store {
             sequence_id,
             requesting_tool_execution_id,
             character_id,
-            location_gm_agent_id,
+            gm_agent_id,
+            gm_branch_id,
             tool: tool.to_string(),
             args: args.to_string(),
         })
@@ -2337,25 +3125,25 @@ impl Store {
     /// fails loudly.
     pub async fn resolve_pending_action(
         &self,
-        location_gm_agent_id: i64,
+        gm_agent_id: i64,
         world_id: i64,
         action_id: i64,
         approving_tool_execution_id: i64,
         result: &str,
     ) -> Result<ResolvedAction> {
         let mut transaction = self.pool.begin().await.with_context(|| {
-            format!("resolving action {action_id} through GM {location_gm_agent_id}")
+            format!("resolving action {action_id} through GM {gm_agent_id}")
         })?;
         let pending: Option<PendingAction> = sqlx::query_as::<_, PendingActionRow>(
-            "SELECT world_id, id, sequence_id, requesting_tool_execution_id, character_id, location_gm_agent_id, tool, args \
-             FROM pending_action WHERE world_id = ? AND id = ? AND location_gm_agent_id = ?",
+            "SELECT world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args \
+             FROM pending_action WHERE world_id = ? AND id = ? AND gm_agent_id = ?",
         )
         .bind(world_id)
         .bind(action_id)
-        .bind(location_gm_agent_id)
+        .bind(gm_agent_id)
         .fetch_optional(&mut *transaction)
         .await
-        .context("loading pending action for location GM")?
+        .context("loading pending action for group GM")?
         .map(Into::into);
         let Some(action) = pending else {
             // Not pending: either this GM already resolved it (return the
@@ -2377,13 +3165,13 @@ impl Store {
             )
             .bind(world_id)
             .bind(action_id)
-            .bind(location_gm_agent_id)
+            .bind(gm_agent_id)
             .fetch_optional(&mut *transaction)
             .await
             .context("checking for an already-resolved action")?;
             let (approved, result_content_id) = resolved.with_context(|| {
                 format!(
-                    "action {action_id} is not pending for location GM {location_gm_agent_id} in world {world_id}"
+                    "action {action_id} is not pending for group GM {gm_agent_id} in world {world_id}"
                 )
             })?;
             transaction
@@ -2419,11 +3207,11 @@ impl Store {
         .await
         .with_context(|| format!("recording resolved action {action_id}"))?;
         let deleted = sqlx::query(
-            "DELETE FROM pending_action WHERE world_id = ? AND id = ? AND location_gm_agent_id = ?",
+            "DELETE FROM pending_action WHERE world_id = ? AND id = ? AND gm_agent_id = ?",
         )
         .bind(world_id)
         .bind(action_id)
-        .bind(location_gm_agent_id)
+        .bind(gm_agent_id)
         .execute(&mut *transaction)
         .await
         .context("retiring resolved pending action")?
@@ -2466,12 +3254,14 @@ impl Store {
                 let item_ids: Vec<i64> = sqlx::query_scalar(
                     "SELECT item.id FROM item \
                      JOIN item_location ON item_location.item_id = item.id \
-                     JOIN character_location ON character_location.location_id = item_location.location_id \
-                     WHERE item.world_id = ? AND item.name = ? AND character_location.character_id = ?",
+                     JOIN character_group ON character_group.character_id = ? \
+                     JOIN \"group\" ON \"group\".id = character_group.group_id \
+                        AND \"group\".location_id = item_location.location_id \
+                     WHERE item.world_id = ? AND item.name = ?",
                 )
+                .bind(action.character_id)
                 .bind(action.world_id)
                 .bind(&arguments.item)
-                .bind(action.character_id)
                 .fetch_all(&mut **transaction)
                 .await
                 .context("finding requested item at acting character's location")?;
@@ -2564,8 +3354,9 @@ impl Store {
             .collect::<Result<_>>()?;
         let starting_location: String = sqlx::query_scalar(
             "SELECT location.name FROM player_character \
-             JOIN character_location ON character_location.character_id = player_character.character_id \
-             JOIN location ON location.id = character_location.location_id \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN location ON location.id = \"group\".location_id \
              JOIN world_member ON world_member.id = player_character.member_id \
              JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
              WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
@@ -2575,25 +3366,57 @@ impl Store {
         .await
         .context("loading scenario start location")?
         .context("scenario world has no owner Adventurer location")?;
-        let paths: Vec<ScenarioPath> = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
-            "SELECT from_location.name, to_location.name, path.travel_time, path.description, path.gm_notes, path.storyteller_notes \
-             FROM path JOIN location AS from_location ON from_location.id = path.from_location_id \
-             JOIN location AS to_location ON to_location.id = path.to_location_id \
-             WHERE path.world_id = ? ORDER BY path.id",
+        let starting_group: String = sqlx::query_scalar(
+            "SELECT \"group\".name FROM player_character \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN world_member ON world_member.id = player_character.member_id \
+             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
+             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
+        )
+        .bind(world_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("loading scenario starting group")?
+        .context("scenario world has no owner Adventurer group")?;
+        let connections: Vec<ScenarioConnection> = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
+            "SELECT from_location.name, to_location.name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
+             FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id \
+             JOIN location AS to_location ON to_location.id = connection.to_location_id \
+             WHERE connection.world_id = ? ORDER BY connection.id",
         )
         .bind(world_id)
         .fetch_all(&self.pool)
         .await
-        .context("loading scenario paths")?
+        .context("loading scenario connections")?
         .into_iter()
         .map(|(from, to, travel_time, description, gm, storyteller)| {
-            Ok(ScenarioPath { from, to, travel_time, description, notes: decode_notes(&gm, &storyteller)? })
+            Ok(ScenarioConnection { from, to, travel_time, description, notes: decode_notes(&gm, &storyteller)? })
+        })
+        .collect::<Result<_>>()?;
+        let groups: Vec<ScenarioGroup> = sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT \"group\".name, location.name, \"group\".description, \"group\".gm_notes, \"group\".storyteller_notes \
+             FROM \"group\" JOIN location ON location.id = \"group\".location_id \
+             WHERE \"group\".world_id = ? ORDER BY \"group\".id",
+        )
+        .bind(world_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("loading scenario groups")?
+        .into_iter()
+        .map(|(name, location, description, gm, storyteller)| {
+            Ok(ScenarioGroup {
+                name,
+                location,
+                description,
+                notes: decode_notes(&gm, &storyteller)?,
+            })
         })
         .collect::<Result<_>>()?;
         let npcs: Vec<Npc> = sqlx::query_as::<_, (String, String, String, String, String, String, String, String, String)>(
-            "SELECT character.name, location.name, character.description, character.background, character.motive, character.ambition, character.sheet, character.gm_notes, character.storyteller_notes \
-             FROM character JOIN character_location ON character_location.character_id = character.id \
-             JOIN location ON location.id = character_location.location_id \
+            "SELECT character.name, \"group\".name, character.description, character.background, character.motive, character.ambition, character.sheet, character.gm_notes, character.storyteller_notes \
+             FROM character JOIN character_group ON character_group.character_id = character.id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
              WHERE character.world_id = ? AND character.role = 'npc' ORDER BY character.id",
         )
         .bind(world_id)
@@ -2601,8 +3424,8 @@ impl Store {
         .await
         .context("loading scenario NPCs")?
         .into_iter()
-        .map(|(name, location, description, background, motive, ambition, sheet, gm, storyteller)| {
-            Ok(Npc { name, location, description, background, motive, ambition, sheet: serde_json::from_str(&sheet).context("decoding NPC sheet")?, notes: decode_notes(&gm, &storyteller)? })
+        .map(|(name, group, description, background, motive, ambition, sheet, gm, storyteller)| {
+            Ok(Npc { name, group, description, background, motive, ambition, sheet: serde_json::from_str(&sheet).context("decoding NPC sheet")?, notes: decode_notes(&gm, &storyteller)? })
         })
         .collect::<Result<_>>()?;
         let item_types = self.export_item_types("item_type", world_id).await?;
@@ -2629,8 +3452,10 @@ impl Store {
             storyteller_summary,
             notes,
             starting_location,
+            starting_group,
             locations,
-            paths,
+            connections,
+            groups,
             npcs,
             item_types,
             spell_types,
@@ -2664,7 +3489,7 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         user: &User,
         world_id: i64,
-        starting_location_id: i64,
+        starting_group_id: i64,
     ) -> Result<JoinedWorld> {
         let member_id = sqlx::query(
             "INSERT INTO world_member (world_id, user_id, access) VALUES (?, ?, 'active')",
@@ -2676,7 +3501,7 @@ impl Store {
         .with_context(|| format!("joining user {} to world {world_id}", user.email))?
         .last_insert_rowid();
         let (character_id, agent_id, character_tool_id) =
-            Self::create_adventurer(transaction, member_id, world_id, starting_location_id).await?;
+            Self::create_adventurer(transaction, member_id, world_id, starting_group_id).await?;
         Ok(JoinedWorld {
             member_id,
             character_id,
@@ -2689,7 +3514,7 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         member_id: i64,
         world_id: i64,
-        starting_location_id: i64,
+        starting_group_id: i64,
     ) -> Result<(i64, i64, i64)> {
         let agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
             .bind(world_id)
@@ -2727,8 +3552,8 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("linking Adventurer for world {world_id}"))?;
-        sqlx::query("INSERT INTO character_location (character_id, location_id, description) VALUES (?, ?, '')")
-            .bind(character_id).bind(starting_location_id).execute(&mut **transaction).await
+        sqlx::query("INSERT INTO character_group (character_id, group_id, description) VALUES (?, ?, '')")
+            .bind(character_id).bind(starting_group_id).execute(&mut **transaction).await
             .with_context(|| format!("placing Adventurer in world {world_id}"))?;
         Ok((character_id, agent_id, tool_id))
     }
@@ -2918,7 +3743,6 @@ impl Store {
     /// duplicating it.
     pub async fn complete_tool_result(
         &self,
-        agent_id: i64,
         source_inference_id: i64,
         tool_execution_id: i64,
         status: &str,
@@ -2927,7 +3751,19 @@ impl Store {
         let mut transaction = self.pool.begin().await.with_context(|| {
             format!("starting tool result transaction for tool_execution {tool_execution_id}")
         })?;
-        let branch_id = Self::branch_for_agent_tx(&mut transaction, agent_id).await?;
+        // The branch the triggering inference's own history_entry lives on -
+        // not a fresh agent_history lookup, which a world_gm agent (one
+        // branch per group) has no single row for.
+        let branch_id: i64 = sqlx::query_scalar(
+            "SELECT history_entry.branch_id FROM inference \
+             JOIN history_entry ON history_entry.id = inference.history_entry_id \
+             WHERE inference.id = ?",
+        )
+        .bind(source_inference_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading tool result's source inference branch")?
+        .with_context(|| format!("inference {source_inference_id} does not exist"))?;
         let (_message_id, content_id) = Self::insert_message(
             &mut transaction,
             branch_id,
@@ -3020,10 +3856,21 @@ impl Store {
         Ok(history_entry_id)
     }
 
+    /// Every pending compaction, whichever relation owns its branch: an
+    /// ordinary agent's single `agent_history` row, or - for a world_gm
+    /// agent, which has no such row - the group whose `branch_id` it is
+    /// (design.md's `GroupHistory`). A plain `agent_history` JOIN alone would
+    /// silently exclude every world_gm branch's jobs, including at startup
+    /// recovery.
     pub async fn pending_compactions(&self) -> Result<Vec<PendingCompaction>> {
         let rows = sqlx::query_as::<_, PendingCompactionRow>(
-            "SELECT agent_history.agent_id, pending_compaction.branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments \
-             FROM pending_compaction JOIN agent_history ON agent_history.branch_id = pending_compaction.branch_id \
+            "SELECT COALESCE(agent_history.agent_id, world_gm.agent_id) AS agent_id, \
+                    pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
+                    next_input_tokens, sampling, model, static_segments \
+             FROM pending_compaction \
+             LEFT JOIN agent_history ON agent_history.branch_id = pending_compaction.branch_id \
+             LEFT JOIN \"group\" ON \"group\".branch_id = pending_compaction.branch_id \
+             LEFT JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              ORDER BY pending_compaction.branch_id",
         )
         .fetch_all(&self.pool)
@@ -3032,16 +3879,37 @@ impl Store {
         rows.into_iter().map(PendingCompaction::try_from).collect()
     }
 
+    /// As `pending_compaction_for_branch`, resolving an ordinary agent's
+    /// single `agent_history` branch first - only valid for an agent kind
+    /// that actually has one. A world_gm agent, which may own several
+    /// branches at once, has no such single branch and must call
+    /// `pending_compaction_for_branch` directly with the branch in question.
     pub async fn pending_compaction(&self, agent_id: i64) -> Result<Option<PendingCompaction>> {
+        let branch_id = self.branch_for_agent(agent_id).await?;
+        self.pending_compaction_for_branch(branch_id).await
+    }
+
+    /// As `pending_compactions`, for one already-known branch - the only
+    /// lookup that works for a world_gm agent, which may own several
+    /// branches at once and so cannot be resolved by `agent_id` alone.
+    pub async fn pending_compaction_for_branch(
+        &self,
+        branch_id: i64,
+    ) -> Result<Option<PendingCompaction>> {
         sqlx::query_as::<_, PendingCompactionRow>(
-            "SELECT agent_history.agent_id, pending_compaction.branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments \
-             FROM pending_compaction JOIN agent_history ON agent_history.branch_id = pending_compaction.branch_id \
-             WHERE agent_history.agent_id = ?",
+            "SELECT COALESCE(agent_history.agent_id, world_gm.agent_id) AS agent_id, \
+                    pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
+                    next_input_tokens, sampling, model, static_segments \
+             FROM pending_compaction \
+             LEFT JOIN agent_history ON agent_history.branch_id = pending_compaction.branch_id \
+             LEFT JOIN \"group\" ON \"group\".branch_id = pending_compaction.branch_id \
+             LEFT JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             WHERE pending_compaction.branch_id = ?",
         )
-        .bind(agent_id)
+        .bind(branch_id)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("loading pending compaction for agent {agent_id}"))?
+        .with_context(|| format!("loading pending compaction for branch {branch_id}"))?
         .map(PendingCompaction::try_from)
         .transpose()
     }
@@ -3054,13 +3922,14 @@ impl Store {
     pub async fn enqueue_capacity_compaction(
         &self,
         agent_id: i64,
-        sequence_id: Option<i64>,
+        branch_id: Option<i64>,
         requested_tokens: usize,
-        sampling: &Sampling,
-        model: &str,
-        static_segments: &[Segment],
+        policy: CompactionPolicy<'_>,
     ) -> Result<()> {
-        let branch_id = self.branch_for_agent(agent_id).await?;
+        let branch_id = match branch_id {
+            Some(branch_id) => branch_id,
+            None => self.branch_for_agent(agent_id).await?,
+        };
         let position: i64 = sqlx::query_scalar(
             "SELECT next_position - 1 FROM history_branch WHERE id = ?",
         )
@@ -3077,11 +3946,11 @@ impl Store {
         )
         .bind(branch_id)
         .bind(position)
-        .bind(sequence_id)
+        .bind(policy.sequence_id)
         .bind(i64::try_from(requested_tokens).context("capacity-rejected input token count is too large")?)
-        .bind(serde_json::to_string(sampling).context("serializing capacity compaction sampling")?)
-        .bind(model)
-        .bind(serde_json::to_string(static_segments)
+        .bind(serde_json::to_string(policy.sampling).context("serializing capacity compaction sampling")?)
+        .bind(policy.model)
+        .bind(serde_json::to_string(policy.static_segments)
             .context("serializing capacity compaction static context")?)
         .execute(&self.pool)
         .await
@@ -3209,9 +4078,21 @@ impl Store {
     }
 
     /// The summary currently selected as this agent's live point-in-time
-    /// replacement: the newest activation on its branch.
+    /// replacement: the newest activation on its branch. A convenience over
+    /// `latest_summary_for_branch` for an ordinary agent with exactly one
+    /// branch; every production caller already has an explicit branch_id
+    /// (a world_gm agent has no single branch to resolve here) and uses that
+    /// directly instead.
+    #[cfg(test)]
     pub async fn latest_summary(&self, agent_id: i64) -> Result<Option<Summary>> {
         let branch_id = self.branch_for_agent(agent_id).await?;
+        self.latest_summary_for_branch(branch_id).await
+    }
+
+    /// As `latest_summary`, for an already-known branch - the only lookup
+    /// that works for a world_gm agent, which may own several branches at
+    /// once (design.md's `GroupHistory`).
+    pub async fn latest_summary_for_branch(&self, branch_id: i64) -> Result<Option<Summary>> {
         let row = sqlx::query_as::<_, SummaryRow>(
             "SELECT summary.id, summary.history_entry_id, summary.agent_id, summary.covered_ranges, \
                     json_extract(summary.body, '$.content.value') AS content, summary.inference_id \
@@ -3222,75 +4103,143 @@ impl Store {
         .bind(branch_id)
         .fetch_optional(&self.pool)
         .await
-        .with_context(|| format!("loading latest summary for agent {agent_id}"))?;
+        .with_context(|| format!("loading latest summary for branch {branch_id}"))?;
         row.map(Summary::try_from).transpose()
     }
 
-    /// The live history is the newest summary followed by every raw message
-    /// it does not cover, walked through the shared bounded-parent traversal.
-    /// Older messages remain stored for replay and debugging.
-    pub async fn live_segments(&self, agent_id: i64) -> Result<Vec<Segment>> {
-        let head = self.current_head(agent_id).await?;
+    /// The live history is, per branch touched by the bounded-parent
+    /// traversal, that branch's own newest disjoint summary (if any)
+    /// followed by every one of its raw messages not covered by any selected
+    /// summary. A merge can bring in several branches, each with its own
+    /// independent summary covering its own disjoint range - unlike a plain
+    /// linear branch, "the newest summary in the whole traversal" is not
+    /// enough, since an older parent branch's summary is never superseded by
+    /// a sibling branch's newer one. Older messages remain stored for replay
+    /// and debugging.
+    pub async fn live_segments(
+        &self,
+        agent_id: i64,
+        branch_id: Option<i64>,
+    ) -> Result<Vec<Segment>> {
+        let head = match branch_id {
+            Some(branch_id) => self.current_head_for_branch(branch_id).await?,
+            None => self.current_head(agent_id).await?,
+        };
         let world_id = self.world_id_for_agent(agent_id).await?;
         let entries = self.history_range(head, world_id, agent_id).await?;
-        let summary_entry = entries
-            .iter()
-            .rev()
-            .find(|entry| entry.kind == history::EntryKind::Summary);
-        let mut segments = Vec::new();
-        // Not covered by the selected summary, not merely positioned after
-        // it: a summary activation's own position in the unified index can
-        // land after messages it does not cover, since it is produced by a
-        // separate compaction inference recorded later.
-        let mut covered_through: Option<i64> = None;
-        if let Some(summary_entry) = summary_entry {
+        // Every summary reachable in this traversal, newest activation first
+        // per branch: a branch's own summaries are already monotonic (each
+        // supersedes the last), so its first entry here is its live one.
+        let mut summaries_by_branch: std::collections::HashMap<i64, Summary> =
+            std::collections::HashMap::new();
+        for entry in entries.iter().rev() {
+            if entry.kind != history::EntryKind::Summary {
+                continue;
+            }
+            if summaries_by_branch.contains_key(&entry.branch_id) {
+                continue;
+            }
             let row = sqlx::query_as::<_, SummaryRow>(
                 "SELECT summary.id, summary.history_entry_id, summary.agent_id, summary.covered_ranges, \
                         json_extract(summary.body, '$.content.value') AS content, summary.inference_id \
                  FROM summary_content AS summary WHERE summary.history_entry_id = ?",
             )
-            .bind(summary_entry.id)
+            .bind(entry.id)
             .fetch_optional(&self.pool)
             .await
-            .with_context(|| format!("loading summary for history entry {}", summary_entry.id))?
-            .with_context(|| format!("summary activation {} has no summary row", summary_entry.id))?;
-            let summary = Summary::try_from(row)?;
-            covered_through = summary
-                .covered_ranges
-                .iter()
-                .filter(|range| range.branch_id == head.branch_id)
-                .map(|range| range.last_position)
-                .max();
-            segments.push(Segment::Summary { summary: summary.id });
+            .with_context(|| format!("loading summary for history entry {}", entry.id))?
+            .with_context(|| format!("summary activation {} has no summary row", entry.id))?;
+            summaries_by_branch.insert(entry.branch_id, Summary::try_from(row)?);
         }
-        let messages: Vec<&history::HistoryEntry> = entries
-            .iter()
-            .filter(|entry| entry.kind == history::EntryKind::Message)
-            .filter(|entry| covered_through.is_none_or(|covered| entry.position > covered))
-            .collect();
-        if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
-            // The live range spans first..=last position on the head branch:
-            // every entry after the summary belongs to the same branch here,
-            // since this slice has no branch with parents yet.
-            segments.push(Segment::Messages {
-                messages: PositionRange {
-                    branch_id: head.branch_id,
-                    first_position: first.position,
-                    last_position: last.position,
-                },
+        // Group entries by branch, preserving the traversal's own order
+        // (ancestors before the branch that owns them): `history_range`
+        // already emits each branch's entries as one contiguous run.
+        let mut branch_order = Vec::new();
+        let mut entries_by_branch: std::collections::HashMap<i64, Vec<&history::HistoryEntry>> =
+            std::collections::HashMap::new();
+        for entry in &entries {
+            entries_by_branch.entry(entry.branch_id).or_insert_with(|| {
+                branch_order.push(entry.branch_id);
+                Vec::new()
             });
+            entries_by_branch.get_mut(&entry.branch_id).unwrap().push(entry);
+        }
+        let mut segments = Vec::new();
+        for branch_id in branch_order {
+            let branch_entries = &entries_by_branch[&branch_id];
+            // Not covered by the selected summary, not merely positioned
+            // after it: a summary activation's own position in the unified
+            // index can land after messages it does not cover, since it is
+            // produced by a separate compaction inference recorded later.
+            let mut covered_through: Option<i64> = None;
+            if let Some(summary) = summaries_by_branch.get(&branch_id) {
+                covered_through = summary
+                    .covered_ranges
+                    .iter()
+                    .filter(|range| range.branch_id == branch_id)
+                    .map(|range| range.last_position)
+                    .max();
+                segments.push(Segment::Summary { summary: summary.id });
+            }
+            let messages: Vec<&&history::HistoryEntry> = branch_entries
+                .iter()
+                .filter(|entry| entry.kind == history::EntryKind::Message)
+                .filter(|entry| covered_through.is_none_or(|covered| entry.position > covered))
+                .collect();
+            if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
+                segments.push(Segment::Messages {
+                    messages: PositionRange {
+                        branch_id,
+                        first_position: first.position,
+                        last_position: last.position,
+                    },
+                });
+            }
         }
         Ok(segments)
+    }
+
+    /// This branch's own raw message count not yet covered by its own newest
+    /// summary - its unique suffix, since a shared ancestor's messages live
+    /// on the ancestor's own branch, never copied onto this one (design.md's
+    /// merge eligibility check: "each incoming branch's unique suffix is
+    /// eligible for compaction if its raw-message count exceeds
+    /// merge_branch_messages").
+    pub async fn uncovered_message_count(&self, branch_id: i64) -> Result<i64> {
+        let covered = self
+            .latest_summary_for_branch(branch_id)
+            .await?
+            .map_or(-1, |summary| {
+                summary
+                    .covered_ranges
+                    .last()
+                    .map_or(-1, |range| range.last_position)
+            });
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message \
+             JOIN history_entry ON history_entry.id = message.id \
+             WHERE history_entry.branch_id = ? AND history_entry.position > ?",
+        )
+        .bind(branch_id)
+        .bind(covered)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("counting uncovered messages for branch {branch_id}"))
     }
 
     /// Find the newest raw suffix containing exactly `keep_tail_messages`
     /// message entries, or every available one when there are fewer. Returns
     /// the branch position just before that suffix starts (the new covered
     /// cut), or the already-covered position when there is nothing to split.
-    pub async fn tail_split(&self, agent_id: i64, keep_tail_messages: usize) -> Result<i64> {
-        let branch_id = self.branch_for_agent(agent_id).await?;
+    /// Every caller already has an explicit branch_id (a world_gm agent has
+    /// no single branch to resolve here - design.md's `GroupHistory`).
+    pub async fn tail_split_for_branch(
+        &self,
+        branch_id: i64,
+        keep_tail_messages: usize,
+    ) -> Result<i64> {
         let covered = self
-            .latest_summary(agent_id)
+            .latest_summary_for_branch(branch_id)
             .await?
             .map_or(-1, |summary| {
                 summary
@@ -3309,7 +4258,7 @@ impl Store {
         .bind(keep_tail_messages as i64)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("loading raw tail for agent {agent_id}"))?;
+        .with_context(|| format!("loading raw tail for branch {branch_id}"))?;
         Ok(rows.last().map_or(covered, |(position,)| position - 1))
     }
 
@@ -3369,10 +4318,15 @@ impl Store {
                     }
                 }
                 Segment::Messages { messages: range } => {
-                    let branch_id = self.branch_for_agent(agent_id).await?;
+                    // A world_gm agent plays several groups, each its own
+                    // branch, so this checks the range's branch is actually
+                    // owned by the claimed agent rather than comparing against
+                    // one fixed agent_history branch (design.md's
+                    // `GroupHistory`).
+                    let (owner_agent_id, _world_id) = self.branch_owner(range.branch_id).await?;
                     ensure!(
-                        range.branch_id == branch_id,
-                        "inference for agent {agent_id} references messages from branch {}",
+                        owner_agent_id == agent_id,
+                        "inference for agent {agent_id} references messages from branch {} owned by agent {owner_agent_id}",
                         range.branch_id
                     );
                     ensure!(
@@ -3576,7 +4530,19 @@ impl Store {
             .begin()
             .await
             .context("starting inference-start transaction")?;
-        let branch_id = Self::branch_for_agent_tx(&mut transaction, input.agent_id).await?;
+        // The invocation already resolved its branch at start_invocation time
+        // (a world_gm agent has one branch per group); every inference within
+        // it appends to that same branch, not a fresh agent_history lookup
+        // (migrations/0001_recording.sql's invocation.branch_id: "the branch
+        // it started on; each inference within it records its own actual
+        // branch").
+        let branch_id: i64 =
+            sqlx::query_scalar("SELECT branch_id FROM invocation WHERE id = ?")
+                .bind(input.invocation_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .context("loading invocation branch")?
+                .with_context(|| format!("invocation {} does not exist", input.invocation_id))?;
         let (history_entry_id, _position) =
             Self::append_history_entry(&mut transaction, branch_id, EntryKind::Inference).await?;
         // Successive inferences within one invocation are ordered by ordinal
@@ -3835,7 +4801,19 @@ impl Store {
             duration_ms,
         )
         .await?;
-        let branch_id = Self::branch_for_agent_tx(&mut transaction, agent_id).await?;
+        // The branch this exact inference's own history_entry already lives
+        // on - not a fresh agent_history lookup, which a world_gm agent (one
+        // branch per group) has no single row for.
+        let branch_id: i64 = sqlx::query_scalar(
+            "SELECT history_entry.branch_id FROM inference \
+             JOIN history_entry ON history_entry.id = inference.history_entry_id \
+             WHERE inference.id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading inference's own branch")?
+        .with_context(|| format!("inference {id} does not exist"))?;
         if !is_error {
             // The message reuses the output content row this inference
             // already wrote via completion_columns, rather than reading it
@@ -3857,7 +4835,7 @@ impl Store {
                 && next_input_tokens >= policy.compact_before_next_input_tokens
             {
                 sqlx::query(
-                    "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments) VALUES (?, (SELECT position FROM history_entry WHERE id = ?), ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments) VALUES (?, (SELECT position FROM history_entry WHERE id = ?), ?, ?, ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
                 )
                 .bind(branch_id)
                 .bind(message_id)
@@ -4040,7 +5018,7 @@ impl Store {
         let world_id = self.world_id_for_agent(agent_id).await?;
         let sequence = self.begin_sequence(world_id, "test inference").await?;
         let invocation_id = self
-            .start_invocation(Some(sequence.id), agent_id, None, None)
+            .start_invocation(Some(sequence.id), agent_id, None, None, None)
             .await?;
         self.record(InferenceRecord {
             agent_id,
@@ -4063,12 +5041,20 @@ impl Store {
     pub async fn record_tool_call_for_test(
         &self,
         agent_id: i64,
+        branch_id: Option<i64>,
         sequence_id: Option<i64>,
-        request: &Request,
         call_id: &str,
         tool: &str,
         arguments: &str,
     ) -> i64 {
+        let request = Request {
+            messages: vec![],
+            tools: vec![],
+            sampling: Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        };
         let world_id = self.world_id_for_agent(agent_id).await.unwrap();
         let sequence_id = match sequence_id {
             Some(id) => id,
@@ -4079,7 +5065,7 @@ impl Store {
                 .id,
         };
         let invocation_id = self
-            .start_invocation(Some(sequence_id), agent_id, None, None)
+            .start_invocation(Some(sequence_id), agent_id, branch_id, None, None)
             .await
             .unwrap();
         let inference_id = self
@@ -4088,7 +5074,7 @@ impl Store {
                 sequence_id: Some(sequence_id),
                 invocation_id,
                 segments: &[],
-                request,
+                request: &request,
                 outcome: InferenceOutcome::Response(Response {
                     content: Content::ToolCalls(vec![ToolCall {
                         id: call_id.to_string(),
@@ -4391,17 +5377,16 @@ impl Store {
                     CASE \
                       WHEN player_character.agent_id IS NOT NULL THEN 'player' \
                       WHEN npc_agent.agent_id IS NOT NULL THEN 'npc' \
-                      WHEN location_gm.agent_id IS NOT NULL THEN 'location_gm' \
+                      WHEN world_gm.agent_id IS NOT NULL THEN 'world_gm' \
                       ELSE 'unknown' END AS role, \
                     COALESCE(pc.name, npc.name) AS character_name, \
-                    location.name AS location_name \
+                    NULL AS location_name \
              FROM agent \
              LEFT JOIN player_character ON player_character.agent_id = agent.id \
              LEFT JOIN character AS pc ON pc.id = player_character.character_id \
              LEFT JOIN npc_agent ON npc_agent.agent_id = agent.id \
              LEFT JOIN character AS npc ON npc.id = npc_agent.character_id \
-             LEFT JOIN location_gm ON location_gm.agent_id = agent.id \
-             LEFT JOIN location ON location.id = location_gm.location_id \
+             LEFT JOIN world_gm ON world_gm.agent_id = agent.id \
              WHERE agent.world_id = ? ORDER BY agent.id",
         )
         .bind(world_id)
@@ -4413,29 +5398,38 @@ impl Store {
         .collect()
     }
 
-    /// One raw history page for an agent: every stored message in sequence
-    /// order with its resolved content, interleaved with chat notices,
-    /// summary markers at their compaction points, and any failed inference.
-    /// This is the raw record, not context assembly - no summary folding.
     /// One raw history page for an agent, in true recorded order: every
     /// history_entry kind - message, notice, summary activation and failed
     /// inference - resolved and paged directly from the shared traversal, so
     /// a failure or notice at a page boundary is neither skipped nor
     /// duplicated (design.md: "summary coverage never determines the
     /// activation marker's position"; "Message-free histories can therefore
-    /// contain failed inferences").
+    /// contain failed inferences"). This is the raw record, not context
+    /// assembly - no summary folding.
+    ///
+    /// `branch_id` names which of this agent's branches the *first* page
+    /// pages (ignored once `after` is given - a later page always resumes
+    /// from its own cursor's branch-explicit head). `None` keeps resolving
+    /// the agent's single `agent_history` branch, the only correct choice
+    /// for a player/NPC/Storyteller agent; a world_gm agent's branch has no
+    /// such single resolution (design.md's `GroupHistory`) and must name one
+    /// explicitly (see `gm_branch_graph` for the branches it can name).
     pub async fn agent_raw_history(
         &self,
         viewer_id: i64,
         world_id: i64,
         agent_id: i64,
+        branch_id: Option<i64>,
         after: Option<RawHistoryCursor>,
         limit: i64,
     ) -> Result<(Vec<RawHistoryEntry>, Option<RawHistoryCursor>)> {
         self.inspecting(viewer_id, world_id).await?;
         let head = match after {
             Some(cursor) => cursor.head,
-            None => self.current_head(agent_id).await?,
+            None => match branch_id {
+                Some(branch_id) => self.current_head_for_branch(branch_id).await?,
+                None => self.current_head(agent_id).await?,
+            },
         };
         // A successful inference's own history entry renders nothing on its
         // own - its assistant message entry is what appears. Only a failed
@@ -4590,19 +5584,19 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .context("loading item objects")?;
-        // A path has no name of its own; label it by the locations it joins.
-        let paths = sqlx::query_as::<_, PathObjectRow>(
-            "SELECT path.id, from_loc.name AS from_name, to_loc.name AS to_name, \
-                    path.travel_time, path.description, path.gm_notes, path.storyteller_notes \
-             FROM path \
-             JOIN location AS from_loc ON from_loc.id = path.from_location_id \
-             JOIN location AS to_loc ON to_loc.id = path.to_location_id \
-             WHERE path.world_id = ? ORDER BY path.id",
+        // A connection has no name of its own; label it by the locations it joins.
+        let connections = sqlx::query_as::<_, ConnectionObjectRow>(
+            "SELECT connection.id, from_loc.name AS from_name, to_loc.name AS to_name, \
+                    connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
+             FROM connection \
+             JOIN location AS from_loc ON from_loc.id = connection.from_location_id \
+             JOIN location AS to_loc ON to_loc.id = connection.to_location_id \
+             WHERE connection.world_id = ? ORDER BY connection.id",
         )
         .bind(world_id)
         .fetch_all(&self.pool)
         .await
-        .context("loading path objects")?;
+        .context("loading connection objects")?;
         Ok(WorldObjects {
             name: world.name,
             time: world.time,
@@ -4613,7 +5607,7 @@ impl Store {
             characters: characters.into_iter().map(Into::into).collect(),
             locations: locations.into_iter().map(Into::into).collect(),
             items: items.into_iter().map(Into::into).collect(),
-            paths: paths.into_iter().map(Into::into).collect(),
+            connections: connections.into_iter().map(Into::into).collect(),
         })
     }
 
@@ -4701,13 +5695,20 @@ mod tests {
             storyteller_summary: String::new(),
             notes: Notes::default(),
             starting_location: "start".into(),
+            starting_group: "start".into(),
             locations: vec![crate::scenario::Location {
                 name: "start".into(),
                 kind: "test".into(),
                 description: String::new(),
                 notes: Notes::default(),
             }],
-            paths: vec![],
+            connections: vec![],
+            groups: vec![crate::scenario::Group {
+                name: "start".into(),
+                location: "start".into(),
+                description: String::new(),
+                notes: Notes::default(),
+            }],
             npcs: vec![],
             item_types: vec![],
             spell_types: vec![],
@@ -4752,7 +5753,7 @@ mod tests {
                 text: prompt,
                 role: Role::System,
             },
-            store.live_segments(agent).await.unwrap().pop().unwrap(),
+            store.live_segments(agent, None).await.unwrap().pop().unwrap(),
         ];
         let request = store
             .request_for_segments(
@@ -4904,12 +5905,12 @@ mod tests {
         let members = store.world_members(installed.world_id).await.unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].characters.len(), 2);
-        let gm_agent_id = store
-            .player_location_gm_agent_id(&installed.member)
+        let gm_history = store
+            .player_group_history(&installed.member)
             .await
             .unwrap();
         let gm_scene = store
-            .gm_scene(installed.world_id, gm_agent_id)
+            .gm_scene(installed.world_id, gm_history.branch_id)
             .await
             .unwrap();
         assert_eq!(
@@ -5228,14 +6229,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_character, format!("Adventurer{active_tool_id}"));
-        let location_gms: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM location_gm \
-             JOIN location ON location.id = location_gm.location_id WHERE location.world_id = ?",
-        )
-        .bind(installed.world_id)
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
+        let groups: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM \"group\" WHERE world_id = ?")
+            .bind(installed.world_id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
         let npc_agents: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM npc_agent \
              JOIN character ON character.id = npc_agent.character_id WHERE character.world_id = ?",
@@ -5252,7 +6250,7 @@ mod tests {
         .fetch_one(&store.pool)
         .await
         .unwrap();
-        assert_eq!(location_gms, 1, "the shared playable location has one GM");
+        assert_eq!(groups, 1, "Bread Thief declares one starting group");
         assert_eq!(npc_agents, 2, "Mara and Toma have distinct agent histories");
         assert_eq!(
             placed_items, 2,
@@ -5279,20 +6277,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Mara", "Toma"]
         );
-        let gm_agent_id: i64 = sqlx::query_scalar(
-            "SELECT location_gm.agent_id FROM location_gm \
-             JOIN location ON location.id = location_gm.location_id WHERE location.world_id = ?",
-        )
-        .bind(installed.world_id)
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
+        let gm_branch_id: i64 = sqlx::query_scalar("SELECT branch_id FROM \"group\" WHERE world_id = ?")
+            .bind(installed.world_id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
         let gm_scene = store
-            .gm_scene(installed.world_id, gm_agent_id)
+            .gm_scene(installed.world_id, gm_branch_id)
             .await
             .unwrap();
         assert_eq!(gm_scene.location_name, player_scene.location_name);
         assert!(gm_scene.gm_notes.get("interior").is_some());
+        assert_eq!(
+            gm_scene.group_description,
+            "Everyone present at the charcoal hut: the Adventurer, Mara and Toma."
+        );
+        assert!(
+            gm_scene.group_gm_notes.get("grouping").is_some(),
+            "the group's own GM notes must be distinct from the location's"
+        );
         let toma = gm_scene.npcs.iter().find(|npc| npc.name == "Toma").unwrap();
         assert!(toma.motive.contains("imprisonment"));
         assert!(toma.gm_notes.get("beliefs").is_some());
@@ -5304,7 +6307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_actions_keep_the_validated_call_for_its_location_gm() {
+    async fn pending_actions_keep_the_validated_call_for_its_group_gm() {
         let db = database();
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -5321,20 +6324,12 @@ mod tests {
             .begin_sequence(installed.world_id, "player message")
             .await
             .unwrap();
-        let request = Request {
-            messages: vec![],
-            tools: vec![],
-            sampling: Sampling {
-                temperature: 0.0,
-                ..Default::default()
-            },
-        };
         let args = r#"{"description":"look through the rear window"}"#;
         let requesting_tool_execution_id = store
             .record_tool_call_for_test(
                 installed.member.agent_id,
+                None,
                 Some(sequence.id),
-                &request,
                 "call-1",
                 "look",
                 args,
@@ -5354,23 +6349,24 @@ mod tests {
         assert_eq!(action.tool, "look");
         assert_eq!(action.args, args);
         assert_eq!(action.sequence_id, sequence.id);
-        let location_gm: i64 = sqlx::query_scalar(
-            "SELECT location_gm.agent_id FROM player_character \
-             JOIN character_location ON character_location.character_id = player_character.character_id \
-             JOIN location_gm ON location_gm.location_id = character_location.location_id \
+        let group_gm: i64 = sqlx::query_scalar(
+            "SELECT world_gm.agent_id FROM player_character \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE player_character.member_id = ?",
         )
         .bind(installed.member.member_id)
         .fetch_one(&store.pool)
         .await
         .unwrap();
-        assert_eq!(action.location_gm_agent_id, location_gm);
+        assert_eq!(action.gm_agent_id, group_gm);
 
         let approving_tool_execution_id = store
             .record_tool_call_for_test(
-                location_gm,
+                group_gm,
+                Some(action.gm_branch_id),
                 Some(sequence.id),
-                &request,
                 "approve-1",
                 "approve_action",
                 "{}",
@@ -5386,10 +6382,10 @@ mod tests {
             )
             .await
             .expect_err("a player agent cannot resolve its own action");
-        assert!(format!("{error:#}").contains("is not pending for location GM"));
+        assert!(format!("{error:#}").contains("is not pending for group GM"));
         let resolved = store
             .resolve_pending_action(
-                location_gm,
+                group_gm,
                 installed.world_id,
                 action.id,
                 approving_tool_execution_id,
@@ -5419,7 +6415,7 @@ mod tests {
             .unwrap();
         let resolved_again = store
             .resolve_pending_action(
-                location_gm,
+                group_gm,
                 installed.world_id,
                 action.id,
                 approving_tool_execution_id,
@@ -5483,19 +6479,11 @@ mod tests {
             .begin_sequence(installed.world_id, "player message")
             .await
             .unwrap();
-        let request = Request {
-            messages: vec![],
-            tools: vec![],
-            sampling: Sampling {
-                temperature: 0.0,
-                ..Default::default()
-            },
-        };
         let requesting_tool_execution_id = store
             .record_tool_call_for_test(
                 installed.member.agent_id,
+                None,
                 Some(sequence.id),
-                &request,
                 "call-1",
                 "take",
                 r#"{"item":"flour sack"}"#,
@@ -5513,9 +6501,9 @@ mod tests {
             .unwrap();
         let approving_tool_execution_id = store
             .record_tool_call_for_test(
-                action.location_gm_agent_id,
+                action.gm_agent_id,
+                Some(action.gm_branch_id),
                 Some(sequence.id),
-                &request,
                 "approve-1",
                 "approve_action",
                 "{}",
@@ -5523,7 +6511,7 @@ mod tests {
             .await;
         store
             .resolve_pending_action(
-                action.location_gm_agent_id,
+                action.gm_agent_id,
                 installed.world_id,
                 action.id,
                 approving_tool_execution_id,
@@ -5565,7 +6553,7 @@ mod tests {
         // (design.md: "cannot be approved twice").
         let resolved_again = store
             .resolve_pending_action(
-                action.location_gm_agent_id,
+                action.gm_agent_id,
                 installed.world_id,
                 action.id,
                 approving_tool_execution_id,
@@ -5615,19 +6603,11 @@ mod tests {
             .begin_sequence(installed.world_id, "player message")
             .await
             .unwrap();
-        let request = Request {
-            messages: vec![],
-            tools: vec![],
-            sampling: Sampling {
-                temperature: 0.0,
-                ..Default::default()
-            },
-        };
         let requesting_tool_execution_id = store
             .record_tool_call_for_test(
                 installed.member.agent_id,
+                None,
                 Some(sequence.id),
-                &request,
                 "call-1",
                 "take",
                 r#"{"item":"flour sack"}"#,
@@ -5645,9 +6625,9 @@ mod tests {
             .unwrap();
         let approving_tool_execution_id = store
             .record_tool_call_for_test(
-                action.location_gm_agent_id,
+                action.gm_agent_id,
+                Some(action.gm_branch_id),
                 Some(sequence.id),
-                &request,
                 "approve-1",
                 "approve_action",
                 "{}",
@@ -5655,7 +6635,7 @@ mod tests {
             .await;
         store
             .resolve_pending_action(
-                action.location_gm_agent_id,
+                action.gm_agent_id,
                 installed.world_id,
                 action.id,
                 approving_tool_execution_id,
@@ -5665,9 +6645,9 @@ mod tests {
             .unwrap();
         let reject_tool_execution_id = store
             .record_tool_call_for_test(
-                action.location_gm_agent_id,
+                action.gm_agent_id,
+                Some(action.gm_branch_id),
                 Some(sequence.id),
-                &request,
                 "reject-1",
                 "reject_action",
                 "{}",
@@ -5675,7 +6655,7 @@ mod tests {
             .await;
         let resolved = store
             .resolve_pending_action(
-                action.location_gm_agent_id,
+                action.gm_agent_id,
                 installed.world_id,
                 action.id,
                 reject_tool_execution_id,
@@ -5724,7 +6704,7 @@ mod tests {
     async fn inference_identity_survives_execution_failure_and_restart() {
         let (store, db, agent, segments, request) = store_with_history().await;
         let invocation_id = store
-            .start_invocation(None, agent, None, None)
+            .start_invocation(None, agent, None, None, None)
             .await
             .unwrap();
         let id = store
@@ -5843,7 +6823,7 @@ mod tests {
         let store = Store::open(db.path()).await.unwrap();
         let world = store.create_world("test world").await.unwrap();
         let agent = store.create_agent(world).await.unwrap();
-        let invocation = store.start_invocation(None, agent, None, None).await.unwrap();
+        let invocation = store.start_invocation(None, agent, None, None, None).await.unwrap();
         let inference_id = store
             .start_inference(InferenceInput {
                 agent_id: agent,
@@ -5898,7 +6878,7 @@ mod tests {
         // Two independent equal outputs must still get distinct rows
         // (design.md's Chat schema: "No uniqueness constraint on body") -
         // sharing must be an explicit reference, not accidental interning.
-        let other_invocation = store.start_invocation(None, agent, None, None).await.unwrap();
+        let other_invocation = store.start_invocation(None, agent, None, None, None).await.unwrap();
         let other_inference_id = store
             .start_inference(InferenceInput {
                 agent_id: agent,
@@ -5972,6 +6952,16 @@ mod tests {
             location_id,
             "both characters must start at the same location for this test"
         );
+        // Narration recipients are connected PCs (design.md's Membership and
+        // presence); both characters must be online to receive it.
+        store
+            .mark_character_present(installed.member.character_id)
+            .await
+            .unwrap();
+        store
+            .mark_character_present(second.character_id)
+            .await
+            .unwrap();
 
         // The narrating GM's own reply, whose recorded_content row delivery
         // must reference rather than copy.
@@ -6196,7 +7186,7 @@ mod tests {
             .append_message(agent, &Message::text(Role::User, "And the walls?"))
             .await
             .unwrap();
-        let history = store.live_segments(agent).await.unwrap();
+        let history = store.live_segments(agent, None).await.unwrap();
         // The summary covers only position 0 ("What is beneath the
         // floorboards?"), so the live range spans from the still-uncovered
         // assistant reply (position 1) through the newest message - even
@@ -6261,7 +7251,7 @@ mod tests {
         // The reply that crossed the threshold served this sequence.
         let trigger = store.begin_sequence(world, "player message").await.unwrap();
         let reply_invocation = store
-            .start_invocation(Some(trigger.id), agent, None, None)
+            .start_invocation(Some(trigger.id), agent, None, None, None)
             .await
             .unwrap();
         let reply_inference = store
@@ -6314,7 +7304,7 @@ mod tests {
         // invocation has no parent tool call; it records its triggering
         // inference as cause_inference_id instead (design.md).
         let compaction_invocation = store
-            .start_invocation(job.sequence_id, agent, None, Some(reply_inference))
+            .start_invocation(job.sequence_id, agent, None, None, Some(reply_inference))
             .await
             .unwrap();
         let summary_inference = store
@@ -6359,7 +7349,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .latest_summary(agent)
+                .latest_summary_for_branch(branch_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -6371,6 +7361,593 @@ mod tests {
             vec![Some(summary_inference)],
             "the compaction notice links to the summarisation that produced it"
         );
+    }
+
+    /// A world_gm agent has no `agent_history` row - it has one branch per
+    /// group instead (design.md's `GroupHistory`) - so every function this
+    /// exercises must resolve compaction state through the group's own
+    /// branch, never a plain `agent_id` lookup. Drives two real over-
+    /// threshold replies on the same group branch and confirms: the job is
+    /// visible to both `pending_compaction_for_branch` and the unfiltered
+    /// `pending_compactions()` (which a bare `agent_history` JOIN would
+    /// silently exclude); a second over-threshold reply while the first
+    /// job is still pending does not collide (`ON CONFLICT DO NOTHING`); and
+    /// resolving the job through `compaction::run`'s real shape (an
+    /// invocation started with the branch explicit, since `start_invocation`
+    /// falling back to `branch_for_agent` would fail for a world_gm) settles
+    /// cleanly.
+    #[tokio::test]
+    async fn a_world_gm_groups_branch_compacts_without_an_agent_history_row() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let installed = store
+            .install_scenario(&owner, &test_scenario("world gm compaction"))
+            .await
+            .unwrap();
+        let group_id = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let gm_history = store.group_gm_history(group_id).await.unwrap();
+
+        assert!(
+            store
+                .pending_compaction_for_branch(gm_history.branch_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "no compaction is pending before any over-threshold reply"
+        );
+
+        let trigger = store
+            .begin_sequence(installed.world_id, "gm turn")
+            .await
+            .unwrap();
+        let reply_invocation = store
+            .start_invocation(
+                Some(trigger.id),
+                gm_history.agent_id,
+                Some(gm_history.branch_id),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let reply_inference = store
+            .start_inference(InferenceInput {
+                agent_id: gm_history.agent_id,
+                sequence_id: Some(trigger.id),
+                invocation_id: reply_invocation,
+                segments: &[],
+                request: &Request {
+                    messages: vec![Message::text(Role::User, "narrate")],
+                    tools: Vec::new(),
+                    sampling: Sampling::default(),
+                },
+                model: "test-model",
+            })
+            .await
+            .unwrap();
+        store
+            .finish_chat_inference(
+                reply_inference,
+                gm_history.agent_id,
+                InferenceOutcome::Response(Response {
+                    content: Content::Text("A shadow crosses the doorway.".into()),
+                    ..response()
+                }),
+                1,
+                CompactionPolicy {
+                    sequence_id: Some(trigger.id),
+                    compact_before_next_input_tokens: 1,
+                    sampling: &Sampling::default(),
+                    model: "test-model",
+                    static_segments: &[],
+                },
+            )
+            .await
+            .unwrap();
+
+        let job = store
+            .pending_compaction_for_branch(gm_history.branch_id)
+            .await
+            .unwrap()
+            .expect("the over-threshold GM reply queued compaction on its own branch");
+        assert_eq!(job.agent_id, gm_history.agent_id);
+        assert!(
+            store
+                .pending_compactions()
+                .await
+                .unwrap()
+                .iter()
+                .any(|job| job.branch_id == gm_history.branch_id),
+            "the unfiltered listing (used at startup recovery) must also see a world_gm's job, \
+             not silently exclude it the way a bare agent_history JOIN would"
+        );
+
+        // A second over-threshold reply on the same branch while the first
+        // job is still pending must not collide (finish_chat_inference's own
+        // INSERT has ON CONFLICT(branch_id) DO NOTHING, matching
+        // enqueue_capacity_compaction's sibling).
+        let second_invocation = store
+            .start_invocation(
+                Some(trigger.id),
+                gm_history.agent_id,
+                Some(gm_history.branch_id),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let second_inference = store
+            .start_inference(InferenceInput {
+                agent_id: gm_history.agent_id,
+                sequence_id: Some(trigger.id),
+                invocation_id: second_invocation,
+                segments: &[],
+                request: &Request {
+                    messages: vec![Message::text(Role::User, "narrate more")],
+                    tools: Vec::new(),
+                    sampling: Sampling::default(),
+                },
+                model: "test-model",
+            })
+            .await
+            .unwrap();
+        store
+            .finish_chat_inference(
+                second_inference,
+                gm_history.agent_id,
+                InferenceOutcome::Response(Response {
+                    content: Content::Text("The floorboards creak.".into()),
+                    ..response()
+                }),
+                1,
+                CompactionPolicy {
+                    sequence_id: Some(trigger.id),
+                    compact_before_next_input_tokens: 1,
+                    sampling: &Sampling::default(),
+                    model: "test-model",
+                    static_segments: &[],
+                },
+            )
+            .await
+            .expect("a second over-threshold reply must not collide with the still-pending job");
+        assert_eq!(
+            store
+                .pending_compaction_for_branch(gm_history.branch_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .position,
+            job.position,
+            "the first job's row must stand unchanged, not be silently replaced"
+        );
+
+        // Resolve the job exactly as compaction::run does: an explicit
+        // branch on invocation start, since start_invocation falling back to
+        // branch_for_agent would fail for a world_gm agent.
+        let compaction_invocation = store
+            .start_invocation(
+                job.sequence_id,
+                job.agent_id,
+                Some(job.branch_id),
+                None,
+                Some(reply_inference),
+            )
+            .await
+            .unwrap();
+        let summary_inference = store
+            .start_inference(InferenceInput {
+                agent_id: job.agent_id,
+                sequence_id: job.sequence_id,
+                invocation_id: compaction_invocation,
+                segments: &[],
+                request: &Request {
+                    messages: vec![Message::text(Role::User, "summarise")],
+                    tools: Vec::new(),
+                    sampling: Sampling::default(),
+                },
+                model: "test-model",
+            })
+            .await
+            .unwrap();
+        store
+            .finish_summary_inference(
+                summary_inference,
+                &job,
+                InferenceOutcome::Response(Response {
+                    content: Content::Text("Earlier: the doorway and floorboards.".into()),
+                    ..response()
+                }),
+                1,
+                Some(&[PositionRange {
+                    branch_id: job.branch_id,
+                    first_position: 0,
+                    last_position: job.position,
+                }]),
+                "compacted",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .pending_compaction_for_branch(gm_history.branch_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "resolving the job must clear it"
+        );
+        assert_eq!(
+            store
+                .latest_summary_for_branch(gm_history.branch_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .inference_id,
+            summary_inference
+        );
+    }
+
+    /// After a merge, the merged branch's parents each carry their own
+    /// independent summary over their own disjoint range. `live_segments`
+    /// must surface both - not just the single newest one across the whole
+    /// traversal - or the model silently loses one parent's compaction and
+    /// pays full raw-message cost for it (plans/developer-inspection.md's
+    /// D5 "longest-disjoint-summary selector").
+    #[tokio::test]
+    async fn live_segments_after_a_merge_carries_each_parent_branchs_own_summary() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let installed = store
+            .install_scenario(&owner, &test_scenario("merge live segments"))
+            .await
+            .unwrap();
+        let starting_group_id = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let world_gm_agent_id = store.group_gm_history(starting_group_id).await.unwrap().agent_id;
+        let location_id: i64 = sqlx::query_scalar("SELECT location_id FROM \"group\" WHERE id = ?")
+            .bind(starting_group_id)
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+
+        // Two independent group branches, each with one settled message and
+        // its own summary covering it - mirroring what a real compaction
+        // would leave behind on each side before they ever merge.
+        async fn seed_branch(store: &Store, world_id: i64, agent_id: i64, branch_id: i64, text: &str, summary_text: &str) {
+            let trigger = store.begin_sequence(world_id, "seed").await.unwrap();
+            let invocation = store
+                .start_invocation(Some(trigger.id), agent_id, Some(branch_id), None, None)
+                .await
+                .unwrap();
+            let inference = store
+                .start_inference(InferenceInput {
+                    agent_id,
+                    sequence_id: Some(trigger.id),
+                    invocation_id: invocation,
+                    segments: &[],
+                    request: &Request {
+                        messages: vec![Message::text(Role::User, "narrate")],
+                        tools: Vec::new(),
+                        sampling: Sampling::default(),
+                    },
+                    model: "test-model",
+                })
+                .await
+                .unwrap();
+            store
+                .finish_chat_inference(
+                    inference,
+                    agent_id,
+                    InferenceOutcome::Response(Response {
+                        content: Content::Text(text.to_string()),
+                        ..response()
+                    }),
+                    1,
+                    CompactionPolicy {
+                        sequence_id: Some(trigger.id),
+                        compact_before_next_input_tokens: 1,
+                        sampling: &Sampling::default(),
+                        model: "test-model",
+                        static_segments: &[],
+                    },
+                )
+                .await
+                .unwrap();
+            let job = store
+                .pending_compaction_for_branch(branch_id)
+                .await
+                .unwrap()
+                .expect("the settled reply must have queued compaction on its own branch");
+            let summary_invocation = store
+                .start_invocation(job.sequence_id, job.agent_id, Some(job.branch_id), None, Some(inference))
+                .await
+                .unwrap();
+            let summary_inference = store
+                .start_inference(InferenceInput {
+                    agent_id,
+                    sequence_id: Some(trigger.id),
+                    invocation_id: summary_invocation,
+                    segments: &[],
+                    request: &Request {
+                        messages: vec![Message::text(Role::User, "summarise")],
+                        tools: Vec::new(),
+                        sampling: Sampling::default(),
+                    },
+                    model: "test-model",
+                })
+                .await
+                .unwrap();
+            store
+                .finish_summary_inference(
+                    summary_inference,
+                    &job,
+                    InferenceOutcome::Response(Response {
+                        content: Content::Text(summary_text.to_string()),
+                        ..response()
+                    }),
+                    1,
+                    Some(&[PositionRange { branch_id, first_position: 0, last_position: job.position }]),
+                    "compacted",
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut left_setup = store.pool().begin().await.unwrap();
+        let (_left_group_id, left_branch_id) = Store::spawn_group_branch(
+            &mut left_setup,
+            installed.world_id,
+            world_gm_agent_id,
+            location_id,
+            "left",
+            "left side",
+            &[],
+        )
+        .await
+        .unwrap();
+        left_setup.commit().await.unwrap();
+        let mut right_setup = store.pool().begin().await.unwrap();
+        let (_right_group_id, right_branch_id) = Store::spawn_group_branch(
+            &mut right_setup,
+            installed.world_id,
+            world_gm_agent_id,
+            location_id,
+            "right",
+            "right side",
+            &[],
+        )
+        .await
+        .unwrap();
+        right_setup.commit().await.unwrap();
+
+        seed_branch(&store, installed.world_id, world_gm_agent_id, left_branch_id, "The left group settles in.", "Earlier, the left group arrived.").await;
+        seed_branch(&store, installed.world_id, world_gm_agent_id, right_branch_id, "The right group settles in.", "Earlier, the right group arrived.").await;
+
+        let mut transaction = store.pool().begin().await.unwrap();
+        let left_through: i64 = sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
+            .bind(left_branch_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+        let right_through: i64 = sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
+            .bind(right_branch_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+        let (_merged_group_id, merged_branch_id) = Store::spawn_group_branch(
+            &mut transaction,
+            installed.world_id,
+            world_gm_agent_id,
+            location_id,
+            "merged",
+            "reunited",
+            &[(left_branch_id, left_through), (right_branch_id, right_through)],
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+
+        let segments = store
+            .live_segments(world_gm_agent_id, Some(merged_branch_id))
+            .await
+            .unwrap();
+        let summary_count = segments
+            .iter()
+            .filter(|segment| matches!(segment, Segment::Summary { .. }))
+            .count();
+        assert_eq!(
+            summary_count, 2,
+            "both parent branches' independent summaries must survive the merge, not just the newest one: {segments:?}"
+        );
+        let message_segments: Vec<&PositionRange> = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Messages { messages } => Some(messages),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            message_segments.is_empty(),
+            "every message on both branches is already covered by its own branch's summary: {segments:?}"
+        );
+    }
+
+    /// A plain player agent's branch graph is its one branch, no parents, no
+    /// group head - the trivial case every non-GM agent must keep rendering
+    /// as today's single linear view.
+    #[tokio::test]
+    async fn gm_branch_graph_is_one_parentless_headless_branch_for_a_plain_agent() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let installed = store
+            .install_scenario(&owner, &test_scenario("plain agent branch graph"))
+            .await
+            .unwrap();
+        let world_id = installed.world_id;
+        let player_agent_id = installed.member.agent_id;
+        store.set_developer_mode(owner.id, world_id, true).await.unwrap();
+
+        let nodes = store
+            .gm_branch_graph(owner.id, world_id, player_agent_id)
+            .await
+            .unwrap();
+
+        assert_eq!(nodes.len(), 1, "a plain agent has exactly one branch: {nodes:?}");
+        assert!(nodes[0].parents.is_empty(), "a plain agent's branch has no parents: {nodes:?}");
+        assert!(
+            nodes[0].head.is_none(),
+            "a plain agent's head is its own agent_history row, not a group: {nodes:?}"
+        );
+    }
+
+    /// After a split, the world_gm's branch graph must show the whole DAG:
+    /// the retired source branch (still present, no current head) and both
+    /// resulting branches (each a current group head), with the split's
+    /// exact parent/through_position edge - user_declarations.md: "the GM's
+    /// chat history view needs to authentically display the DAG, including
+    /// multiple heads - one per Group".
+    #[tokio::test]
+    async fn gm_branch_graph_shows_a_split_as_a_retired_source_and_two_new_heads() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let original_group_id = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let toma_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        let mara_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Mara'")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        let gm_history = store.group_gm_history(original_group_id).await.unwrap();
+        store.set_developer_mode(owner.id, installed.world_id, true).await.unwrap();
+
+        let trigger = store.begin_sequence(installed.world_id, "split").await.unwrap();
+        let invocation = store
+            .start_invocation(Some(trigger.id), gm_history.agent_id, Some(gm_history.branch_id), None, None)
+            .await
+            .unwrap();
+        let inference = store
+            .start_inference(InferenceInput {
+                agent_id: gm_history.agent_id,
+                sequence_id: Some(trigger.id),
+                invocation_id: invocation,
+                segments: &[],
+                request: &Request {
+                    messages: vec![Message::text(Role::User, "split")],
+                    tools: Vec::new(),
+                    sampling: Sampling::default(),
+                },
+                model: "test-model",
+            })
+            .await
+            .unwrap();
+        let executions = store.create_tool_executions(inference, 1).await.unwrap();
+        let source_through_position: i64 =
+            sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
+                .bind(gm_history.branch_id)
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        store
+            .apply_topology_changes(
+                inference,
+                vec![(
+                    "split-1".to_string(),
+                    executions[0],
+                    tools::TopologyChange::Split {
+                        group_id: original_group_id,
+                        partitions: vec![
+                            tools::GroupPartition {
+                                character_ids: vec![installed.member.character_id, mara_id],
+                                name: "player side".into(),
+                                description: "outside".into(),
+                            },
+                            tools::GroupPartition {
+                                character_ids: vec![toma_id],
+                                name: "Toma side".into(),
+                                description: "inside".into(),
+                            },
+                        ],
+                        continue_with_character_id: Some(installed.member.character_id),
+                    },
+                )],
+            )
+            .await
+            .unwrap();
+
+        let player_group_id = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let toma_group_id = store.character_group_id(toma_id).await.unwrap();
+        let player_branch_id = store.group_gm_history(player_group_id).await.unwrap().branch_id;
+        let toma_branch_id = store.group_gm_history(toma_group_id).await.unwrap().branch_id;
+
+        let nodes = store
+            .gm_branch_graph(owner.id, installed.world_id, gm_history.agent_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            nodes.len(), 3,
+            "the retired source branch plus its two split children: {nodes:?}"
+        );
+
+        let source_node = nodes
+            .iter()
+            .find(|node| node.branch_id == gm_history.branch_id)
+            .expect("the source branch must still appear in the graph");
+        assert!(source_node.parents.is_empty(), "the root branch has no parents: {nodes:?}");
+        assert!(
+            source_node.head.is_none(),
+            "the split's source group is retired, so it has no current head: {nodes:?}"
+        );
+
+        for (branch_id, expected_group_id) in
+            [(player_branch_id, player_group_id), (toma_branch_id, toma_group_id)]
+        {
+            let node = nodes
+                .iter()
+                .find(|node| node.branch_id == branch_id)
+                .unwrap_or_else(|| panic!("split child branch {branch_id} must appear: {nodes:?}"));
+            assert_eq!(
+                node.parents,
+                vec![BranchParent { branch_id: gm_history.branch_id, through_position: source_through_position }],
+                "each split child's one parent is the exact source cut"
+            );
+            let head = node.head.as_ref().expect("each split child is a current group head");
+            assert_eq!(head.group_id, expected_group_id);
+        }
     }
 
     #[tokio::test]
@@ -6402,7 +7979,7 @@ mod tests {
         let request = store
             .request_for_segments(
                 agent,
-                &store.live_segments(agent).await.unwrap(),
+                &store.live_segments(agent, None).await.unwrap(),
                 Sampling {
                     temperature: 0.7,
                     ..Default::default()
@@ -6689,7 +8266,7 @@ mod tests {
             .await
             .unwrap();
         let other_invocation = store
-            .start_invocation(Some(other_sequence.id), other_agent, None, None)
+            .start_invocation(Some(other_sequence.id), other_agent, None, None, None)
             .await
             .unwrap();
         let other_inference = store
@@ -6719,7 +8296,7 @@ mod tests {
             .unwrap_err();
         assert!(format!("{inference_error:#}").contains("is not in world"));
         let agent_error = store
-            .agent_raw_history(owner.id, world_id, other_agent, None, 50)
+            .agent_raw_history(owner.id, world_id, other_agent, None, None, 50)
             .await
             .unwrap_err();
         assert!(format!("{agent_error:#}").contains("is not in world"));
@@ -6746,7 +8323,7 @@ mod tests {
                 text: prompt,
                 role: Role::System,
             },
-            store.live_segments(agent).await.unwrap().pop().unwrap(),
+            store.live_segments(agent, None).await.unwrap().pop().unwrap(),
         ];
         let recipe_request = store
             .request_for_segments(agent, &segments, Sampling::default())
@@ -6757,7 +8334,7 @@ mod tests {
             .await
             .unwrap();
         let root_invocation = store
-            .start_invocation(Some(sequence.id), agent, None, None)
+            .start_invocation(Some(sequence.id), agent, None, None, None)
             .await
             .unwrap();
         let parent = store
@@ -6791,7 +8368,7 @@ mod tests {
         let parent_tool_execution_id =
             store.create_tool_executions(parent, 1).await.unwrap()[0];
         let child_invocation = store
-            .start_invocation(Some(sequence.id), agent, Some(parent_tool_execution_id), None)
+            .start_invocation(Some(sequence.id), agent, None, Some(parent_tool_execution_id), None)
             .await
             .unwrap();
         let child = store
@@ -6847,7 +8424,7 @@ mod tests {
                 .unwrap();
         }
         // A failed inference for this agent.
-        let failed_invocation = store.start_invocation(None, agent, None, None).await.unwrap();
+        let failed_invocation = store.start_invocation(None, agent, None, None, None).await.unwrap();
         let failed = store
             .start_inference(InferenceInput {
                 agent_id: agent,
@@ -6868,7 +8445,7 @@ mod tests {
             .await
             .unwrap();
         // A compaction covering the first two messages.
-        let summary_invocation = store.start_invocation(None, agent, None, None).await.unwrap();
+        let summary_invocation = store.start_invocation(None, agent, None, None, None).await.unwrap();
         let summary_inference = store
             .start_inference(InferenceInput {
                 agent_id: agent,
@@ -6917,7 +8494,7 @@ mod tests {
             .unwrap();
 
         let (page, cursor) = store
-            .agent_raw_history(owner.id, world_id, agent, None, 50)
+            .agent_raw_history(owner.id, world_id, agent, None, None, 50)
             .await
             .unwrap();
         assert_eq!(cursor, None, "a full page has nothing left to fetch");
@@ -6951,7 +8528,7 @@ mod tests {
         // skipped or duplicated across a boundary that lands exactly on a
         // failure/summary/notice entry, and the cursor round-trips.
         let (first_two, mid_cursor) = store
-            .agent_raw_history(owner.id, world_id, agent, None, 2)
+            .agent_raw_history(owner.id, world_id, agent, None, None, 2)
             .await
             .unwrap();
         assert_eq!(first_two.len(), 2);
@@ -6960,7 +8537,7 @@ mod tests {
         let mut cursor = Some(mid_cursor);
         loop {
             let (page, next) = store
-                .agent_raw_history(owner.id, world_id, agent, cursor, 2)
+                .agent_raw_history(owner.id, world_id, agent, None, cursor, 2)
                 .await
                 .unwrap();
             if page.is_empty() {
@@ -6973,7 +8550,7 @@ mod tests {
             }
         }
         let (whole, _) = store
-            .agent_raw_history(owner.id, world_id, agent, None, 50)
+            .agent_raw_history(owner.id, world_id, agent, None, None, 50)
             .await
             .unwrap();
         assert_eq!(
@@ -7006,20 +8583,20 @@ mod tests {
         }
 
         let (quiet_page, quiet_cursor) = store
-            .agent_raw_history(owner.id, world_id, quiet, None, 50)
+            .agent_raw_history(owner.id, world_id, quiet, None, None, 50)
             .await
             .unwrap();
         assert_eq!(quiet_page.len(), 1, "the quiet agent has exactly one entry");
         assert_eq!(quiet_cursor, None);
 
         let (busy_first, busy_cursor) = store
-            .agent_raw_history(owner.id, world_id, busy, None, 4)
+            .agent_raw_history(owner.id, world_id, busy, None, None, 4)
             .await
             .unwrap();
         assert_eq!(busy_first.len(), 4);
         let busy_cursor = busy_cursor.expect("more of the busy agent's history remains");
         let (busy_rest, busy_cursor) = store
-            .agent_raw_history(owner.id, world_id, busy, Some(busy_cursor), 50)
+            .agent_raw_history(owner.id, world_id, busy, None, Some(busy_cursor), 50)
             .await
             .unwrap();
         assert_eq!(busy_first.len() + busy_rest.len(), 9);
@@ -7052,8 +8629,8 @@ mod tests {
         assert!(!objects.locations.is_empty(), "the scenario has locations");
         assert!(!objects.items.is_empty(), "the scenario has items");
         assert!(
-            objects.paths.is_empty(),
-            "the single-location Bread Thief scenario has no paths"
+            objects.connections.is_empty(),
+            "the single-location Bread Thief scenario has no connections"
         );
         // GM and Storyteller notes are exposed - the NPCs carry seeded ones.
         assert!(
@@ -7082,8 +8659,8 @@ mod tests {
             "the owner's player agent is listed"
         );
         assert!(
-            agents.iter().any(|agent| agent.role == "location_gm"),
-            "each location GM agent is listed"
+            agents.iter().any(|agent| agent.role == "world_gm"),
+            "the world GM agent is listed"
         );
         assert!(
             agents.iter().all(|agent| agent.role != "unknown"),

@@ -23,7 +23,11 @@ enum Priority {
 struct State {
     running: usize,
     foreground_waiting: usize,
-    deferred_agents: HashSet<i64>,
+    // Keyed by branch_id, not agent_id: a world_gm agent plays several
+    // groups at once, each its own branch with its own independent
+    // compaction obligation (design.md's `GroupHistory`); agent_id alone
+    // cannot tell two groups' pending jobs apart.
+    deferred_branches: HashSet<i64>,
     failures: HashMap<i64, String>,
 }
 
@@ -98,7 +102,7 @@ where
     pub async fn resume(&self, store: &Store) -> Result<()> {
         store.interrupt_open_inferences().await?;
         for job in store.pending_compactions().await? {
-            self.admit_deferred(store.clone(), job.agent_id).await;
+            self.admit_deferred(store.clone(), job.branch_id).await;
         }
         Ok(())
     }
@@ -129,9 +133,9 @@ where
         }
     }
 
-    async fn admit_deferred(&self, store: Store, agent_id: i64) {
+    async fn admit_deferred(&self, store: Store, branch_id: i64) {
         let mut state = self.state.lock().expect("scheduler state poisoned");
-        if !state.deferred_agents.insert(agent_id) {
+        if !state.deferred_branches.insert(branch_id) {
             return;
         }
         drop(state);
@@ -139,42 +143,46 @@ where
         tokio::spawn(async move {
             let result = async {
                 let job = store
-                    .pending_compaction(agent_id)
+                    .pending_compaction_for_branch(branch_id)
                     .await?
-                    .with_context(|| format!("missing pending compaction for agent {agent_id}"))?;
+                    .with_context(|| format!("missing pending compaction for branch {branch_id}"))?;
                 let backend = scheduler.deferred();
                 compaction::run(&store, &backend, &job, scheduler.limits).await
             }
             .await;
             let mut state = scheduler.state.lock().expect("scheduler state poisoned");
-            state.deferred_agents.remove(&agent_id);
+            state.deferred_branches.remove(&branch_id);
             if let Err(error) = result {
-                state.failures.insert(agent_id, format!("{error:#}"));
+                state.failures.insert(branch_id, format!("{error:#}"));
             }
             drop(state);
             scheduler.changed.notify_waiters();
         });
     }
 
-    async fn wait_for_agent(&self, store: &Store, agent_id: i64) -> Result<()> {
-        if store.pending_compaction(agent_id).await?.is_none() {
+    /// Wait for `branch_id`'s own pending compaction, if any, to finish -
+    /// the explicit branch a world_gm agent is using this turn, or an
+    /// ordinary agent's single branch (design.md's `GroupHistory`: agent_id
+    /// alone cannot select which of a world_gm's branches is due).
+    async fn wait_for_branch(&self, store: &Store, branch_id: i64) -> Result<()> {
+        if store.pending_compaction_for_branch(branch_id).await?.is_none() {
             return Ok(());
         }
-        self.admit_deferred(store.clone(), agent_id).await;
+        self.admit_deferred(store.clone(), branch_id).await;
         loop {
             let changed = self.changed.notified();
             let inactive = {
                 let mut state = self.state.lock().expect("scheduler state poisoned");
-                if let Some(error) = state.failures.remove(&agent_id) {
-                    anyhow::bail!("deferred compaction for agent {agent_id} failed: {error}");
+                if let Some(error) = state.failures.remove(&branch_id) {
+                    anyhow::bail!("deferred compaction for branch {branch_id} failed: {error}");
                 }
-                !state.deferred_agents.contains(&agent_id)
+                !state.deferred_branches.contains(&branch_id)
             };
             if inactive {
-                if store.pending_compaction(agent_id).await?.is_none() {
+                if store.pending_compaction_for_branch(branch_id).await?.is_none() {
                     return Ok(());
                 }
-                self.admit_deferred(store.clone(), agent_id).await;
+                self.admit_deferred(store.clone(), branch_id).await;
             }
             changed.await;
         }
@@ -242,17 +250,39 @@ impl<B> Backend for ScheduledBackend<B>
 where
     B: Backend + Send + Sync + 'static,
 {
-    async fn before_agent(&self, store: &Store, agent_id: i64) -> Result<()> {
+    async fn before_agent(
+        &self,
+        store: &Store,
+        agent_id: i64,
+        branch_id: Option<i64>,
+    ) -> Result<()> {
         // A pending job was created with the previous final reply. It must
-        // finish before this agent can assemble another context, otherwise the
-        // same over-threshold history would be inferred again. Other agents
-        // remain schedulable while this one waits.
-        self.scheduler.wait_for_agent(store, agent_id).await
+        // finish before this branch can assemble another context, otherwise
+        // the same over-threshold history would be inferred again. Other
+        // agents/branches remain schedulable while this one waits.
+        let branch_id = match branch_id {
+            Some(branch_id) => branch_id,
+            None => store.branch_id_for_agent(agent_id).await?,
+        };
+        self.scheduler.wait_for_branch(store, branch_id).await
     }
 
-    async fn after_agent(&self, store: &Store, agent_id: i64) -> Result<()> {
-        if store.pending_compaction(agent_id).await?.is_some() {
-            self.scheduler.admit_deferred(store.clone(), agent_id).await;
+    async fn after_agent(
+        &self,
+        store: &Store,
+        agent_id: i64,
+        branch_id: Option<i64>,
+    ) -> Result<()> {
+        let branch_id = match branch_id {
+            Some(branch_id) => branch_id,
+            None => store.branch_id_for_agent(agent_id).await?,
+        };
+        if store
+            .pending_compaction_for_branch(branch_id)
+            .await?
+            .is_some()
+        {
+            self.scheduler.admit_deferred(store.clone(), branch_id).await;
         }
         Ok(())
     }
@@ -397,7 +427,7 @@ mod tests {
             },
         };
         let invocation_id = store
-            .start_invocation(None, agent, None, None)
+            .start_invocation(None, agent, None, None, None)
             .await
             .unwrap();
         let inference_id = store
@@ -442,7 +472,8 @@ mod tests {
             "a reply whose output makes the next input reach the threshold must queue compaction"
         );
         let scheduler = scheduler(1);
-        scheduler.wait_for_agent(&store, agent).await.unwrap();
+        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        scheduler.wait_for_branch(&store, branch_id).await.unwrap();
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
     }
 }

@@ -557,11 +557,12 @@ mod tests {
         let store = crate::store::Store::open(database.path()).await.unwrap();
         let world = store.create_world("prompt evidence").await.unwrap();
         let agent = store.create_agent(world).await.unwrap();
-        let segments = crate::context::segments(&store, agent, &request.messages, &request.tools)
-            .await
-            .unwrap();
+        let segments =
+            crate::context::segments(&store, agent, None, &request.messages, &request.tools)
+                .await
+                .unwrap();
         let invocation_id = store
-            .start_invocation(None, agent, None, None)
+            .start_invocation(None, agent, None, None, None)
             .await
             .unwrap();
         let inference_id = store

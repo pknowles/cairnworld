@@ -28,9 +28,11 @@ pub struct Scenario {
     #[serde(default)]
     pub notes: Notes,
     pub starting_location: String,
+    pub starting_group: String,
     pub locations: Vec<Location>,
     #[serde(default)]
-    pub paths: Vec<Path>,
+    pub connections: Vec<Connection>,
+    pub groups: Vec<Group>,
     #[serde(default)]
     pub npcs: Vec<Npc>,
     #[serde(default)]
@@ -53,7 +55,7 @@ pub struct Location {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Path {
+pub struct Connection {
     pub from: String,
     pub to: String,
     pub travel_time: i64,
@@ -64,9 +66,19 @@ pub struct Path {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Npc {
+pub struct Group {
     pub name: String,
     pub location: String,
+    pub description: String,
+    #[serde(default)]
+    pub notes: Notes,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Npc {
+    pub name: String,
+    pub group: String,
     pub description: String,
     #[serde(default)]
     pub background: String,
@@ -128,22 +140,46 @@ impl Scenario {
             "scenario start location {} does not exist",
             self.starting_location
         );
-        for path in &self.paths {
+        for connection in &self.connections {
             ensure!(
-                location_names.contains(path.from.as_str())
-                    && location_names.contains(path.to.as_str()),
-                "path references an unknown location"
+                location_names.contains(connection.from.as_str())
+                    && location_names.contains(connection.to.as_str()),
+                "connection references an unknown location"
             );
             ensure!(
-                path.from != path.to,
-                "path cannot connect a location to itself"
+                connection.from != connection.to,
+                "connection cannot connect a location to itself"
             );
-            ensure!(path.travel_time >= 0, "path travel time cannot be negative");
+            ensure!(
+                connection.travel_time >= 0,
+                "connection travel time cannot be negative"
+            );
+        }
+        let group_names = self
+            .groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        ensure!(
+            group_names.len() == self.groups.len(),
+            "scenario has duplicate group names"
+        );
+        ensure!(
+            group_names.contains(self.starting_group.as_str()),
+            "scenario starting group {} does not exist",
+            self.starting_group
+        );
+        for group in &self.groups {
+            ensure!(
+                location_names.contains(group.location.as_str()),
+                "group {} references an unknown location",
+                group.name
+            );
         }
         for npc in &self.npcs {
             ensure!(
-                location_names.contains(npc.location.as_str()),
-                "NPC {} references an unknown location",
+                group_names.contains(npc.group.as_str()),
+                "NPC {} references an unknown group",
                 npc.name
             );
         }
@@ -193,16 +229,23 @@ mod tests {
             storyteller_summary: String::new(),
             notes: Notes::default(),
             starting_location: "hut".into(),
+            starting_group: "hut".into(),
             locations: vec![Location {
                 name: "hut".into(),
                 kind: "hut".into(),
                 description: String::new(),
                 notes: Notes::default(),
             }],
-            paths: vec![],
+            connections: vec![],
+            groups: vec![Group {
+                name: "hut".into(),
+                location: "hut".into(),
+                description: String::new(),
+                notes: Notes::default(),
+            }],
             npcs: vec![Npc {
                 name: "Toma".into(),
-                location: "missing".into(),
+                group: "missing".into(),
                 description: String::new(),
                 background: String::new(),
                 motive: String::new(),

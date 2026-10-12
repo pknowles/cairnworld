@@ -152,6 +152,20 @@ checkBrowser(server, async (tab, port) => {
   await tab.locator("aside").getByText("I prepare for adventure.", { exact: false }).first().waitFor();
   assert.equal(tab.url(), `http://127.0.0.1:${port}/`, "browsing the navigator never navigates");
 
+  // The world_gm's history is a real DAG (the fixture split its starting
+  // group in two): opening it must fetch the whole branch graph, then each
+  // branch's own page, and render every branch as its own linked section -
+  // not the single flat list a plain agent's history still is (D6,
+  // user_declarations.md: "authentically display the DAG").
+  const branchesResponse = tab.waitForResponse(r => r.url().endsWith(`/inspect/agents/${fixture.gm_agent_id}/branches`));
+  await tab.locator("aside").getByText("Agents", { exact: true }).click();
+  await tab.locator("aside button").filter({ hasText: "world_gm" }).first().click();
+  assert.equal((await branchesResponse).status(), 200);
+  await tab.locator("aside").getByText("retired", { exact: false }).first().waitFor();
+  await tab.locator("aside").getByText("player side (current)", { exact: false }).first().waitFor();
+  await tab.locator("aside").getByText("Toma side (current)", { exact: false }).first().waitFor();
+  await tab.locator("aside").getByText("continues from branch", { exact: false }).first().waitFor();
+
   // Rapid selection changes: switching Agents -> Objects -> Agents faster
   // than any one fetch can land must still end on Agents' own data, not a
   // stale Objects (or earlier Agents) response applied out of order -

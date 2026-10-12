@@ -28,8 +28,9 @@ on many other projects and need this brief reintroduction.
 
 # Worktree and git sanitation
 
-Stay in your assigned directory. Creating new branches or worktrees is expressly
-forbidden without explicit user requests. Ask if you think you need one.
+Stay in your assigned directory. This includes subagents. Creating new branches
+or worktrees is expressly forbidden without explicit user requests. Ask if you
+think you need one.
 
 Make a note of the git repository state before beginning any work. Do not let
 uncommitted work become tangled. Commits must self-contained and individually

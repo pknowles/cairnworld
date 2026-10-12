@@ -48,6 +48,9 @@ web-sys = { version = "0.3.83", optional = true, features = ["Clipboard", "Docum
 # Drives real Axum handlers with an in-process request/response, for route
 # tests that must exercise the same router the server serves.
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
+# Adds tokio::time::{pause,advance} for virtual-time presence timer tests,
+# without pulling test-util into the production ssr binary.
+tokio = { version = "1.53.1", features = ["test-util"] }
 
 [package.metadata.leptos]
 bin-features = ["ssr"]

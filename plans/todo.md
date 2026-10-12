@@ -2,7 +2,9 @@
 
 Implement these features in order. Each linked plan specifies concrete changes,
 declaration links and verification. Follow AGENTS.md's implementation/commit
-checklist for each complete slice. Remove and archive only verified completions.
+checklist for each complete slice. In particular, checks like "Check the order
+of implementation works and that the plan doesn't require features that aren't
+there yet". Remove and archive only verified completions.
 
 - [Developer Mode](developer-inspection.md): first complete the
   [required corrections to A–C](developer-inspection.md#required-corrections-before-d)

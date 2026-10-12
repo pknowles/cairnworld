@@ -146,6 +146,17 @@ pub struct Limits {
     pub compact_before_next_input_tokens: usize,
     /// Exact number of newest raw messages retained after a summary.
     pub keep_tail_messages: usize,
+    /// Before committing a merge, a source branch's own unique suffix (not
+    /// counting shared ancestors) is compacted first when it exceeds this
+    /// many raw messages, preserving `keep_tail_messages` at the end
+    /// (design.md's "Groups and shared GM history": "Before committing a
+    /// merge, each incoming branch's unique suffix is eligible for
+    /// compaction if its raw-message count exceeds `merge_branch_messages`").
+    pub merge_branch_messages: usize,
+    /// A group departure (or first arrival after an empty period) delays
+    /// narration this long so a brief reconnect never announces a departure
+    /// that did not really happen (design.md's Membership and presence).
+    pub presence_departure_seconds: u64,
 }
 
 impl Default for Limits {
@@ -158,6 +169,8 @@ impl Default for Limits {
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 15_360,
             keep_tail_messages: 32,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         }
     }
 }
@@ -203,6 +216,10 @@ impl Limits {
         ensure!(
             self.keep_tail_messages > 0,
             "limits.keep_tail_messages must be greater than zero"
+        );
+        ensure!(
+            self.merge_branch_messages > 0,
+            "limits.merge_branch_messages must be greater than zero"
         );
         self.cache_context_tokens()?;
         Ok(())
@@ -366,6 +383,8 @@ mod tests {
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 800,
             keep_tail_messages: 1,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         };
 
         limits.validate().unwrap();
@@ -382,6 +401,8 @@ mod tests {
             max_output_tokens: 200,
             compact_before_next_input_tokens: 801,
             keep_tail_messages: 1,
+            merge_branch_messages: 64,
+            presence_departure_seconds: 60,
         };
 
         assert!(limits.validate().is_err());

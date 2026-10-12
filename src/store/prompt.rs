@@ -122,10 +122,13 @@ mod tests {
             tools: vec![],
             sampling: Sampling::default(),
         };
-        let segments = context::segments(&store, agent, &request.messages, &[])
+        let segments = context::segments(&store, agent, None, &request.messages, &[])
             .await
             .unwrap();
-        let invocation_id = store.start_invocation(None, agent, None, None).await.unwrap();
+        let invocation_id = store
+            .start_invocation(None, agent, None, None, None)
+            .await
+            .unwrap();
         let mut ids = Vec::new();
         for day in [8, 9] {
             let format: ChatTemplateFormat = serde_json::from_value(serde_json::json!({

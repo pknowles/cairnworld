@@ -377,7 +377,7 @@ async fn run_chat(
         // Do this before appending the next user row: an earlier compaction
         // must never see a newer chat message in the history it summarizes.
         backend
-            .before_agent(&store, agent)
+            .before_agent(&store, agent, None)
             .await
             .context("finishing earlier deferred work for this chat")?;
 
@@ -395,6 +395,7 @@ async fn run_chat(
             &budget,
             agent::Turn {
                 agent_id: agent,
+                branch_id: None,
                 static_messages: &static_messages,
                 tools: &tools,
                 sampling: sampling.clone(),
@@ -468,7 +469,7 @@ async fn run_replay(
         .await
         .context("starting detached replay sequence")?;
     let invocation_id = store
-        .start_invocation(Some(sequence.id), recorded.agent_id, None, None)
+        .start_invocation(Some(sequence.id), recorded.agent_id, None, None, None)
         .await
         .context("starting detached replay invocation")?;
     let run = context::run_recipe(

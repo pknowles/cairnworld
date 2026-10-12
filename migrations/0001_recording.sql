@@ -104,23 +104,12 @@ CREATE TABLE world_starting_location (
     location_id INTEGER NOT NULL REFERENCES location(id)
 );
 
-CREATE TABLE character_location (
-    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
-    location_id INTEGER NOT NULL REFERENCES location(id),
-    description TEXT NOT NULL
-);
-
-CREATE TABLE location_gm (
-    location_id INTEGER PRIMARY KEY NOT NULL REFERENCES location(id),
-    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
-);
-
 CREATE TABLE npc_agent (
     character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
     agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
 );
 
-CREATE TABLE path (
+CREATE TABLE connection (
     id INTEGER PRIMARY KEY NOT NULL,
     world_id INTEGER NOT NULL REFERENCES world(id),
     from_location_id INTEGER NOT NULL REFERENCES location(id),
@@ -130,6 +119,72 @@ CREATE TABLE path (
     gm_notes TEXT NOT NULL DEFAULT '{}',
     storyteller_notes TEXT NOT NULL DEFAULT '{}',
     CHECK (from_location_id <> to_location_id)
+);
+
+-- One GM agent per world; its many history branches are each owned by a
+-- group, not this table, since a world_gm plays several concurrent groups
+-- (design.md's "Groups and shared GM history": "GM context follows the
+-- interacting group, including when it moves; location alone does not
+-- determine shared history").
+CREATE TABLE world_gm (
+    world_id INTEGER PRIMARY KEY NOT NULL REFERENCES world(id),
+    agent_id INTEGER NOT NULL UNIQUE REFERENCES agent(id)
+);
+
+-- One GM history branch shared by every character currently in the group.
+-- A null retired_at is an active group with a writable head; a retired group
+-- keeps its final head for inspection but gets no new characters or entries.
+-- location_id is where the group currently is, not a derived grouping key -
+-- distinct groups may share one location.
+-- name is a scenario-authoring/export handle (like location.name), not part
+-- of design.md's listed columns: groups need a stable reference distinct from
+-- their prose description for scenario JSON round-tripping.
+CREATE TABLE "group" (
+    id INTEGER PRIMARY KEY NOT NULL,
+    world_id INTEGER NOT NULL REFERENCES world(id),
+    name TEXT NOT NULL,
+    location_id INTEGER NOT NULL REFERENCES location(id),
+    description TEXT NOT NULL,
+    branch_id INTEGER NOT NULL UNIQUE REFERENCES history_branch(id),
+    gm_notes TEXT NOT NULL DEFAULT '{}',
+    storyteller_notes TEXT NOT NULL DEFAULT '{}',
+    retired_at TEXT,
+    UNIQUE (world_id, name)
+);
+
+-- Replaces character_location. Created with every character, including a
+-- blank Adventurer, at construction time. Each active character has exactly
+-- one group.
+CREATE TABLE character_group (
+    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
+    group_id INTEGER NOT NULL REFERENCES "group"(id),
+    description TEXT NOT NULL
+);
+
+-- The durable zero/one connected transition (design.md's Membership and
+-- presence: "Multiple tabs share one character-presence state"). Live
+-- connection IDs themselves are process-local, tracked in memory on
+-- WorldEvents, and never restored after restart - only this logical
+-- transition and its generation (bumped on every connect/disconnect, so a
+-- stale timer event can recognize it is no longer current) are durable.
+CREATE TABLE character_presence (
+    character_id INTEGER PRIMARY KEY NOT NULL REFERENCES character(id),
+    last_connected_at TEXT NOT NULL,
+    absent_since TEXT,
+    generation INTEGER NOT NULL DEFAULT 0
+);
+
+-- The announced online set and outstanding arrival/departure transition for
+-- one group (design.md's Membership and presence). due_at is set on a
+-- departure (or first arrival into an empty group); null while nothing is
+-- pending. generation is bumped every time this row's outstanding transition
+-- changes, so a `sleep_until` timer scheduled against an earlier generation
+-- recognizes itself as stale and does nothing.
+CREATE TABLE presence_narration (
+    group_id INTEGER PRIMARY KEY NOT NULL REFERENCES "group"(id),
+    last_announced_character_ids TEXT NOT NULL DEFAULT '[]',
+    due_at TEXT,
+    generation INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE item_type (
@@ -195,9 +250,9 @@ CREATE TABLE history_branch (
 );
 
 -- Immutable bounded references from a branch to an earlier branch it
--- continues from, ordered by ordinal. Empty in this slice: no branch has
--- parents until split/merge (groups) exist. Parents belong to the same agent
--- and predate their child.
+-- continues from, ordered by ordinal. Populated by split_group (one parent:
+-- the source) and merge_groups (one parent per source group). Parents belong
+-- to the same agent and predate their child.
 CREATE TABLE history_parent (
     branch_id INTEGER NOT NULL REFERENCES history_branch(id),
     ordinal INTEGER NOT NULL,
@@ -386,9 +441,10 @@ FROM summary
 JOIN inference ON inference.id = summary.inference_id
 JOIN recorded_content ON recorded_content.id = inference.output;
 
--- Character-action arguments are validated once, retained while the location
--- GM arbitrates, then executed from this row after approval. The world-local
--- id is the value the GM sees; it never has to reproduce model-supplied JSON.
+-- Character-action arguments are validated once, retained while the acting
+-- character's group GM arbitrates, then executed from this row after
+-- approval. The world-local id is the value the GM sees; it never has to
+-- reproduce model-supplied JSON.
 CREATE TABLE pending_action (
     world_id INTEGER NOT NULL REFERENCES world(id),
     id INTEGER NOT NULL,
@@ -397,7 +453,11 @@ CREATE TABLE pending_action (
     -- to its model call ID/name/arguments via its inference's output.
     requesting_tool_execution_id INTEGER NOT NULL REFERENCES tool_execution(id),
     character_id INTEGER NOT NULL REFERENCES character(id),
-    location_gm_agent_id INTEGER NOT NULL REFERENCES agent(id),
+    gm_agent_id INTEGER NOT NULL REFERENCES agent(id),
+    -- The acting character's group branch at submission time (design.md's
+    -- `GroupHistory`): agent_id alone cannot select a GM history once a
+    -- world_gm plays several groups.
+    gm_branch_id INTEGER NOT NULL REFERENCES history_branch(id),
     tool TEXT NOT NULL,
     args TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -431,9 +491,9 @@ CREATE TABLE action (
 
 -- A final reply that crossed the compaction threshold creates one durable
 -- obligation. It is not derived from current history, so restart cannot lose
--- work that was already required when the reply was delivered. Still 1:1
--- with an agent in this slice (agent_history is one branch per agent), but
--- keyed by branch so it composes with parent branches once they exist.
+-- work that was already required when the reply was delivered. Keyed by
+-- branch, not agent: a world_gm agent has several branches (one per group,
+-- design.md's GroupHistory) and each has its own independent obligation.
 CREATE TABLE pending_compaction (
     branch_id INTEGER PRIMARY KEY NOT NULL REFERENCES history_branch(id),
     -- The exact cut this obligation covers: the branch position of the reply

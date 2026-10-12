@@ -308,6 +308,47 @@ struct RawHistoryPageView {
     cursor: Option<RawHistoryCursorView>,
 }
 
+/// Mirrors `store::BranchNode`, one node of `/inspect/agents/:id/branches`'
+/// whole-DAG response.
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Debug, Deserialize)]
+struct BranchNodeView {
+    branch_id: i64,
+    parents: Vec<BranchParentView>,
+    head: Option<BranchHeadView>,
+}
+
+/// Mirrors `store::BranchParent`.
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Debug, Deserialize)]
+struct BranchParentView {
+    branch_id: i64,
+    through_position: i64,
+}
+
+/// Mirrors `store::BranchHead`'s `group_name` - `group_id` is omitted since
+/// nothing in this view links to a group yet (no group-detail view exists to
+/// link to; `WorldObjects` does not expose groups as a browseable type).
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Debug, Deserialize)]
+struct BranchHeadView {
+    group_name: String,
+}
+
+/// One branch's own paged entries inside a `GmBranchGraphView`, keyed
+/// separately from every sibling branch's paging state - a merge's shared
+/// ancestor is one `BranchSection` referenced by more than one child, never
+/// duplicated.
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Debug)]
+struct BranchSection {
+    branch_id: i64,
+    parents: Vec<BranchParentView>,
+    head: Option<BranchHeadView>,
+    entries: Vec<RawHistoryEntryView>,
+    cursor: Option<RawHistoryCursorView>,
+}
+
 /// Mirrors `store::WorldObjects` (`/inspect/objects`): the world's current
 /// browseable objects, presented as-is with their relations, not projected
 /// into a simplified display (user_declarations.md: Developer Mode).
@@ -323,7 +364,7 @@ struct WorldObjectsView {
     characters: Vec<GameObjectView>,
     locations: Vec<GameObjectView>,
     items: Vec<GameObjectView>,
-    paths: Vec<PathObjectView>,
+    connections: Vec<ConnectionObjectView>,
 }
 
 #[cfg(feature = "hydrate")]
@@ -338,7 +379,7 @@ struct GameObjectView {
 
 #[cfg(feature = "hydrate")]
 #[derive(Clone, Debug, Deserialize)]
-struct PathObjectView {
+struct ConnectionObjectView {
     id: i64,
     from: String,
     to: String,
@@ -354,7 +395,11 @@ struct PathObjectView {
 enum InspectData {
     Sequence(Vec<SequenceNodeView>),
     Inference(InferenceSummary),
-    AgentHistory { agent_id: i64, entries: Vec<RawHistoryEntryView>, cursor: Option<RawHistoryCursorView> },
+    /// `branches` is never empty: a plain player/NPC/Storyteller agent has
+    /// exactly one section here, with no parents and no head, rendered
+    /// exactly as the single linear view always has been. A world_gm agent
+    /// whose groups have split/merged has one section per branch in its DAG.
+    AgentHistory { agent_id: i64, branches: Vec<BranchSection> },
     Agents(Vec<AgentInfoView>),
     Objects(WorldObjectsView),
 }
@@ -457,13 +502,11 @@ fn inspect_pane(
                 error,
             ),
             InspectSelection::AgentHistory(agent_id) => fetch_json(
-                format!("/world/{world_id}/inspect/agents/{agent_id}/history"),
-                "agent chat history",
-                move |page: RawHistoryPageView| apply(InspectData::AgentHistory {
-                    agent_id,
-                    entries: page.entries,
-                    cursor: page.cursor,
-                }),
+                format!("/world/{world_id}/inspect/agents/{agent_id}/branches"),
+                "agent branch graph",
+                move |nodes: Vec<BranchNodeView>| {
+                    fetch_branch_sections(world_id, agent_id, nodes, apply, error);
+                },
                 error,
             ),
             InspectSelection::Agents => fetch_json(
@@ -478,6 +521,53 @@ fn inspect_pane(
                 move |objects| apply(InspectData::Objects(objects)),
                 error,
             ),
+        }
+    }
+
+    /// Fetches every branch's own first history page and combines them into
+    /// one `InspectData::AgentHistory` once all have arrived - a single
+    /// linear agent has exactly one node here, so this costs one extra small
+    /// unpaged request over the old direct history fetch, not an extra round
+    /// trip for the common case (both requests fire in parallel).
+    #[cfg(feature = "hydrate")]
+    fn fetch_branch_sections(
+        world_id: i64,
+        agent_id: i64,
+        nodes: Vec<BranchNodeView>,
+        apply: impl Fn(InspectData) + Clone + 'static,
+        error: RwSignal<Option<String>>,
+    ) {
+        let remaining = Rc::new(RefCell::new(nodes.len()));
+        let sections: Rc<RefCell<Vec<Option<BranchSection>>>> =
+            Rc::new(RefCell::new(vec![None; nodes.len()]));
+        for (index, node) in nodes.into_iter().enumerate() {
+            let remaining = remaining.clone();
+            let sections = sections.clone();
+            let apply = apply.clone();
+            let BranchNodeView { branch_id, parents, head } = node;
+            fetch_json(
+                format!("/world/{world_id}/inspect/agents/{agent_id}/history?branch={branch_id}"),
+                "agent chat history",
+                move |page: RawHistoryPageView| {
+                    sections.borrow_mut()[index] = Some(BranchSection {
+                        branch_id,
+                        parents: parents.clone(),
+                        head: head.clone(),
+                        entries: page.entries,
+                        cursor: page.cursor,
+                    });
+                    *remaining.borrow_mut() -= 1;
+                    if *remaining.borrow() == 0 {
+                        let branches = sections
+                            .borrow_mut()
+                            .iter_mut()
+                            .map(|section| section.take().expect("every branch section was filled"))
+                            .collect();
+                        apply(InspectData::AgentHistory { agent_id, branches });
+                    }
+                },
+                error,
+            );
         }
     }
 
@@ -734,8 +824,8 @@ fn inspect_pane(
                         Some(InspectData::Inference(inference)) => view! {
                             <InferenceCard inference selection standalone=true live_tokens/>
                         }.into_any(),
-                        Some(InspectData::AgentHistory { agent_id, entries, cursor }) => view! {
-                            <AgentHistoryView world_id agent_id entries cursor selection data/>
+                        Some(InspectData::AgentHistory { agent_id, branches }) => view! {
+                            <AgentHistoryView world_id agent_id branches selection data/>
                         }.into_any(),
                         Some(InspectData::Agents(agents)) => view! {
                             <AgentsList agents selection/>
@@ -967,20 +1057,49 @@ fn InferenceCard(
 }
 
 /// The agent chat history view: linear raw messages, with compaction
-/// summaries and inference failures inlined where they occurred. Currently
-/// linear per agent, including the location GM's - user_declarations.md
-/// calls for the GM's history to show a DAG with one head per Group once
-/// Groups exist, which is not yet implemented (see plans/todo.md).
+/// summaries and inference failures inlined where they occurred. A plain
+/// player/NPC/Storyteller agent has exactly one section and renders exactly
+/// as the single linear view always has. A world_gm agent whose groups have
+/// split/merged renders every branch in its DAG as its own linked section -
+/// a shared ancestor branch appears once, named by every child section that
+/// continues from it, never duplicated (user_declarations.md: "the GM's chat
+/// history view needs to authentically display the DAG, including multiple
+/// heads - one per Group").
 #[cfg(feature = "hydrate")]
 #[component]
 fn AgentHistoryView(
     world_id: i64,
     agent_id: i64,
-    entries: Vec<RawHistoryEntryView>,
-    cursor: Option<RawHistoryCursorView>,
+    branches: Vec<BranchSection>,
     selection: RwSignal<Option<InspectSelection>>,
     data: RwSignal<Option<InspectData>>,
 ) -> impl IntoView {
+    let single = branches.len() == 1;
+    view! {
+        <div class="flex flex-col gap-3">
+            <h3 class="text-sm font-semibold">{format!("Agent {agent_id} chat history")}</h3>
+            {branches.into_iter().map(|section| view! {
+                <BranchSectionView world_id agent_id section show_heading=!single selection data/>
+            }).collect_view()}
+        </div>
+    }
+}
+
+/// One branch's own section: its entries, its own independent load-more
+/// state, and - only when the parent view is showing more than one branch -
+/// a heading naming its current group head (or "retired" for a split/merge
+/// source) and links to the branches it continues from.
+#[cfg(feature = "hydrate")]
+#[component]
+fn BranchSectionView(
+    world_id: i64,
+    agent_id: i64,
+    section: BranchSection,
+    show_heading: bool,
+    selection: RwSignal<Option<InspectSelection>>,
+    data: RwSignal<Option<InspectData>>,
+) -> impl IntoView {
+    let branch_id = section.branch_id;
     let loading_more = RwSignal::new(false);
     let load_more_error = RwSignal::new(None::<String>);
     let load_more = move |cursor: RawHistoryCursorView| {
@@ -993,22 +1112,47 @@ fn AgentHistoryView(
             move |page: RawHistoryPageView| {
                 loading_more.set(false);
                 data.update(|data| {
-                    if let Some(InspectData::AgentHistory { entries, cursor, .. }) = data {
-                        entries.extend(page.entries);
-                        *cursor = page.cursor;
+                    if let Some(InspectData::AgentHistory { branches, .. }) = data
+                        && let Some(section) = branches.iter_mut().find(|section| section.branch_id == branch_id)
+                    {
+                        section.entries.extend(page.entries);
+                        section.cursor = page.cursor;
                     }
                 });
             },
             load_more_error,
         );
     };
+    let heading = show_heading.then(|| {
+        let label = match &section.head {
+            Some(head) => format!("Branch {branch_id} - {} (current)", head.group_name),
+            None => format!("Branch {branch_id} - retired"),
+        };
+        let parents = section.parents.clone();
+        view! {
+            <div class="flex flex-wrap items-baseline gap-2 border-t border-base-300 pt-2 text-xs">
+                <span class="font-semibold">{label}</span>
+                {(!parents.is_empty()).then(|| view! {
+                    <span class="text-base-content/60">
+                        {format!(
+                            "continues from {}",
+                            parents.iter()
+                                .map(|parent| format!("branch {} @{}", parent.branch_id, parent.through_position))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )}
+                    </span>
+                })}
+            </div>
+        }
+    });
     view! {
         <div class="flex flex-col gap-2">
-            <h3 class="text-sm font-semibold">{format!("Agent {agent_id} chat history")}</h3>
+            {heading}
             <ul class="flex flex-col gap-1 text-sm">
-                {entries.into_iter().map(|entry| view! { <RawHistoryEntryRow entry selection/> }).collect_view()}
+                {section.entries.into_iter().map(|entry| view! { <RawHistoryEntryRow entry selection/> }).collect_view()}
             </ul>
-            {cursor.map(|cursor| view! {
+            {section.cursor.map(|cursor| view! {
                 <button
                     class="btn btn-ghost btn-sm"
                     disabled=move || loading_more.get()
@@ -1160,16 +1304,16 @@ fn ObjectsView(objects: WorldObjectsView) -> impl IntoView {
             <div>
                 <h3 class="text-sm font-semibold">"Connections"</h3>
                 <ul class="mt-1 flex flex-col gap-1">
-                    {objects.paths.into_iter().map(|path| view! {
+                    {objects.connections.into_iter().map(|connection| view! {
                         <li class="rounded bg-base-200 p-2">
-                            <p class="font-semibold">{format!("{} <-> {} ({})", path.from, path.to, path.id)}</p>
-                            <p class="whitespace-pre-wrap">{path.description}</p>
-                            <p class="text-base-content/60">{format!("travel time: {}", path.travel_time)}</p>
-                            {(!path.gm_notes.is_empty()).then(|| view! {
-                                <p class="whitespace-pre-wrap text-base-content/60">{format!("GM notes: {}", path.gm_notes)}</p>
+                            <p class="font-semibold">{format!("{} <-> {} ({})", connection.from, connection.to, connection.id)}</p>
+                            <p class="whitespace-pre-wrap">{connection.description}</p>
+                            <p class="text-base-content/60">{format!("travel time: {}", connection.travel_time)}</p>
+                            {(!connection.gm_notes.is_empty()).then(|| view! {
+                                <p class="whitespace-pre-wrap text-base-content/60">{format!("GM notes: {}", connection.gm_notes)}</p>
                             })}
-                            {(!path.storyteller_notes.is_empty()).then(|| view! {
-                                <p class="whitespace-pre-wrap text-base-content/60">{format!("Storyteller notes: {}", path.storyteller_notes)}</p>
+                            {(!connection.storyteller_notes.is_empty()).then(|| view! {
+                                <p class="whitespace-pre-wrap text-base-content/60">{format!("Storyteller notes: {}", connection.storyteller_notes)}</p>
                             })}
                         </li>
                     }).collect_view()}

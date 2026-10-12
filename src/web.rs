@@ -199,6 +199,10 @@ fn router(app: App, sessions: SqliteStore, secure_cookies: bool) -> Router {
             "/world/{world_id}/inspect/agents/{agent_id}/history",
             get(inspect_agent_history),
         )
+        .route(
+            "/world/{world_id}/inspect/agents/{agent_id}/branches",
+            get(inspect_agent_branches),
+        )
         .route("/world/{world_id}/inspect/objects", get(inspect_objects))
         .route("/world/{world_id}/inspect/events", get(inspect_events))
         .route("/world/{world_id}/invitations", post(create_invitation))
@@ -503,6 +507,10 @@ impl InspectPage {
 /// resume from rather than a single history-entry id.
 #[derive(Deserialize)]
 struct RawHistoryPage {
+    /// Which of the agent's branches the *first* page pages - required for a
+    /// world_gm agent (see `gm_branch_graph`), ignored once `after` names a
+    /// page to resume, which already carries its own branch.
+    branch: Option<i64>,
     /// JSON-encoded `RawHistoryCursor`, as returned by a previous page.
     after: Option<String>,
     limit: Option<i64>,
@@ -584,9 +592,22 @@ async fn inspect_agent_history(
     let viewer = session_user(&app.store, &session).await?;
     let (entries, cursor) = app
         .store
-        .agent_raw_history(viewer.id, world_id, agent_id, page.after()?, page.limit())
+        .agent_raw_history(viewer.id, world_id, agent_id, page.branch, page.after()?, page.limit())
         .await?;
     Ok(Json(RawHistoryPageResponse { entries, cursor }))
+}
+
+/// The whole branch DAG an agent's history can form (a world_gm agent, once
+/// groups have split/merged) or its trivial one-branch form (every other
+/// agent kind) - fetched once, separate from any branch's own paged entries,
+/// so the browser can render every branch as its own linked section.
+async fn inspect_agent_branches(
+    State(app): State<App>,
+    session: Session,
+    Path((world_id, agent_id)): Path<(i64, i64)>,
+) -> Result<impl IntoResponse, WebError> {
+    let viewer = session_user(&app.store, &session).await?;
+    Ok(Json(app.store.gm_branch_graph(viewer.id, world_id, agent_id).await?))
 }
 
 #[derive(Serialize)]
@@ -907,11 +928,31 @@ async fn play_connection(
         user_id = member.user_id,
         "player chat websocket connected"
     );
-    let mut broadcasts = match game.subscribe(&member).await {
+    // A connection is registered after authentication and deregistered on
+    // every exit including error/ban/logout or transport error (design.md's
+    // Membership and presence). The whole remaining body runs inside this
+    // block so every one of its early `return`/`?` exits still reaches the
+    // single disconnect call below - matching agent.rs's InvocationGuard
+    // pattern for a guaranteed exit action without async work in Drop.
+    let connection_id = game.connect(&member).await?;
+    let result = play_connected(&mut socket, &game, &member, after_message_id).await;
+    game.disconnect(&member, connection_id)
+        .await
+        .context("releasing player chat connection")?;
+    result
+}
+
+async fn play_connected(
+    socket: &mut WebSocket,
+    game: &Arc<Game<MistralRsBackend>>,
+    member: &PlayerAgent,
+    after_message_id: Option<i64>,
+) -> Result<()> {
+    let mut broadcasts = match game.subscribe(member).await {
         Ok(broadcasts) => broadcasts,
         Err(error) => {
             send_event(
-                &mut socket,
+                socket,
                 &ServerEvent::Error {
                     message: format!("{error:#}"),
                 },
@@ -920,11 +961,11 @@ async fn play_connection(
             return Ok(());
         }
     };
-    match game.opening_complete(&member).await {
+    match game.opening_complete(member).await {
         Ok(true) => {}
         Ok(false) => {
             send_event(
-                &mut socket,
+                socket,
                 &ServerEvent::Activity {
                     activity: ChatActivity::PreparingOpening,
                 },
@@ -933,7 +974,7 @@ async fn play_connection(
         }
         Err(error) => {
             send_event(
-                &mut socket,
+                socket,
                 &ServerEvent::Error {
                     message: format!("{error:#}"),
                 },
@@ -942,11 +983,11 @@ async fn play_connection(
             return Ok(());
         }
     }
-    match ensure_opening(&game, member.clone()).await {
+    match ensure_opening(game, member.clone()).await {
         Ok(()) => {}
         Err(error) => {
             send_event(
-                &mut socket,
+                socket,
                 &ServerEvent::Error {
                     message: format!("{error:#}"),
                 },
@@ -956,8 +997,8 @@ async fn play_connection(
         }
     }
     let mut cursor = after_message_id;
-    cursor = send_new_entries(&mut socket, &game, &member, cursor).await?;
-    send_event(&mut socket, &ServerEvent::CanAct { value: true }).await?;
+    cursor = send_new_entries(socket, game, member, cursor).await?;
+    send_event(socket, &ServerEvent::CanAct { value: true }).await?;
     tracing::info!(
         world_id = member.world_id,
         user_id = member.user_id,
@@ -975,38 +1016,38 @@ async fn play_connection(
                 let ClientEvent::Message { text } = match serde_json::from_str(&text) {
                     Ok(event) => event,
                     Err(error) => {
-                        send_event(&mut socket, &ServerEvent::Error {
+                        send_event(socket, &ServerEvent::Error {
                             message: format!("invalid browser chat message: {error}"),
                         }).await?;
                         continue;
                     }
                 };
                 if text.trim().is_empty() {
-                    send_event(&mut socket, &ServerEvent::Error {
+                    send_event(socket, &ServerEvent::Error {
                         message: "browser chat message cannot be empty".into(),
                     }).await?;
                     continue;
                 }
-                send_event(&mut socket, &ServerEvent::Activity {
+                send_event(socket, &ServerEvent::Activity {
                     activity: ChatActivity::Responding,
                 }).await?;
-                send_event(&mut socket, &ServerEvent::CanAct { value: false }).await?;
+                send_event(socket, &ServerEvent::CanAct { value: false }).await?;
                 let result = game.player_message(member.clone(), &text).await;
-                cursor = send_ready_broadcasts(&mut socket, &game, &member, &mut broadcasts, cursor).await?;
+                cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
                 if let Err(error) = result {
-                    send_event(&mut socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
-                    send_event(&mut socket, &ServerEvent::CanAct { value: true }).await?;
+                    send_event(socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
+                    send_event(socket, &ServerEvent::CanAct { value: true }).await?;
                     continue;
                 }
-                cursor = send_new_entries(&mut socket, &game, &member, cursor).await?;
-                send_event(&mut socket, &ServerEvent::CanAct { value: true }).await?;
+                cursor = send_new_entries(socket, game, member, cursor).await?;
+                send_event(socket, &ServerEvent::CanAct { value: true }).await?;
             }
             narration = broadcasts.recv() => match narration {
                 Ok(_) => {
-                    cursor = send_new_entries(&mut socket, &game, &member, cursor).await?;
+                    cursor = send_new_entries(socket, game, member, cursor).await?;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    send_event(&mut socket, &ServerEvent::Error {
+                    send_event(socket, &ServerEvent::Error {
                         message: format!("{skipped} earlier live messages were missed; reload the page to recover the stored history."),
                     }).await?;
                 }
@@ -1438,7 +1479,82 @@ mod tests {
             .await
             .unwrap();
         let invitation = store.create_invitation(owner.id, world_id, None).await.unwrap();
-        store.accept_invitation(&viewer, &invitation.token).await.unwrap();
+        let viewer_character_id = store
+            .accept_invitation(&viewer, &invitation.token)
+            .await
+            .unwrap()
+            .character_id;
+
+        // A real split, so check_developer_mode.cjs can exercise the GM's
+        // branch-graph DAG view (D6), not just the trivial one-branch case
+        // every other agent still uses.
+        let original_group_id = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let toma_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        let mara_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Mara'")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        let gm_history = store.group_gm_history(original_group_id).await.unwrap();
+        let split_trigger = store
+            .begin_sequence(world_id, "browser inspection split fixture")
+            .await
+            .unwrap();
+        let split_invocation = store
+            .start_invocation(Some(split_trigger.id), gm_history.agent_id, Some(gm_history.branch_id), None, None)
+            .await
+            .unwrap();
+        let split_inference = store
+            .start_inference(InferenceInput {
+                agent_id: gm_history.agent_id,
+                sequence_id: Some(split_trigger.id),
+                invocation_id: split_invocation,
+                segments: &[],
+                request: &crate::llm::Request {
+                    messages: vec![Message::text(Role::User, "split")],
+                    tools: Vec::new(),
+                    sampling: Sampling::default(),
+                },
+                model: "browser-test",
+            })
+            .await
+            .unwrap();
+        let split_executions = store.create_tool_executions(split_inference, 1).await.unwrap();
+        store
+            .apply_topology_changes(
+                split_inference,
+                vec![(
+                    "split-1".to_string(),
+                    split_executions[0],
+                    crate::tools::TopologyChange::Split {
+                        group_id: original_group_id,
+                        partitions: vec![
+                            crate::tools::GroupPartition {
+                                character_ids: vec![
+                                    installed.member.character_id,
+                                    mara_id,
+                                    viewer_character_id,
+                                ],
+                                name: "player side".into(),
+                                description: "outside".into(),
+                            },
+                            crate::tools::GroupPartition {
+                                character_ids: vec![toma_id],
+                                name: "Toma side".into(),
+                                description: "inside".into(),
+                            },
+                        ],
+                        continue_with_character_id: Some(installed.member.character_id),
+                    },
+                )],
+            )
+            .await
+            .unwrap();
         let agent_id = installed.member.agent_id;
         let sequence = store
             .begin_sequence(world_id, "browser inspection fixture")
@@ -1451,13 +1567,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let segments = store.live_segments(agent_id).await.unwrap();
+        let segments = store.live_segments(agent_id, None).await.unwrap();
         let request = store
             .request_for_segments(agent_id, &segments, Sampling::default())
             .await
             .unwrap();
         let root_invocation_id = store
-            .start_invocation(Some(sequence.id), agent_id, None, None)
+            .start_invocation(Some(sequence.id), agent_id, None, None, None)
             .await
             .unwrap();
         let inference_id = store
@@ -1499,7 +1615,7 @@ mod tests {
             .await
             .unwrap();
         let reply_invocation_id = store
-            .start_invocation(Some(sequence.id), agent_id, Some(hp_tool_execution_id), None)
+            .start_invocation(Some(sequence.id), agent_id, None, Some(hp_tool_execution_id), None)
             .await
             .unwrap();
         let reply_id = store
@@ -1554,7 +1670,7 @@ mod tests {
         let start_live_inference = move |Json(step): Json<LiveInferenceStep>| {
             let store = live_store.clone();
             async move {
-                let segments = store.live_segments(step.agent_id).await.unwrap();
+                let segments = store.live_segments(step.agent_id, None).await.unwrap();
                 let request = store
                     .request_for_segments(step.agent_id, &segments, Sampling::default())
                     .await
@@ -1563,6 +1679,7 @@ mod tests {
                     .start_invocation(
                         Some(step.sequence_id),
                         step.agent_id,
+                        None,
                         step.parent_tool_execution_id,
                         None,
                     )
@@ -1629,6 +1746,7 @@ mod tests {
             "world_id": world_id, "sequence_id": sequence.id,
             "inference_id": inference_id, "parent_tool_execution_id": hp_tool_execution_id,
             "agent_id": agent_id, "hp": hp, "modal_world_id": modal_world_id,
+            "gm_agent_id": gm_history.agent_id,
         })
         .to_string();
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
@@ -1927,6 +2045,17 @@ mod tests {
             .await,
             StatusCode::INTERNAL_SERVER_ERROR,
             "an agent from another world must be rejected"
+        );
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                &format!("/world/{world_id}/inspect/agents/{other_agent}/branches"),
+                Some(&owner_session),
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "an agent from another world must be rejected for its branch graph too"
         );
     }
 

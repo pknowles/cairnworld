@@ -42,11 +42,25 @@ pub trait Backend {
         self.complete(request, on_token)
     }
 
-    async fn before_agent(&self, _store: &crate::store::Store, _agent_id: i64) -> Result<()> {
+    /// `branch_id` is the explicit branch this turn is using, when the
+    /// agent's single `agent_history` branch is not it (a world_gm agent
+    /// plays several groups, each its own branch - design.md's
+    /// `GroupHistory`). `None` for every other agent kind.
+    async fn before_agent(
+        &self,
+        _store: &crate::store::Store,
+        _agent_id: i64,
+        _branch_id: Option<i64>,
+    ) -> Result<()> {
         Ok(())
     }
 
-    async fn after_agent(&self, _store: &crate::store::Store, _agent_id: i64) -> Result<()> {
+    async fn after_agent(
+        &self,
+        _store: &crate::store::Store,
+        _agent_id: i64,
+        _branch_id: Option<i64>,
+    ) -> Result<()> {
         Ok(())
     }
 

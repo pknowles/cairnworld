@@ -388,6 +388,17 @@ after D4; archive presence only with the passing D completion review.
    to use groups and Connections (rename path and its types/JSON fields).
    Bread Thief declares its actual starting group rather than deriving groups
    from identical location IDs. Retain all archived branch/group identities.
+   Reordering note (2026-09-18): a world_gm agent has one branch per group,
+   never an `agent_history` row (the migration's own comment: "GM heads move
+   to groups once groups exist"). `branch_for_agent`/`start_invocation`/
+   `agent::Turn` only resolve an agent's single `agent_history` branch, so D1
+   cannot compile a working world_gm without also accepting an explicit
+   branch_id through invocation start and context assembly - design.md's
+   `GroupHistory { agent_id, branch_id }`. That plumbing is pulled forward
+   into D1 rather than left to D1.3; D1.3 becomes the query layer (resolving
+   the acting character's actual group and its HistoryHead) built on top of
+   branch selection D1 already made explicit, not the first place agent_id
+   stops being sufficient.
 2. Implement the [presence plan](multiplayer-presence.md) now, using the group
    rows from D1 and the live connection/access work from A. This delivers the
    online recipient facts needed for group narration; it is a dependency inside
@@ -397,23 +408,191 @@ after D4; archive presence only with the passing D completion review.
    objects/notes and other local group descriptions. Replace location narration
    subscription keys with group IDs; recipient selection follows the approved
    narration policy. Group changes update an existing socket's subscription.
+   Status (2026-09-21): gm_scene/action routing and the group-keyed
+   subscription/broadcast rename (`Game::subscribe`, `GroupBroadcasts`,
+   `Narration.group_id`, `deliver_narration`/`narrate_presence_transition`)
+   are done and verified, including a regression test proving two groups
+   sharing one location no longer cross-leak live narration. "Group changes
+   update an existing socket's subscription" is not yet implemented -
+   nothing can actually change a character's group before D4's split_group/
+   merge_groups exist, so `play_connection` still subscribes once at
+   connection time with no resubscription path. This needs revisiting once
+   D4 lands, since only then does a real trigger exist to build and verify
+   against.
 4. Implement split_group and merge_groups arguments/validation from design.md.
    Add the typed grouping ToolOutcome; settle ordinary tool results, append the
    whole batch in returned order, and apply the topology transaction at the
    complete-exchange boundary. Next inference resolves the acting character's
    new group; source-less GM events supply continue_with_character_id on split.
-5. Reuse the corrected bounded parent traversal and add the specified
+5. `enqueue_capacity_compaction`, `latest_summary` and `tail_split` still
+   resolve a plain `branch_for_agent(agent_id)` and would panic given a
+   world_gm agent_id, since it has no single `agent_history` row (D1's branch
+   plumbing note above). Give these the same explicit-branch treatment before
+   or alongside adding group-aware compaction here, so a GM branch nearing
+   capacity does not panic instead of compacting.
+   Status (2026-09-23): this gap was more severe than the note above implied
+   - it was reachable in real play, not just a future risk. A world_gm's
+   deferred compaction jobs were invisible to `pending_compaction`/
+   `pending_compactions` (both JOINed through `agent_history`, which has zero
+   rows for world_gm), so the scheduler's admission gate never drained them
+   and `resume()` never recovered them at startup. A second over-threshold
+   reply on the same branch then hit `finish_chat_inference`'s INSERT into
+   `pending_compaction`, which (unlike its sibling
+   `enqueue_capacity_compaction`) was missing `ON CONFLICT(branch_id) DO
+   NOTHING`, producing a UNIQUE constraint violation. Separately,
+   `compaction::run` passed `None` for branch_id into `start_invocation`,
+   which fell back to `branch_for_agent` and failed outright with "agent {id}
+   has no history branch" for any world_gm job that did get enqueued. Fixed
+   by threading `branch_id: Option<i64>` through the `Backend` trait's
+   `before_agent`/`after_agent` (previously silently dropped in
+   `agent::complete_with_call_context`), rekeying `InferenceScheduler`'s
+   admission state from agent_id to branch_id, adding
+   `pending_compaction_for_branch`/`latest_summary_for_branch`/
+   `tail_split_for_branch`, adding the missing `ON CONFLICT`, and passing
+   `job.branch_id` explicitly into `start_invocation`. `latest_summary` stays
+   `#[cfg(test)]`-only; `tail_split` (agent_id form) was removed, having no
+   remaining callers. Verified with a new store.rs test
+   (`a_world_gm_groups_branch_compacts_without_an_agent_history_row`) and
+   individual revert-and-reproduce against the exact production error
+   strings for all three defects.
+   Reuse the corrected bounded parent traversal and add the specified
    longest-disjoint-summary selector.
+   Status (2026-09-23): the bounded parent traversal (`Store::range`/
+   `history_range` in `src/store/history.rs`) already exists, already dedups
+   entries a shared ancestor would otherwise emit twice, and needed no further
+   correction - it was built and verified for D4's split/merge DAGs.
+   The actual gap, found while scoping this item: `live_segments`
+   (`src/store.rs`) still assumed a single branch with no parents - its own
+   comment said so ("this slice has no branch with parents yet"). It walked
+   the full traversal but kept only the single newest `Summary` entry across
+   ALL branches (`.rev().find(...)`) and computed `covered_through` using
+   only `head.branch_id`'s own covered ranges. After a merge, each parent
+   branch can have its own independent summary covering a disjoint range;
+   the old code silently ignored every summary but the newest one and fed
+   the model raw, uncompacted messages from the other parent branch(es)
+   instead - not a correctness bug (no content was lost, `history_range`
+   still returns every entry), but a token-budget one: exactly the kind of
+   "compact before capacity" contract this feature exists to keep.
+   Fixed: `live_segments` now groups the traversal's entries by branch
+   (already emitted as contiguous per-branch runs - ancestors before the
+   branch that owns them) and selects, per branch, that branch's own newest
+   summary (branch-local summaries are already monotonic, so cross-branch
+   overlap cannot occur - a `PositionRange` is scoped to one branch_id).  It
+   pushes one `Segment::Summary` + at most one `Segment::Messages` per
+   branch touched by the traversal, not just `head.branch_id`, in traversal
+   order. Verified with a new store.rs test
+   (`live_segments_after_a_merge_carries_each_parent_branchs_own_summary`)
+   building two independently-summarized group branches and merging them,
+   confirming both summaries survive and no raw message leaks in
+   uncovered; verified by reverting the fix and confirming the test fails
+   with exactly that symptom (1 summary instead of 2, one branch's raw
+   message present).
+   `tail_split_for_branch`'s single-branch assumption
+   (`latest_summary_for_branch(branch_id)` only ever looks at its own
+   branch's covered ranges) needed no change for the merge-compaction step
+   below: each source branch's own newest summary and own tail cut is
+   exactly what that step operates on, called once per eligible source
+   branch - "unique suffix" falls out for free, since a shared ancestor's
+   messages live on the ancestor's own branch, never copied onto a split
+   child.
    Add limits.merge_branch_messages=64 with positive validation. Before committing
    a merge, queue summaries for eligible unique source suffixes through their
    last settled exchanges, excluding the grouping batch. Await these jobs before
    capturing parent cuts so the merged history includes their activations. Use existing recorded compaction execution and
    admission; group changes wait for affected pending compactions.
+   Status (2026-09-23): implemented. `agent::compact_merge_sources` runs
+   before `Store::apply_topology_changes`'s own transaction (design.md: "no
+   database transaction spans inference execution"), so `apply_merge`'s
+   existing fresh `next_position - 1` read naturally picks up the new
+   summary/notice as part of the branch's settled position - no change
+   needed in `apply_merge` itself. For each `TopologyChange::Merge`
+   proposal's `group_ids`: `Store::active_group_branch` gates existence/
+   retirement (skips soft, leaving the real rejection to `apply_merge`'s own
+   validation instead of erroring on a doomed proposal); `Store::
+   uncovered_message_count` (new) checks that branch's own unique suffix
+   against `merge_branch_messages`, and when it exceeds the threshold
+   enqueues a durable job via the existing `enqueue_capacity_compaction`
+   (branch-explicit, `ON CONFLICT(branch_id) DO NOTHING` - reuses an
+   already-pending job rather than double-enqueueing). Either way it then
+   calls `backend.before_agent(store, agent_id, Some(branch_id))` - not
+   `compaction::run` directly - so a branch that already has an unrelated
+   pending job (e.g. an ordinary token-threshold trigger, independent of raw
+   message count, so reachable even under the merge threshold) is waited on
+   through the same admission path a concurrently running deferred
+   compaction uses, rather than resolved a second time and racing it; this
+   is also literally "group changes wait for affected pending compactions".
+   Compaction itself reuses `limits.keep_tail_messages` for the retained
+   tail exactly like ordinary compaction. "Excluding the grouping batch" is
+   automatic: this step runs before the batch's own tool-result message is
+   written to any branch. Verified with a new agent.rs test
+   (`compact_merge_sources_compacts_only_branches_over_the_threshold`,
+   backed by a real `InferenceScheduler`/`ScheduledBackend` so
+   `before_agent` actually resolves the job, not the default no-op) that
+   splits a real group, seeds one side over threshold and leaves the other
+   empty, then confirms only the over-threshold side gets a summary;
+   verified by reverting the eligibility gate and separately the
+   `before_agent` wait to confirm the test catches both a never-compact and
+   an always-compact regression.
 6. Return branches, ordered parent cuts and current group heads from the GM
    history endpoint. Render them as linked branch sections in the same history
    component, with shared ancestors shown once and expandable summary markers.
    Player/NPC histories remain the one-branch form. Connect branch/head/object
    links immediately; do not leave a fake linear GM view after changing storage.
+   Plan (2026-09-23): `AgentHistoryView`'s own comment already names this gap
+   ("Currently linear per agent, including the location GM's -
+   user_declarations.md calls for the GM's history to show a DAG with one
+   head per Group"). `history_range`'s traversal and the cursor's
+   `HistoryHead{branch_id, cut}` are already branch-aware (D1); what's
+   missing is (a) a way to ask for a *specific* GM branch's page instead of
+   always falling back to `current_head(agent_id)`, which errors for a
+   world_gm (no single `agent_history` row), and (b) a small, unpaged query
+   describing the whole branch DAG so the browser can render every branch as
+   its own section and link them, instead of only ever showing whichever one
+   branch happened to resolve.
+   - `Store::agent_raw_history` gains an explicit `branch_id: Option<i64>`,
+     used only to resolve the *first* page's head (`None` keeps today's
+     `current_head(agent_id)` behavior for player/NPC/Storyteller); every
+     later page already resumes from the cursor's own branch-explicit head,
+     unchanged.
+   - New `Store::gm_branch_graph(viewer_id, world_id, agent_id) ->
+     Vec<BranchNode>`: every `history_branch` this agent owns, each with its
+     ordered `history_parent` edges (`parent_branch_id, through_position`)
+     and, when a non-retired `"group"` row's `branch_id` points at it, that
+     group's id/name as its "current head" label. Branch counts are small
+     (one per group ever split/merged into existence) - this is one plain
+     query, not paged like the entry list.
+   - `web.rs`: `inspect_agent_history` accepts an optional `branch` query
+     param, used only when `after` is absent. New route returning
+     `gm_branch_graph`, gated the same `inspecting()` way as every other
+     inspection query.
+   - `migrations/0001_recording.sql`'s `history_parent` comment ("Empty in
+     this slice: no branch has parents until split/merge (groups) exist") is
+     stale since D4; update it while touching this area.
+   Status (2026-09-23): implemented, differing from the plan above in one
+   respect - `InspectSelection::AgentHistory(agent_id)` did not need a
+   `branch_id` field. Selecting an agent fetches its whole `/branches` graph
+   first, then fetches every returned branch's own first `/history?branch=`
+   page in parallel and combines them once all have arrived into one
+   `InspectData::AgentHistory { agent_id, branches: Vec<BranchSection> }` -
+   the plain single-branch case (`branches.len() == 1`, the overwhelming
+   majority) costs one extra small unpaged `/branches` request over the old
+   direct fetch, not an extra round trip, and renders with no heading,
+   identical to the prior single-branch view. `AgentHistoryView` still
+   exists but is now the trivial-vs-DAG dispatcher; a new `BranchSectionView`
+   (one per branch, its own independent load-more state) does the actual
+   per-branch rendering `AgentHistoryView` used to do directly - a shared
+   ancestor branch is one `BranchSection`, never duplicated across its
+   children, satisfying "shared ancestors shown once" structurally rather
+   than needing deduplication logic. Verified with a new browser check
+   (`check_developer_mode.cjs`, using a real split in the shared browser
+   fixture) asserting the retired source branch, both new current-head
+   sections and a "continues from branch ..." parent link all render, and
+   with two new store.rs tests for `gm_branch_graph` itself (a plain agent's
+   trivial one-branch/no-parents/no-head graph, and a split's exact
+   retired-source-plus-two-heads shape with the correct parent
+   through_position). Verified by reverting `AgentHistoryView`'s branch-count
+   check to always render single-section and confirming the browser test
+   fails exactly as expected, then restoring it and confirming green again.
 
 Examples to verify through Store/Game and the browser: root [a,b], split left
 [c,d]/right [e], merge [f] yields [a,b,c,d,e,f]; a second split/remerge still shows
