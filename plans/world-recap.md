@@ -1,42 +1,42 @@
-# World recap
+# Returning-character recap implementation
 
-## Goal
+## Outcome and trace
 
-Show each returning player a durable, current recap of their world after they
-have been absent for 60 seconds, without adding the recap to their agent chat
-history.
+A private recap appears on WorldDetail after absence, without becoming an agent
+chat message. Authority: [World detail page](../user_declarations.md#world-detail-page).
+Design: [Recap storage and execution](../design.md#recap-storage-and-execution).
+This plan uses the concrete per-character ownership proposal, pending the user's
+answer; it does not silently redefine the declaration's per-player wording.
+Presence supplies the durable absence timestamp/generation and timer boundary.
 
-## Scope
+## Ordered changes
 
-- Maintain per-member recap data separate from messages and summaries.
-- Queue recap generation durably after the declared logout/absence condition;
-  it must survive restart and run at deferred priority.
-- Display the current player's recap on the world-detail page.
-- World completion and epilogues are excluded: their behavior remains an
-  undesigned End conditions and epilogue feature in `design.md`.
+1. Add pending_recap and character_recap with the exact design fields. The
+   last-disconnect transaction captures the character's history head/cut, static
+   recipe and generation with due_at=absent_since+60 seconds. Return before the
+   deadline deletes only that generation's pending job.
+2. Extend existing deferred admission with the Compaction/Recap enum. A due
+   presence event starts its recap at deferred priority after validating absence
+   generation. Resume loads both typed job tables at startup. Keep one in-flight
+   job per character/generation; retain errors durably and surface them.
+3. Add src/recap.rs assembling the captured history/public character context plus
+   a closing recap request through complete_recipe. Store its inference reference
+   as character_recap and remove that exact obligation in one transaction. An
+   older result cannot delete a newer job. Never append recap output to message.
+4. WorldDetail resolves the viewer's character recaps under their character rows,
+   displaying pending/failed/current status and the last successful text. Normal
+   members see only their own; enabled Developer Mode uses ordinary authorized
+   inference inspection. No separate debug transcript or stored recap text copy.
 
-## Steps
+## Verification and completion
 
-1. Design the durable recap obligation in `design.md`, comparing direct reuse
-   of pending compaction work, a shared representation for the two real durable
-   inference obligations, and a separate recap representation. Choose the
-   smallest design that owns real data and obtain user sign-off before code.
-2. Persist the absence-triggered obligation and its completion atomically with
-   the recap result; restart resumes unfinished work.
-3. Assemble the player's recap inference through the normal recorded context
-   path while keeping its result outside the player-agent transcript.
-4. Render the member's stored recap on the world-detail page and update
-   `implementation_reference.md`.
+Return at 59 seconds cancels the job; absence through 60 seconds creates one
+runnable obligation. Restart before/after deadline or inference completion does
+not lose/duplicate it. A second absence cannot be cleared by the first result.
+A real character-agent recap excludes hidden NPC/Storyteller facts, appears in
+WorldDetail and leaves the agent's message history unchanged. It summarizes
+known history, not unseen events from a missed session.
 
-## Verification
-
-- Logging out and remaining absent for 60 seconds creates exactly one durable
-  recap obligation; returning first prevents it.
-- Restarting between queueing and completion preserves the obligation and does
-  not create duplicate recaps.
-- The recap is visible only to its member, is absent from that agent's chat
-  history, and its inference remains inspectable through the normal recording
-  path.
-
-Follow the implementation loop and pre-commit checklist in `AGENTS.md`, plus
-`coding_standards.md` and `prompt_standards.md`.
+Update implementation_reference.md. Re-read coding_standards.md and
+prompt_standards.md, obtain required LLM-test review and complete the
+[AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist).

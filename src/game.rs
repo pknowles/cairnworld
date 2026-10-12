@@ -45,6 +45,12 @@ type LocationBroadcasts = Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>;
 struct Narration {
     location_id: i64,
     text: String,
+    /// The recorded_content row the GM's own settled reply message already
+    /// references. Every present character's delivered copy points at this
+    /// same reference rather than re-recording the narration text once per
+    /// recipient (design.md's Chat schema: "every recipient references that
+    /// same selection").
+    content_id: i64,
 }
 
 /// Everything a player-facing action tool needs to submit one action to its
@@ -245,54 +251,94 @@ where
             .begin_sequence(member.world_id, "player message")
             .await
             .context("starting player message sequence")?;
-        self.store
-            .append_message(member.agent_id, &Message::text(Role::User, text))
+        // Everything from here on must finish the sequence on every exit,
+        // including a failure in setup before the agent ever runs - not only
+        // agent::complete_with_call_context's own result - so the whole body
+        // is captured as one Result rather than using `?` directly.
+        let result: Result<Response> = async {
+            self.store
+                .append_message_with_sequence(
+                    member.agent_id,
+                    &Message::text(Role::User, text),
+                    sequence.id,
+                )
+                .await
+                .context("storing player message")?;
+            let ready = self
+                .store
+                .is_ready_to_begin(&member)
+                .await
+                .context("checking character creation state")?;
+            let budget = Budget::new(self.limits);
+            let call = CallContext::root(Some(sequence.id));
+            let tools = if ready {
+                let location_id = self
+                    .store
+                    .player_location_id(&member)
+                    .await
+                    .context("resolving player location")?;
+                self.action_tools(
+                    member.clone(),
+                    sequence.id,
+                    location_id,
+                    budget.clone(),
+                    call.clone(),
+                    Arc::clone(broadcasts),
+                )
+            } else {
+                self.creation_tools(
+                    member.clone(),
+                    sequence.id,
+                    budget.clone(),
+                    call.clone(),
+                    Arc::clone(broadcasts),
+                )
+            };
+            let prompt = self
+                .player_prompt(&member, ready)
+                .await
+                .context("building player prompt")?;
+            let settled = agent::complete_with_call_context(
+                &self.store,
+                &self.backend,
+                &budget,
+                agent::Turn {
+                    agent_id: member.agent_id,
+                    static_messages: &[prompt],
+                    tools: &tools,
+                    sampling: self.sampling.clone(),
+                    model: &self.model,
+                },
+                &call,
+                |_| {},
+                |_| {},
+            )
             .await
-            .context("storing player message")?;
-        let ready = self
+            .context("resolving player agent")?;
+            Ok(settled.response)
+        }
+        .await;
+        // This is the root, player-triggered invocation: its return finishes
+        // the whole sequence's wall time (design.md: "Finish sequence on
+        // foreground invocation return"). Nested/deferred invocations finish
+        // only their own row. A failure to finish the sequence itself is a
+        // secondary bookkeeping problem, logged rather than allowed to
+        // replace `result`'s own error as the reason this call failed.
+        if let Err(finish_error) = self
             .store
-            .is_ready_to_begin(&member)
+            .finish_sequence(
+                sequence.id,
+                result.as_ref().err().map(|error| format!("{error:#}")).as_deref(),
+            )
             .await
-            .context("checking character creation state")?;
-        let budget = Budget::new(self.limits);
-        let call = CallContext::root(Some(sequence.id));
-        let tools = if ready {
-            let location_id = self.store.player_location_id(&member).await?;
-            self.action_tools(
-                member.clone(),
-                sequence.id,
-                location_id,
-                budget.clone(),
-                call.clone(),
-                Arc::clone(broadcasts),
-            )
-        } else {
-            self.creation_tools(
-                member.clone(),
-                sequence.id,
-                budget.clone(),
-                call.clone(),
-                Arc::clone(broadcasts),
-            )
-        };
-        let prompt = self.player_prompt(&member, ready).await?;
-        let response = agent::complete_with_call_context(
-            &self.store,
-            &self.backend,
-            &budget,
-            agent::Turn {
-                agent_id: member.agent_id,
-                static_messages: &[prompt],
-                tools: &tools,
-                sampling: self.sampling.clone(),
-                model: &self.model,
-            },
-            &call,
-            |_| {},
-            |_| {},
-        )
-        .await
-        .context("resolving player agent")?;
+        {
+            tracing::error!(
+                sequence_id = sequence.id,
+                error = %format!("{finish_error:#}"),
+                "failed to finish player message sequence"
+            );
+        }
+        let response = result?;
         ensure!(
             matches!(response.content, Content::Text(_)),
             "player agent did not settle after its action"
@@ -334,32 +380,60 @@ where
             call.clone(),
             Arc::clone(broadcasts),
         );
-        let prompt = self.player_prompt(&member, false).await?;
-        // This is the game event that starts the agent's first turn. It is
-        // deliberately static context, not a player-visible or stored chat
-        // message: the agent must speak first, while tool-capable templates
-        // require a user message before their declarations.
-        let entered = Message::text(
-            Role::User,
-            "The player has entered the world and has not chosen to roll yet. Speak directly to them.",
-        );
-        let response = agent::complete_with_call_context(
-            &self.store,
-            &self.backend,
-            &budget,
-            agent::Turn {
-                agent_id: member.agent_id,
-                static_messages: &[prompt, entered],
-                tools: &tools,
-                sampling: self.sampling.clone(),
-                model: &self.model,
-            },
-            &call,
-            |_| {},
-            |_| {},
-        )
-        .await
-        .context("opening player-agent conversation")?;
+        // Everything from here on must finish the sequence on every exit,
+        // including a failure building the prompt before the agent ever
+        // runs - not only agent::complete_with_call_context's own result.
+        let result: Result<Response> = async {
+            let prompt = self
+                .player_prompt(&member, false)
+                .await
+                .context("building player prompt")?;
+            // This is the game event that starts the agent's first turn. It
+            // is deliberately static context, not a player-visible or stored
+            // chat message: the agent must speak first, while tool-capable
+            // templates require a user message before their declarations.
+            let entered = Message::text(
+                Role::User,
+                "The player has entered the world and has not chosen to roll yet. Speak directly to them.",
+            );
+            let settled = agent::complete_with_call_context(
+                &self.store,
+                &self.backend,
+                &budget,
+                agent::Turn {
+                    agent_id: member.agent_id,
+                    static_messages: &[prompt, entered],
+                    tools: &tools,
+                    sampling: self.sampling.clone(),
+                    model: &self.model,
+                },
+                &call,
+                |_| {},
+                |_| {},
+            )
+            .await
+            .context("opening player-agent conversation")?;
+            Ok(settled.response)
+        }
+        .await;
+        // A failure to finish the sequence itself is a secondary bookkeeping
+        // problem, logged rather than allowed to replace `result`'s own
+        // error as the reason this call failed.
+        if let Err(finish_error) = self
+            .store
+            .finish_sequence(
+                sequence.id,
+                result.as_ref().err().map(|error| format!("{error:#}")).as_deref(),
+            )
+            .await
+        {
+            tracing::error!(
+                sequence_id = sequence.id,
+                error = %format!("{finish_error:#}"),
+                "failed to finish player entered sequence"
+            );
+        }
+        let response = result?;
         ensure!(
             matches!(response.content, Content::Text(_)),
             "player agent did not settle while opening the conversation"
@@ -423,10 +497,11 @@ where
                 description: "Roll the Adventurer's starting 1d6 Hit Protection.".to_string(),
                 schema: no_argument_schema(),
             },
-            move |arguments, inference_id| {
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
                 let member = hp_member.clone();
-                let arguments = arguments.to_string();
                 Box::pin(async move {
                     if let Err(error) = parse_no_arguments(&arguments) {
                         return Ok(ToolOutcome::rejected(error));
@@ -434,7 +509,7 @@ where
                     Ok(ToolOutcome::Completed(format!(
                         "Hit Protection: {}",
                         game.store
-                            .roll_hit_protection(&member, sequence_id, Some(inference_id))
+                            .roll_hit_protection(&member, sequence_id, Some(tool_execution_id))
                             .await?
                     )))
                 }) as ToolFuture
@@ -448,17 +523,18 @@ where
                 description: "Roll the Adventurer's STR, DEX, and WIL as 3d6 each.".to_string(),
                 schema: no_argument_schema(),
             },
-            move |arguments, inference_id| {
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
                 let member = attributes_member.clone();
-                let arguments = arguments.to_string();
                 Box::pin(async move {
                     if let Err(error) = parse_no_arguments(&arguments) {
                         return Ok(ToolOutcome::rejected(error));
                     }
                     let (str, dex, wil) = game
                         .store
-                        .roll_attributes(&member, sequence_id, Some(inference_id))
+                        .roll_attributes(&member, sequence_id, Some(tool_execution_id))
                         .await?;
                     Ok(ToolOutcome::Completed(format!(
                         "Attributes: STR {str}, DEX {dex}, WIL {wil}"
@@ -478,10 +554,11 @@ where
                     .to_string(),
                 schema: no_argument_schema(),
             },
-            move |arguments, inference_id| {
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
                 let member = ready_member.clone();
-                let arguments = arguments.to_string();
                 let budget = ready_budget.clone();
                 let call = ready_call.clone();
                 let broadcasts = Arc::clone(&ready_broadcasts);
@@ -490,18 +567,16 @@ where
                         return Ok(ToolOutcome::rejected(error));
                     }
                     game.store
-                        .ready_to_begin(&member, sequence_id, Some(inference_id))
+                        .ready_to_begin(&member, sequence_id, Some(tool_execution_id))
                         .await?;
                     let narration = game
-                        .opening_narration(&member, budget, call.child(inference_id))
+                        .opening_narration(&member, budget, call.child(tool_execution_id))
                         .await?;
                     let delivery_game = Arc::clone(&game);
                     Ok(ToolOutcome::CompletedAfter {
                         content: "The GM's narration reached the player as its own entry. Ask what they want to do next.".to_string(),
                         after_result: Box::pin(async move {
-                            delivery_game
-                                .deliver_narration(&member, narration.location_id, &narration.text, &broadcasts)
-                                .await
+                            delivery_game.deliver_narration(&member, &narration, &broadcasts).await
                         }),
                     })
                 }) as ToolFuture
@@ -581,10 +656,11 @@ where
         } = action;
         let tool_name = definition.name.clone();
         let game = Arc::clone(self);
-        Tool::new(definition, move |arguments, inference_id| {
+        Tool::new(definition, move |context| {
+            let arguments = context.arguments.to_string();
+            let tool_execution_id = context.tool_execution_id;
             let game = Arc::clone(&game);
             let member = member.clone();
-            let arguments = arguments.to_string();
             let budget = budget.clone();
             let call = call.clone();
             let broadcasts = Arc::clone(&broadcasts);
@@ -598,7 +674,7 @@ where
                     .create_pending_action(
                         &member,
                         sequence_id,
-                        inference_id,
+                        tool_execution_id,
                         &tool_name,
                         &arguments,
                     )
@@ -609,9 +685,7 @@ where
                 Ok(ToolOutcome::CompletedAfter {
                     content: "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
                     after_result: Box::pin(async move {
-                        delivery_game
-                            .deliver_narration(&member, narration.location_id, &narration.text, &broadcasts)
-                            .await
+                        delivery_game.deliver_narration(&member, &narration, &broadcasts).await
                     }),
                 })
             }) as ToolFuture
@@ -650,7 +724,7 @@ where
             Role::User,
             "A player character has just begun play here. Narrate the scene, surroundings, and plot-relevant details the characters present can perceive.",
         );
-        let response = agent::complete_with_call_context(
+        let settled = agent::complete_with_call_context(
             &self.store,
             &self.backend,
             &budget,
@@ -667,12 +741,13 @@ where
         )
         .await
         .context("asking location GM for opening narration")?;
-        let Content::Text(narration) = response.content else {
+        let Content::Text(narration) = settled.response.content else {
             anyhow::bail!("location GM did not settle while opening play");
         };
         Ok(Narration {
             location_id,
             text: narration,
+            content_id: settled.output_content_id,
         })
     }
 
@@ -683,6 +758,16 @@ where
         budget: Budget,
         call: CallContext,
     ) -> Result<Narration> {
+        // approve_action and reject_action both resolve the same pending
+        // action. resolve_pending_action's transaction is the sole authority
+        // (design.md: "They cannot be approved twice") - no caller-side flag
+        // mirrors that durable state. Each tool compares the decision it
+        // requested against the decision resolve_pending_action actually
+        // returns (freshly applied or already resolved by an earlier call in
+        // this same turn): a match reports that recorded outcome, a mismatch
+        // is an ordinary tool rejection describing the existing resolution,
+        // not an error - a later rejection reason can never replace an
+        // earlier approval's result, or vice versa.
         let game = Arc::clone(self);
         let action_id = pending.id;
         let approval_pending = pending.clone();
@@ -695,9 +780,10 @@ where
                 schema: serde_json::to_value(schema_for!(ApproveAction))
                     .expect("approval schema should serialize"),
             },
-            move |arguments, inference_id| {
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
-                let arguments = arguments.to_string();
                 Box::pin(async move {
                     let approval: ApproveAction =
                         match serde_json::from_str(&arguments).context("parsing action approval") {
@@ -710,16 +796,22 @@ where
                             approval.action_id
                         )));
                     }
-                    game.store
+                    let resolved = game
+                        .store
                         .resolve_pending_action(
                             approval_pending.location_gm_agent_id,
                             approval_pending.world_id,
                             action_id,
-                            inference_id,
+                            tool_execution_id,
                             "approved",
                         )
                         .await
                         .with_context(|| format!("approving action {action_id}"))?;
+                    if !resolved.approved {
+                        return Ok(ToolOutcome::Rejected(format!(
+                            "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
+                        )));
+                    }
                     Ok(ToolOutcome::Completed(format!(
                         "Action {action_id} approved."
                     )))
@@ -736,9 +828,10 @@ where
                 schema: serde_json::to_value(schema_for!(RejectAction))
                     .expect("rejection schema should serialize"),
             },
-            move |arguments, inference_id| {
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
-                let arguments = arguments.to_string();
                 Box::pin(async move {
                     let rejection: RejectAction = match serde_json::from_str(&arguments)
                         .context("parsing action rejection")
@@ -758,16 +851,22 @@ where
                                 .to_string(),
                         ));
                     }
-                    game.store
+                    let resolved = game
+                        .store
                         .resolve_pending_action(
                             pending.location_gm_agent_id,
                             pending.world_id,
                             action_id,
-                            inference_id,
+                            tool_execution_id,
                             &format!("rejected: {}", rejection.reason),
                         )
                         .await
                         .with_context(|| format!("rejecting action {action_id}"))?;
+                    if resolved.approved {
+                        return Ok(ToolOutcome::Rejected(format!(
+                            "Tool arguments were rejected: action {action_id} was already approved, it cannot now be rejected"
+                        )));
+                    }
                     Ok(ToolOutcome::Completed(format!(
                         "Action {action_id} rejected: {}",
                         rejection.reason
@@ -799,7 +898,7 @@ where
                 pending.tool, pending.args,
             ),
         );
-        let response = agent::complete_with_call_context(
+        let settled = agent::complete_with_call_context(
             &self.store,
             &self.backend,
             &budget,
@@ -810,13 +909,13 @@ where
                 sampling: self.sampling.clone(),
                 model: &self.model,
             },
-            &call.child(pending.inference_id),
+            &call.child(pending.requesting_tool_execution_id),
             |_| {},
             |_| {},
         )
         .await
         .with_context(|| format!("arbitrating action {action_id}"))?;
-        let Content::Text(narration) = response.content else {
+        let Content::Text(narration) = settled.response.content else {
             anyhow::bail!("GM did not settle after action {action_id}");
         };
         ensure!(
@@ -830,25 +929,25 @@ where
         Ok(Narration {
             location_id,
             text: narration,
+            content_id: settled.output_content_id,
         })
     }
 
     async fn deliver_narration(
         &self,
         member: &PlayerAgent,
-        location_id: i64,
-        narration: &str,
+        narration: &Narration,
         broadcasts: &LocationBroadcasts,
     ) -> Result<()> {
         self.store
-            .append_location_narration(member.world_id, location_id, narration)
+            .append_location_narration(member.world_id, narration.location_id, narration.content_id)
             .await
             .context("storing GM narration before the player agent follows up")?;
         // A player may disconnect while the GM resolves. The narration remains
         // stored for reload; active viewers receive this exact same text.
-        let _ = location_broadcast(broadcasts, location_id)
+        let _ = location_broadcast(broadcasts, narration.location_id)
             .await
-            .send(narration.to_owned());
+            .send(narration.text.clone());
         Ok(())
     }
 }
@@ -1231,7 +1330,7 @@ mod tests {
             .request_for_segments(
                 installed.member.agent_id,
                 &store
-                    .history_segments(installed.member.agent_id)
+                    .live_segments(installed.member.agent_id)
                     .await
                     .unwrap(),
                 Sampling {
@@ -1264,33 +1363,242 @@ mod tests {
         assert_eq!(player_inference.parent_inference_id, None);
         assert_eq!(gm_inference.sequence_id, player_inference.sequence_id);
         assert_eq!(gm_inference.parent_inference_id, Some(player_inference.id));
+        // A chat-entry inspect button needs the same sequence whether it
+        // resolves through the player's own triggering message or through the
+        // inference that produced a later reply.
+        let player_line = chat
+            .iter()
+            .find(|entry| entry.text == "I take the flour sack.")
+            .expect("the player's own message is stored");
+        assert_eq!(player_line.sequence_id, player_inference.sequence_id);
+        let assistant_line = chat
+            .iter()
+            .find(|entry| entry.text == "What do you do next?")
+            .expect("the player agent's reply is stored");
+        assert_eq!(assistant_line.sequence_id, player_inference.sequence_id);
+        // The live socket handler re-fetches from a cursor after each turn
+        // instead of reloading the page; that must resolve the same sequence
+        // ids as the SSR path above, not the placeholder None a raw broadcast
+        // string would carry.
+        let live_entries = game
+            .player_chat_after(&installed.member, Some(player_line.id - 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            live_entries
+                .iter()
+                .find(|entry| entry.text == "I take the flour sack.")
+                .expect("the live cursor sees the player's own message")
+                .sequence_id,
+            player_inference.sequence_id
+        );
+        assert_eq!(
+            live_entries
+                .iter()
+                .find(|entry| entry.text == "What do you do next?")
+                .expect("the live cursor sees the player agent's reply")
+                .sequence_id,
+            player_inference.sequence_id
+        );
+        {
+            let requests = recorded_requests.lock().unwrap();
+            let gm_packet = requests
+                .iter()
+                .flat_map(|request| request.messages.iter())
+                .find_map(|message| match &message.content {
+                    MessageContent::Text(text)
+                        if text.starts_with("You arbitrate this location") =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .expect("the GM arbitration must receive its actual location packet");
+            for name in &player_names {
+                assert!(
+                    gm_packet.contains(&format!("\"name\":\"{name}\"")),
+                    "the GM packet must name every player character in its location"
+                );
+            }
+            let acting = &player_names[0];
+            assert!(
+                requests
+                    .iter()
+                    .flat_map(|request| request.messages.iter())
+                    .any(|message| {
+                        matches!(&message.content, MessageContent::Text(text)
+                        if text.starts_with(&format!("{acting} takes action")))
+                    }),
+                "the GM must be told which character took the action"
+            );
+        }
+
+        // Provenance: the take action links to the player call that submitted
+        // it and the GM call that approved it. The sequence tree walks from the
+        // player message trigger through both inferences.
+        let take_actions = store.inference_actions(player_inference.id).await.unwrap();
+        assert_eq!(
+            take_actions.len(),
+            1,
+            "the player turn performed one action"
+        );
+        assert_eq!(take_actions[0].tool, "take");
+        assert_eq!(take_actions[0].call_id.as_deref(), Some("take-1"));
+        assert_eq!(
+            take_actions[0].approval_inference_id,
+            Some(gm_inference.id),
+            "the recorded action names the GM inference that approved it"
+        );
+        assert!(
+            store
+                .inference_actions(gm_inference.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the GM inference approved an action but performed none of its own"
+        );
+        let sequence_inferences = store
+            .sequence_inference_ids(player_inference.sequence_id.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            sequence_inferences.first().copied(),
+            Some(player_inference.id),
+            "the player message inference opens its sequence"
+        );
+        assert!(
+            sequence_inferences.contains(&gm_inference.id),
+            "the GM inference belongs to the same sequence"
+        );
+        assert!(
+            sequence_inferences.windows(2).all(|pair| pair[0] < pair[1]),
+            "sequence inferences are returned in recorded order"
+        );
+        let gm_messages = store.inference_message_ids(gm_inference.id).await.unwrap();
+        assert_eq!(
+            gm_messages
+                .iter()
+                .map(|message| message.role.clone())
+                .collect::<Vec<_>>(),
+            vec![Role::Assistant, Role::Tool],
+            "the GM inference's approve_action call and its result are recorded in the GM's history"
+        );
+        assert!(
+            gm_messages[1].answers_tool_execution_id.is_some(),
+            "the GM's tool result names the exact approve_action call it answers"
+        );
+    }
+
+    /// A GM turn cannot resolve the same pending action twice with different
+    /// outcomes: calling approve_action then reject_action for the same
+    /// action_id in one batch must report the conflicting call as an
+    /// ordinary tool rejection, not silently succeed or error out - and the
+    /// first call's approval (and its state mutation) stands.
+    #[tokio::test]
+    async fn a_gm_turn_cannot_both_approve_and_reject_the_same_action() {
+        let db = crate::store::TestDatabase::new("game-test");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let creation = store
+            .begin_sequence(installed.world_id, "creation test")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .ready_to_begin(&installed.member, creation.id, None)
+            .await
+            .unwrap();
+        let (scripted_backend, recorded_requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "take-1".into(),
+                name: "take".into(),
+                arguments: r#"{"item":"flour sack"}"#.into(),
+            }])),
+            // Both calls answer the same action_id in one batch; the GM
+            // model reversing its own decision mid-turn is exactly the case
+            // this guards - not a network retry of an identical call.
+            response(Content::ToolCalls(vec![
+                ToolCall {
+                    id: "approve-1".into(),
+                    name: "approve_action".into(),
+                    arguments: r#"{"action_id":1}"#.into(),
+                },
+                ToolCall {
+                    id: "reject-1".into(),
+                    name: "reject_action".into(),
+                    arguments: r#"{"action_id":1,"reason":"changed my mind"}"#.into(),
+                },
+            ])),
+            response(Content::Text(
+                "You lift the flour sack while Toma watches.".into(),
+            )),
+            response(Content::Text("What do you do next?".into())),
+        ]);
+        let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
+        let game = Arc::new(Game::new(
+            store.clone(),
+            backend.foreground(),
+            Limits::default(),
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        ));
+        let (actions_before, pending_before) = store.action_counts().await.unwrap();
+        game.player_message(installed.member.clone(), "I take the flour sack.")
+            .await
+            .unwrap();
+        let (actions, pending) = store.action_counts().await.unwrap();
+        assert_eq!(
+            actions,
+            actions_before + 1,
+            "exactly one resolution must be recorded, not two conflicting ones"
+        );
+        assert_eq!(pending, pending_before);
+        let holders: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM item_character JOIN item ON item.id = item_character.item_id \
+             WHERE item.world_id = ? AND item.name = 'flour sack'",
+        )
+        .bind(installed.world_id)
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            holders, 1,
+            "the first call's approval must stand: the item is transferred exactly once"
+        );
         let requests = recorded_requests.lock().unwrap();
-        let gm_packet = requests
+        let reject_result = requests
             .iter()
             .flat_map(|request| request.messages.iter())
             .find_map(|message| match &message.content {
-                MessageContent::Text(text) if text.starts_with("You arbitrate this location") => {
-                    Some(text)
+                MessageContent::ToolResult { tool_call_id, content } if tool_call_id == "reject-1" => {
+                    Some(content.clone())
                 }
                 _ => None,
             })
-            .expect("the GM arbitration must receive its actual location packet");
-        for name in &player_names {
-            assert!(
-                gm_packet.contains(&format!("\"name\":\"{name}\"")),
-                "the GM packet must name every player character in its location"
-            );
-        }
-        let acting = &player_names[0];
+            .expect("the GM's own next turn must see reject-1's tool result");
         assert!(
-            requests
-                .iter()
-                .flat_map(|request| request.messages.iter())
-                .any(|message| {
-                    matches!(&message.content, MessageContent::Text(text)
-                    if text.starts_with(&format!("{acting} takes action")))
-                }),
-            "the GM must be told which character took the action"
+            reject_result.contains("already approved") && reject_result.contains("cannot now be rejected"),
+            "the conflicting reject_action call must be reported as an ordinary tool rejection naming \
+             the existing resolution, not silently succeed or surface a generic error: {reject_result}"
         );
     }
 
@@ -1367,7 +1675,7 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert!(
             !store
-                .history_segments(member.agent_id)
+                .live_segments(member.agent_id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -1445,6 +1753,11 @@ mod tests {
             ["roll_hit_protection", "roll_attributes", "ready_to_begin"],
             "the real opening must present the model's complete creation interface"
         );
+        let prompt = opening
+            .model_prompt
+            .as_ref()
+            .expect("normal game inference retains model prompt evidence");
+        assert!(prompt.contains("roll_hit_protection") && prompt.contains("ready_to_begin"));
         let player_chat = store
             .player_chat(&member)
             .await

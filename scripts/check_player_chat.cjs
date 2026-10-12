@@ -1,21 +1,13 @@
 const assert = require("node:assert/strict");
 const { createServer } = require("node:http");
-const { readFileSync, createReadStream } = require("node:fs");
-const { join, basename } = require("node:path");
-const { chromium } = require("playwright-core");
+const { fixture, forward, checkBrowser } = require("./browser_check.cjs");
 const { WebSocketServer } = require("ws");
-
-const packageRoot = join(process.cwd(), "target/site/pkg");
-const packageSource = readFileSync(join(packageRoot, "cairnworld.js"), "utf8");
-const island = packageSource.match(/export function (PlayerChat_\d+)/)?.[1];
-if (!island) throw new Error("generated package does not export the PlayerChat island");
 
 const entries = Array.from({ length: 24 }, (_, index) => ({
   role: "assistant",
   text: index === 0 ? "The kettle whistles." : "The clock ticks (" + index + ").",
 }));
 let messages = 0;
-let socketError;
 let connections = 0;
 let disconnections = 0;
 let releaseOpening;
@@ -25,34 +17,10 @@ const openingReady = new Promise((resolve) => (releaseOpening = resolve));
 const replyReady = new Promise((resolve) => (releaseReply = resolve));
 const closeReady = new Promise((resolve) => (closeReply = resolve));
 
-function escapeHtml(text) {
-  return text.replace(/[&<>\"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]);
-}
-
-function page() {
-  const transcript = entries.map(({ role, text }) => `<li data-role="${role}" class="chat chat-${role === "user" ? "end" : "start"}"><!><div class="chat-bubble">${escapeHtml(text)}</div></li>`).join("");
-  return `<!doctype html>
-<link rel="stylesheet" href="/pkg/cairnworld.css">
-<main class="h-dvh bg-base-200 p-3 sm:p-6">
-  <section class="mx-auto flex h-[calc(100dvh-1.5rem)] max-w-5xl flex-col rounded-box bg-base-100 shadow-xl sm:h-[calc(100dvh-3rem)]">
-    <header class="navbar border-b border-base-300 px-4">Chat</header>
-    <div id="chat-pane" class="flex min-h-0 flex-1 flex-col p-3 sm:p-5">
-      <leptos-island data-component="${island}" data-props='{"world_id":1,"character_id":2,"after_message_id":24}'><ol id="chat" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-1 py-4" aria-live="polite"><leptos-children>${transcript}<!></leptos-children><!></ol><!><form id="message" class="join w-full"><input class="input join-item min-w-0 flex-1" name="text" autocomplete="off" placeholder="Write a message…"><button class="btn btn-primary join-item" type="submit" disabled>Send</button></form></leptos-island>
-    </div>
-  </section>
-</main>
-<script type="module">
-  const app = await import("/pkg/cairnworld.js");
-  await app.default({module_or_path: "/pkg/cairnworld.wasm"});
-  app.hydrate();
-  app.${island}(document.querySelector("leptos-island"));
-</script>`;
-}
-
 const server = createServer((request, response) => {
   if (request.url === "/") {
-    response.writeHead(200, { "content-type": "text/html" });
-    return response.end(page());
+    return forward(request, response, "/browser/render", { world_id: fixture.world_id, developer_mode: false, history: entries })
+      .catch(error => server.emit("error", error));
   }
   if (request.url === "/release-opening") {
     releaseOpening();
@@ -69,25 +37,19 @@ const server = createServer((request, response) => {
     response.writeHead(204);
     return response.end();
   }
-  if (request.url?.startsWith("/pkg/")) {
-    const file = join(packageRoot, basename(request.url));
-    const contentType = file.endsWith(".js")
-      ? "text/javascript"
-      : file.endsWith(".css")
-        ? "text/css"
-      : file.endsWith(".wasm")
-        ? "application/wasm"
-        : "application/octet-stream";
-    response.writeHead(200, { "content-type": contentType });
-    return createReadStream(file).pipe(response);
-  }
-  response.writeHead(404);
-  response.end("not found");
+  forward(request, response).catch(error => server.emit("error", error));
 });
 
 const sockets = new WebSocketServer({ noServer: true });
+const devEventSockets = new WebSocketServer({ noServer: true });
 server.on("upgrade", (request, socket, head) => {
-  if (request.url !== "/world/1/characters/2/ws?after_message_id=24") return socket.destroy();
+  if (request.url === `/world/${fixture.world_id}/inspect/events`) {
+    // developer_mode is false for this fixture: the island still opens this
+    // connection (any active member may learn the mode changed), but no
+    // DevEvent is ever relevant here, so just accept and hold it open.
+    return devEventSockets.handleUpgrade(request, socket, head, () => {});
+  }
+  assert.equal(request.url, `/world/${fixture.world_id}/characters/2/ws?after_message_id=${entries.length}`);
   sockets.handleUpgrade(request, socket, head, (connection) => sockets.emit("connection", connection));
 });
 
@@ -122,11 +84,10 @@ sockets.on("connection", (socket) => {
       if (messages === 1) replyReady.then(reply);
       else reply();
     } catch (error) {
-      socketError = error;
-      socket.close();
+      server.emit("error", error);
     }
   });
-  socket.on("error", (error) => (socketError = error));
+  socket.on("error", (error) => server.emit("error", error));
   socket.once("close", () => (disconnections += 1));
 });
 
@@ -135,7 +96,6 @@ async function ready(tab, text) {
     const input = document.querySelector('input[name="text"]');
     return input && !input.disabled && document.body.textContent.includes(text);
   }, text);
-  if (socketError) throw socketError;
 }
 
 async function release(port, path) {
@@ -143,18 +103,12 @@ async function release(port, path) {
   assert.equal(response.status, 204);
 }
 
-async function checkPlayerChat() {
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
-  let browser;
-  try {
-    browser = await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] });
-    const tab = await browser.newPage();
+checkBrowser(server, async (tab, port) => {
     await tab.goto(`http://127.0.0.1:${port}/`);
     assert.equal(await tab.evaluate(() => document.scrollingElement.scrollHeight <= window.innerHeight), true);
     assert.equal(await tab.evaluate(() => {
       const form = document.querySelector("#message").getBoundingClientRect();
-      const pane = document.querySelector("#chat-pane").getBoundingClientRect();
+      const pane = document.querySelector("main > section").getBoundingClientRect();
       return form.bottom < pane.bottom;
     }), true);
     await tab.locator("#chat-status").getByText("The game is preparing its first response…").waitFor();
@@ -181,6 +135,18 @@ async function checkPlayerChat() {
     assert.equal(await tab.locator("#chat-status").count(), 0);
 
     await tab.reload();
+    // The reloaded page's SSR history can satisfy ready()'s text/enabled
+    // check before the new WebSocket finishes connecting; wait for the
+    // connection itself so this assertion is not a timing race.
+    await new Promise((resolve, reject) => {
+      const deadline = Date.now() + 5000;
+      const poll = () => {
+        if (connections === 2) return resolve();
+        if (Date.now() > deadline) return reject(new Error(`expected a second WebSocket connection, saw ${connections}`));
+        setTimeout(poll, 20);
+      };
+      poll();
+    });
     await ready(tab, "I listen.");
     assert.equal(connections, 2);
     assert.ok(disconnections >= 1, "page reload did not close the prior WebSocket");
@@ -195,14 +161,7 @@ async function checkPlayerChat() {
     await release(port, "/close-reply");
     await tab.locator("#chat-status").getByText("Connection lost. Reload to reconnect.").waitFor();
     assert.equal(await tab.locator('input[name="text"]').isDisabled(), true);
-  } finally {
-    await browser?.close();
-    for (const socket of sockets.clients) socket.terminate();
-    await new Promise((resolve) => server.close(resolve));
-  }
-}
-
-checkPlayerChat().catch((error) => {
+}).catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });

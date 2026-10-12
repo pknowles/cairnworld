@@ -1,37 +1,49 @@
-# MCP development interface
+# Coding-agent playtesting implementation
 
-## Goal
+## Outcome and trace
 
-Let coding agents run real playtests and inspect the recorded debug spine
-through the project's existing game and recording boundaries.
+A coding agent imports a scenario, chats through the real game and inspects or
+replays a recorded inference without temporary scripts. Authority:
+[Live Coding Agent Interaction with MCP](../user_declarations.md#live-coding-agent-interaction-with-mcp),
+[Debugging and Telemetry](../user_declarations.md#debugging-and-telemetry), and
+[proof of concept](../user_declarations.md#an-initial-proof-of-concept).
+Implementation follows [MCP design](../design.md#mcp-for-coding-agents).
+Developer Mode's shared query types and group history are prerequisites.
 
-## Scope
+## Ordered changes
 
-- Expose scenario import/export, chat/replay, and the required recorded
-  sequence, inference, reconstruction, message, and game-object queries.
-- Reuse the same operations and authorization boundaries as the CLI, web
-  Developer Mode, store, and game services; do not create a parallel mutable
-  administration model.
-- Include the declared historical-inference regeneration operation if the
-  existing replay command does not satisfy it after Developer inspection makes
-  its inputs selectable.
-
-## Steps
-
-1. Trace each MCP operation to a declared developer need and existing project
-   operation; extend `design.md` first for any missing boundary.
-2. Implement the RMCP surface as a thin invocation of those operations,
-   including complete error context and recorded effects.
-3. Exercise it with a coding-agent playtest and update
-   `implementation_reference.md`.
+1. Add the server-only rmcp dependency and `src/mcp.rs`. Add serve's opt-in
+   mcp_socket/mcp_user arguments and the thin `mcp --socket` proxy subcommand in
+   main.rs. Bind a mode-0600 Unix socket only after resolving the configured
+   existing user and obtaining the running Game instance. Each accepted stream
+   hosts an RMCP session; stdout of the proxy is reserved for protocol bytes.
+2. Expose the exact tool table from design.md. Bind user identity to the session;
+   derive PlayerAgent through the existing membership/character lookup. Queue
+   enter/chat through Game and call inspection's existing store queries. Keep
+   tool errors intact. Track entered characters with session-owned presence
+   handles backed by Game::connect/disconnect from Developer Mode
+   D2; leave/close releases them through that same implementation.
+3. Move import/export/replay command bodies from main.rs into server library
+   functions callable by CLI and MCP. import creates a new owned world; export
+   uses the same scenario serializer. replay accepts explicit replacement segment
+   IDs/text, creates a new sandbox recording, and never executes returned tools.
+   Return source and new inference IDs so both can be opened in Developer Mode.
+4. Document the coding-agent stdio command, server prerequisites, authorization,
+   and an enter/chat/inspect/replay example in README. Reuse the actual typed
+   tool schemas; no duplicate handwritten argument definitions.
 
 ## Verification
 
-- A coding agent can initialize Bread Thief, execute a real playtest, retrieve
-  its sequence and exact inference reconstruction, and replay a selected
-  inference without a temporary script.
-- MCP access cannot bypass the project's world, membership, or Developer Mode
-  visibility boundaries.
+Connect an actual RMCP client through the proxy to the running server. Import
+Bread Thief, enable Developer Mode through the owner warning modal, enter a
+character, perform a real model conversation and inspect its
+same sequence in the browser. Replay with one explicit prompt replacement;
+confirm the original request hash/content is unchanged. Two sessions target one
+world and still observe serialized state. A foreign world, another member's
+character, disabled Developer Mode and a banned session fail at the shared
+boundary. Closing a session leaves no live transport resources.
 
-Follow the implementation loop and pre-commit checklist in `AGENTS.md`, plus
-`coding_standards.md` and `prompt_standards.md`.
+Update implementation_reference.md; run focused transport/game tests and real
+client/browser/model paths. Re-read coding_standards.md and prompt_standards.md,
+obtain the required review before new LLM tests, and complete the
+[AGENTS.md commit checklist](../AGENTS.md#post-feature-and-pre-commit-checklist).

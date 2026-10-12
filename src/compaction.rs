@@ -4,7 +4,7 @@ use crate::{
     context,
     llm::{Backend, Content, ContextCapacityExceeded, Role},
     settings::Limits,
-    store::{MessageRange, PendingCompaction, Segment, Store},
+    store::{PendingCompaction, PositionRange, Segment, Store},
 };
 
 #[cfg(test)]
@@ -21,7 +21,6 @@ const PROMPT: &str = "The conversation above is your own history. Replace it wit
 #[cfg(test)]
 struct CompletedTurn<'a> {
     agent_id: i64,
-    after_message_id: i64,
     next_input_tokens: usize,
     sampling: Sampling,
     model: &'a str,
@@ -33,9 +32,14 @@ async fn after_turn<B: Backend>(store: &Store, backend: &B, turn: CompletedTurn<
     if turn.next_input_tokens < turn.limits.compact_before_next_input_tokens {
         return Ok(());
     }
+    let branch_id = store.branch_id_for_agent(turn.agent_id).await?;
+    let position = store.tail_split(turn.agent_id, 0).await?;
     let job = PendingCompaction {
         agent_id: turn.agent_id,
-        after_message_id: turn.after_message_id,
+        branch_id,
+        position,
+        sequence_id: None,
+        cause_inference_id: None,
         next_input_tokens: turn.next_input_tokens,
         sampling: turn.sampling,
         model: turn.model.to_string(),
@@ -61,10 +65,48 @@ pub async fn run<B: Backend>(
         "limits.keep_tail_messages must be greater than zero"
     );
 
+    // Deferred compaction is its own invocation, separate from the sequence
+    // whose reply queued it - design.md: "deferred compaction has its
+    // triggering inference as cause" and "Pending compaction is shown as
+    // caused deferred work rather than extending the foreground reply's
+    // wall time". `job.sequence_id` is carried for display/linkage only;
+    // this invocation's own start/finish never touches that sequence's row.
+    let invocation_id = store
+        .start_invocation(job.sequence_id, job.agent_id, None, job.cause_inference_id)
+        .await
+        .context("starting deferred compaction invocation")?;
+    let result = run_invocation(store, backend, job, limits, invocation_id).await;
+    // A failure to finish the invocation itself is a secondary bookkeeping
+    // problem, logged rather than allowed to replace `result`'s own error as
+    // the reason this compaction job failed.
+    if let Err(finish_error) = store
+        .finish_invocation(
+            invocation_id,
+            if result.is_ok() { "settled" } else { "error" },
+        )
+        .await
+    {
+        tracing::error!(
+            invocation_id,
+            error = %format!("{finish_error:#}"),
+            "failed to finish deferred compaction invocation"
+        );
+    }
+    result
+}
+
+async fn run_invocation<B: Backend>(
+    store: &Store,
+    backend: &B,
+    job: &PendingCompaction,
+    limits: Limits,
+    invocation_id: i64,
+) -> Result<()> {
     let mut keep = limits.keep_tail_messages;
     let mut recovering_capacity = false;
     loop {
-        let (segments, split, covered) = summary_segments(store, job.agent_id, keep).await?;
+        let (segments, branch_id, split, covered) =
+            summary_segments(store, job.agent_id, keep).await?;
         if split <= covered {
             if recovering_capacity {
                 anyhow::bail!(
@@ -72,9 +114,8 @@ pub async fn run<B: Backend>(
                 );
             }
             return store
-                .finish_compaction(
+                .abandon_pending_compaction(
                     job,
-                    None,
                     &format!(
                         "The next context would start at {} tokens; no history older than the retained {keep} messages was eligible for compaction.",
                         job.next_input_tokens
@@ -83,32 +124,11 @@ pub async fn run<B: Backend>(
                 .await;
         }
 
-        let completion = context::complete_recipe(
-            store,
-            backend,
-            context::RecipeCompletion {
-                agent_id: job.agent_id,
-                sequence_id: None,
-                parent_inference_id: None,
-                segments: &segments,
-                sampling: job.sampling.clone(),
-                model: &job.model,
-            },
-            |_| {},
-        )
-        .await;
-        let completion = match completion {
-            Ok(completion) => completion,
-            Err(error) if error.downcast_ref::<ContextCapacityExceeded>().is_some() => {
-                recovering_capacity = true;
-                keep += 1;
-                continue;
-            }
-            Err(error) => return Err(error).context("running recorded compaction inference"),
-        };
-        let Content::Text(content) = completion.response.content else {
-            anyhow::bail!("compaction inference returned tool calls instead of summary text");
-        };
+        let covered_ranges = [PositionRange {
+            branch_id,
+            first_position: covered + 1,
+            last_position: split,
+        }];
         let notice = if recovering_capacity {
             format!(
                 "Compacted history through a capacity recovery; retained the newest {keep} messages."
@@ -119,13 +139,38 @@ pub async fn run<B: Backend>(
                 job.next_input_tokens
             )
         };
-        return store
-            .finish_compaction(
-                job,
-                Some((&content, split, completion.inference_id)),
-                &notice,
-            )
-            .await;
+        let completion = context::complete_summary_recipe(
+            store,
+            backend,
+            context::RecipeCompletion {
+                agent_id: job.agent_id,
+                // Ties the summary's inference to the event that queued this job.
+                sequence_id: job.sequence_id,
+                invocation_id,
+                segments: &segments,
+                sampling: job.sampling.clone(),
+                model: &job.model,
+            },
+            job,
+            Some(&covered_ranges),
+            &notice,
+            |_| {},
+        )
+        .await;
+        return match completion {
+            Ok(completion) => {
+                let Content::Text(_) = completion.response.content else {
+                    anyhow::bail!("compaction inference returned tool calls instead of summary text");
+                };
+                Ok(())
+            }
+            Err(error) if error.downcast_ref::<ContextCapacityExceeded>().is_some() => {
+                recovering_capacity = true;
+                keep += 1;
+                continue;
+            }
+            Err(error) => Err(error).context("running recorded compaction inference"),
+        };
     }
 }
 
@@ -133,11 +178,17 @@ async fn summary_segments(
     store: &Store,
     agent_id: i64,
     keep_tail_messages: usize,
-) -> Result<(Vec<Segment>, i64, i64)> {
+) -> Result<(Vec<Segment>, i64, i64, i64)> {
+    let branch_id = store.branch_id_for_agent(agent_id).await?;
     let previous = store.latest_summary(agent_id).await?;
     let covered = previous
         .as_ref()
-        .map_or(-1, |summary| summary.covers_to_seq);
+        .map_or(-1, |summary| {
+            summary
+                .covered_ranges
+                .last()
+                .map_or(-1, |range| range.last_position)
+        });
     let split = store.tail_split(agent_id, keep_tail_messages).await?;
     let prompt = store
         .store_prompt_text(PROMPT)
@@ -151,10 +202,10 @@ async fn summary_segments(
     }
     if split > covered {
         segments.push(Segment::Messages {
-            messages: MessageRange {
-                agent_id,
-                first_seq: covered + 1,
-                last_seq: split,
+            messages: PositionRange {
+                branch_id,
+                first_position: covered + 1,
+                last_position: split,
             },
         });
     }
@@ -164,7 +215,7 @@ async fn summary_segments(
         text: prompt,
         role: Role::User,
     });
-    Ok((segments, split, covered))
+    Ok((segments, branch_id, split, covered))
 }
 
 #[cfg(test)]
@@ -262,9 +313,13 @@ mod tests {
             .store_prompt_text("standing instruction")
             .await
             .unwrap();
+        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
         let job = PendingCompaction {
             agent_id: agent,
-            after_message_id: 3,
+            branch_id,
+            position: 2,
+            sequence_id: None,
+            cause_inference_id: None,
             next_input_tokens: 100,
             sampling: Sampling {
                 temperature: 0.0,
@@ -310,7 +365,6 @@ mod tests {
             &backend,
             CompletedTurn {
                 agent_id: agent,
-                after_message_id: 4,
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
@@ -330,7 +384,10 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .covers_to_seq,
+                .covered_ranges
+                .last()
+                .unwrap()
+                .last_position,
             0
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
@@ -354,7 +411,6 @@ mod tests {
             &backend,
             CompletedTurn {
                 agent_id: agent,
-                after_message_id: 3,
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
@@ -408,7 +464,6 @@ mod tests {
             &backend,
             CompletedTurn {
                 agent_id: agent,
-                after_message_id: 3,
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
@@ -431,8 +486,8 @@ mod tests {
         }
 
         let summary = store.latest_summary(agent).await.unwrap().unwrap();
-        assert_eq!(summary.covers_to_seq, 0);
-        let live = store.history_segments(agent).await.unwrap();
+        assert_eq!(summary.covered_ranges.last().unwrap().last_position, 0);
+        let live = store.live_segments(agent).await.unwrap();
         let request = store
             .request_for_segments(
                 agent,
@@ -487,7 +542,6 @@ mod tests {
             &backend,
             CompletedTurn {
                 agent_id: agent,
-                after_message_id: 3,
                 next_input_tokens: 99,
                 sampling: Sampling {
                     temperature: 0.0,
@@ -526,7 +580,6 @@ mod tests {
             &backend,
             CompletedTurn {
                 agent_id: agent,
-                after_message_id: 3,
                 next_input_tokens: 100,
                 sampling: Sampling {
                     temperature: 0.0,
@@ -553,5 +606,107 @@ mod tests {
             "The next context would start at 100 tokens; no history older than the retained 3 messages was eligible for compaction."
         );
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
+    }
+
+    /// design.md's Inference records: reconstruction must reproduce the
+    /// *verbatim* input and output for every inference, including
+    /// compaction, from the shared record - across a restart, and across
+    /// repeated compaction (a summary of a summary). This appends more
+    /// history, compacts twice, reopens the database file (not a fresh
+    /// TestDatabase), and compares reconstruction against the exact request/
+    /// response captured while the original process ran.
+    #[tokio::test]
+    async fn reopened_database_reconstructs_twice_compacted_inferences_byte_identical() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let agent = agent_with_history(&store).await; // "first/middle/newest question", 3 messages
+        let limits = Limits {
+            max_concurrent_inferences: 4,
+            max_inferences_per_chat: 8,
+            max_inferences_total: 64,
+            max_context_tokens: 110,
+            max_output_tokens: 10,
+            compact_before_next_input_tokens: 100,
+            keep_tail_messages: 1,
+        };
+
+        // First compaction: summarize the two oldest of the three messages.
+        let first_backend = ScriptedBackend {
+            responses: Mutex::new(VecDeque::from([response("first summary")])),
+            requests: Mutex::new(Vec::new()),
+        };
+        after_turn(
+            &store,
+            &first_backend,
+            CompletedTurn {
+                agent_id: agent,
+                next_input_tokens: 100,
+                sampling: Sampling { temperature: 0.0, ..Default::default() },
+                model: "scripted",
+                limits,
+            },
+        )
+        .await
+        .unwrap();
+        let first_summary = store.latest_summary(agent).await.unwrap().unwrap();
+        let first_captured_request = first_backend.requests.lock().unwrap()[0].clone();
+
+        // More history accrues, then a second compaction folds the first
+        // summary plus the new messages into a second one.
+        for text in ["fourth question", "fifth question"] {
+            store
+                .append_message(agent, &Message::text(Role::User, text))
+                .await
+                .unwrap();
+        }
+        let second_backend = ScriptedBackend {
+            responses: Mutex::new(VecDeque::from([response("second summary")])),
+            requests: Mutex::new(Vec::new()),
+        };
+        after_turn(
+            &store,
+            &second_backend,
+            CompletedTurn {
+                agent_id: agent,
+                next_input_tokens: 100,
+                sampling: Sampling { temperature: 0.0, ..Default::default() },
+                model: "scripted",
+                limits,
+            },
+        )
+        .await
+        .unwrap();
+        let second_summary = store.latest_summary(agent).await.unwrap().unwrap();
+        assert_ne!(second_summary.id, first_summary.id, "the second compaction produces a new summary");
+        let second_captured_request = second_backend.requests.lock().unwrap()[0].clone();
+
+        // Reopen the same database file, as a restarted process would.
+        let reopened = Store::open(db.path()).await.unwrap();
+        let first_reconstructed = reopened
+            .reconstruct_inference(first_summary.inference_id)
+            .await
+            .unwrap();
+        assert_eq!(first_reconstructed.request, first_captured_request);
+        assert_eq!(
+            first_reconstructed.outcome,
+            crate::store::RecordedOutcome::Response(response("first summary"))
+        );
+        let second_reconstructed = reopened
+            .reconstruct_inference(second_summary.inference_id)
+            .await
+            .unwrap();
+        assert_eq!(second_reconstructed.request, second_captured_request);
+        assert_eq!(
+            second_reconstructed.outcome,
+            crate::store::RecordedOutcome::Response(response("second summary"))
+        );
+        // The second recipe's summary segment refers to the first summary,
+        // proving a summary-of-a-summary chain reconstructs too.
+        assert!(
+            second_reconstructed
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, Segment::Summary { summary } if *summary == first_summary.id))
+        );
     }
 }

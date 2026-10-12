@@ -1,35 +1,48 @@
-# Model selection
+# Recorded model evaluation
 
-## Goal
+## Outcome and trace
 
-Choose the configured default model from evidence gathered on a real playable
-scenario, rather than from the earlier one-tool harness.
+Select the default for the implemented Bread Thief tool surface using recorded
+play, as required by [Tech stack](../user_declarations.md#tech-stack),
+[proof of concept](../user_declarations.md#an-initial-proof-of-concept) and
+[Debugging and Telemetry](../user_declarations.md#debugging-and-telemetry).
+This is an evaluation recipe, not an instruction to design another harness.
+Use the completed MCP/browser/inspection paths and configured models.
 
-## Scope
+## Ordered procedure
 
-- Define representative Bread Thief conversations that exercise player-agent
-  guidance, character creation, GM action calls, narration, and context growth.
-- Run the already working configured models through the same recorded paths.
-- Compare success at the intended behavior, tool-call correctness, visible
-  latency, token use, and context capacity; record the evidence and select the
-  default configuration.
+1. Run each explicitly configured candidate with its checked-in sampling and
+   the same fixed context/output capacities on the same GPU. Create a fresh
+   Bread Thief world for each run. Store model/artifact/settings IDs, scenario
+   digest, sequence IDs, results and notes in a Markdown evaluation table.
+2. Exercise these conversations through normal play: proactive creation and
+   readiness; a scene question followed by a clarification; asking Mara about
+   the flour; a take request requiring GM approval; repeating a refused request
+   with acknowledgment; two-player narration; and long context followed by
+   recall of an early relevant fact. Use the same player intentions, not a
+   predetermined exact model transcript. Repeat each case three times.
+3. Review the actual backend inputs, tools, state and player-visible outputs.
+   A passing case has lawful effects, coherent factual context, appropriate
+   refusal/continuation and no broken tool exchange. Record failures even when
+   later replies recover. Compare latency, input/output tokens and capacity
+   failures from recorded measurements; do not score models on style alone.
+4. Choose a model that passes every required case; among those, use measured
+   latency/resource use and conversational clarity to decide. If none passes,
+   record the capability/context failure and resolve it before selecting a
+   default. Commit the evidence and configured default in default.toml; leave
+   local model paths/secrets in local.toml. Re-run the selected model through
+   one full browser playtest after the configuration change.
 
-## Steps
+## Review and completion
 
-1. Write the use cases, adverse results, and meaningful validation methods as
-   required by `coding_standards.md`; obtain user review before testing model
-   behavior.
-2. Capture comparable real chats and inspect their actual assembled inputs and
-   tool results.
-3. Record the decision and its evidence in `user_exerpts.md`'s decision log,
-   then update the configured default and `implementation_reference.md`.
+The cases/results above and two validation methods—persisted state/tool evidence
+and independent review of exact context/visible replies—are the LLM test design
+for user review under coding_standards.md before evaluation starts. Examples of
+failure include invented inventory, silent tool failure, revealing unrelated
+NPC context, repeated invalid saves or forgetting a still-relevant fact. Both
+methods must detect those, without requiring exact prose or tool-call counts.
 
-## Verification
-
-- Every tested model has evidence from the same scenario and visible tool
-  surface, rather than a synthetic substitute.
-- The selected configuration completes the chosen representative chats through
-  the normal browser/agent path and its recorded input is inspectable.
-
-Follow the implementation loop and pre-commit checklist in `AGENTS.md`, plus
-`coding_standards.md` and `prompt_standards.md`.
+Record evidence in user_exerpts.md's decision log and implementation_reference.md.
+The decision covers existing capabilities; full combat/travel/Storyteller real
+chat acceptance tests exercise it as those features land. Re-read both standards
+and complete the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist).

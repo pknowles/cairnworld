@@ -7,20 +7,27 @@ use crate::{
         Backend, ContextCapacityExceeded, Message, MessageContent, Response, Sampling,
         ToolDefinition,
     },
-    store::{InferenceOutcome, InferenceRecord, Segment, Store},
+    store::{CompactionPolicy, InferenceInput, InferenceOutcome, Segment, Store},
 };
 
 /// Everything required to record one agent inference from its visible context.
 pub struct RecordedCompletion<'a> {
     pub agent_id: i64,
     pub sequence_id: Option<i64>,
-    pub parent_inference_id: Option<i64>,
+    pub invocation_id: i64,
     pub static_messages: &'a [Message],
     pub tools: &'a [ToolDefinition],
     pub sampling: Sampling,
     pub model: &'a str,
+    pub compact_before_next_input_tokens: usize,
 }
 
+/// Runs one recipe as an ordinary chat turn and finishes it through
+/// `finish_chat_inference`: the outcome, its own message (a tool-calling
+/// reply or the settled final reply) and any due compaction obligation, all
+/// in one transaction - see `complete_recipe`'s doc comment. Compaction is
+/// enqueued only when the outcome settled with a text reply whose exact
+/// next-context size reaches `completion.compact_before_next_input_tokens`.
 pub async fn complete_recorded<B: Backend>(
     store: &Store,
     backend: &B,
@@ -36,16 +43,24 @@ pub async fn complete_recorded<B: Backend>(
             completion.tools,
         )
         .await?;
+        let static_segments_snapshot = static_segments(&segments);
         match complete_recipe(
             store,
             backend,
             RecipeCompletion {
                 agent_id: completion.agent_id,
                 sequence_id: completion.sequence_id,
-                parent_inference_id: completion.parent_inference_id,
+                invocation_id: completion.invocation_id,
                 segments: &segments,
                 sampling: completion.sampling.clone(),
                 model: completion.model,
+            },
+            CompactionPolicy {
+                sequence_id: completion.sequence_id,
+                compact_before_next_input_tokens: completion.compact_before_next_input_tokens,
+                sampling: &completion.sampling,
+                model: completion.model,
+                static_segments: &static_segments_snapshot,
             },
             &mut on_token,
         )
@@ -75,6 +90,7 @@ pub async fn complete_recorded<B: Backend>(
                 store
                     .enqueue_capacity_compaction(
                         completion.agent_id,
+                        completion.sequence_id,
                         *requested_tokens,
                         &completion.sampling,
                         completion.model,
@@ -135,7 +151,7 @@ pub async fn segments(
     }
     segments.extend(
         store
-            .history_segments(agent_id)
+            .live_segments(agent_id)
             .await
             .context("assembling agent message context")?,
     );
@@ -156,29 +172,61 @@ pub fn static_segments(segments: &[Segment]) -> Vec<Segment> {
 #[derive(Debug)]
 pub struct Completion {
     pub response: Response,
+    /// The inference this response came from, so a tool-calling turn can
+    /// attribute its results to the call that requested them.
     pub inference_id: i64,
-    /// Stored recipe used for this completion. A final reply retains its
-    /// static subset with any deferred compaction job, while raw history is
-    /// always rebuilt from the store.
-    pub segments: Vec<Segment>,
+    /// The recorded_content row this response's own reply message
+    /// references, so a caller can deliver that exact reference to other
+    /// recipients (e.g. GM narration) instead of re-recording the same text.
+    /// `None` for a compaction summary, which is never delivered to a
+    /// recipient this way.
+    pub output_content_id: Option<i64>,
 }
 
 /// Everything required to record one inference from already assembled segments.
 pub struct RecipeCompletion<'a> {
     pub agent_id: i64,
     pub sequence_id: Option<i64>,
-    pub parent_inference_id: Option<i64>,
+    /// Every inference belongs to one invocation (design.md's `invocation` is
+    /// "one agent loop"). Detached replay (`main.rs`'s `replay` command)
+    /// creates its own throwaway sequence/invocation for this rather than
+    /// running outside the concept entirely, so `inference.invocation_id`
+    /// never needs a NULL case.
+    pub invocation_id: i64,
     pub segments: &'a [Segment],
     pub sampling: Sampling,
     pub model: &'a str,
 }
 
-pub async fn complete_recipe<B: Backend>(
+/// A model outcome not yet recorded as complete. Every recipe completion
+/// stops here rather than finishing itself, so the caller can choose the
+/// finishing transaction its record kind needs: `finish_chat_inference` for
+/// an ordinary agent turn, `finish_summary_inference` for compaction, or
+/// plain `finish_inference` for detached replay - the three producer
+/// operations design.md's Chat schema describes, all sharing this run step.
+pub struct RunOutcome {
+    pub inference_id: i64,
+    pub agent_id: i64,
+    pub outcome: InferenceOutcome,
+    pub duration_ms: u64,
+    /// `Ok` only when the outcome was a successful response; carries the
+    /// same information as `outcome` in a form callers can inspect (e.g. tool
+    /// calls vs. text) without re-matching `InferenceOutcome`. The original
+    /// error and its type are preserved (not just its message) so a caller
+    /// can still `downcast_ref` it - e.g. `complete_recorded`'s
+    /// `ContextCapacityExceeded` retry, which needs the concrete error type,
+    /// not a re-wrapped string.
+    pub result: Result<Response>,
+}
+
+/// Run one recipe against the backend and record its start, without deciding
+/// how to finish it - see `RunOutcome`.
+pub async fn run_recipe<B: Backend>(
     store: &Store,
     backend: &B,
     completion: RecipeCompletion<'_>,
     on_token: impl FnMut(&str) + Send,
-) -> Result<Completion> {
+) -> Result<RunOutcome> {
     let request = store
         .request_for_segments(
             completion.agent_id,
@@ -187,47 +235,105 @@ pub async fn complete_recipe<B: Backend>(
         )
         .await
         .context("assembling inference request")?;
+    let inference_id = store
+        .start_inference(InferenceInput {
+            agent_id: completion.agent_id,
+            sequence_id: completion.sequence_id,
+            invocation_id: completion.invocation_id,
+            segments: completion.segments,
+            request: &request,
+            model: completion.model,
+        })
+        .await
+        .context("recording inference before execution")?;
     let started_at = Instant::now();
-    match backend.complete(request.clone(), on_token).await {
-        Ok(response) => {
-            let inference_id = store
-                .record(InferenceRecord {
-                    agent_id: completion.agent_id,
-                    sequence_id: completion.sequence_id,
-                    parent_inference_id: completion.parent_inference_id,
-                    segments: completion.segments,
-                    request: &request,
-                    outcome: InferenceOutcome::Response(response.clone()),
-                    model: completion.model,
-                    duration_ms: u64::try_from(started_at.elapsed().as_millis())
-                        .context("inference duration exceeds supported range")?,
-                })
-                .await
-                .context("recording completed inference")?;
-            Ok(Completion {
-                response,
-                inference_id,
-                segments: completion.segments.to_vec(),
-            })
-        }
-        Err(error) => {
-            store
-                .record(InferenceRecord {
-                    agent_id: completion.agent_id,
-                    sequence_id: completion.sequence_id,
-                    parent_inference_id: completion.parent_inference_id,
-                    segments: completion.segments,
-                    request: &request,
-                    outcome: InferenceOutcome::Error(format!("{error:#}")),
-                    model: completion.model,
-                    duration_ms: u64::try_from(started_at.elapsed().as_millis())
-                        .context("inference duration exceeds supported range")?,
-                })
-                .await
-                .with_context(|| format!("recording failed inference: {error:#}"))?;
-            Err(error).context("running inference")
-        }
-    }
+    let result = backend
+        .complete_with_recording(request, on_token, store, inference_id)
+        .await;
+    let duration_ms = u64::try_from(started_at.elapsed().as_millis())
+        .context("inference duration exceeds supported range")?;
+    let outcome = match &result {
+        Ok(response) => InferenceOutcome::Response(response.clone()),
+        Err(error) => InferenceOutcome::Error(format!("{error:#}")),
+    };
+    Ok(RunOutcome {
+        inference_id,
+        agent_id: completion.agent_id,
+        outcome,
+        duration_ms,
+        result,
+    })
+}
+
+/// Run a recipe and finish it as an ordinary chat turn (design.md's
+/// `finish_chat_inference`): the outcome, its own reply message (a
+/// tool-calling turn's assistant message or the settled final reply) and any
+/// due compaction obligation, in one transaction. `policy` supplies the
+/// compaction threshold/recipe; whether this outcome is even eligible
+/// (a settled text reply, not tool calls) is decided from the outcome itself.
+pub async fn complete_recipe<B: Backend>(
+    store: &Store,
+    backend: &B,
+    completion: RecipeCompletion<'_>,
+    policy: CompactionPolicy<'_>,
+    on_token: impl FnMut(&str) + Send,
+) -> Result<Completion> {
+    let run = run_recipe(store, backend, completion, on_token).await?;
+    let succeeded = run.result.is_ok();
+    let outcome = store
+        .finish_chat_inference(run.inference_id, run.agent_id, run.outcome, run.duration_ms, policy)
+        .await
+        .with_context(|| {
+            if succeeded {
+                format!("recording completed inference {}", run.inference_id)
+            } else {
+                format!("recording failed inference {}", run.inference_id)
+            }
+        })?;
+    Ok(Completion {
+        response: run.result.context("running inference")?,
+        inference_id: run.inference_id,
+        output_content_id: outcome.output_content_id,
+    })
+}
+
+/// Run a recipe and finish it as a compaction inference (design.md's
+/// `finish_summary_inference`): the outcome, its summary activation (when
+/// `covered_ranges` names an eligible range) and notice, and completion of
+/// `job`'s obligation, all in one transaction.
+pub async fn complete_summary_recipe<B: Backend>(
+    store: &Store,
+    backend: &B,
+    completion: RecipeCompletion<'_>,
+    job: &crate::store::PendingCompaction,
+    covered_ranges: Option<&[crate::store::PositionRange]>,
+    notice: &str,
+    on_token: impl FnMut(&str) + Send,
+) -> Result<Completion> {
+    let run = run_recipe(store, backend, completion, on_token).await?;
+    let succeeded = run.result.is_ok();
+    store
+        .finish_summary_inference(
+            run.inference_id,
+            job,
+            run.outcome,
+            run.duration_ms,
+            covered_ranges,
+            notice,
+        )
+        .await
+        .with_context(|| {
+            if succeeded {
+                format!("recording completed compaction inference {}", run.inference_id)
+            } else {
+                format!("recording failed compaction inference {}", run.inference_id)
+            }
+        })?;
+    Ok(Completion {
+        response: run.result.context("running compaction inference")?,
+        inference_id: run.inference_id,
+        output_content_id: None,
+    })
 }
 
 #[cfg(test)]
@@ -301,11 +407,24 @@ mod tests {
         agent
     }
 
+    /// A real invocation, so `RecordedCompletion`/`RecipeCompletion` can
+    /// thread a genuine `invocation_id` rather than a synthetic one - every
+    /// inference belongs to one (design.md's `invocation`).
+    async fn test_invocation(store: &Store, agent: i64) -> i64 {
+        let world_id = store.world_id_for_agent(agent).await.unwrap();
+        let sequence = store.begin_sequence(world_id, "test").await.unwrap();
+        store
+            .start_invocation(Some(sequence.id), agent, None, None)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn assembled_completion_streams_and_records_a_history_recipe() {
         let db = crate::store::TestDatabase::new("context-test");
         let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
+        let invocation_id = test_invocation(&store, agent).await;
         let mut streamed = String::new();
         let response = complete_recorded(
             &store,
@@ -313,7 +432,7 @@ mod tests {
             RecordedCompletion {
                 agent_id: agent,
                 sequence_id: None,
-                parent_inference_id: None,
+                invocation_id,
                 static_messages: &[Message::text(Role::System, "Be concise.")],
                 tools: &[],
                 sampling: Sampling {
@@ -321,6 +440,7 @@ mod tests {
                     ..Default::default()
                 },
                 model: "streaming-model",
+                compact_before_next_input_tokens: usize::MAX,
             },
             |token| streamed.push_str(token),
         )
@@ -339,6 +459,7 @@ mod tests {
         let db = crate::store::TestDatabase::new("context-test");
         let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
+        let invocation_id = test_invocation(&store, agent).await;
 
         let error = complete_recorded(
             &store,
@@ -346,7 +467,7 @@ mod tests {
             RecordedCompletion {
                 agent_id: agent,
                 sequence_id: None,
-                parent_inference_id: None,
+                invocation_id,
                 static_messages: &[],
                 tools: &[],
                 sampling: Sampling {
@@ -354,6 +475,7 @@ mod tests {
                     ..Default::default()
                 },
                 model: "failing-model",
+                compact_before_next_input_tokens: usize::MAX,
             },
             |_| {},
         )
@@ -377,6 +499,7 @@ mod tests {
         let db = crate::store::TestDatabase::new("context-test");
         let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
+        let invocation_id = test_invocation(&store, agent).await;
         store
             .append_message(agent, &Message::text(Role::Assistant, "A first reply."))
             .await
@@ -426,7 +549,7 @@ mod tests {
             RecordedCompletion {
                 agent_id: agent,
                 sequence_id: None,
-                parent_inference_id: None,
+                invocation_id,
                 static_messages: &[],
                 tools: &[],
                 sampling: Sampling {
@@ -434,6 +557,7 @@ mod tests {
                     ..Default::default()
                 },
                 model: "capacity-test",
+                compact_before_next_input_tokens: 90,
             },
             |_| {},
         )

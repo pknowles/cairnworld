@@ -32,6 +32,16 @@ impl fmt::Display for ContextCapacityExceeded {
 impl std::error::Error for ContextCapacityExceeded {}
 
 pub trait Backend {
+    fn complete_with_recording(
+        &self,
+        request: Request,
+        on_token: impl FnMut(&str) + Send,
+        _store: &crate::store::Store,
+        _inference_id: i64,
+    ) -> impl Future<Output = Result<Response>> + Send {
+        self.complete(request, on_token)
+    }
+
     async fn before_agent(&self, _store: &crate::store::Store, _agent_id: i64) -> Result<()> {
         Ok(())
     }

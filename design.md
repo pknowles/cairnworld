@@ -3,9 +3,8 @@
 This document is the desired end state: a structured consolidation of
 user_declarations.md plus the implementation-shaped decisions needed to build
 it. It contains no progress information - build order and status live in
-plans/ (see AGENTS.md). Sections marked TODO are known design gaps: expand
-them here first, then plan their implementation. Open questions are collected
-at the end.
+plans/ (see AGENTS.md). Concrete product proposals
+requiring user decisions are collected at the end.
 
 # Architecture overview
 
@@ -78,7 +77,7 @@ Model choice is configuration (CLI arg / config), not code.
 **Model selection.** Stheno v3.3 is a Llama-3-base RP finetune with no native
 tool-call template, so it is out as the primary model. Requirements: reliable
 tool calling, good conversational/NPC voice, ~8B GGUF, long context.
-All three candidates run and are selectable by name from configuration. The
+The configured candidates are selectable by name from configuration. The
 choice between them is deliberately open: comparing them on a single tool with
 no GM measures the harness, so it waits for real play (see plans/). Each model
 carries its own sampling: a shared block sets sensible truncation and a model
@@ -117,7 +116,7 @@ than storing a copy of them.
 
 One loaded mistral.rs model accepts concurrent requests and schedules its
 sequences itself. Cairnworld controls admission policy, not model execution:
-`limits.max_concurrent_inferences` defaults to 4. At model load, the paged KV
+`limits.max_concurrent_inferences` is configurable, initially 1 for the target GPU. At model load, the paged KV
 cache reserves `max_context_tokens` for every admitted sequence; this fixed
 total input-plus-output capacity, not compaction, determines the VRAM budget.
 `max_output_tokens` bounds one generated reply within that capacity. After a
@@ -154,63 +153,139 @@ structs. Type safety where it matters, SQL stays visible, async-native so it
 composes directly with axum and the world tasks, and migrations are built in
 (`sqlx migrate`). One `SqlitePool` owned by the application.
 
+## One record for chat history and Developer Mode
+
+Authority: user_declarations.md, **Agents** (an agent is a chat history),
+**User Interface / World game page** (the player's chat), and **Debugging and
+Telemetry / Developer Mode** (complete histories, compaction points, identical
+inference input/output and links between them). The user's reconstruction
+clarification in user_exerpts.md requires one authoritative copy of content,
+with references wherever that content participates in another view.
+
+Recording runs for every game whether Developer Mode is enabled or not.
+Enabling Developer Mode changes visibility, not what evidence is retained.
+Player chat, raw agent history, inference inspection and CLI replay read the
+same durable record through the same server-side content resolution. There is
+no separate debug transcript or second saved copy of an assembled conversation.
+
+| View | Reconstruction from the shared record |
+| --- | --- |
+| Player chat, including reload and scrolling | Resolve that character's ordered message references and player-visible notices. Apply player visibility rules; raw tools, other agents' private context and reasoning remain developer-only. |
+| Developer raw agent history | Resolve all message references in original order up to the selected historical cursor. Show summaries as expandable inserts at their actual compaction points, while preserving the raw messages they cover. Link outputs, tool results, failures and summaries to their sources. |
+| Developer inference input | Resolve that inference's ordered recipe: the exact historical role prompt, dynamic context, tools, selected summary and bounded raw-message ranges, with the original formatting inputs and settings. |
+| Developer inference output and turn stack | Resolve the original recorded output or error and its causal links. A reply in chat and its inference output refer to the same content; a summary and its compaction output do too. |
+
+An historical cursor denotes recorded event order, not a guessed timestamp or
+matching message text. Preserve both the history range a summary covers and
+when it became available/was used: those can differ when compaction is deferred.
+The recipe identifies which summary each inference actually used. Later
+messages, compactions, edits to world notes, configuration changes and restarts
+cannot change any earlier view. Historical prompts retain the context actually
+supplied; rebuilding the entire world's state at every instant is not required
+for this chat/inference guarantee. Object inspection labels current state.
+
 ## Chat schema
 
-- `agent(id, world_id)` - one row per chat history. Its gameplay role is
-  defined by the relationship that owns it, not a duplicated kind string.
-- `message(id, agent_id, seq, role, content, created_at)` - `content` is
-  tagged JSON: plain text, tool calls, or tool results. `seq` orders messages
-  per agent.
-- `summary(id, agent_id, covers_to_seq, content, inference_id)` - compaction
-  products. The live context for an agent is: newest summary + all messages
-  with `seq > covers_to_seq`.
-- `chat_notice(id, agent_id, after_message_id, content)` - an inline event in
-  a user/developer chat view. It is deliberately not selected for agent
-  context.
-- `pending_compaction(agent_id, after_message_id, next_input_tokens, sampling,
-  model, static_segments)` - durable deferred work caused by an already completed reply. It is
-  not a derived cache: its presence is the instruction to compact after a
-  restart.
+Authority: Agents, Chat compaction, Debugging and Telemetry and Developer Mode.
+All tables below live in the existing SQLite store. IDs are ordinary integer
+primary keys. Every insert of a history entry and its typed payload is one
+transaction; no payload is published before that transaction commits.
+
+| Record | Fields and ownership |
+| --- | --- |
+| `recorded_content` | `id, body` where body serializes the existing content enum and reasoning once. No uniqueness constraint on body. |
+| `text` | Immutable prompt, tool-schema and formatter artifacts, reused by equality. Ordinary conversation text is in recorded_content, not interned here. |
+| `history_branch` | `id, agent_id, next_position`; positions are allocated by UPDATE/RETURNING in the insertion transaction. |
+| `history_parent` | `branch_id, ordinal, parent_branch_id, through_position`; primary key `(branch_id, ordinal)`. Immutable bounded references, ordered by ordinal. Parents belong to the same agent and predate their child. |
+| `agent_history` | `agent_id PRIMARY KEY, branch_id UNIQUE`; the single writable branch of a linear player, NPC, Storyteller or sandbox history. GM heads instead belong to groups. |
+| `history_entry` | `id, branch_id, position, kind`; unique `(branch_id, position)`, kind is message, inference, summary or notice. This is the raw history index, not a duplicate transcript. |
+| `message` | `id` is also its history_entry ID; `role, content, source_inference_id, source_tool_execution_id, trigger_sequence_id`. `content` is a plain `recorded_content` reference - every message uses its whole content, so no typed selection is needed. Only applicable provenance fields are set. |
+| `inference` | Its start has a unique `history_entry_id`; input recipe and outcome remain on inference. Completion updates that row, not the original position. |
+| `summary` | Its activation has a unique `history_entry_id`; `inference_id, covered_ranges` stores ordered branch/position ranges of original messages replaced. No summary text column. |
+| `chat_notice` | Its ID is its history_entry ID; `content, source_inference_id`. Notices are not selected into model context. `content` is a plain synthesized string, not a `recorded_content` reference - a notice is Rust-generated text (e.g. "Compacted history..."), never model output another view could reuse. |
+| `pending_compaction` | Keyed by branch ID; immutable input head/cut, source invocation, sampling/model and static recipe. Completion inserts summary activation and notice and deletes the obligation atomically. |
+
+Normal chat completion writes the inference outcome, its assistant message
+reference and any due compaction obligation in one transaction. Summary completion
+writes the outcome, summary activation, notice and obligation removal together.
+Detached replay writes only the outcome. The three producer operations share the
+private content insertion code; they do not perform a later copy-and-link step.
+Unexpected summary output remains a recorded response with a failed invocation,
+not a fabricated successful summary.
+
+Every content reference is a plain `recorded_content` ID: no view needs a typed
+sub-selection of a content row, since reasoning is always read alongside its own
+content's output (never referenced independently by a different history entry)
+and no tool call's argument stands in for narration text (Agent syntax and tool
+calls: the GM narrates in plain text after any approval/rejection tool call, not
+through a dedicated narration tool). Assistant history uses the inference's
+output content ID; GM narration is the GM's own settled reply, so every present
+character's delivered copy references that exact same content ID as the GM's
+own history entry - not a fresh copy of the text. Tool results have one content
+ID shared by their history entry, execution and action. Original JSON arguments
+remain intact inside the model output; names, IDs and argument fragments do not
+get separate interned rows.
+
+Raw history queries traverse bounded parent branches, then their own entries in
+position order. They return typed entries and an opaque cursor containing the
+selected head/cut and the next branch/position in that traversal. The cursor is
+world-validated. Message-free histories can therefore contain failed inferences;
+summary coverage never determines the activation marker's position. The view
+updates a running inference in place when its outcome arrives.
+
+Alternatives: unrelated table IDs cannot establish order; a second universal
+world event log would duplicate existing payloads/causal records; one typed
+history index gives all chat views the same actual order. Branches are plain
+parent/range references over that index, not a second history implementation.
 
 ## Inference records and reconstruction
 
-Requirement: reconstruct the *verbatim* model input for any inference, without
-storing the whole input redundantly every time.
+Requirement: reconstruct the *verbatim* input and output for every inference,
+including compaction, from the shared record defined above.
 
-All large strings that feed prompts - role prompts, rule packets, notes/context
-packets, compaction instructions - live in one table:
+Prompts, tool definitions, dynamic context and formatting inputs are immutable
+recorded content. Reuse their references when unchanged. Preserve a new version
+when the actual input changes and cannot be derived exactly from already
+retained data. Never regenerate historical context from today's world state.
+Necessary source content and causal metadata are not duplicate conversations.
+No full assembled prompt, per-view transcript, second copy of model output,
+or second copy of summary text is stored for convenience.
 
-- `text(id, content)` - written once, never updated, referenced by id.
-
-The requirement is that an inference does not store a second copy of the whole
-conversation, which the recipe below already achieves. Deduplicating identical
-strings is not a goal: it would save almost nothing here and a content hash as
-the primary key makes one shared row able to rewrite history for every
-inference that references it.
-
-An inference is recorded as a recipe of references plus verbatim output:
-
-- `inference(id, agent_id, sequence_id, parent_inference_id, segments,
-  sampling, output, error, input_hash, input_tokens, output_tokens,
-  duration_ms, model, created_at)`
+An inference owns an ordered recipe of references, effective settings,
+model/formatter identity, output content reference or error, measured usage,
+lifecycle and causal relationships. The same output reference supplies any
+assistant message, summary or narration delivery derived from that inference.
+Tool execution links to its original call within that output and its one
+recorded result, rather than repeating arguments/results in each view.
 
 `segments` is a JSON array describing the input in order, e.g.
-`[{text: <id>}, {summary: <id>}, {messages: [first_seq, last_seq]},
+`[{text: <id>}, {summary: <id>},
+{messages: {branch: <id>, first_position: <n>, last_position: <m>}},
 {text: <id>}]`. Reconstruction resolves the references; `input_hash` is the
-hash of the fully assembled input actually sent, so a unit test can reassemble
-and verify equality for every recorded inference. This is the one hash that
-earns its place: it runs over real recorded data and makes any drift between
-assembly and recording fail loudly.
+hash of the fully assembled application request crossing the backend boundary.
+Reconstruction must match that evidence. Dev mode also retains evidence from
+the final model-prompt formatting step, described below; the application hash
+alone does not prove equality with template-expanded model input.
 
-A failed inference is recorded, not dropped: exactly one of `output`/`error`
-is set, and a failure keeps its full recipe and `input_hash` so the prompt
+`input_hash` is an implementation choice for verification, not a user-declared
+feature, game identifier, or an ingredient used to reconstruct the prompt.
+The recipe reconstructs the request; the checksum detects whether that result
+changed. It is retained in production as an integrity check when historical
+inputs are inspected or replayed. Tests must also compare directly against the
+request observed during inference: a matching checksum cannot prove that the
+correct input was recorded in the first place.
+
+An inference is recorded before execution and then completed. For a completed
+inference exactly one of its output reference or error is set; running or interrupted work
+has an explicit lifecycle state, and a failure keeps its full recipe and `input_hash` so the prompt
 that produced it reconstructs and replays like any other. Failures are as
 interesting as successes when debugging prompts and model behaviour, and an
-unrecorded failure is invisible after the fact. A failed output is never fed
-back into an agent's context - it is not a `message`, so context assembly
-never sees it. Dev mode's chat history renders the union of `message` rows
-and non-model-facing `chat_notice` rows in chronological order.
-and failed inferences, so a failure appears inline in the transcript and
+unrecorded failure is invisible after the fact. The full failed-inference
+record is not a model message. The separate brief interruption-entry proposal
+is listed under Product decisions below; it does not permit continuing a failed
+invocation. Dev mode's chat history renders messages, non-model-facing
+chat notices, and failed inferences in causal order, so a failure appears
+inline in the transcript and
 opens into its inference view like any other entry.
 
 Because compaction is itself an inference, summaries automatically get the
@@ -223,7 +298,7 @@ pressure is real.
 ## Game state schema
 
 Direct mapping of the game objects in user_declarations.md: `world`,
-`character` (PC and NPC in one table, discriminated), `location`, `path`,
+`character` (PC and NPC in one table, discriminated), `group`, `location`, `connection`,
 `item`, plus `gm_notes`/`storyteller_notes` columns (key/value JSON - see
 notes editing below) on each. `world` holds time and `next_action_id`. Exact
 columns are an implementation detail; the JSON export format is the stable,
@@ -236,10 +311,24 @@ whole value by key, avoiding line-range or paragraph-index fragility.
 
 ## World identity and agent topology
 
+Invitation links grant initial entry; membership owns continuing access.
+Deleting or exhausting a link never changes an existing membership. The owner
+can ban (disable) a member, retaining their association, characters and histories.
+Banned members cannot play, inspect the world, or reactivate themselves with
+any invitation, including a newly created link. They are hidden from the active
+player tree and appear in an owner-only Ban list with a Reactivate control.
+Reactivation restores the same membership and characters without an invitation,
+a consumed invitation slot, or a newly generated character. The owner cannot
+ban themself. No membership depends on an invitation row after acceptance.
+
+The World detail declaration specifies owner reactivation after a ban. The
+owner-only Ban list and hiding banned players from the active tree follow the
+user's explicit clarification recorded in user_exerpts.md.
+
 This is the durable ownership graph behind the landing page, world detail page,
 and agent calls. It follows user_declarations.md's User Interface: accounts are
 keyed only by email; players may change a non-unique display name; a world has
-one owner; invitation acceptance grants and owner removal revokes access while
+one owner; invitation acceptance grants initial access and owner banning disables it while
 retaining the player association and characters; every joined player has a
 player agent; characters can be PCs or NPCs; and the developer view exposes
 the Storyteller, GM, and NPC chats.
@@ -248,34 +337,119 @@ the Storyteller, GM, and NPC chats.
   name. Neither display name nor any game relationship affects login identity.
 - `world_owner(world_id, user_id)` names the single creator/owner without
   making a sandbox chat world a partial user world. `world_member(world_id,
-  user_id, access)` records one user's current access to one world; removal
-  changes `access` but retains the association and every character exactly as
-  declared. A membership owns zero or more PCs. Each `player_character`
+  user_id, access)` records one user's current access to one world; banning
+  changes `access` but retains the association and every character. Only the
+  owner can reactivate that membership. A membership owns zero or more PCs. Each `player_character`
   relationship owns one PC and that PC's one player-agent history, so a
   replacement or additional character never shares the dead or retired
   character's history.
 - Every `agent(id, world_id)` is only a chat history. Its gameplay
   purpose is determined by a relationship that owns it: `world_storyteller`,
-  `player_character`, `location_gm`, or `npc_agent`. A PC belongs to a
+  `player_character`, the group's GM history head, or `npc_agent`. A PC belongs to a
   membership through `player_character`; an NPC is played through `npc_agent`.
-  Locations contain game state and do not own agents beyond their
-  location-scoped GM.
+  Locations contain game state. GM context follows the interacting group,
+  including when it moves; location alone does not determine shared history.
 
-The relation, rather than a string `agent.kind`, is the source of truth. A
-`kind` can say an agent is a GM without saying which location it governs, allow
-two GMs for one location, or leave a labelled agent unused. Putting nullable
-role foreign keys on `agent` has the inverse problem: it makes mutually
-exclusive ownership implicit and permits invalid combinations. Small explicit
-relationship tables (one Storyteller per world and one GM per location) own
-real game data, make cardinality constraints direct, and avoid construction
-cycles: create a world, its agents, then their relationships in one transaction.
+The owning relationship determines the role, rather than a separately maintained
+`agent.kind`. Construct the world, histories and their owning relationships in
+one transaction before exposing them to play.
 
-This accommodates the declaration's open, playtestable design: there may be a
-GM for each location, including locations occupied by PCs or NPCs; a later
-playtest may consolidate them without changing agent histories or player
-identity. It does not pre-decide Storyteller iteration, invitation mechanics,
-or dynamic NPC/location creation beyond the relationships those declared
-features require.
+### Groups and shared GM history
+
+Authority: GM interaction, Game state / Group, Character actions / Travel,
+and Developer Mode's GM history DAG. `world_gm(world_id PRIMARY KEY, agent_id
+UNIQUE)` owns the world's GM agent. `character_group(character_id PRIMARY KEY,
+group_id, description)` replaces character_location. `character_group` is
+created with every character, including a blank Adventurer at the world's
+starting location. `group(id, world_id, location_id, description, branch_id,
+gm_notes, storyteller_notes, retired_at)` owns one GM history branch. A null
+retired_at denotes an active group with a writable head; a retired group keeps
+its final head for inspection but cannot receive new gameplay entries. Each active
+character has exactly one group. Retired groups keep their historical identity
+but no character membership or writable head.
+
+`GroupHistory { agent_id, branch_id }` is passed explicitly to context assembly;
+agent ID alone cannot select a GM history. Player/NPC calls resolve agent_history.
+The call-stack prohibition on re-entering an active agent remains unchanged;
+the same GM role cannot recursively invoke itself through a different group.
+
+**Split.** `split_group(group_id, partitions)` accepts a complete, nonempty,
+disjoint partition of its character IDs with descriptions. Rust validates exact
+membership. Each resulting group gets a new branch whose single parent is the
+old head through its settled position. The old group retires. Character and
+branch ownership change in one transaction. IDs of resulting groups are returned.
+
+**Merge.** `merge_groups(group_ids, description)` validates distinct nonempty
+groups at one location in the same world. Sort source group IDs ascending for
+parent order. The resulting group gets a new branch with those bounded parents;
+source groups retire. Character membership and the new head commit together.
+The resulting GM context includes both histories. No transcript is copied.
+
+**Tool boundary.** Grouping tools produce a typed pending topology change in
+`ToolOutcome`; it is applied at the end of the current model-returned tool batch.
+Other calls in that batch execute in returned order against the pre-transition
+group, which is the context in which the model generated them. The grouping tool
+schema explicitly describes this batch boundary. Each tool execution retains
+its outcome independently as it finishes. At batch completion one transaction
+validates grouping proposals in call order, creates their result content and
+appends all tool-result message references in returned order, then freezes the
+source cuts and applies group/head changes. A stale second topology proposal
+gets a rejected result; already completed ordinary effects are not rerun.
+If execution fails before the boundary, unapplied grouping calls fail and no
+head changes; completed ordinary results still get history references during
+failure finalization. No half-finished assistant/tool exchange is inherited.
+
+The next GM inference in the same invocation resolves its branch from the
+triggering character's current group. For a GM event without a triggering
+character, split_group requires an explicit `continue_with_character_id` from
+the source group. This binding is recorded on the invocation and visible in its
+context, rather than an implicit choice of the first resulting group. A merge
+has one resulting head. Source-branch compaction settles before taking cuts;
+no database transaction spans inference execution.
+
+**Context order.** Traverse parent edges in ordinal order, parents before child,
+and each branch in position order. Track visited position intervals per branch and subtract already emitted
+intervals; shared ancestors are emitted once, while distinct entries with equal
+text are preserved. Traverse range metadata before loading message payloads;
+ordinary inference fetches only selected summaries and the retained raw ranges,
+not every historical message. A bounded cut applies only to that branch's own entries. Thus root
+`[a,b]`, left suffix `[c,d]`, right suffix `[e]`, merge suffix `[f]` assembles
+`[a,b,c,d,e,f]`. Reversing parent IDs changes the recorded ordering explicitly;
+wall-clock interleaving never changes it. Labels identify branch/group provenance
+without adding another model role. Input recipes record the resulting ordered
+ranges, not a pointer to a mutable current head.
+
+**Summaries.** Resolve each summary's covered ranges to original message IDs.
+For the selected head, compute the ordered range list above; adjacent ranges
+from the same branch coalesce. Match coverage using these range coordinates,
+without reading discarded message bodies. A
+summary is eligible only if its complete coverage matches a contiguous span of
+that stream and it was activated by the selected historical cut. Scan the range list left to
+right, replacing the longest eligible span beginning at that position; break
+identical-coverage ties by latest activation. Advance beyond the entire span,
+so overlapping summaries never repeat their common ancestors. Otherwise emit
+the raw message. This same selector handles linear histories.
+
+Before committing a merge, each incoming branch's
+unique suffix is eligible for compaction if its raw-message count exceeds
+`merge_branch_messages` (default 64). Compact its oldest messages while preserving
+`keep_tail_messages` raw messages at the end; if no eligible prefix remains, use
+the raw suffix. The count is explicit message units; no
+estimated tokens or happy-path tokenization. Shared ancestor material is kept
+once. These summaries cover only that suffix through its last settled exchange;
+the current grouping tool batch is excluded. Existing summaries may be used
+only when wholly inside that suffix. Run these jobs before capturing the final
+parent cuts, so their activation entries belong to the inherited history. A summary request never includes messages outside
+its coverage. The committed merged context then uses the selector above and ordinary
+post-inference compaction can summarize its whole prefix. Exact capacity
+rejection follows the ordinary compaction path. All summary jobs and source
+cuts are durable before execution, so restart cannot lose the merge's work.
+
+Alternatives: a location-owned history conflates distinct groups and loses
+travelling context; copying transcripts loses shared ancestry and duplicates
+storage; bounded immutable branches support the declared split/merge behavior
+with the existing SQLite content/recipe machinery. The chosen representation
+uses no graph database, generic workflow engine or location-handoff histories.
 
 ## Character tool identifiers
 
@@ -302,15 +476,17 @@ Every inference input is assembled fresh, in this order:
    the repo as plain text files (`prompts/`), loaded at startup, recorded in
    `text`.
 2. Context packet - current dynamic state this agent is entitled to see,
-   rebuilt each time: e.g. for a GM, its location description, characters
-   present with sheets, GM notes, visible Storyteller notes. Never appended to
+   rebuilt each time: e.g. for a GM, its group's location description, group
+   characters with sheets, other local groups, GM notes and visible Storyteller
+   notes. Never appended to
    history - it is always current, so it never goes stale in the transcript.
-3. Latest summary, if any, marked as a summary of earlier history.
-4. Raw message tail (`seq > covers_to_seq`).
+3. Selected summaries, marked as summaries of earlier history.
+4. Raw history after those summaries: a linear tail for a player or NPC;
+   ordered, shared-ancestor-aware branches for a merged GM history.
 
 Each history message carries who sent it and implies who else received it: a
 player's own words, this agent's own replies, another agent's message (named),
-or a GM narration - which every character at that location, PC and NPC, is
+or a GM narration - which the characters in the interacting group are
 understood to have seen. The turn is started by such an event message, not by
 the role prompt alone. How these map onto a chat model's message roles is the
 backend's concern and follows each model's preference; the assembly only
@@ -362,7 +538,7 @@ letting a model template interpret a missing map as arbitrary parameters.
   call reaches the GM, rust attaches the extended rulebook text for that tool
   (stored in `text`, so recorded like everything else).
 - **GM narration delivery.** A GM's completed narration is persisted verbatim
-  in the history of every character at that location before any player agent's
+  by source reference in each eligible group recipient's history before its
   follow-up inference. It is a distinct narration entry, attributed to the GM
   and understood to have been seen by everyone present, so a follow-up can
   guide the next choice without inventing or repeating the scene. If it fails,
@@ -374,29 +550,29 @@ sequences) so a session is fully replayable as data.
 
 ## Concurrency
 
-One tokio task per world processes a queue of events (player messages, timers)
-strictly sequentially; all agent recursion for one event completes (awaited)
-before the next event starts. Per-agent history ordering is therefore trivial,
-and there are no locks to reason about. This is deliberately the simplest
-model that is correct; if a world with many players ever stalls on it,
-that is a measured problem for later. Broadcast messages (GM narration to a
-location) fan out from the world task to connected websockets via channels as
-soon as the GM settles, independently of any later player-agent reply.
+Authority: Scheduling, Agent syntax and tool calls, Character actions' human
+replies. One Tokio task per world processes game events sequentially. An event
+runs until its invocation completes, fails or durably suspends for a player
+reply. Suspension releases the queue; a later reply/deadline event resumes the
+same recorded continuation. Other legal events can run while a reply is pending.
+Connection presence uses short-lived state locks; membership writes use short
+Store transactions. Both run independently of model work, so a long inference
+cannot postpone a disconnect or ban.
 
-# Sequences (debug spine)
+Deferred compaction/recap use the existing inference admission policy. A branch's
+next inference waits for its own compaction; unrelated branches can use remaining
+capacity. Group topology transitions wait for the source histories to settle.
+No SQLite transaction is held across an inference. Game mutation
+and its result commit together before narration is broadcast. Web and MCP call
+this same execution path rather than owning separate world tasks.
 
-Every external trigger - a player message, a timer - opens a `sequence` row.
-The `sequence_id` flows through `CallContext` into every inference, tool
-execution, and dice roll it causes:
+# Sequences
 
-- `sequence(id, world_id, trigger, created_at)`
-- `inference.sequence_id`, `inference.parent_inference_id` - the call tree
-- `action(id, sequence_id, inference_id, tool, args, result, created_at)` -
-  every executed tool call, including dice values
-
-This is what the dev-mode sequence view renders, and summing
-`inference.usage` over a sequence gives the cumulative token/latency cost per
-player interaction that user_declarations.md calls out as critical.
+The sequence view reads the sequence/invocation/inference/tool_execution/action
+relationships specified under Durable execution relationships. Every external
+trigger gets one sequence. Nested invocations identify the exact parent tool,
+and deferred work identifies its cause. This is the game execution record,
+not an additional logging subsystem. Usage totals count each inference once.
 
 # Web server and UI
 
@@ -404,9 +580,10 @@ Axum on tokio, with **Leptos** (SSR + hydration via `cargo-leptos`, axum
 integration) for the frontend. Chosen now rather than ported to later: the
 frontend scope is already known (chat page, world pages, the data-heavy dev
 mode browser), and full-stack rust means the message/tool/inference types
-flow from the store into components with no duplicated API layer - Leptos
-server functions replace hand-written JSON endpoints for everything except
-the chat websocket. Accepted costs: the WASM toolchain and slower frontend
+flow through shared serialization types. Raw inspection uses the explicit
+JSON endpoints below, also consumed by developer clients; ordinary page forms
+use Axum handlers. No second set of equivalent Leptos server-function endpoints
+is introduced. Accepted costs: the WASM toolchain and slower frontend
 compile turnaround.
 
 Pages and endpoints:
@@ -442,8 +619,10 @@ configuration.
 
 ## Dev mode
 
-One-way per-world flag as declared. The game page splits into two columns;
-the right column navigates:
+Owner-controlled `world.developer_mode` flag: the owner may enable and later
+disable it, each change immediately visible to every active member including
+already-connected browsers. The game page splits into two columns; the right
+column navigates:
 
 - Agent list → raw chat history (infinite scroll, summaries shown as
   expandable inserts at their compaction points, failed inferences shown
@@ -462,8 +641,255 @@ direct, at-a-glance read on generation speed user_declarations.md asks for
 ("we need to know" when context size or performance blows up), and it uses
 the same `on_token` callback as everything else - no separate mechanism.
 
-All views are plain server-rendered data from the tables above; the sequence
-spine means no extra bookkeeping exists only for debugging.
+### Navigation and visibility
+
+All panels resolve the **One record for chat history and Developer Mode**
+relationships above. Opening an inspect link changes the view of existing
+recorded content; it never copies the left chat or builds a separate log.
+
+
+The owner enables Developer Mode on world detail through a warning modal that
+explains full internal visibility and requires explicit confirmation. The
+owner may later disable the persisted setting. Every active member sees an enabled
+indicator on both world detail and play, including already connected browsers.
+Every inspection request and live subscription resolves active membership,
+the world's enabled setting, and the requested object's world on the server.
+Banning ends inspection access as well as play access. Authentication data,
+OAuth secrets, and other worlds are never game objects available to inspection.
+
+The left chat remains mounted while the right panel changes. Each player entry,
+reply, narration, roll, and compaction notice links to its originating sequence
+or inference. The right panel has stable URLs and browser back/forward support:
+world overview → sequence → inference; inference → agent history at the relevant
+message; history message or summary → inference; object → related agent/history.
+On narrow screens the same panes are selectable, preserving draft input and
+selection. Direct inspection URLs render the same views and enforce the same
+authorization. Lists use stable database cursors, including raw-history infinite
+scroll; loading another page never changes or skips the selected record.
+
+The sequence view is an ordered execution tree, not just a list of model calls.
+It shows the triggering event, each agent invocation, successive inferences,
+each tool call and result, nested agent invocations, actions and dice, and the
+final response or error. Sibling tool calls retain their returned order and
+tool-call identifiers. Repeated identical text cannot determine ancestry.
+Compaction is linked to its triggering reply and shown as deferred work when
+appropriate; it is not silently assigned to the next player turn.
+
+Each node shows lifecycle, agent/object links, direct request/result, measured
+tokens and elapsed time. Sequence totals count each inference once; summed
+inference duration and wall-clock sequence duration have distinct labels because
+deferred work can overlap. Missing usage on a failed attempt is unavailable,
+not zero. The inference panel separates exact input, returned output/reasoning,
+errors, model identity, effective settings, and usage. Raw fields are expandable
+and copyable without truncation; HTML escaping must preserve copied text.
+
+### Browser selection and raw fields
+
+Keep the character game URL and encode inspection in its query string:
+`?inspect=turn&id=42&entry=97`, `?inspect=inference&id=9`,
+`?inspect=history&agent=3&branch=8&entry=97`, or `?inspect=objects&type=item&id=5`.
+A shared `InspectSelection` enum parses/serializes these fields using the browser
+URL API; unknown/invalid selections show an error. Navigation uses pushState;
+popstate only updates the selection signal and does not push another entry.
+Initial hydration reads the URL and fetches the authorized JSON route. This
+keeps PlayerChat mounted; the browser's existing history is the only back stack.
+Full-page links would discard the draft/socket; adopting a whole client router
+for this one island adds another route tree without another routed component.
+The small URL-state adapter is the selected option.
+
+Move wire structs for content, inference/turn/history/object responses and
+DevEvent into `src/inspection.rs`, exported from the existing library. Gate
+Store and backend dependencies to server modules. Both server and WASM use those
+structs; the browser never rebuilds model context. Render complete serialized
+request, recipe, effective settings and returned content as expandable JSON,
+with dedicated message/prompt text fields and exact clipboard text. Object IDs
+and typed relationships are links; search filters name/type/ID over paged server
+queries. At widths below the existing `sm` breakpoint, Chat/Inspect buttons show
+one pane using CSS visibility, leaving both mounted and preserving the draft.
+
+### Durable execution relationships
+
+Authority: Agent syntax and tool calls, Debugging and Telemetry, Developer Mode.
+`sequence(id, world_id, trigger, started_at, finished_at, error)` is one external
+trigger and its lifecycle. `invocation(id, sequence_id, agent_id, branch_id,
+parent_tool_execution_id, cause_inference_id, started_at, finished_at, outcome)`
+is one agent loop; branch_id is its starting branch and each inference records
+its actual branch. Root invocation has no parent tool; deferred compaction has
+its triggering inference as cause. `inference.invocation_id` plus ordinal orders
+successive inferences within that invocation.
+
+`tool_execution(id, inference_id, ordinal, result_content_id, status, error,
+started_at, finished_at)` uniquely identifies each returned call by
+`(inference_id, ordinal)`. Its model call ID/name/arguments resolve from the
+original output. Status is running, completed, rejected, failed or unexecuted.
+Create rows for every call before executing the batch. Each nested invocation
+records this exact parent execution. Each consequential `action` references
+its requesting tool_execution, any approving tool_execution, and result content; remove its copied tool/args/result text.
+Pending actions retain validated typed arguments only while needed to execute,
+and point to the original call. They cannot be approved twice.
+
+The Store transaction is the sole authority for action resolution. It returns
+the persisted action ID, decision and result-content reference, whether newly
+applied or already resolved. A repeat never re-executes the mutation. The tool
+compares the requested decision with that returned decision: matching repeats
+report the original result; conflicting requests are recorded tool rejections.
+No per-invocation claim flag mirrors durable action state. A later rejection
+reason cannot rewrite the original result.
+
+One awaited batch boundary covers tool execution, result persistence and result
+delivery. On failure it preserves already committed results, records the active
+call's failure where no result committed, and marks subsequent unreached calls
+unexecuted. A delivery failure after commit belongs to the enclosing invocation
+and sequence; it does not undo or rerun the action. Failure to persist finalization
+is reported with the original failure, with interruption recovery on restart.
+
+An invocation wrapper finishes its own outcome on every exit, including schema
+rejection, execution error and safety-budget exhaustion. Process recovery marks
+open sequences, invocations, inferences and tools interrupted; it never invents
+completed game effects. Durable pending work retains its original source and
+can be resumed explicitly. Do not rerun a completed state mutation to reconstruct
+its result. Total tokens/summed inference time aggregate distinct inference IDs;
+sequence wall time uses its own start/finish. Pending compaction is shown as
+caused deferred work rather than extending the foreground reply's wall time.
+
+### Live inspection protocol
+
+Authority: owner visibility toggle, membership access, live Developer Mode and
+fail-loudly implementation directives. Keep the existing inspection websocket
+and HTTP queries; share the serializable protocol types through `src/lib.rs`.
+`Store` publishes `Changed { sequence_id, inference_id }` after relevant commits
+and `Token { inference_id, offset, text }` while generating. Offsets are per
+inference UTF-8 byte positions and detect lost chunks; tokens are not persisted.
+
+Use the existing per-world broadcast channel and authoritative SQLite access
+checks. Subscribe before the initial access query. A single indexed query returns
+whether this viewer is an active member and whether Developer Mode is enabled;
+reuse that query for HTTP inspection and before each outbound private websocket
+frame. Retain viewer/world identity in the connection. Membership/toggle writes
+publish `AccessChanged` after committing; it is a wake-up notification, never a
+cached authorization decision. On any received event, recheck current access
+before deciding what to send. Removed membership closes the connection; disabled
+mode sends mode=false, clears cached private client data and permits only mode
+notifications. A query failure terminates inspection with its full error.
+
+Authorization takes effect at the access check: a frame already authorized may
+finish sending concurrently with a ban or disable, as an authorized HTTP response
+may finish. The next frame must pass a new check. Do not hold a transaction or
+lock across socket I/O. Generation only publishes events and never waits for a
+viewer. A slow send cannot hold up the membership mutation. On broadcast lag,
+re-read access and send the current mode before any authorized resynchronization;
+a dropped AccessChanged event therefore cannot authorize later private frames.
+
+Alternatives considered against the membership and live-inspection requirements:
+
+| Approach | Benefit | Cost and decision |
+| --- | --- | --- |
+| SQLite check per private frame, existing broadcast wake-up | One source of truth; ordinary query and socket send; handles lost notifications | One indexed read per frame/viewer. Selected; measure contention with actual streaming viewers during verification. |
+| Cached permissions plus a separate watch channel | Avoids per-frame database reads | Duplicates authority and requires every membership path to synchronize cache lifetime and updates. Consider only if measured read cost warrants it. |
+| Lock access mutations against socket write admission | Orders write admission against revocation completion | Requires transport readiness/locking machinery, still cannot retract bytes already sent, and adds a stronger boundary than the declarations specify. Not selected. |
+
+Subscribe before loading a selected view. Client increments a request generation
+for selection changes; a response applies only to that generation. While fetching,
+record matching Changed invalidations; fetch again once if the just-loaded
+snapshot was invalidated. Repeat only in response to actual changes. Upsert rows
+by durable ID. Inference completion refreshes either a selected turn or that
+standalone inference. This reconciles snapshot races without saving a second
+world log or assigning unrelated IDs a shared chronology.
+
+On broadcast lag send `ResyncRequired { skipped }`; show a persistent loss notice,
+clear partial tokens and reload the authorized selected view. A running
+inference starts showing only subsequent chunks with a missing-prefix indicator;
+its completed output replaces the partial stream. A disconnected socket shows
+the full error and an explicit Reconnect control; reconnect performs the same
+subscribe/snapshot handshake. Browser effect cleanup removes handlers and closes
+its socket. Bad payloads/serialization fail visibly rather than being ignored.
+
+### Exact model input and verification
+
+An application `Request` and the input consumed by the model are distinct
+artifacts. The backend maps narration roles, translates tool calls, applies
+effective generation settings, and expands the model's chat template. The
+inference panel exposes both the structured request and the final template
+input, clearly labelled. Neither is rebuilt using current world notes, prompts,
+settings, summaries, templates, or model defaults.
+
+Retain the existing immutable text/summary/message-range recipe for structured
+requests. Hash the actual request crossing the backend boundary and require
+reconstruction to match. Persist the effective backend settings (including
+output limit), immutable model/template/tokenizer identity and formatting
+options used for that call. Observe the rendered prompt and token IDs at the
+actual template/tokenization boundary used for generation, including special
+tokens and the generation prefix. Tests retain these observations temporarily
+for direct equality checks; production retains verification checksums and the
+source references needed to reconstruct, not duplicate expanded prompts or
+token arrays. Observe the normal tokenization pass; do not
+run another one on the inference hot path just for inspection.
+
+"Actual model prompt recording" means observing the formatted prompt as the
+model runtime consumes it. This is an implementation detail of the declared
+verbatim-input inspection and its verification, not a new gameplay feature.
+The runtime combines message roles, tool schemas and text using a chat template;
+inspecting messages before that formatting step alone cannot reveal formatting
+mistakes. The name refers to that actual prompt, not a second model or service.
+
+Reconstruct final template input from immutable recorded inputs and retained
+formatter artifacts, and verify it against evidence observed during generation.
+First establish experimentally whether the runtime exposes the needed prompt
+and tokens, and whether its formatting can be reproduced exactly. A second
+handwritten template or test-only renderer is not evidence of equivalence.
+There is no approved fallback to storing a full duplicate conversation on every
+inference. If exact reconstruction needs additional stored data, measure and
+explain that requirement before revising this storage design.
+Unavailable legacy evidence is labelled explicitly. A hash mismatch fails the
+inspection request with full context rather than showing plausible input.
+For a failure before formatting, show the captured structured request and the
+failure stage; no model prompt existed to display.
+
+Alternatives considered against the recording declaration and coding standards:
+
+- Store every expanded conversation: simple equality, but duplicates growing
+  histories on every inference and violates the requested storage approach.
+- Rebuild from current state/templates: small storage, but changes historical
+  evidence and cannot support trustworthy debugging.
+- Immutable recipes plus boundary evidence: reuses the existing recorder,
+  retains small request metadata, and proves equality. This is the chosen
+  approach; establish the exact formatter inputs needed before implementation.
+
+Retained model evidence uses `model_artifact(id, gguf_digest,
+tokenizer_digest, config_digest, adapter_revision, runtime_revision)` and
+`inference_prompt.model_artifact_id`. Tokenizer/config bytes live once under
+`data/artifacts/<digest>`; their digest is checked when loaded. The already
+retained template artifact holds the original template source and options.
+`inference.effective_settings` serializes the fully resolved runtime parameters,
+separately from requested sampling. The formatter module dispatches on the
+recorded adapter revision; version 1 remains supported when version 2 is added.
+Releases changing rendering dependencies must pass old-version reconstruction
+fixtures before replacing the supported runtime. Missing artifacts or an
+unsupported revision fail explicitly; they never use current defaults.
+
+### Verification contract
+
+Compare what the browser exposes to an independent capture of the actual
+backend request and generation input from the same inference through normal
+play. Comparing two calls to the reconstruction function is insufficient.
+Cover first entry, tool round trips, sibling and nested calls, narration,
+compaction and later tail history, rejected/failed calls, interrupted work,
+Unicode/escaping, and changed world context/configuration after inference.
+Old inference input must remain unchanged after all later changes and restart.
+In the same test, compare player chat and developer raw history at cursors
+before and after compaction to the original delivered messages, and compare
+summary/inference views to the original model outputs. Verify that appending a
+reply, activating a summary and delivering narration to several histories add
+references to the original content, not further payload copies. Check both
+content identity and exact rendered text: either check alone is insufficient.
+Corrupting a referenced message, summary, tool schema, or formatter artifact
+must be detected. Verify navigation with deliberately repeated identical text
+so linkage cannot pass by matching contents. Authorization tests include a
+disabled world, non-owner enablement, another world, and banned membership,
+including an already open inspection connection.
+
+All views read these recorded facts on the server. The browser formats and
+navigates them; it never assembles an agent prompt.
 
 # Chat compaction
 
@@ -482,11 +908,11 @@ another inference for that agent, but does not delay the completed reply:
    matters to keep, what is supplied separately). Newer messages are excluded -
    the agent's history is effectively truncated for this one inference.
 3. Run it through the normal recorded inference path; store the `summary` row
-   with `covers_to_seq = n`.
+   with exact covered branch ranges and a separate activation entry.
 
 The trigger uses the completed inference's model-reported `input_tokens` plus
-`output_tokens`; it adds no tokenization work and exactly describes the context
-that would be assembled next. The durable background job begins after the
+`output_tokens`; it adds no tokenization work. Those are measured units, not
+a claim that newly supplied text will fit. The durable background job begins after the
 completed reply is delivered. If only the retained tail remains, it records an
 inline notice and retires the job; a later turn can queue a new one. It never
 interrupts the completed game response for context pressure alone.
@@ -514,33 +940,59 @@ recorded path, in a dedicated sandbox world so world telemetry stays clean.
   the web game's authenticated membership and websocket path.
 - **Replay:** `cairnworld replay <inference-id>` reassembles the recorded input
   via the reconstruction machinery and re-runs it, printing old and new output
-  side by side. Reassembly uses the current code and the current prompt files,
-  so editing a role prompt and replaying shows what the new prompt would have
-  produced for that exact exchange - the loop user_declarations.md asks for
+  side by side. Exact reconstruction uses the original recorded inputs.
+  An explicit edited replay substitutes selected prompt/history inputs in a new
+  recorded inference and leaves the original intact - the loop
+  user_declarations.md asks for
   under Debugging and Telemetry: "reference a specific LLM output message,
   replace the history to match the prompt changes and then re-generate".
   Replay depends only on the recording layer, and doubles as the living proof
   that reconstruction works.
-- REPL niceties: `/undo` (drop the last exchange and re-prompt - i.e.
-  delete-and-retry for interactive prompt testing), `/tools` (show the
+- REPL niceties: `/undo` (select the previous history head and re-prompt,
+  preserving the abandoned exchange for inspection), `/tools` (show the
   assembled tool definitions), `/context` (dump the exact input that will be
   sent next).
 
 Access paths: humans use the stdio REPL; coding agents get the same verbs -
 replay, chat-as-agent, plus the debug-spine queries - through the MCP
-server (stdio transport for local Claude Code/Codex; rmcp also offers HTTP if
-a remote agent ever needs it). Same functions underneath, two transports.
+server through the local stdio/socket transport below. Same functions
+underneath, with one live execution host.
 
 # MCP for coding agents
 
-An RMCP server (own subcommand or enabled under `serve`) exposing:
+Authority: Live Coding Agent Interaction with MCP, Debugging and Telemetry and
+An initial proof of concept. The running `serve` process hosts RMCP sessions on
+an opt-in Unix socket, `--mcp-socket data/mcp.sock --mcp-user <email>`. The email
+must identify an existing account; mode 0600 restricts the socket to the process
+owner. It is a local developer transport, not an unauthenticated network endpoint.
+`cairnworld mcp --socket data/mcp.sock` copies stdin/stdout bytes to/from that
+socket; RMCP's framed protocol terminates inside serve. The proxy never opens
+the database or loads another model. The server removes its owned socket path
+on shutdown and reports an occupied path instead of replacing it blindly.
 
-- the same game tool surface an agent sees (act as any agent in a dev world)
-- read access to the debug spine: sequences, inferences, reconstruction,
-  chat histories, game objects
+Each session binds the configured user once. Every tool resolves membership and
+world/Developer Mode at invocation time, through the same Store/Game operations.
+The user can operate only characters they own; NPC/GM tools are reached through
+the ordinary character-agent loop, not invoked as arbitrary unscoped mutations.
+No local proxy changes a user's authorization merely by supplying another ID.
 
-This reuses the same tool lists and store queries verbatim - it is a thin
-transport, not a second implementation.
+| MCP tool | Existing operation/return |
+| --- | --- |
+| import_scenario(path) | Parse/validate Scenario and create a fresh owned development world; return world/character IDs. |
+| export_scenario(world_id,path) | Authorized existing export of reusable state, excluding private histories. |
+| enter(world_id,character_id) | Game::enter via WorldEvents; return sequence and stored entry cursor. |
+| chat(world_id,character_id,text) | Game::player_message via WorldEvents; return sequence/result or suspension. |
+| history(world_id,agent_id,head,cursor) | The same bounded raw-history query as inspection. |
+| inspect_turn / inspect_inference / objects | The same typed Developer Mode queries and authorization. |
+| replay(world_id,inference_id,replacements) | Reconstruct originals; explicit text/segment replacements create a fresh recorded sandbox inference, never mutate the source history or execute returned game tools. |
+
+An MCP play session registers a presence connection on enter and releases it
+on leave/session close through the same connection events as the web client.
+The server can process multiple sessions without a second world executor.
+Alternatives: a separate database-writing MCP process violates world serialization;
+a second HTTP authentication surface adds machinery for local-only use; the
+stdio-to-private-socket transport keeps one execution host and works with local
+coding-agent clients. Network MCP access is not part of this implementation.
 
 # Off-the-shelf dependencies
 
@@ -562,8 +1014,6 @@ Fewer lines of ours, chosen once here so nothing gets reinvented mid-build:
 - `blake3` - hashes an assembled request so reconstruction can be verified
 - `tracing`/`tracing-subscriber` - server logs (game telemetry lives in
   sqlite, not logs)
-- `insta` - snapshot tests for context assembly (review prompt-affecting
-  diffs explicitly)
 
 The normal compaction trigger uses the completed model inference's exact usage,
 not a second tokenizer pass. Capacity recovery also uses actual inference
@@ -571,65 +1021,253 @@ outcomes, so there is no separate tokenizer dependency or estimate.
 
 # Game layer
 
-The framework above exists to serve the game design in user_declarations.md.
-Each subsection below is a design pass still to be made - expand it here
-before planning its implementation. The listed pointers are the governing
-sections of user_declarations.md.
+## Membership and presence
 
-## Actions and rules (TODO)
+Authority: World detail page, World game page, and Game state / Group.
+Membership access is `active|banned`. Only the owner changes it; invitation
+acceptance returns an existing active membership unchanged and rejects a banned
+one before consuming a slot. Reactivation updates that same membership and
+creates no characters. Routes are POST `/world/{id}/members/{user}/ban` and
+`/reactivate`; WorldDetail renders active members and an owner-only collapsed
+Ban list. Both update Store membership and publish AccessChanged after commit.
 
-The full character/NPC/GM/Storyteller tool sets over the framework's
-per-invocation tool lists, rule packets from the Cairn SRD, item transfer
-invariants
-(Give/Take through rust so items cannot duplicate), BePersuaded, save
-mechanics. (Tool calls; GM interaction.)
+The existing world's `WorldEvents` owns a short-lock-protected set of
+connection IDs per character. Game::connect/disconnect update this set and the
+durable zero/one transition, then post a generation-tagged PresenceChanged event
+to the existing world queue. These methods never wait for an ongoing model turn;
+narration delivery reads the current set when committing recipient references.
+A connection is registered after authentication and deregistered on close,
+logout, ban or transport error. Multiple tabs share one character-presence state. Logical
+changes are durable as `character_presence(character_id PRIMARY KEY,
+last_connected_at, absent_since, generation)`; timestamps are server UTC.
+Live connection IDs are process-local and are never restored after restart.
 
-## Turns, time and combat state (TODO)
+`presence_narration(group_id PRIMARY KEY, last_announced_character_ids,
+due_at, generation)` records the announced online set and outstanding transition.
+On first arrival into an already occupied group, queue an immediate GM arrival
+turn. On a departure, set due_at to the first departure plus 60 seconds;
+subsequent changes within that window share the deadline. Returning before the
+deadline changes the final set and removes a cancelled departure. At deadline,
+if anyone remains online, narrate the difference and persist the new announced
+set with the narration; if nobody remains, retain the difference without running
+an inference. First arrival after an empty period sets a new 60-second deadline
+and narrates the consolidated old-to-new state then. One `sleep_until` per pending
+deadline posts a generation-tagged event; stale timer events do nothing.
 
-Per-character time advancing to world time, InCombat/Moved/Acted flags,
-rust-defined `can_act` rules (never GM-decided), combat begin/end, initiative,
-out-of-combat simultaneity limits. (Turns and time.)
+At restart, clear all connection sets and timestamp formerly connected characters
+as absent at recovery. Retain pending/announced transitions; when a real connection
+returns, apply the same empty-group transition above. Split partitions the
+announced set; merge unions it. Timer validation and group changes are serialized in WorldEvents; each timer
+rechecks the current presence generation and group, so stale events cannot narrate
+membership from a retired group. `party_presence()` resolves the caller's group and returns character IDs,
+names and online state from this data. It does not mutate group membership.
+Narration recipients are NPCs and connected PCs in the interacting group;
+offline PCs do not receive it (accepted 2026-09-18, see user_exerpts.md).
 
-## World initialization (TODO)
+## Recap storage and execution
 
-Storyteller/Questioner iterative world building: phased meta-questions,
-answer-then-summarize loop, initialization tools for locations/paths/NPCs,
-per-object Questioner enrichment. (Game setting and story narrative;
-Storyteller initialization output and tools.)
+Authority: World detail page's recap after 60 seconds of absence, deferred
+priority and durable jobs; Agents / Player agents' separate histories.
+The proposed owner is the character (see Product decisions).
+`pending_recap(character_id PRIMARY KEY, absence_generation, due_at,
+head_branch_id, through_position, static_segments, model, sampling)` is written
+with the last-disconnect transition. Return before due_at cancels it. At due_at
+it becomes runnable only if the same absence generation is still current.
+`character_recap(character_id PRIMARY KEY, inference_id, absence_generation)`
+references the completed text output; no second recap payload is stored.
 
-## Character creation (TODO)
+Reuse the existing inference admission with a concrete
+`DeferredWork::Compaction(branch_id)|Recap(character_id)` enum and its existing
+Notify mechanism. Each variant loads/finishes its own typed obligation; do not
+merge different job fields into a sparse generic jobs table. Recap assembly uses
+its frozen character history and recorded public character/world context, with
+one closing recap request; its output is never appended to model history.
+A completed result updates character_recap and deletes that exact generation's
+job in one transaction. A newer absence job cannot be removed by an old result.
+Return after due_at need not wait for generation; WorldDetail shows the prior
+recap and current generation status until completion. Restart reloads both typed
+job tables. This reuses real scheduling behavior without treating a recap as a
+compaction summary or creating another worker framework.
 
-The player agent opens the first chat with its character-creation prompt and
-guides the player through Cairn creation. The later full flow includes
-Storyteller background negotiation with spoiler scrubbing and the
-ReadyToBegin/RollOmens sync point. Bread Thief initially keeps the same
-player-agent-led conversation while omitting Storyteller negotiation.
-(Character creation; TODO section of user_declarations.md.)
+## Rules and action execution
 
-## Encounter difficulty (TODO)
+Authority: Character creation actions, Character actions, GM tools, NPC actions,
+Turns and time, and the checked-in Cairn second-edition rules. Rust owns all
+rolls and mutations. An action's ToolDefinition and typed argument struct live
+with its Rust implementation; character descriptions remain short, and GM
+arbitration gets only the relevant rule excerpt, actor/targets, item stats and
+current group/location notes. Existing look/say/take and HP/attribute rolls are
+extended in place. NPCs use the same character action implementations.
 
-GM requests guidance, Storyteller sets composition, GM adjusts
-attributes/equipment as needed. (GM interaction.)
+`CharacterSheet` is a serde struct with current/max STR/DEX/WIL, current/max HP,
+background, traits, bonds, age and explicit creation progress. Keep creation
+progress as a variant `Creating{completed_steps}|Ready`, not magic empty strings.
+Use checked-in typed tables for the declared background, traits, bonds and age
+rolls and starting equipment. Choosing or rolling a background populates its
+items through the same item constructors. Roll functions record the dice and
+selected table entry once; replaying an already-completed creation operation
+returns its recorded result rather than granting another roll. ready_to_begin
+validates every required field. The initial group's ready barrier runs RollOmens
+once for the youngest PC and queues the opening GM narration; later entrants get
+a separate arrival narration.
 
-## End conditions and epilogue (TODO)
+Consolidate item_location/item_character into `item_holder(item_id PRIMARY KEY,
+location_id, character_id, description)` with exactly one holder FK set.
+A transfer validates current holder, visibility, capacity (ten slots, bulky two,
+petty zero), and any consent, then changes that row with its recorded action in
+one transaction. Full inventory imposes the Cairn HP restriction. Typed item
+stats hold damage dice, armor, slots and spell references; object notes hold
+fiction rather than substituting for mechanical state.
 
-UpdateStoryteller event summaries, EndWorld, the epilogue talk-only mode,
-ReadyToEnd, final narration. (End Conditions; Epilogue sequence.)
+| Operation | Rust result and GM/NPC responsibility |
+| --- | --- |
+| Look/investigate/open/ask | GM can answer, request a save/time cost, or reject with a reason. No automatic repeated save. |
+| Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
+| Say/lie | GM supplies hearers from the current group. Append speech to recipient histories by source reference; invoke addressed NPCs in stable character-ID order. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
+| BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
+| Give/take/drop/place | One holder change after arbitration/consent; no duplicate item on repeated approval. |
+| Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
+| Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
+| BeginCombat/endCombat | GM identifies combatants and state boundary; Rust stores turn order and flags and determines eligibility. |
+| SpawnItem/SpawnNPC | GM submits a typed proposal to Storyteller; its approval creates the object through the same validated constructors and records the source. |
+| Edit notes | GM/Storyteller tools replace one named JSON value on an authorized object; Storyteller reads its own notes, GM reads both but edits only GM notes. |
 
-## Multiplayer party travel (TODO)
+`combat(id, group_id, round, current_character_id)` and
+`combat_participant(combat_id, character_id, initiative_order)` own the stable
+turn order. Character moved/acted flags clear when its new turn begins; wait
+can end it early. Rust derives can_act from combat order, death/disabled state,
+pending reply eligibility and out-of-combat time. GM cannot set can_act directly.
+The proposed initiative order and out-of-combat time window are Product decisions.
+World time is the maximum character time. Each character advances by approved
+elapsed seconds; time advancement queues hourly distant-NPC opportunities only
+for elapsed whole hours, in stable character order, through WorldEvents.
 
-Group Travel with stay-behind prompts and timeouts. (Character actions.)
+## Player replies and coordinated travel
 
-## Dynamic storyteller and spells (TODO, future)
+Authority: Take/Request, Accept, Travel and Agent syntax's recursion tree.
+The action that needs a human response persists
+`pending_reply(action_id, character_id, deadline, status, response_content_id)`;
+its deadline and intended character are explicit. The corresponding
+`pending_action` also holds a typed continuation `Transfer|Travel`, original
+invocation/call IDs and the ordered remaining tool-call ordinals. It retains
+budget consumption. It never serializes a Rust future or re-executes earlier tools.
 
-NPC/location/path mutation mid-game; Read mind / Command / Erase mind
-operating on chat histories. (Dynamic Storyteller; Spell ideas.)
+The agent loop returns `Suspended(action_id)` up through its call stack; each
+waiting invocation remains recorded. The world queue is then free. Only the
+requested character's ordinary input is accepted as a response to that action;
+their player agent interprets text and calls accept/decline/stay/join/object with
+that explicit action ID. Other characters may continue legal independent work.
+A response or deadline event updates the pending reply and resumes the stored
+continuation once; original completed tool results are reused. Recheck mutable
+preconditions before transferring or moving. Restart reconstructs these concrete
+continuations from rows and restores outstanding timers.
 
-# Open questions
+Travel takes a Connection ID, validates that one endpoint is the source group's
+location, and asks the group's other characters to join/stay/object. NPCs answer
+through their agents; PCs have the declared one-minute window. The proposed
+resolution is in Product decisions. On approval, create the travelling/staying
+partition using the group history operation, update the travelling group's
+location to the other endpoint, and replace its location description with the
+GM's arrival description. Record transfer of location and action completion
+atomically. Waiting/objections leave the original location unchanged; rejected
+travel can still have an explicitly narrated/recorded movement within the source
+location. Group history follows the travellers without a location GM handoff.
 
-1. **Model.** All three run; the pick waits for a scenario worth measuring,
-   since one tool and no GM measures the harness rather than the models (see
-   Model selection).
-2. **user_declarations.md tech stack.** It lists neither Leptos nor sqlx.
-   Suggested addition once these decisions settle (design.md must not
-   contradict the declarations).
+## Storyteller world creation
+
+Authority: Game setting and story narrative, Storyteller initialization output
+and tools, Character creation and World detail page. `world.phase` is
+`initializing|playing|epilogue|complete|initialization_failed`. World creation
+stores the optional seed, owner and Storyteller history before queuing work;
+only playing/epilogue worlds accept play. Imported scenarios enter playing after
+validated installation. `world_build(world_id PRIMARY KEY, phase_index,
+round_index, step, question_index, question_inference_id, summary_inference_id)`
+is the persisted progress of the three declared phases. Each finished answer or
+summary advances one step atomically; a failed inference leaves that step and
+full error visible. Resume is explicit after failure, automatic after restart
+for work that was interrupted before completion.
+
+The Questioner sees the seed, phase, hard-coded meta-questions, and only the most
+recent Storyteller summary. Its structured output is `{questions, satisfied}`.
+The Storyteller answers those questions one by one in a fresh round history with
+seed and previous summary, then produces a new summary. The next round uses that
+summary without replaying previous answers. `world_build.max_rounds_per_phase`
+defaults to 3; inference safety budgets still apply. Each phase ends on satisfied
+or its round limit. The final named summary is retained by inference reference.
+Questioner is an invocation role, not another global autonomous agent.
+
+After the summary, Storyteller tools create locations first, then Connections
+with validated endpoint IDs, groups and NPCs one at a time, then items/holders.
+Each location/NPC seed gets its own Questioner/Storyteller enrichment using the
+world summary. Constructors enforce world-local references and exactly one
+character group/item holder. A final validation checks reachability from the
+starting location and required object references before phase becomes playing.
+Draft objects remain in the initializing world and are not exposed to game play.
+
+Character background negotiation uses three Storyteller proposals stored as
+`background_offer(id, character_id, private_content_ref, public_content_ref)`.
+Only the public descriptions go to the player agent. A player choice or
+counterproposal calls Storyteller with that offer ID; approval commits the
+background and relevant private notes. Creation rolls request Storyteller
+approval/modifiers through the same action arbitration path. Encounter guidance
+returns composition/equipment proposals before those objects are exposed to
+players; observed facts are never silently rewritten. Death/replacement checks
+real rules state and Storyteller approval; a replacement creates a fresh PC
+and agent_history under the existing membership and enters a group through the
+normal join flow. The dead character and history remain inspectable.
+
+## Campaign completion
+
+Authority: End Conditions, Epilogue sequence, GM UpdateStoryteller/EndWorld and
+World detail page. `update_storyteller(summary, referenced_object_ids)` is an
+ordinary nested invocation after consequential events. Typed object trigger
+metadata identifies events requiring this update. The Storyteller may call
+`end_world(outcome, text)`; Rust also triggers loss when no living PC remains.
+The state transition from playing to epilogue happens once with a reference to
+the ending narration, delivered to all character histories. NPCs also receive
+the declared epilogue notice without proactively taking turns.
+
+In epilogue the tool surface contains conversation and `ready_to_end(text)`;
+mutation/travel/combat tools are absent and their server operations reject play
+regardless of UI state. Cross-location NPC conversation bypasses travel only in
+this phase. `epilogue_choice(character_id PRIMARY KEY, content_ref)` stores each
+participating PC's decision; participants are snapshotted when epilogue starts,
+so later membership changes cannot silently alter the barrier. Once every
+required choice exists, the Storyteller receives them and the ending context in
+one final recorded inference. Completion stores its output reference and sets
+phase=complete atomically. WorldDetail shows the final account; connected game
+pages become read-only and new game entry is refused. Offline/dead participant
+handling at this barrier is a Product decision below, not a fabricated timeout.
+
+# Product decisions
+
+The following are concrete proposals pending the user's answers. They are not
+implementation instructions until accepted and do not authorize changing
+user_declarations.md. All other schema/protocol choices above are implementation
+choices derived from the named requirements.
+
+- **Recap:** one recap per character beneath that character on WorldDetail,
+  written from its own history after its last connection is absent for 60 seconds.
+  The declaration currently says per player despite multiple character agents.
+- **Failure context:** full errors remain in the original failed record and
+  player/developer display; affected invocations append one brief factual
+  interruption message for the next invocation, including unresolved tool IDs.
+  No model runs in response to the failure. This reconciles Implementation
+  Directives / Chat with immediate propagation and the safety bounds.
+- **Combat:** individual stable turns, successes on the initial DEX save before
+  failures, higher DEX next, remaining ties randomized once by Rust. This follows
+  the game's individual-turn declaration rather than Cairn's simultaneous sides.
+- **Travel:** silent PCs join after 60 seconds; stay splits the party; objection
+  goes to GM arbitration before movement. No second initiator confirmation.
+- **Time window:** propose `max_character_lead_seconds=600` out of combat;
+  a character at least that far ahead of the least-advanced connected PC in its
+  group waits for catch-up. The GM's elapsed time is bounded nonnegative, with
+  long activities gating further action. The declaration leaves this limit open.
+- **Epilogue barrier:** propose one choice per PC present in the campaign-end
+  participant snapshot, including dead PCs. Disconnection does not auto-consent;
+  a world stays in epilogue until those players return and answer. Owner override
+  would be an additional feature requiring a declaration.
+
+Capacity recovery follows the currently declared shrinking-prefix summary
+algorithm. The older tokenizer proposal in user_exerpts.md does not supersede
+that declaration; no capacity-algorithm decision is pending in these plans.

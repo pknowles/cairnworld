@@ -160,14 +160,16 @@ trying to further consolidate too.
 ## Storyteller initialization output and tools
 
 At some point the storyteller must be able to initialize game state. The world
-summary is one output. It must also create locations, paths between locations
-and NPCs at each location. The Storyteller now has tool calls exposed to it to
-populate locations and paths. Then it must populate NPCs one at a time.
-Locations, paths and NPCs require custom seed text to fully describe what they
-are and their purpose in the setting/dynamic story. The NPCs must be populated
-one at a time to allow the model to give longer input to each.
+summary is one output. It must also create locations like cities, roads,
+dungeons, connections between locations, NPCs and items at locations etc.. The
+Storyteller will have tool calls exposed so it can populate and edit locations.
+Then it must populate NPCs one at a time. Locations and NPCs require custom seed
+text to fully describe what they are and their purpose in the setting/dynamic
+story. This must be done in stages, especially NPCs, one at a time to allow the
+model to give focused descriptions to each. Rust should validate as much as it
+can, where explicit relations/IDs are given.
 
-For each NPCs location and path, the Questioner concept is again executed to add
+For each NPCs location, the Questioner concept is again executed to add
 detail to each. The Questioner is given the world summary and the seed prompt
 provided by the Storyteller.
 
@@ -292,6 +294,10 @@ made by the player.
 
 ## GM interaction
 
+The GM manages dynamic state of characters and their location and arbitrates
+character interactions as per the game rules. Mostly approving/modifying action
+requests, narrating results and keeping the world consistent.
+
 When players begin play they should have an initialized location reference and
 description of where they are within the location. The GM immediately greets
 them by narrating the scene, their surroundings and any plot-relevant details
@@ -304,16 +310,40 @@ agents.
 Single GM vs multiple? If we had one, or rather a single chat history for it,
 this might cause contextual confusion if many players travel to separate
 locations. So far the GM seems to resolve local interaction, which by name is at
-a location. So we could technically have multiple GMs. The text here would then
-refer to one, but it'd be implied to be the one for the character's location -
-any PC or NPC. The GM would then manage dynamic state at its location and
-arbitrates character interaction as per the game rules. One possible pitfall is
-when characters move from one location to another, the GM in the new location
-would not have their recent context. Given the GM should provide the Storyteller
-with frequent encounter summaries, this may not be a problem - i.e. the new
-location's GM still has enough context to do its job. Easy to change later too.
-I don't know if this will work, so it will need playtesting. Easy enough to
-consolidate GMs if it isn't useful.
+a location. So we could technically have multiple GMs. It'd be nice to have the
+GM's context continue with the players (assuming they stay as one party). It'd
+also be nice to have multiple GMs to handle unrelated NPC interactions at other
+locations. Having a GM move with players when they travel (i.e. it keeps its
+chat history) would add consistency, but we run into the problem of possible
+multiple GMs at a single location which should not be possible. At this point we
+could consider GM location hand-offs or merging GM histories. A better idea is
+to have GM inferences use a dynamic context/chat for all characters in a local
+group. This is like a shared experience history for all those involved and the
+GM can focus on just those interactions. As a bonus, GM narrations would only be
+sent to characters within a group and can be shared. Any characters joining
+become part of the group, share chat history and compaction. If a character or
+characters leave they form a new group, which takes a copy of the history of the
+previous group so far. Groups are fungible so there is no difference between a
+split being one new group or two new groups with the old one being deleted. This
+design allows separation between groups of characters at the same location that
+may not be interacting. When they need to interact their groups must be merged.
+This means both chat histories get given to the GM. When compacting merged
+histories we should prefer to compact individual group histories first, before
+making a compaction summary for the merged group's histories - we should have
+customizable threshold to tweak. I.e. if all pre-merged histories are small,
+there's no point compacting just them. The text in this document will refer to
+one GM, but it's implicit that it only has context for the group of players
+interacting.
+
+The GM must be aware of other groups at the same location and can issue calls to
+merge or split them as their players make actions that would cause direct
+interaction.
+
+The GM should provide the Storyteller with encounter summaries when major events
+happen. This could be a battle, when quest/story-relevant items are acquired or
+lost etc. There should be an explicit way for the storyteller to mark items as
+such and tag them with triggers for when the GM must send the storyteller
+summaries of encounters/events.
 
 The following are a few examples that should serve to define the interface. In
 the simplest form, a player might wants to attack an NPC. They say that to their
@@ -326,8 +356,8 @@ ID allows forwarding the tool call data and reduces LLM responsibility to copy
 it correctly. The arguments should be visible though, e.g. maybe the character
 has an injury preventing them using a two handed weapon and the GM needs to see
 all arguments to be able to reject the request. Rust can trivially verify the ID
-matches, compute the dice roll and the result, which is broadcast to players'
-chats in the current location. The approve-action call may include an optional
+matches, compute the dice roll and the result, which is broadcast to the
+character group's chats. The approve-action call may include an optional
 difficulty or situational modifier that the GM deems appropriate, even adding,
 subtracting or limiting possible damage. The GM will see the result of the tool
 call and should issue a narration of the result, which is also broadcast to
@@ -406,10 +436,9 @@ from other locations. This needs play testing.
 
 These are currently ideas for the future. Not the initial version.
 
-New NPCs can enter the story, perhaps as some exit or die. Locations can be
-added, new paths can be found or some paths can be removed (e.g. a fallen
-bridge). These are initiated by a structured GM tool call, and succeed when a
-dice roll meets a GM-provided success threshold.
+New NPCs can enter the story, perhaps as some others exit or die (purely for
+performance reasons to balance agent chat processing time). Locations can be
+added, new connections can be found or removed (e.g. a fallen bridge).
 
 The storyteller may implant ideas in NPC chats or append to their
 background/description. E.g. NPCs may need to react to player interaction or
@@ -545,26 +574,36 @@ asking them to make changes.
 # Game state
 
 Game objects
-- Player characters
+- Character
   - Name and ID - the ID is charN where N is a small unique number
     calls to uniquely identify the character
+  - Character sheet info
   - InCombat, Moved and Acted booleans for combat actions
   - Time
-  - Location - both a reference to the location object and a string description within it
-  - Character sheet info, including background
+  - Group - both a reference to the group object and a string description within
+    it only if specified, e.g. the player has climbed a tree, rather than just
+    generally with the rest of the group's characters. Any number of players can
+    be part of a group and individual players can have their own group. Players
+    must belong to exactly one group at any one time. This will be used by the
+    GM to share GM-facing character context/chat history. E.g. when the party
+    enter an ambush, all PCs and enemies merge into one group/chat history for
+    the GM to operate in.
+- Player characters
+  - Character
+  - Player-specific character sheet info
 - Non-player characters
-  - Name and ID - the ID is charN where N is a small unique number
-    calls to uniquely identify the character
-  - InCombat, Moved and Acted booleans for combat actions
-  - Description: background, motive, ambition, how they fit into the world,
-    implies how they should act
-- Locations
+  - Character
+- Group
+  - Location ID and simple description of where it is in the location.
+- Location
   - Type - an unstructured string, e.g. "city", "river", "dark wood", "clearing".
   - Description - details everything characters can interact with
-- Paths
+- Connection
   - Connecting location references {A, B}
-  - Normal travel time
-  - Description of what is along the path in the order from location A to B, whether it is blocked and what would be needed to pass.
+  - Description of the transition/connection. It could be the start of a path or
+    road where A is the north entrance to a city and B is the south end of a
+    road to another city. It could be the door to a tavern within a city, or its
+    stairs to a mysteriously large basement.
 - World state
   - Time
   - Initial prompt (just for record; unused except for initialization input)
@@ -573,6 +612,12 @@ Game objects
 - ItemType
   - Description
   - Relevant stats, if weapons/armor etc. (type safe/structured)
+- Item
+  - ItemType
+  - Location ID and description - could be in a character's inventory or at a
+    location in a locked/trapped chest
+  - Unique Description - optional.
+  - Storyteller trigger?
 - SpellType
   - Description
   - Relevant stats (type safe/structured)
@@ -596,15 +641,10 @@ Most importantly, this allows the world to evolve. E.g. a player asks a question
 which is yet to have an answer. The Storyteller creates an answer and records it
 so that it stays consistent as the game progresses.
 
-The GM may see the Storyteller's notes on objects at the location/path, but cannot
+The GM may see the Storyteller's notes on objects at the location, but cannot
 edit them. It is up to the GM to maintain consistency with whatever the
 Storyteller decrees. The Storyteller should not see the GM's notes or it would
 be overloaded with unnecessary detail.
-
-TODO: a path is just another location. Could consolidate or union them. Using a
-separate name would probably help LLMs understand the difference. This will be
-better because then neighboring locations could simply connect without requiring
-some intermediate path that must be traveled.
 
 ## Turns and time
 
@@ -643,8 +683,8 @@ question. Something to decide on later.
 
 When time advances, main NPCs in other locations may get a chance to take
 actions, chat, organise and plot with other NPCs. While rare, this could allow
-NPCs to suddenly enter a location or an encounter along a path between locations
-while players are there.
+NPCs to suddenly enter a location, for example arrive at an encounter along a
+path while players are there.
 
 If the time of day changes such as sunrise/sunset/darkness, the GM should
 narrate this to the player in the next chat response. Narration is an optional
@@ -745,20 +785,19 @@ indirectly explains why this happened to connect the character with the story.
   follow the move rules of combat. The GM augments the move action with the time
   the move takes, ideally being consistent with the described layout of places
   within the location in the location notes.
-- Travel - like move, but takes the argument of a Path (if the character is at a
-  location) or Location (if the character is on a path). The GM either narrates
-  how far the character gets from their current position to the connection in
-  the current location/path if not all the way (this is a rejected action), or
-  verifies the character can move to the beginning of the path and narrates them
-  beginning travel (action accepted). Rust then moves the character's location
-  to the Path and re-initializes their description within the location to note
-  the location they entered from. The character then implicitly performs the
-  Travel tool call, which goes to their new Path's GM. Following the same flow,
-  the GM there narrate them moving to the location at the other end of the path,
-  or how far they get if they are interrupted (e.g. by event/ambush). Once Path
-  travel has completed, rust again moves the character location to the
-  destination, sets the location-description and they are greeted by the new
-  location's GM with a description of their surroundings (see above).
+- Travel - like move, but takes the argument of a Connection. First, other
+  characters in the group are informed of the action and asked if they will
+  stay, join or attempt to prevent travel (verbally or with force). If movement
+  is possible at the time and no other characters object, the GM approves the
+  action. The group may be split if some characters stay. The GM narrates the
+  character(s) moving to and through the connection to the destination. If
+  rejected, the GM narrates what happens instead, e.g. how far the character
+  actually get from their current position to the connection in the current
+  location before something else happens (e.g. some other event). If accepted,
+  rust then moves the group's location to the Connection's other side and makes
+  the GM re-populate their description within the location to note their
+  position near the connection they entered from, among any other required
+  consistency updates.
 - Say - just raw text that the GM is told the character wishes to say, with an
   optional target for who the character is addressing. The character agent may
   need to translate a general desire into a specific sentence. E.g. "I want to
@@ -968,8 +1007,8 @@ Links can be deleted at any time, revoking their use if accidentally posted
 publicly. Links just allow players to join; there is no relation once joined.
 All players can see the names of all other players who have joined the world.
 This is a tree view and under each player are their list of characters. The
-world creator can remove joined users. Their association and characters remain
-but until they get another link to join they will be unable to access that
+world creator can deactivate/ban joined users. Their association and characters remain
+but until they get reactivated by the world owner they will be unable to access that
 world.
 
 Next to each player is a shortcut Join button to enter the world with that
@@ -990,11 +1029,11 @@ their agent for a new blank Adventurer character, which must be approved by the
 Storyteller.
 
 There is a button to enable developer mode for a world that only the owner can
-click. This mode cannot be disabled and becomes immediately visible to all
-players once enabled. A big warning modal must be accepted before changing to
-developer mode, noting that it enables complete visibility into internal game
-state and is effectively cheating. Developer mode enables complete inspection of
-chat logs from all agents - the Storyteller, GM and NPCs.
+click. This mode becomes immediately visible to all players once enabled. A big
+warning modal must be accepted before changing to developer mode, noting that it
+enables complete visibility into internal game state and is effectively
+cheating. Developer mode enables complete inspection of chat logs from all
+agents - the Storyteller, GM and NPCs.
 
 ## World game page
 
@@ -1015,6 +1054,9 @@ check.
 LLMs generate tokens over time. Streaming this to the browser would create a
 good user and developer experience, even if the end result requires parsing
 intermediate tool calls.
+
+Dice rolls should be displayed inline in the chat in the order they happen in.
+Modifiers the GM adds should also be visible.
 
 The main chat may include additional inline messages such as warnings, or roll
 results in developer mode. E.g. if compaction is ever triggered twice in a row,
@@ -1082,30 +1124,54 @@ complete replay of its chat history, provided it's not too long.
 ## Developer Mode
 
 Developer mode should split the main view into two columns. The regular chat on
-the left and all world objects, descriptions, agents, chat histories etc. are
-navigatable/queryable and displayed on the right. This should be available to
-all players. Again, developer mode is a one-way operation. For real games,
-players should not see this data as it is meta-gaming and would ruin the
-experience.
+the left and a developer/debug view on the right. This should be available to
+all players. For real games, players should not see this data as it is
+meta-gaming and would ruin the experience.
 
-In addition to the raw agent chat histories, we'll need some structured debug
-views:
+The developer view will need to be able to display the following.
 
-- There needs to be a button on chat entries on the left to inspect them, which
-  will open a sequence view on the right. This will be the full tool call stack
-  through all agents involved in responding to the player's message. Clicking on
-  a dice roll should open the sequence view that the dice roll was involved in.
-- As mentioned earlier we need a way to reconstruct all that went into an LLM's
-  response. Messages in the debug view should link to an inference view that
-  shows the entire verbatim input given to the LLM and its returned output.
+- Browseable world objects, descriptions, tools, agents and links to their chat
+  histories. A search/filter is probably important for database objects as there
+  will likely be many. The aim is to just present data cleanly and intuitively
+  including relations/links without any effort to project or transform relations
+  into simplified displays. This is for developers.
+- A turn view. User messages may trigger or be involved in full agent turns,
+  where a turn is the entire stack of messages and tool calls, appropriately
+  displaying tool calls and their results. In most cases turns are initiated by
+  players, but some player messages may be responses (e.g. when a travel action
+  asks players if they will to join).
+- An inference view. As mentioned earlier we need a way to reconstruct all that
+  went into an LLM's response. Messages in the debug view should link to an
+  inference view that shows the entire verbatim input prompt, system message,
+  all that was given to the LLM and its returned output. This will be most
+  important to debug why agents misbehave as 99% of the time, the cause will be
+  a misleading prompt or incomplete information.
+- A chat history view for a particular agent. This view is a much longer
+  infinite scrolling view of all messages for a chat history. This is the most
+  complex as it is a higher level concept than the data. I.e. inference view is
+  real and tangible but the chat history is more of a timeline view of messages.
+  For example, the linear messages for an individual player or NPC agents. The
+  GM agent chat history is more complex as it will form a DAG where histories
+  split and merge. To support this, the GM's chat history view needs to
+  authentically display the DAG, including multiple heads - one per Group of
+  characters and their history of messages. This view should include expandable
+  compaction/chat-summaries inline into the history at the point they were made.
+  It does not include additional agent prompt/context. When opening a message
+  from the current player's chat, it would show the player agent's chat history,
+  including its agentic loop and tool calls etc that would normally be hidden
+  from the player.
 
-Shortcuts between views are important for navigation. E.g. when looking at a
-sequence view (which only shows the direct request/responses from agents),
-developers may want to see the agent's raw chat history before that. E.g. to see
-the overall flow of the chat that a GM agent sees, not just the short
-request/response. This is different to the inference view because the chat
-history would be infinite scrolling raw chats and would not include additional
-agent context and summaries from compaction.
+There needs to be a button on chat entries on the left to inspect them, which
+will open and highlight their entry in the turn view on the right. This will be
+the full tool call stack through all agents involved in responding to the
+initial message. Similarly, clicking on a dice roll should show the tool call in
+the turn view that the dice roll was involved in.
+
+Links between views are important for navigation. E.g. when looking at a turn
+view (which only shows the direct request/responses from agents), developers may
+want to see the agent's raw chat history before that and would like to switch to
+view that message in its history view. E.g. to see the overall flow of the chat
+that a GM agent sees, not just the short request/response.
 
 In general the aim of developer mode is to include everything, all the raw data
 verbatim. This can be a bit overwhelming so some parts may be hidden. We should
@@ -1114,6 +1180,15 @@ points compaction has occurred.
 
 Chat compaction is the result of LLM inference, so summaries will have an
 inference view too, again, showing the exact input and output.
+
+Implementation wise, it is important that we do not redundantly store duplicate
+prompts. The database would contain chat messages that can be stitched together
+to reconstruct the full chat history, summaries AND prompt/inference input
+identically as it appeared. This would need testing where we do store the prompt
+input and verify it matches live reconstruction identically.
+
+I was thinking developer mode should be a one-way operation, but giving the host
+a way to briefly enable players to inspect bugs is too valuable.
 
 ## Live Coding Agent Interaction with MCP
 

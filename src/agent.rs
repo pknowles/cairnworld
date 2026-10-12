@@ -6,7 +6,7 @@ use crate::{
     context,
     llm::{Backend, Content, Message, Response, Sampling},
     settings::Limits,
-    store::{CompletedReply, Store},
+    store::Store,
     tools::{self, Tool},
 };
 
@@ -74,7 +74,7 @@ impl Budget {
 #[derive(Clone)]
 pub struct CallContext {
     sequence_id: Option<i64>,
-    parent_inference_id: Option<i64>,
+    parent_tool_execution_id: Option<i64>,
     agents: Arc<Mutex<Vec<i64>>>,
 }
 
@@ -82,15 +82,18 @@ impl CallContext {
     pub fn root(sequence_id: Option<i64>) -> Self {
         Self {
             sequence_id,
-            parent_inference_id: None,
+            parent_tool_execution_id: None,
             agents: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    pub fn child(&self, parent_inference_id: i64) -> Self {
+    /// A nested agent call spawned by `parent_tool_execution_id` (design.md's
+    /// `invocation.parent_tool_execution_id`: "Each nested invocation records
+    /// this exact parent execution").
+    pub fn child(&self, parent_tool_execution_id: i64) -> Self {
         Self {
             sequence_id: self.sequence_id,
-            parent_inference_id: Some(parent_inference_id),
+            parent_tool_execution_id: Some(parent_tool_execution_id),
             agents: Arc::clone(&self.agents),
         }
     }
@@ -131,6 +134,76 @@ pub struct Turn<'a> {
     pub model: &'a str,
 }
 
+/// A settled turn's final text reply and the recorded_content reference its
+/// own message already stores - so a caller (e.g. GM narration) can deliver
+/// that exact reference to other recipients instead of re-recording the same
+/// text. Only returned once the loop has actually settled on text, not for
+/// an intermediate tool-calling turn.
+pub struct Settled {
+    pub response: Response,
+    pub output_content_id: i64,
+}
+
+/// RAII guard over one `invocation` row (design.md: "An invocation wrapper
+/// finishes its own outcome on every exit, including schema rejection,
+/// execution error and safety-budget exhaustion"). `finish` records the real
+/// outcome on the ordinary return path; anything still armed on drop (an
+/// early `?` propagation this function did not explicitly finish) is an
+/// unexpected interruption, not a normal outcome, and is recorded as such
+/// rather than left permanently "running".
+struct InvocationGuard<'a> {
+    store: &'a Store,
+    invocation_id: i64,
+    finished: bool,
+}
+
+impl<'a> InvocationGuard<'a> {
+    async fn start(
+        store: &'a Store,
+        sequence_id: Option<i64>,
+        agent_id: i64,
+        parent_tool_execution_id: Option<i64>,
+    ) -> Result<Self> {
+        let invocation_id = store
+            .start_invocation(sequence_id, agent_id, parent_tool_execution_id, None)
+            .await
+            .context("starting agent invocation")?;
+        Ok(Self {
+            store,
+            invocation_id,
+            finished: false,
+        })
+    }
+
+    async fn finish(mut self, outcome: &str) -> Result<()> {
+        self.finished = true;
+        self.store
+            .finish_invocation(self.invocation_id, outcome)
+            .await
+            .context("finishing agent invocation")
+    }
+}
+
+impl Drop for InvocationGuard<'_> {
+    fn drop(&mut self) {
+        // complete_with_call_context's match calls finish() on both the Ok
+        // and Err arms before returning, so reaching drop still armed cannot
+        // happen on any path that exists today. A detached background write
+        // here would not actually be "failing loudly" - it would silently
+        // paper over exactly the bug this exists to catch. If a future edit
+        // adds a return path that skips finish(), this must fail the test/
+        // debug build that exercises it, not quietly self-heal at runtime;
+        // process-restart recovery (interrupt_open_inferences) already
+        // exists as the sanctioned recovery path for a genuine process
+        // death (e.g. a panic), which Drop cannot reliably run for anyway.
+        debug_assert!(
+            self.finished,
+            "invocation {} dropped without an explicit outcome - a return path skipped finish()",
+            self.invocation_id
+        );
+    }
+}
+
 /// Resolve one chat turn, recording every model response and tool result in order.
 pub async fn complete<B: Backend>(
     store: &Store,
@@ -141,11 +214,13 @@ pub async fn complete<B: Backend>(
     on_activity: impl FnMut(String),
 ) -> Result<Response> {
     let call = CallContext::root(None);
-    complete_with_call_context(store, backend, budget, turn, &call, on_token, on_activity).await
+    complete_with_call_context(store, backend, budget, turn, &call, on_token, on_activity)
+        .await
+        .map(|settled| settled.response)
 }
 
 /// Resolve a turn while retaining its external sequence and, for a nested
-/// agent call, the inference that caused it.
+/// agent call, the tool_execution that caused it.
 pub async fn complete_with_call_context<B: Backend>(
     store: &Store,
     backend: &B,
@@ -154,100 +229,157 @@ pub async fn complete_with_call_context<B: Backend>(
     call: &CallContext,
     mut on_token: impl FnMut(&str) + Send,
     mut on_activity: impl FnMut(String),
-) -> Result<Response> {
+) -> Result<Settled> {
     let _active = call.enter(turn.agent_id)?;
-    backend
-        .before_agent(store, turn.agent_id)
-        .await
-        .context("waiting for earlier deferred work for this agent")?;
-    let definitions = tools::definitions(turn.tools).context("validating declared tool schemas")?;
-    let mut chat_spent = 0;
-    loop {
-        budget
-            .spend(chat_spent)
-            .context("resolving this chat turn")?;
-        chat_spent += 1;
-        let completion = context::complete_recorded(
-            store,
-            backend,
-            context::RecordedCompletion {
-                agent_id: turn.agent_id,
-                sequence_id: call.sequence_id,
-                parent_inference_id: call.parent_inference_id,
-                static_messages: turn.static_messages,
-                tools: &definitions,
-                sampling: turn.sampling.clone(),
-                model: turn.model,
-            },
-            &mut on_token,
-        )
-        .await
-        .context("running recorded agent inference")?;
-        let response = completion.response;
-        let Content::ToolCalls(calls) = &response.content else {
-            // The completed model request reports its exact template-expanded
-            // input and generated output. That is the next normal context, so
-            // this happy path deliberately does not tokenize it again: doing
-            // so would be pure overhead. Capacity recovery instead retries
-            // real summary inferences with progressively smaller prefixes.
-            let next_input_tokens = response
-                .usage
-                .input_tokens
-                .checked_add(response.usage.output_tokens)
-                .context("completed inference input plus output token count overflowed")?;
-            let static_segments = context::static_segments(&completion.segments);
-            store
-                .append_reply_and_enqueue_compaction(
-                    turn.agent_id,
-                    CompletedReply {
-                        message: &Message::assistant(
-                            response.content.clone(),
-                            response.reasoning.clone(),
-                        ),
-                        next_input_tokens,
-                        compact_before_next_input_tokens: budget
-                            .limits()
-                            .compact_before_next_input_tokens,
-                        sampling: &turn.sampling,
-                        model: turn.model,
-                        static_segments: &static_segments,
-                    },
-                )
-                .await
-                .context("storing final agent response and any due compaction")?;
-            backend
-                .after_agent(store, turn.agent_id)
-                .await
-                .context("admitting any due deferred compaction")?;
-            return Ok(response);
-        };
-        store
-            .append_message(
-                turn.agent_id,
-                &Message::assistant(response.content.clone(), response.reasoning.clone()),
+    let invocation = InvocationGuard::start(
+        store,
+        call.sequence_id,
+        turn.agent_id,
+        call.parent_tool_execution_id,
+    )
+    .await?;
+    let invocation_id = invocation.invocation_id;
+    let result: Result<Settled> = async {
+        backend
+            .before_agent(store, turn.agent_id)
+            .await
+            .context("waiting for earlier deferred work for this agent")?;
+        let definitions =
+            tools::definitions(turn.tools).context("validating declared tool schemas")?;
+        let mut chat_spent = 0;
+        loop {
+            budget
+                .spend(chat_spent)
+                .context("resolving this chat turn")?;
+            chat_spent += 1;
+            let completion = context::complete_recorded(
+                store,
+                backend,
+                context::RecordedCompletion {
+                    agent_id: turn.agent_id,
+                    sequence_id: call.sequence_id,
+                    invocation_id,
+                    static_messages: turn.static_messages,
+                    tools: &definitions,
+                    sampling: turn.sampling.clone(),
+                    model: turn.model,
+                    compact_before_next_input_tokens: budget.limits().compact_before_next_input_tokens,
+                },
+                &mut on_token,
             )
             .await
-            .context("storing agent response")?;
-        for call in calls {
-            on_activity(format!("tool call {}: {}", call.name, call.arguments));
-            let (result, after_result) = tools::execute(turn.tools, call, completion.inference_id)
-                .await
-                .with_context(|| format!("executing tool call {}", call.id))?
-                .into_parts();
-            let activity = format!("tool result {}: {result}", call.id);
-            store
-                .append_message(
-                    turn.agent_id,
-                    &Message::tool_result(call.id.clone(), result),
-                )
-                .await
-                .with_context(|| format!("storing result for tool call {}", call.id))?;
-            if let Some(after_result) = after_result {
-                after_result
+            .context("running recorded agent inference")?;
+            let response = completion.response;
+            // finish_chat_inference already wrote this reply as the agent's
+            // own message (and, if it settled, any due compaction obligation)
+            // atomic with the inference completion. Tool calls still need
+            // their results executed and appended below; a settled text
+            // reply is done.
+            let Content::ToolCalls(calls) = &response.content else {
+                backend
+                    .after_agent(store, turn.agent_id)
                     .await
-                    .with_context(|| format!("delivering result of tool call {}", call.id))?;
+                    .context("admitting any due deferred compaction")?;
+                let output_content_id = completion
+                    .output_content_id
+                    .context("a settled reply always has an output content reference")?;
+                return Ok(Settled { response, output_content_id });
+            };
+            // Create every call's tool_execution row up front, keyed by its
+            // output ordinal, before any of them execute (design.md: "Create
+            // rows for every call before executing the batch") - so sibling
+            // and not-yet-reached calls are always visible even if an
+            // earlier call in the batch fails outright.
+            let executions = store
+                .create_tool_executions(completion.inference_id, calls.len())
+                .await
+                .context("creating tool execution records")?;
+            // Each call's execution, result recording and after-result
+            // delivery run as one awaited block so a failure anywhere in it -
+            // not only in execution itself - is caught by the same outer
+            // match, rather than an after-result `?` bypassing sibling
+            // finalization below (design.md: "One awaited batch boundary
+            // covers tool execution, result persistence and result
+            // delivery"). `committed` distinguishes the two failure shapes
+            // the outer match must tell apart: before a result commits, the
+            // call itself is recorded failed; after, its result and any
+            // completed mutation stand, and only the delivery failure is
+            // reported - never re-recorded as this call's own failure, never
+            // re-run.
+            let mut batch_error = None;
+            for (tool_call, tool_execution_id) in calls.iter().zip(&executions) {
+                on_activity(format!("tool call {}: {}", tool_call.name, tool_call.arguments));
+                let mut committed = false;
+                let outcome: Result<()> = async {
+                    let outcome = tools::execute(turn.tools, tool_call, *tool_execution_id)
+                        .await
+                        .with_context(|| format!("executing tool call {}", tool_call.id))?;
+                    let status = match &outcome {
+                        tools::ToolOutcome::Completed(_) | tools::ToolOutcome::CompletedAfter { .. } => {
+                            "completed"
+                        }
+                        tools::ToolOutcome::Rejected(_) => "rejected",
+                    };
+                    let (result, after_result) = outcome.into_parts();
+                    store
+                        .complete_tool_result(
+                            turn.agent_id,
+                            completion.inference_id,
+                            *tool_execution_id,
+                            status,
+                            &Message::tool_result(tool_call.id.clone(), result.clone()),
+                        )
+                        .await
+                        .with_context(|| format!("storing result for tool call {}", tool_call.id))?;
+                    committed = true;
+                    let activity = format!("tool result {}: {result}", tool_call.id);
+                    if let Some(after_result) = after_result {
+                        after_result
+                            .await
+                            .with_context(|| format!("delivering result of tool call {}", tool_call.id))?;
+                    }
+                    on_activity(activity);
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = outcome {
+                    if !committed {
+                        store
+                            .complete_tool_execution(*tool_execution_id, "failed", None, Some(&format!("{error:#}")))
+                            .await
+                            .with_context(|| format!("recording failed tool execution for call {}", tool_call.id))?;
+                    }
+                    batch_error = Some(error);
+                    break;
+                }
             }
-            on_activity(activity);
+            if let Some(error) = batch_error {
+                store
+                    .mark_unexecuted_tool_executions(completion.inference_id)
+                    .await
+                    .context("marking unreached tool executions after a batch abort")?;
+                return Err(error);
+            }
+        }
+    }
+    .await;
+    match result {
+        Ok(settled) => {
+            invocation.finish("settled").await?;
+            Ok(settled)
+        }
+        Err(error) => {
+            // The turn's own error is the one the caller needs; if finishing
+            // the invocation row also fails (e.g. an unexpected double-finish
+            // race), that's a secondary bookkeeping problem and must not
+            // replace or hide the real cause of this turn's failure.
+            if let Err(finish_error) = invocation.finish("error").await {
+                tracing::error!(
+                    error = %format!("{finish_error:#}"),
+                    "failed to finish invocation after a turn error"
+                );
+            }
+            Err(error)
         }
     }
 }
@@ -257,7 +389,7 @@ mod tests {
     use std::{collections::VecDeque, sync::Mutex};
 
     use super::*;
-    use crate::llm::{MessageContent, Role, ToolCall, Usage};
+    use crate::llm::{MessageContent, Role, ToolCall, ToolDefinition, Usage};
     use crate::settings::Limits;
 
     struct ScriptedBackend {
@@ -333,7 +465,7 @@ mod tests {
     }
 
     async fn history(store: &Store, agent: i64) -> Vec<Message> {
-        let segments = store.history_segments(agent).await.unwrap();
+        let segments = store.live_segments(agent).await.unwrap();
         store
             .request_for_segments(
                 agent,
@@ -409,6 +541,34 @@ mod tests {
         assert!(
             matches!(&entries[2].content, MessageContent::ToolResult { tool_call_id, content }
                 if tool_call_id == "echo-1" && content == "Rook")
+        );
+
+        // Provenance: the assistant call message and its result both link to the
+        // first inference; the result names the exact tool_execution it
+        // answers. The user message that opened the turn links to no inference.
+        let produced = store.inference_message_ids(1).await.unwrap();
+        assert!(
+            matches!(
+                produced.as_slice(),
+                [
+                    crate::store::InferenceMessage { role: Role::Assistant, answers_tool_execution_id: None, .. },
+                    crate::store::InferenceMessage { role: Role::Tool, answers_tool_execution_id: Some(_), .. },
+                ]
+            ),
+            "inference 1 produced the tool-call message and its result, keyed to its tool_execution: {produced:?}"
+        );
+        let second = store.inference_message_ids(2).await.unwrap();
+        assert!(
+            matches!(
+                second.as_slice(),
+                [crate::store::InferenceMessage { role: Role::Assistant, answers_tool_execution_id: None, .. }]
+            ),
+            "the final inference produced only its assistant reply: {second:?}"
+        );
+        assert_eq!(
+            store.message_source_inference_for_test(agent_id, 0).await,
+            None,
+            "player input is attributed to no inference"
         );
     }
 
@@ -590,6 +750,78 @@ mod tests {
         assert!(content.contains("Mara"), "got {content}");
     }
 
+    /// A delivery failure after a call's result already committed (design.md:
+    /// "One awaited batch boundary covers tool execution, result persistence
+    /// and result delivery") must not re-record that call as failed or leave
+    /// its result unset - only the never-reached sibling after it is marked
+    /// unexecuted, and the batch error surfaces as the turn's failure.
+    #[tokio::test]
+    async fn a_delivery_failure_after_commit_does_not_undo_its_own_result_but_stops_the_batch() {
+        let (store, _db, agent_id) = test_store().await;
+        let delivers_then_fails = Tool::new(
+            ToolDefinition {
+                name: "delivers_then_fails".to_string(),
+                description: "Completes its result, then fails delivering it.".to_string(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            |_context| {
+                Box::pin(async move {
+                    Ok(tools::ToolOutcome::CompletedAfter {
+                        content: "delivered".to_string(),
+                        after_result: Box::pin(async move {
+                            anyhow::bail!("delivery channel closed")
+                        }),
+                    })
+                }) as tools::ToolFuture
+            },
+        );
+        let backend = ScriptedBackend::new([response(
+            Content::ToolCalls(vec![
+                ToolCall {
+                    id: "first-call".to_string(),
+                    name: "delivers_then_fails".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                ToolCall {
+                    id: "second-call".to_string(),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("never reached"),
+                },
+            ]),
+            "",
+        )]);
+        let error = complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(agent_id, &[delivers_then_fails, tools::test_echo()]),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .expect_err("a delivery failure must surface as the turn's own error");
+        assert!(
+            format!("{error:#}").contains("delivery channel closed"),
+            "{error:#}"
+        );
+        let (first_status, second_status): (String, String) = sqlx::query_as(
+            "SELECT \
+                (SELECT status FROM tool_execution WHERE ordinal = 0), \
+                (SELECT status FROM tool_execution WHERE ordinal = 1)",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            first_status, "completed",
+            "the first call's own result committed before delivery failed and must stand"
+        );
+        assert_eq!(
+            second_status, "unexecuted",
+            "the never-reached second call must be marked unexecuted, not left running"
+        );
+    }
+
     /// A model that keeps calling a tool must be stopped by the budget rather
     /// than looping forever.
     #[tokio::test]
@@ -698,5 +930,20 @@ mod tests {
         call.child(99)
             .enter(4)
             .expect("the agent is callable again after its prior turn ends");
+    }
+
+    /// Every real exit path (complete_with_call_context's match) explicitly
+    /// finishes the guard before it drops. If a future edit adds a return
+    /// path that skips that, this must fail the build/test that exercises
+    /// it rather than silently self-heal at runtime - see InvocationGuard's
+    /// Drop impl.
+    #[tokio::test]
+    #[should_panic(expected = "dropped without an explicit outcome")]
+    async fn invocation_guard_panics_in_debug_if_dropped_unfinished() {
+        let (store, _db, agent_id) = test_store().await;
+        let guard = InvocationGuard::start(&store, None, agent_id, None)
+            .await
+            .unwrap();
+        drop(guard);
     }
 }

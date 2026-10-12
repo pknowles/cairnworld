@@ -206,3 +206,97 @@ An imported or newly joined Adventurer is blank. The player agent initiates the
 ordinary chat-based creation conversation and, when appropriate, calls the
 declared creation roll tools. Rust performs and persists each roll; the player
 does not issue a special character-creation command.
+
+## 2026-09-07: Developer Mode priority and exact inference inspection
+
+> invitation links are for only invitation. once a player is in they're in and would need to be explicitly removed, not by removing the invitation link.
+
+Invitation deletion and membership removal are independent operations. This
+clarification did not specify post-removal link reuse or slot consumption.
+The ban/reactivation decision below replaces that open question.
+
+> the thing I really wanted to get to was developer mode. I need this asap so I can actually debug and play test
+
+> would you be able to restructure the plans so they match what I wanted to build, completed items are archived and the order is easily followable without fabricated intermediate stages?
+
+> Then begin work on developer mode - start by fleshing out the design. I'd like to be able to see and navigate the entire turn stack, click on inference items and see the entire prompt. We need testing to make sure what I end up being shown is identical to what was given to the agent (even if when I actuall view it it's reconstructed from database messages for efficiency)
+
+Design interpretation: keep immutable inference recipes, prove reconstruction
+against input captured on the actual inference path, and verify that the browser
+exposes that same content. Include backend formatting evidence so application
+messages are not mistaken for the final template-expanded model prompt.
+Developer Mode is the next complete implementation feature; unrelated remaining
+World detail declarations must not delay it.
+
+
+## 2026-09-07: Bans, recording terminology and commit scope
+
+> Lets call "removing" more just banning/disabling membership. We can hide the player from the list. They can't join until they're un-banned. We can have a discrete Ban list where world owners can reactivate banned/disabled players. This avoids the issue of a removed player immediately using an existing join link to re-join and the possibility of getting a brand new character generated.
+
+This supersedes the earlier re-entry question and the declaration's return with
+another link. The owner reactivates the existing membership and its characters;
+an invitation cannot override a ban. The user must update user_declarations.md.
+
+> sometimes bigger chunks make for more efficient/faster development because you skip having to make intermediate state work. Your call as you're the one that's going to be doing it either way.
+
+> It needs better naming so I can understand it just by seeing the name
+
+Actual model prompt recording names observation of the formatted input consumed
+by the model. Input checksums are verification details, not separate declared
+features; reconstruction itself uses the recorded messages and other inputs.
+
+
+## 2026-09-07: Shared historical reconstruction
+
+> can you confirm that this schema/recording extension does not have to capture redundant/additional/duplicate data? this is why I keep discussing reconstruction. I'm hoping we can 100% accurately rebuild ALL OF the chat history at any point in time, compaction points, prompt/inference input and output (that would then be appended to chats) etc
+
+> Can you make sure the design makes my reconstruction clear and directly tied to both viewing the chat history and dev mode to view everything
+
+Design decision: all history and inspection views resolve one authoritative
+copy of original content. Inference outputs become chat entries, summaries or
+narration through references, not copied payloads. Compaction preserves original
+messages, earlier summaries, covered ranges and activation points. Inference
+recipes retain exact historical inputs and formatting references; checksums
+verify reconstruction but cannot replace the independent equality tests.
+
+
+## 2026-09-09: Developer mode is an owner toggle, not one-way
+
+> I removed the "cannot be disabled" part as I think players may need this in
+> order to fix issues in their games. safer to allow
+
+> it's fine if this is a toggle too
+
+user_declarations.md was updated: developer mode is enabled and disabled by the
+world owner, in either direction. The earlier "one-way operation" language is
+removed (see the note the user added to user_declarations.md). Recording is
+unaffected - it runs for every game regardless of the toggle; the toggle only
+changes who can see the data. `world.developer_mode` is a plain boolean column.
+
+## 2026-09-14: Plans specify implementation, not future design work
+
+> The plan should concretely describe an implementation and ordering thereof
+> for the overal features I need and each item must be traceable to user
+> declarations.
+
+> if you disagree with anything or have better alternative ideas, please
+> suggest them/discuss with me about whether I should change or add them to
+> the user declarations
+
+Design owns the chosen data relationships, algorithms and behavior. Plans name
+concrete code/data changes in dependency order, with declaration links and
+verification. A step such as “specify the schema” is unfinished design, not an
+implementation plan. Product alternatives remain explicit proposals until the
+user decides; agents never edit user_declarations.md.
+
+## 2026-09-18: Narration recipient policy accepted
+
+design.md's Product decisions proposal - NPCs and connected PCs in the
+interacting group receive narration; offline PCs do not - was accepted to
+unblock Developer Mode plan D2 (presence) and D3/D4 (group narration/recipient
+routing). This resolves the World detail page's open TODO ("Should GM
+narrations be added to all PC chats even when not online? For now lets not,
+but this needs testing.") as: no. The user should update
+user_declarations.md's World detail page section to remove that TODO and state
+the accepted policy directly, since design proposals do not themselves amend
+declarations.

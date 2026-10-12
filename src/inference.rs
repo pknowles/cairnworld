@@ -93,8 +93,10 @@ where
     }
 
     /// Resume stored work after startup. Each job remains in SQLite until its
-    /// summary and notice have committed, so this is safe to call repeatedly.
+    /// summary and notice have committed. Incomplete inferences are marked
+    /// interrupted before execution resumes.
     pub async fn resume(&self, store: &Store) -> Result<()> {
+        store.interrupt_open_inferences().await?;
         for job in store.pending_compactions().await? {
             self.admit_deferred(store.clone(), job.agent_id).await;
         }
@@ -255,6 +257,20 @@ where
         Ok(())
     }
 
+    async fn complete_with_recording(
+        &self,
+        request: Request,
+        on_token: impl FnMut(&str) + Send,
+        store: &Store,
+        inference_id: i64,
+    ) -> Result<Response> {
+        let _admission = self.scheduler.admit(self.priority).await;
+        self.scheduler
+            .backend
+            .complete_with_recording(request, on_token, store, inference_id)
+            .await
+    }
+
     async fn complete(
         &self,
         request: Request,
@@ -269,8 +285,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        llm::{Message, Role, Sampling, Usage},
-        store::CompletedReply,
+        llm::{Content, Message, Role, Sampling, Usage},
+        store::{CompactionPolicy, InferenceInput, InferenceOutcome},
     };
 
     struct TestBackend;
@@ -372,12 +388,44 @@ mod tests {
             .append_message(agent, &Message::text(Role::User, "older history"))
             .await
             .unwrap();
+        let request = Request {
+            messages: vec![Message::text(Role::User, "older history")],
+            tools: Vec::new(),
+            sampling: Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        };
+        let invocation_id = store
+            .start_invocation(None, agent, None, None)
+            .await
+            .unwrap();
+        let inference_id = store
+            .start_inference(InferenceInput {
+                agent_id: agent,
+                sequence_id: None,
+                invocation_id,
+                segments: &[],
+                request: &request,
+                model: "test",
+            })
+            .await
+            .unwrap();
         store
-            .append_reply_and_enqueue_compaction(
+            .finish_chat_inference(
+                inference_id,
                 agent,
-                CompletedReply {
-                    message: &Message::text(Role::Assistant, "reply"),
-                    next_input_tokens: 2,
+                InferenceOutcome::Response(Response {
+                    content: Content::Text("reply".into()),
+                    reasoning: String::new(),
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
+                }),
+                1,
+                CompactionPolicy {
+                    sequence_id: None,
                     compact_before_next_input_tokens: 2,
                     sampling: &Sampling {
                         temperature: 0.0,

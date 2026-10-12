@@ -437,22 +437,47 @@ async fn run_replay(
         "Recorded request:\n{}",
         serde_json::to_string_pretty(&recorded.request)?
     );
+    if let Some(prompt) = &recorded.model_prompt {
+        println!("Actual model prompt:\n{prompt}");
+    }
     match &recorded.outcome {
         RecordedOutcome::Response(response) => println!(
             "Recorded output:\n{}",
             serde_json::to_string_pretty(response)?
         ),
         RecordedOutcome::Error(error) => println!("Recorded error:\n{error}"),
+        RecordedOutcome::Running => println!("Inference has not finished."),
     }
     println!("Replayed output:");
     let backend = backend(&model, limits, allow_cpu).await?;
-    let response = context::complete_recipe(
+    // Detached replay records only the outcome, with no message or
+    // compaction side effect (design.md: "Detached replay writes only the
+    // outcome"), so it runs the shared recipe step and finishes it through
+    // the plain outcome-only `finish_inference` rather than
+    // `finish_chat_inference`. It still needs its own throwaway
+    // sequence/invocation to satisfy `inference.invocation_id` - every
+    // inference belongs to one - but this invocation is never finished as
+    // part of a live turn; it exists only to give the replayed inference a
+    // valid parent.
+    let world_id = store
+        .world_id_for_agent(recorded.agent_id)
+        .await
+        .context("resolving replayed inference's world")?;
+    let sequence = store
+        .begin_sequence(world_id, "detached replay")
+        .await
+        .context("starting detached replay sequence")?;
+    let invocation_id = store
+        .start_invocation(Some(sequence.id), recorded.agent_id, None, None)
+        .await
+        .context("starting detached replay invocation")?;
+    let run = context::run_recipe(
         &store,
         &backend,
         context::RecipeCompletion {
             agent_id: recorded.agent_id,
-            sequence_id: None,
-            parent_inference_id: None,
+            sequence_id: Some(sequence.id),
+            invocation_id,
             segments: &recorded.segments,
             sampling: recorded.request.sampling,
             model: &model.path,
@@ -464,7 +489,23 @@ async fn run_replay(
     )
     .await
     .context("replaying recorded inference")?;
-    let response = response.response;
+    store
+        .finish_inference(run.inference_id, run.outcome, run.duration_ms)
+        .await
+        .context("recording replayed inference outcome")?;
+    let outcome = if run.result.is_ok() { "settled" } else { "error" };
+    store
+        .finish_invocation(invocation_id, outcome)
+        .await
+        .context("finishing detached replay invocation")?;
+    store
+        .finish_sequence(
+            sequence.id,
+            run.result.as_ref().err().map(|error| format!("{error:#}")).as_deref(),
+        )
+        .await
+        .context("finishing detached replay sequence")?;
+    let response = run.result.context("running inference")?;
     println!(
         "\nReplay usage: {} input tokens, {} output tokens",
         response.usage.input_tokens, response.usage.output_tokens

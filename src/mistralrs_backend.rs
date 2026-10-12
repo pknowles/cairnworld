@@ -145,7 +145,10 @@ fn log_gpu_memory(phase: &str) -> Result<usize> {
     Ok(total_mib.saturating_sub(available_mib))
 }
 
-fn request_builder(request: &Request, max_output_tokens: usize) -> Result<RequestBuilder> {
+pub(crate) fn request_builder(
+    request: &Request,
+    max_output_tokens: usize,
+) -> Result<RequestBuilder> {
     let mut request_builder = RequestBuilder::new();
     for message in &request.messages {
         match &message.content {
@@ -212,20 +215,70 @@ impl Backend for MistralRsBackend {
     async fn complete(
         &self,
         request: Request,
+        on_token: impl FnMut(&str) + Send,
+    ) -> Result<Response> {
+        let builder = request_builder(&request, self.max_output_tokens)?;
+        self.generate(builder, on_token).await
+    }
+
+    async fn complete_with_recording(
+        &self,
+        request: Request,
+        mut on_token: impl FnMut(&str) + Send,
+        store: &crate::store::Store,
+        inference_id: i64,
+    ) -> Result<Response> {
+        let max_output_tokens = self.max_output_tokens;
+        let builder = request_builder(&request, max_output_tokens)?.with_prompt_observer({
+            let store = store.clone();
+            std::sync::Arc::new(move |prompt, tokens, format| {
+                let store = store.clone();
+                let evidence = format
+                    .context("model did not provide reconstructable prompt formatting")
+                    .and_then(|format| {
+                        crate::store::PromptEvidence::new(format, prompt, tokens, max_output_tokens)
+                    });
+                Box::pin(async move { store.record_prompt(inference_id, evidence?).await })
+            })
+        });
+        // Resolved once before streaming starts, not per token: Developer
+        // Mode's live token broadcast otherwise has no cheap way to know
+        // which world's viewers to reach from inside this streaming loop.
+        // Live broadcast is not essential to a correct inference, so a
+        // lookup failure here is logged and degrades to no live tokens for
+        // this one inference rather than failing the inference itself.
+        let dev_world_id = match store.world_id_for_inference(inference_id).await {
+            Ok(world_id) => Some(world_id),
+            Err(error) => {
+                tracing::warn!(inference_id, error = %format!("{error:#}"), "could not resolve world for live token broadcast");
+                None
+            }
+        };
+        let store = store.clone();
+        let mut emitted_bytes = 0usize;
+        self.generate(builder, move |token| {
+            if let Some(world_id) = dev_world_id {
+                store.publish_token(world_id, inference_id, emitted_bytes, token);
+            }
+            emitted_bytes += token.len();
+            on_token(token);
+        })
+        .await
+    }
+}
+
+impl MistralRsBackend {
+    async fn generate(
+        &self,
+        request_builder: RequestBuilder,
         mut on_token: impl FnMut(&str) + Send,
     ) -> Result<Response> {
         let started = Instant::now();
         tracing::info!(
-            messages = request.messages.len(),
-            tools = request.tools.len(),
             max_context_tokens = self.max_context_tokens,
             max_output_tokens = self.max_output_tokens,
-            temperature = request.sampling.temperature,
-            thinking = request.sampling.enable_thinking,
             "starting model inference"
         );
-        let request_builder = request_builder(&request, self.max_output_tokens)?;
-
         let mut stream = self
             .model
             .stream_chat_request(request_builder)
@@ -464,6 +517,138 @@ mod tests {
             .model(None)
             .expect("default.toml should configure the device-test model");
         (model, settings.limits)
+    }
+
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn generation_prompt_observation_matches_request_reconstruction() {
+        use std::sync::{Arc, Mutex};
+        show_inference_lifecycle();
+        let (model, limits) = device_test_model("dev-qwen35");
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            model.source_model.as_deref(),
+            limits,
+            false,
+        )
+        .await
+        .expect("model should load");
+        let request = Request {
+            messages: vec![
+                Message::text(Role::System, "Reply briefly."),
+                Message::text(
+                    Role::Narration,
+                    "Rain falls. <gate> & café\nThe mill creaks.",
+                ),
+                Message::text(Role::User, "Say hello."),
+            ],
+            tools: vec![ToolDefinition {
+                name: "look".into(),
+                description: "Inspect the scene.".into(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            sampling: Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        };
+        let database = crate::store::TestDatabase::new("generation-evidence");
+        let store = crate::store::Store::open(database.path()).await.unwrap();
+        let world = store.create_world("prompt evidence").await.unwrap();
+        let agent = store.create_agent(world).await.unwrap();
+        let segments = crate::context::segments(&store, agent, &request.messages, &request.tools)
+            .await
+            .unwrap();
+        let invocation_id = store
+            .start_invocation(None, agent, None, None)
+            .await
+            .unwrap();
+        let inference_id = store
+            .start_inference(crate::store::InferenceInput {
+                agent_id: agent,
+                sequence_id: None,
+                invocation_id,
+                segments: &segments,
+                request: &request,
+                model: "dev-qwen35",
+            })
+            .await
+            .unwrap();
+        let recording_store = store.clone();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let capture = Arc::clone(&observed);
+        let recorded_request = serde_json::to_vec(&request).unwrap();
+        let builder = request_builder(&request, 16)
+            .unwrap()
+            .with_prompt_observer(Arc::new(move |prompt, tokens, format| {
+                use mistralrs::RequestLike;
+                let format = format.expect("text chat format");
+                let recorded_format = serde_json::to_vec(format).unwrap();
+                let restored_format: mistralrs::ChatTemplateFormat =
+                    serde_json::from_slice(&recorded_format).unwrap();
+                let restored_request: Request = serde_json::from_slice(&recorded_request).unwrap();
+                let mut restored = request_builder(&restored_request, 16).unwrap();
+                let tools = restored.take_tools().expect("tools supplied").0;
+                let mistralrs::RequestMessage::Chat { messages, .. } = restored.take_messages()
+                else {
+                    panic!("text request expected");
+                };
+                assert_eq!(restored_format.render(messages, tools).unwrap(), prompt);
+                capture.lock().unwrap().push((
+                    prompt.to_owned(),
+                    tokens.to_vec(),
+                    serde_json::to_value(format).unwrap(),
+                ));
+                let evidence =
+                    crate::store::PromptEvidence::new(format, prompt, tokens, 16).unwrap();
+                let store = recording_store.clone();
+                Box::pin(async move { store.record_prompt(inference_id, evidence).await })
+            }));
+        let mut stream = backend.model.stream_chat_request(builder).await.unwrap();
+        loop {
+            match stream.next().await.expect("generation must complete") {
+                MrResponse::Chunk(chunk) => {
+                    if chunk
+                        .choices
+                        .iter()
+                        .any(|choice| choice.finish_reason.is_some())
+                    {
+                        break;
+                    }
+                }
+                other => panic!(
+                    "unexpected inference response: {}",
+                    match other {
+                        MrResponse::InternalError(error) | MrResponse::ValidationError(error) =>
+                            error.to_string(),
+                        _ => "non-chat response".into(),
+                    }
+                ),
+            }
+        }
+        let reconstructed_tokens = backend
+            .model
+            .tokenize_chat_request(request_builder(&request, 16).unwrap())
+            .await
+            .unwrap();
+        let reconstructed = store.reconstruct_inference(inference_id).await.unwrap();
+        assert_eq!(reconstructed.request, request);
+        assert_eq!(
+            reconstructed.model_prompt.as_deref(),
+            Some(observed.lock().unwrap()[0].0.as_str())
+        );
+        let observations = observed.lock().unwrap();
+        assert_eq!(
+            observations.len(),
+            1,
+            "observe the normal tokenization exactly once"
+        );
+        let (prompt, tokens, format) = &observations[0];
+        assert!(format["rendered_at"].is_string());
+        assert_eq!(tokens, &reconstructed_tokens);
+        assert!(prompt.contains("GM narration:\nRain falls. <gate> & café\nThe mill creaks."));
+        assert!(prompt.contains("look"));
     }
 
     #[tokio::test]

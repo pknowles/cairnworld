@@ -28,6 +28,9 @@ on many other projects and need this brief reintroduction.
 
 # Worktree and git sanitation
 
+Stay in your assigned directory. Creating new branches or worktrees is expressly
+forbidden without explicit user requests. Ask if you think you need one.
+
 Make a note of the git repository state before beginning any work. Do not let
 uncommitted work become tangled. Commits must self-contained and individually
 contribute features and fixes. If incomplete work exists, you must stop and deal
@@ -48,6 +51,9 @@ not checked in.
 
 Use integrated edit/search tools rather than grep/sed when at all possible.
 
+Do not create files in /tmp - this gets cleared when the machine is rebooted and
+that can happen between your turns.
+
 # Post-feature and pre-commit checklist
 
 The following items must have been completed after implementing a feature and
@@ -58,13 +64,17 @@ before making a commit. This is a hard gate and MUST be followed:
 3. Prompt/context/model-facing changes have been exercised through the real chat
    path, including presenting edge case chats and evaluating related use-cases
 4. Self-review performed:
-   - Did you "fix" any guesses? I.e. did you make changes without verifying the
-     fix was the one required and that it actually fixed the issue? If you did,
-     it's likely the "fix" needs reverting as it was made on false assumptions.
    - Did you do everything agreed upon?
    - Anything missed or shortcuts taken?
    - Did you follow the rules here and in coding_standards.md and
      prompt_standards.md?
+   - Was what you did the simplest way to achieve the desired goals,
+     requirements, use cases and edge cases, but not simpler. I.e. a robust and
+     standard approach with minimal lines of code and files touched, that is
+     maintainable and not over-engineered?
+   - Did you "fix" any guesses? I.e. did you make changes without verifying the
+     fix was the one required and that it actually fixed the issue? If you did,
+     it's likely the "fix" needs reverting as it was made on false assumptions.
    - If writing a plan, make sure that it references this checklist and our
      standards docs.
    - If designing/planning, verify the implementation matches a direct user
@@ -282,10 +292,10 @@ moved to the archive.
 
 Sometimes the design changes or agents make mistakes with the implementation
 order. Any follow-up items that are strictly blocked and cannot be done at the
-time may be extracted into a new plan file and added as a future todo.md item,
-ordered appropriately. This is NOT an excuse to just do planned work later. Any
-delaying work comes with a maintenance cost and requires explicit rationale and
-user signoff.
+time may be extracted into a new plan file and consolidated into a future
+todo.md item (not an arbitrary TBD), ordered appropriately. This is NOT an
+excuse to just do planned work later. Any delaying work comes with a maintenance
+cost and requires explicit rationale and user signoff.
 
 ## implementation_reference.md
 

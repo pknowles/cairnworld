@@ -1,5 +1,12 @@
 # World detail
 
+Superseded 2026-09-07: the character-ownership increment already delivered this
+tree and its entry controls. Source review and the focused rendering, character
+ownership, and invitation tests passed on 2026-09-07. No new browser validation
+was performed in this review; this is an archived duplicate, not a claim that
+all World detail declarations are implemented. Remaining behavior is named in
+the active roadmap.
+
 ## Goal
 
 Render the declared membership graph as a player/character tree and put each
