@@ -1,5 +1,9 @@
 # Core Standards
 
+Pre-existing issues rationalized as "conventions" are NO excuse for crappy code.
+If you notice anything divergent from the rules, fix it even if it's not
+directly part of what you're working on.
+
 Fail fast and loudly, with accurate error messages. Ideally no debugging is ever
 needed - when something goes wrong we should simply know exactly what went wrong
 and why. Always propagate errors. Only ever add to the error context. Never
@@ -33,7 +37,8 @@ helping expose. This implies:
 Less is more. The right solution is straightforward and simple, implicitly
 handles all use cases and edge cases. Keep file sizes small and the number of
 files small. Every line of code added (i.e. our code) is a chance for a bug and
-incurs maintenance cost and tech debt. Make it count.
+incurs maintenance cost and tech debt. Make it count. Over-engineered bloat must
+be reported to the user for scheduled removal.
 
 Prefer canonical off-the-shelf libraries that have been proven and are well
 tested; avoid hand rolling things even if they sound simple. Pick the option

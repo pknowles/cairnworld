@@ -244,12 +244,14 @@ the Storyteller, GM, and NPC chats.
 - `world_owner(world_id, user_id)` names the single creator/owner without
   making a sandbox chat world a partial user world. `world_member(world_id,
   user_id, access)` records one user's current access to one world; removal
-  changes `access` but retains the association and characters exactly as
-  declared. `member_player_agent(member_id, agent_id)` gives that membership
-  its singular player chat history.
+  changes `access` but retains the association and every character exactly as
+  declared. A membership owns zero or more PCs. Each `player_character`
+  relationship owns one PC and that PC's one player-agent history, so a
+  replacement or additional character never shares the dead or retired
+  character's history.
 - Every `agent(id, world_id)` is only a chat history. Its gameplay
   purpose is determined by a relationship that owns it: `world_storyteller`,
-  `member_player_agent`, `location_gm`, or `npc_agent`. A PC belongs to a
+  `player_character`, `location_gm`, or `npc_agent`. A PC belongs to a
   membership through `player_character`; an NPC is played through `npc_agent`.
   Locations contain game state and do not own agents beyond their
   location-scoped GM.

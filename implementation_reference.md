@@ -147,10 +147,15 @@ when things were built.
 - `src/web.rs` - `cairnworld serve`'s Axum routes. Google OIDC discovers and
   exchanges through `openidconnect`; SQLite-backed `tower-sessions` holds the
   verified account id. The landing page updates only a non-unique display
-  name; identity remains the verified email. Landing, world, invitation, and membership routes all
-  resolve access through `Store` rather than trusting a client user or agent
-  id. The authenticated `/world/:id/play` route loads that membership's
-  durable player-visible history and its final durable message id, while its
+  name; identity remains the verified email. The world detail page already
+  creates, limits, lists, revokes, and accepts invitation links, and lets an
+  owner remove an active member while retaining its durable association. It
+  renders every retained membership with its current character nested below it;
+  each active viewer receives the entry link for their own character. Landing,
+  world, invitation, and membership routes all resolve access through `Store`
+  rather than trusting a client user or agent id. The authenticated
+  `/world/:id/play` route loads that membership's durable player-visible
+  history and its final durable message id, while its
   websocket passes the same resolved membership and snapshot cursor into `Game`
   for each player message. After opening work settles, the socket sends every
   later durable entry before enabling submission, so SSR and a delayed socket

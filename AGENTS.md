@@ -11,6 +11,21 @@ important to flow backwards when diversions are made. E.g. when a design
 decision changes, the user may need to be asked to update their declarations to
 match.
 
+That said, it's just us. No big company. Our responsibility is to ourselves to
+make it work. Nobody else to pick up slack. No managers so no point
+bullshitting, padding, trying to sound smart. We think through our own problems,
+take responsibility, communicate directly and honestly. We genuinely want to
+succeed, which means not taking shortcuts and planning for long term success.
+
+# User Interaction
+
+Users are very busy. Their time is valuable. They do not and cannot read your
+thought processes. Your summaries must be short and to the point but still
+introduce required context. Always start with the logical connections from the
+top down goal to what you're currently working on to the related problem - just
+a few words at the start. Use long form names when describing things. They work
+on many other projects and need this brief reintroduction.
+
 # Worktree and git sanitation
 
 Make a note of the git repository state before beginning any work. Do not let
@@ -58,7 +73,8 @@ before making a commit. This is a hard gate and MUST be followed:
      Does the implementation ordering flow so data and dependencies will simply
      already exist when needed or are constructs being introduced unnecessarily
      that would simply not be needed if the ordering were corrected or steps
-     were consolidated?
+     were consolidated? Check there are there no vague items or abstract
+     descriptions that hand waive a complex or possibly inappropriate problem solution.
    - If you changed any LLM prompt, context packet, tool description, or model-facing instruction, did you complete the review checklist in prompt_standards.md?
    - Are your changes project-consistent, modular and did not introduce duplication?
    - Did you "fix" anything without evidence, i.e. proving the thing you fixed was actually the cause and true underlying problem? See Debugging below for details.
@@ -97,16 +113,18 @@ it's important to define the finish line. Exactly what needs to be verified
 working before stopping. Do not stop until the work is complete, tested,
 reviewed and committed, or there is a real blocker.
 
-- Define the goal for this iteration. Take stock and assess the current state.
-  This is the time to see the forest for the trees. Have you been working
-  effectively? Are the current plans working smoothly or are you having to jump
-  through hoops to follow it when it's actually flawed design? Do you need to
-  make changes to your strategies to avoid going down unnecessary rabbit holes
-  and getting stuck? Course correct if needed, evaluate possible refactors,
-  recognise when coding patterns are actually getting in the way. I.e. given all
-  the requirements and use cases, what code structure would best fit, in a way
-  that's modular, separable, composable, will allow for future changes and have
-  low maintenance overhead.
+- Verify the git directory is clean; if it is not, deal with it appropriately -
+  see the git sanitation section.
+- Define the goal for this iteration. Take stock, what is the project doing,
+  what's the current state, what is the next missing feature or issue to correct
+  and any progress so far. This is the time to see the forest for the trees.
+  Have you been working effectively? Are the current plans working smoothly
+  could the design be flawed? Do you need to make changes to your strategies to
+  avoid going down unnecessary rabbit holes and getting stuck? Course correct if
+  needed, evaluate possible refactors, recognise when existing coding patterns
+  are actually getting in the way. I.e. given all the requirements and use
+  cases, what code structure would best fit, in a way that's modular, separable,
+  composable, will allow for future changes and have low maintenance overhead.
 - If debugging a problem, list your hypotheses and then list experiments you
   will perform to prove which is correct. I.e. don't fix speculations/guesses.
   See Debugging above.
@@ -118,8 +136,9 @@ reviewed and committed, or there is a real blocker.
   simpler if a feature was there. Check that the granularity of the plan is
   appropriate - i.e. we won't need to write extra code just to have an
   intermediate step work and that we won't be implementing too much without
-  modular testing in one big blob. Check for plans/deferred.md items that should
-  be included/merged into the plan.
+  modular testing in one big blob. Check `plans/todo.md` for the consistency
+  with other work or possible required reordering due to dependencies and
+  conflicts.
 - Implement one complete slice that can be committed. See Worktree and git
   sanitation above. The project must be in a good state at the end so we can git
   bisect. You may need to revisit the plan or implement a little more to achieve
@@ -208,8 +227,7 @@ said.
 This file contains the high level concepts and ideas of the project and the
 overall approach to implementation. It is a structured consolidation of
 user_declarations.md and a place for implementing agents to expand ideas and
-fill in the gaps. TODOs are fine, but this is not a place to record progress or
-current state.
+fill in the gaps. TODOs are fine, but do not record progress or current state.
 
 Before writing plans from this document, check it for false assumptions. For
 example it has sometimes described the addition of an entirely unnecessary
@@ -218,36 +236,56 @@ down. Every decision must be traceable to a user declaration. If adding a new
 system/framework/abstraction, make sure you have listed ~3 alternatives,
 evaluated each against the coding standards and picked the most appropriate.
 
+If the code and design disagree, the code is wrong. I.e. an agent may have made
+a mistake when implementing. It is critical that the design is updated first
+before making changes to the code, so that this directive flow is maintained.
+Any design updates to match the code requires explicit user sign-off.
+
 ## plans/
 
-Implementation planning records. Build order and status live here. Each plan is
-one self-contained increment with a goal, scope, steps, per-step verification
-and possibly a status line kept current. Completed plans may remain as records,
-however it is expected they become stale. Do NOT refer to them as reference or
-attempt to maintain them as references. In fact deleting them once they are in
-git, completed and stale is probably best to avoid confusion given they'll be in
+Implementation plans, features and build order live here. It is the short term
+detailed expansion of design items. todo.md tracks order and references
+individual plan files. Each plan is one self-contained increment with a goal,
+scope, steps, verification. One completed-and-verified status line should be at
+the top and may only be set AFTER a passing self-review (see above). These are
+recipes for implementation to follow and for verification once done. Status is
+implicit based on short lines in implementation_reference.md, which must be kept
+up to date with the source code. Completed plans may remain as records, however
+it is expected they become stale. Do NOT refer to them as reference or attempt
+to maintain them as references. In fact, deleting them once they are in git,
+completed and stale is probably best to avoid confusion. They'll always be in
 the git history.  Avoid mentioning history in both code and documents - that's
 what git is for. Feel free to refactor plans inline if we pivot - it is only
-going to lead to confusion if they are considered set in stone. The document
-flow is: user_declarations.md (ground truth) → design.md (desired end state) →
-plans/ (order, detail and status) → implementation_reference.md (index of what
-exists). Naming them with a date prefix may help to know their order and what's
-most recent.
+going to lead to confusion if they are considered set in stone. Agents can still
+get confused so it doesn't hurt to leave a note when items become stale.
 
-### plans/deferred.md
+The document flow is: user_declarations.md (ground truth) → design.md (desired
+end state) → plans/ (order and detail) → implementation_reference.md
+(index of what exists). Naming them with a date prefix may help to know their
+order and what's most recent.
+
+### plans/todo.md
+
+This is the plan index and order. It contains a simple concise short term list
+of concrete items to be completed in order. Typically a plan file named by its
+feature is written and referenced in this list. Name items; do not number them.
+Re-numbering when reordering is wasteful maintenance overhead.
+
+Do not proceed to the next items before the previous one is completed and
+verified.
+
+Completed-and-verified items must be removed. Removal requires verifying the
+plan has actually been completed and reviewed. The plan file should then be
+moved to the archive.
+
+**Deferring work items**
 
 Sometimes the design changes or agents make mistakes with the implementation
-order. This file contains a list of follow-up items that were at one point
-scheduled for implementation but could not be at the time.
-
-Items here must be deferred due to being blocked. This file is NOT an excuse to
-just do planned work later. Additions here come with maintenance cost.
-
-Each item must include a recommended implementation schedule or trigger so that
-ideas/features don't get lost to time.
-
-Additions due to scope are not allowed unless they are explicitly requested and
-signed off by the user.
+order. Any follow-up items that are strictly blocked and cannot be done at the
+time may be extracted into a new plan file and added as a future todo.md item,
+ordered appropriately. This is NOT an excuse to just do planned work later. Any
+delaying work comes with a maintenance cost and requires explicit rationale and
+user signoff.
 
 ## implementation_reference.md
 
