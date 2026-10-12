@@ -42,6 +42,20 @@ failure include invented inventory, silent tool failure, revealing unrelated
 NPC context, repeated invalid saves or forgetting a still-relevant fact. Both
 methods must detect those, without requiring exact prose or tool-call counts.
 
+Already observed with the currently-configured model (Qwen3.5-4B, 2026-09-25,
+`real_model_assembles_context_after_a_split_and_merge` in `src/game.rs`,
+`#[ignore]`d device test): the GM sometimes narrates a final text reply for a
+pending action without first calling `approve_action`/`reject_action`, even
+though its system prompt explicitly says to resolve the action before
+narrating (`game.rs`'s GM arbitration role prompt) - caught by
+`game.rs:1311`'s `ensure!(!has_pending_action(...))` check, which fails the
+turn rather than silently leaving the action unresolved. Observed at roughly
+3 failures in 10 real turns against a `say` action in this one scenario -
+not a portable rate, but reproducible enough to be a real case for this
+evaluation, not a one-off. Include this specific case (an approvable action,
+repeated enough times to likely trigger it) when exercising "a take request
+requiring GM approval" above.
+
 Record evidence in user_exerpts.md's decision log and implementation_reference.md.
 The decision covers existing capabilities; full combat/travel/Storyteller real
 chat acceptance tests exercise it as those features land. Re-read both standards

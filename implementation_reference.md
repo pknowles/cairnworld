@@ -7,9 +7,8 @@ work; their completion claims do not override the source.
 
 Developer Mode has the A–C recording/query foundations, but their completion is
 not verified. Review of `a7191bd` on 2026-09-17 found several defects; the
-[required corrections](plans/developer-inspection.md#required-corrections-before-d)
-describe each with reproduced cases, implementation changes, alternatives and
-acceptance checks. Status as corrections land:
+corrections below have landed except bounded history ranges
+([plan](plans/developer-inspection.md#bounded-history-ranges)). Status:
 
 - **Fixed:** `game.rs::arbitrate` no longer mirrors durable resolution in a
   per-turn `Arc<Mutex<bool>>`. `Store::resolve_pending_action` is the sole
@@ -222,9 +221,11 @@ behavior is not implied to exist here.
   `store::live_segments` all accept an explicit `branch_id: Option<i64>`
   override for this case; every other agent kind passes `None` and resolves
   its one `agent_history` branch as before. `store::history::branch_owner`
-  resolves a branch's owning agent/world through either relation, so raw
-  history traversal and request reconstruction validate a world_gm's group
-  branches the same way. `history_entry(branch_id, position, kind)` is the
+  resolves a branch's owning agent/world directly from
+  `history_branch.agent_id JOIN agent` - `spawn_group_branch` always binds a
+  world_gm agent's own `agent_id` to every group branch it creates, so this
+  needs no fallback through `agent_history`/`group`, unlike before D4.
+  `history_entry(branch_id, position, kind)` is the
   one ordered index every message, inference start, summary activation and
   notice appends to (`src/store/history.rs`'s `allocate_position`/
   `append_history_entry`, using `UPDATE history_branch SET next_position =
@@ -235,41 +236,79 @@ behavior is not implied to exist here.
   while a summary's activation is a distinct entry from the message range it
   covers (`summary.covered_ranges`, JSON `[{branch_id, first_position,
   last_position}, ...]` - always length 1 until slice D's branch splits/merges
-  exist). `history_parent(branch_id, ordinal, parent_branch_id,
+  exist). `history_parent(branch_id, agent_id, ordinal, parent_branch_id,
   through_position)` is the bounded-parent list `split_group`/`merge_groups`
   (D4, `Store::spawn_group_branch`) populate: a split's resulting branches
   each get one parent (the source), a merge's resulting branch gets one
-  parent per source group.
-  `src/store/history.rs::history_range(HistoryHead{branch_id, cut}, world_id,
-  agent_id)` is the shared bounded parent-first traversal every raw and live
-  selector is built on: it validates the head's world/agent, walks
-  `history_parent` recursively with cycle detection (a visited-branch-id set
-  threaded through the recursion) and a missing-parent check independent of
-  the schema's own foreign key, loads all entries up to each cut, and removes
-  duplicates by scanning accumulated entries. It does not yet subtract intervals
-  before reading entries or validate each parent's agent/world ownership.
-- `Store::live_segments` groups that traversal's entries by branch (already
-  emitted as contiguous per-branch runs - ancestors before the branch that
-  owns them) and, per branch, selects that branch's own newest summary
-  activation (if any) - a branch's own summaries are already monotonic, so
-  cross-branch overlap cannot occur (`PositionRange` is scoped to one
-  branch_id). For each branch it resolves the summary's `covered_ranges` to
-  find the actual highest still-covered position **on that branch**
-  (distinct from the activation's own position in the unified index, which
-  can sit after messages the summary does not cover), and returns every
-  message entry past that as one `Segment::Messages{PositionRange}` - a
-  position range spans the branch's whole unified index, so non-message
-  entries (inference starts, notices) inside it are expected gaps, not
-  missing rows; only a `kind = 'message'` entry missing its `message` row is
-  real corruption. After a merge, this means each parent branch contributes
-  its own summary + uncovered tail independently, rather than only the
-  single newest summary across the whole merged DAG silently absorbing every
-  other parent's raw messages uncompacted (plans/developer-inspection.md's
-  D5 "longest-disjoint-summary selector").
+  parent per source group. Composite foreign keys to
+  `history_branch(id, agent_id)` make both branches share one agent (and so
+  one world), and `CHECK (parent_branch_id < branch_id)` makes cycles
+  unrepresentable, so readers never check either.
+  `store::history::BranchHead` is a `HistoryHead` already proven to belong to
+  its world/agent - private fields, constructed only by
+  `Store::branch_head_for_agent` (an agent's own current head, validated
+  against its caller-claimed world), `branch_head_for_branch` (an explicit
+  branch, validated against a caller-claimed world/agent - the world_gm group
+  case) or `branch_head_from_cursor` (a browser-supplied cursor, validated
+  the same way). Holding one proves the check passed, so
+  `reach(head)` is one recursive query
+  (`WITH RECURSIVE reach(branch_id, cut) AS (...)`) collapsing every path
+  from `head` to a branch into that branch's single furthest-reaching cut
+  (`GROUP BY branch_id, MAX(cut)`), in ancestor-first order for free via
+  `ORDER BY branch_id` (the `CHECK (parent_branch_id < branch_id)` constraint
+  guarantees this ordering) - a shared ancestor is read once regardless of
+  how many paths reach it, replacing the old per-path recursion and its
+  linear-scan deduplication. `history_range(head: BranchHead)` performs no
+  validation of its own (holding a `BranchHead` already proves it), loads
+  every entry up to each reached branch's bounded cut regardless of kind, and
+  is now `#[cfg(test)]`-only: no production caller needs this unfiltered a
+  load, since `history_live_segments` and `raw_page` (below) each select
+  only what they need directly - it exists to test `reach`'s bounding/dedup
+  behavior precisely, which neither of those two (each with its own
+  additional filtering) can exercise as exactly.
+  `store::history::Store::raw_page(head: BranchHead, after: Option<(branch_id,
+  position)>, limit)` is `agent_raw_history`'s keyset-paged raw selector: one
+  query joins `reach` against `history_entry`, excludes a successful
+  inference's own entry (`LEFT JOIN inference ... WHERE kind != 'inference' OR
+  inference.error IS NOT NULL` - a failed inference's history-entry row is
+  what design.md's `FailedInference` needs; a succeeded one renders nothing
+  of its own, only its assistant message), and resumes from `after` via the
+  standard `(branch_id > ?) OR (branch_id = ? AND position >= ?)` keyset
+  condition rather than reloading and re-slicing every prior page.
+  `LIMIT limit + 1` reveals whether another page follows. When `after` is
+  given, its position is first checked against `head`'s own reach and
+  rejected (`ensure!`, not silently treated as end-of-history) if it names a
+  branch outside the reach or a position past that branch's bounded cut.
+  `store::history::Store::history_live_segments(head: BranchHead)` is the
+  other, separate consumer of `reach` and does not call `history_range` at
+  all, so it is no longer on the unbounded path: per reached branch it runs
+  one query for that branch's newest summary activation within its bounded
+  cut (`history_entry JOIN summary`, `MAX` position), then decodes only that
+  summary's `covered_ranges` (bounded by branch count, not entry count) to
+  find the actual highest still-covered position **on that branch** (distinct
+  from the activation's own position in the unified index, which can sit
+  after messages the summary does not cover - a branch's own summaries are
+  already monotonic, so cross-branch overlap cannot occur; `PositionRange` is
+  scoped to one branch_id), then one more query selects only the uncovered
+  `kind = 'message'` position range past that. No covered or non-message
+  entry is ever loaded. After a merge, this means each parent branch
+  contributes its own summary + uncovered tail independently, rather than
+  only the single newest summary across the whole merged DAG silently
+  absorbing every other parent's raw messages uncompacted
+  (plans/developer-inspection.md's D5 "longest-disjoint-summary selector").
+  `Store::live_segments(agent_id, branch_id)` is the thin production entry
+  point every real inference calls: it resolves the caller's
+  `agent_id`/`branch_id` to a validated `BranchHead` and delegates here.
   `Store::tail_split` and `enqueue_capacity_compaction`/`abandon_pending_compaction`
   work in the same position space. `pending_compaction` is keyed by
   `branch_id` (still 1:1 with an agent in this slice) with a plain `position`
   cut column.
+  `Store::check_message_range_ownership(agent_id, segments)` validates every
+  `Segment::Messages` range's branch in one batched query
+  (`history_branch WHERE id IN (...)` via `sqlx::QueryBuilder`, since a
+  merge's recipe can carry several distinct branches) before
+  `request_for_segments` assembles anything, instead of one `branch_owner`
+  lookup per range as the loop reaches each one.
 - `Store::finish_chat_inference` and `finish_summary_inference` are the two
   single-transaction completion operations design.md's Chat schema
   describes (`finish_inference` stays the plain outcome-only op, used only by
@@ -289,15 +328,15 @@ behavior is not implied to exist here.
   and `RunOutcome.result` keeps the original `anyhow::Error` (not a
   re-wrapped string) so a caller can still `downcast_ref::<ContextCapacityExceeded>`
   through it.
-- `Store::agent_raw_history` pages `history_range`'s output directly: it
-  resolves every `message`/`chat_notice`/`summary` entry (skipping a
-  successful or still-running `inference` entry, which renders nothing of its
-  own - only a *failed* inference becomes a `RawHistoryEntry::FailedInference`)
-  and returns an opaque `RawHistoryCursor{head, next_branch_id,
-  next_position}`, so a page boundary landing exactly on a failure, summary or
-  notice is neither skipped nor duplicated in the existing paging tests. It
-  queries each inference outcome across the full history before slicing, and
-  failed rows currently mislabel their history-entry ID as an inference ID.
+- `Store::agent_raw_history` resolves `agent_id`/`branch_id`/`after` to a
+  validated `BranchHead`, pages it through `raw_page` (above), then resolves
+  each returned entry's `message`/`chat_notice`/`summary`/failed-`inference`
+  payload and returns an opaque `RawHistoryCursor{head, next_branch_id,
+  next_position}`, so a page boundary landing exactly on a failure, summary
+  or notice is neither skipped nor duplicated in the existing paging tests.
+  A failed inference resolves its own real `inference.id` (not the
+  `history_entry.id` primary key its row shares) as the ID a browser
+  inference-view link must name.
   `web.rs`'s `RawHistoryPage` query param carries the cursor JSON-encoded
   plus an optional `branch` (D6) used only when `after` is absent, to page a
   specific one of a world_gm agent's several branches rather than the
@@ -748,7 +787,12 @@ behavior is not implied to exist here.
   (an outcome's text, each tool call's arguments, a tool result's content,
   each request message, the post-template model prompt) - it writes to the
   clipboard via `navigator.clipboard.write_text` and flips to a checkmark for
-  a moment, skipped entirely when the field is empty.
+  a moment, skipped entirely when the field is empty. `InferenceCard` also
+  serializes the complete `RecordedInference` it was given (every field -
+  segments, request, outcome, model, duration, not a projection of them) as
+  pretty-printed JSON into its own collapsed "Raw JSON" `<details>`, with the
+  same `CopyButton` treatment, satisfying design.md's "Render raw JSON ...
+  with ... clipboard controls" independent of the structured rendering above.
   Step 6's live updates implement design.md's Live inspection protocol in
   full (Developer Inspection plan slice A). `Store` owns a `dev_events:
   Arc<Mutex<HashMap<world_id, broadcast::Sender<DevEvent>>>>` registry

@@ -196,7 +196,7 @@ transaction; no payload is published before that transaction commits.
 | `recorded_content` | `id, body` where body serializes the existing content enum and reasoning once. No uniqueness constraint on body. |
 | `text` | Immutable prompt, tool-schema and formatter artifacts, reused by equality. Ordinary conversation text is in recorded_content, not interned here. |
 | `history_branch` | `id, agent_id, next_position`; positions are allocated by UPDATE/RETURNING in the insertion transaction. |
-| `history_parent` | `branch_id, ordinal, parent_branch_id, through_position`; primary key `(branch_id, ordinal)`. Immutable bounded references, ordered by ordinal. Parents belong to the same agent and predate their child. |
+| `history_parent` | `branch_id, agent_id, ordinal, parent_branch_id, through_position`; primary key `(branch_id, ordinal)`. Immutable bounded references. Parents belong to the same agent and predate their child, enforced by composite foreign keys to `history_branch(id, agent_id)` and `parent_branch_id < branch_id`. |
 | `agent_history` | `agent_id PRIMARY KEY, branch_id UNIQUE`; the single writable branch of a linear player, NPC, Storyteller or sandbox history. GM heads instead belong to groups. |
 | `history_entry` | `id, branch_id, position, kind`; unique `(branch_id, position)`, kind is message, inference, summary or notice. This is the raw history index, not a duplicate transcript. |
 | `message` | `id` is also its history_entry ID; `role, content, source_inference_id, source_tool_execution_id, trigger_sequence_id`. `content` is a plain `recorded_content` reference - every message uses its whole content, so no typed selection is needed. Only applicable provenance fields are set. |
@@ -407,14 +407,15 @@ context, rather than an implicit choice of the first resulting group. A merge
 has one resulting head. Source-branch compaction settles before taking cuts;
 no database transaction spans inference execution.
 
-**Context order.** Traverse parent edges in ordinal order, parents before child,
-and each branch in position order. Track visited position intervals per branch and subtract already emitted
-intervals; shared ancestors are emitted once, while distinct entries with equal
-text are preserved. Traverse range metadata before loading message payloads;
-ordinary inference fetches only selected summaries and the retained raw ranges,
-not every historical message. A bounded cut applies only to that branch's own entries. Thus root
-`[a,b]`, left suffix `[c,d]`, right suffix `[e]`, merge suffix `[f]` assembles
-`[a,b,c,d,e,f]`. Reversing parent IDs changes the recorded ordering explicitly;
+**Context order.** Like a git history with merges: every branch reachable from
+the head appears once, with the longest prefix any path reaches, in branch
+creation order (ancestors always first, since a parent predates its child), and
+each branch in position order. Shared ancestors therefore appear once, while
+distinct entries with equal text are preserved. Compute this reach from branch
+metadata before loading entries; ordinary inference fetches only selected
+summaries and the retained raw ranges, not every historical message. A bounded
+cut applies only to that branch's own entries. Thus root `[a,b]`, left suffix
+`[c,d]`, right suffix `[e]`, merge suffix `[f]` assembles `[a,b,c,d,e,f]`;
 wall-clock interleaving never changes it. Labels identify branch/group provenance
 without adding another model role. Input recipes record the resulting ordered
 ranges, not a pointer to a mutable current head.

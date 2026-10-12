@@ -2019,10 +2019,11 @@ impl Store {
         .context("creating history branch for new group")?;
         for (ordinal, (parent_branch_id, through_position)) in parents.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO history_parent (branch_id, ordinal, parent_branch_id, through_position) \
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO history_parent (branch_id, agent_id, ordinal, parent_branch_id, through_position) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(branch_id)
+            .bind(world_gm_agent_id)
             .bind(i64::try_from(ordinal).expect("parent ordinal fits in i64"))
             .bind(parent_branch_id)
             .bind(through_position)
@@ -3926,96 +3927,20 @@ impl Store {
         row.map(Summary::try_from).transpose()
     }
 
-    /// The live history is, per branch touched by the bounded-parent
-    /// traversal, that branch's own newest disjoint summary (if any)
-    /// followed by every one of its raw messages not covered by any selected
-    /// summary. A merge can bring in several branches, each with its own
-    /// independent summary covering its own disjoint range - unlike a plain
-    /// linear branch, "the newest summary in the whole traversal" is not
-    /// enough, since an older parent branch's summary is never superseded by
-    /// a sibling branch's newer one. Older messages remain stored for replay
-    /// and debugging.
+    /// Resolves `agent_id`/`branch_id` to a validated head and delegates to
+    /// `store/history.rs::live_segments` - see its own doc comment for what
+    /// the live history actually is.
     pub async fn live_segments(
         &self,
         agent_id: i64,
         branch_id: Option<i64>,
     ) -> Result<Vec<Segment>> {
-        let head = match branch_id {
-            Some(branch_id) => self.current_head_for_branch(branch_id).await?,
-            None => self.current_head(agent_id).await?,
-        };
         let world_id = self.world_id_for_agent(agent_id).await?;
-        let entries = self.history_range(head, world_id, agent_id).await?;
-        // Every summary reachable in this traversal, newest activation first
-        // per branch: a branch's own summaries are already monotonic (each
-        // supersedes the last), so its first entry here is its live one.
-        let mut summaries_by_branch: std::collections::HashMap<i64, Summary> =
-            std::collections::HashMap::new();
-        for entry in entries.iter().rev() {
-            if entry.kind != history::EntryKind::Summary {
-                continue;
-            }
-            if summaries_by_branch.contains_key(&entry.branch_id) {
-                continue;
-            }
-            let row = sqlx::query_as::<_, SummaryRow>(
-                "SELECT summary.id, summary.history_entry_id, summary.agent_id, summary.covered_ranges, \
-                        json_extract(summary.body, '$.content.value') AS content, summary.inference_id \
-                 FROM summary_content AS summary WHERE summary.history_entry_id = ?",
-            )
-            .bind(entry.id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("loading summary for history entry {}", entry.id))?
-            .with_context(|| format!("summary activation {} has no summary row", entry.id))?;
-            summaries_by_branch.insert(entry.branch_id, Summary::try_from(row)?);
-        }
-        // Group entries by branch, preserving the traversal's own order
-        // (ancestors before the branch that owns them): `history_range`
-        // already emits each branch's entries as one contiguous run.
-        let mut branch_order = Vec::new();
-        let mut entries_by_branch: std::collections::HashMap<i64, Vec<&history::HistoryEntry>> =
-            std::collections::HashMap::new();
-        for entry in &entries {
-            entries_by_branch.entry(entry.branch_id).or_insert_with(|| {
-                branch_order.push(entry.branch_id);
-                Vec::new()
-            });
-            entries_by_branch.get_mut(&entry.branch_id).unwrap().push(entry);
-        }
-        let mut segments = Vec::new();
-        for branch_id in branch_order {
-            let branch_entries = &entries_by_branch[&branch_id];
-            // Not covered by the selected summary, not merely positioned
-            // after it: a summary activation's own position in the unified
-            // index can land after messages it does not cover, since it is
-            // produced by a separate compaction inference recorded later.
-            let mut covered_through: Option<i64> = None;
-            if let Some(summary) = summaries_by_branch.get(&branch_id) {
-                covered_through = summary
-                    .covered_ranges
-                    .iter()
-                    .filter(|range| range.branch_id == branch_id)
-                    .map(|range| range.last_position)
-                    .max();
-                segments.push(Segment::Summary { summary: summary.id });
-            }
-            let messages: Vec<&&history::HistoryEntry> = branch_entries
-                .iter()
-                .filter(|entry| entry.kind == history::EntryKind::Message)
-                .filter(|entry| covered_through.is_none_or(|covered| entry.position > covered))
-                .collect();
-            if let (Some(first), Some(last)) = (messages.first(), messages.last()) {
-                segments.push(Segment::Messages {
-                    messages: PositionRange {
-                        branch_id,
-                        first_position: first.position,
-                        last_position: last.position,
-                    },
-                });
-            }
-        }
-        Ok(segments)
+        let head = match branch_id {
+            Some(branch_id) => self.branch_head_for_branch(branch_id, world_id, agent_id).await?,
+            None => self.branch_head_for_agent(world_id, agent_id).await?,
+        };
+        self.history_live_segments(head).await
     }
 
     /// This branch's own raw message count not yet covered by its own newest
@@ -4081,12 +4006,59 @@ impl Store {
         Ok(rows.last().map_or(covered, |(position,)| position - 1))
     }
 
+    /// Every `Segment::Messages` range's branch must belong to `agent_id` - a
+    /// world_gm agent plays several groups, each its own branch, so this
+    /// checks each range's actual branch rather than comparing against one
+    /// fixed `agent_history` branch (design.md's `GroupHistory`). One query
+    /// over every distinct branch a merge's segments reference, rather than
+    /// one `branch_owner` lookup per `Segment::Messages` entry.
+    async fn check_message_range_ownership(&self, agent_id: i64, segments: &[Segment]) -> Result<()> {
+        let mut branch_ids: Vec<i64> = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Messages { messages } => Some(messages.branch_id),
+                _ => None,
+            })
+            .collect();
+        branch_ids.sort_unstable();
+        branch_ids.dedup();
+        if branch_ids.is_empty() {
+            return Ok(());
+        }
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, agent_id FROM history_branch WHERE id IN (",
+        );
+        let mut separated = query.separated(", ");
+        for branch_id in &branch_ids {
+            separated.push_bind(branch_id);
+        }
+        query.push(")");
+        let owners: Vec<(i64, i64)> = query
+            .build_query_as()
+            .fetch_all(&self.pool)
+            .await
+            .context("loading owners of referenced message-range branches")?;
+        for branch_id in &branch_ids {
+            let owner_agent_id = owners
+                .iter()
+                .find(|(id, _)| id == branch_id)
+                .map(|(_, agent_id)| *agent_id)
+                .with_context(|| format!("history branch {branch_id} does not exist"))?;
+            ensure!(
+                owner_agent_id == agent_id,
+                "inference for agent {agent_id} references messages from branch {branch_id} owned by agent {owner_agent_id}"
+            );
+        }
+        Ok(())
+    }
+
     pub async fn request_for_segments(
         &self,
         agent_id: i64,
         segments: &[Segment],
         sampling: Sampling,
     ) -> Result<Request> {
+        self.check_message_range_ownership(agent_id, segments).await?;
         let mut messages = Vec::new();
         let mut tools = Vec::new();
         for segment in segments {
@@ -4137,17 +4109,9 @@ impl Store {
                     }
                 }
                 Segment::Messages { messages: range } => {
-                    // A world_gm agent plays several groups, each its own
-                    // branch, so this checks the range's branch is actually
-                    // owned by the claimed agent rather than comparing against
-                    // one fixed agent_history branch (design.md's
-                    // `GroupHistory`).
-                    let (owner_agent_id, _world_id) = self.branch_owner(range.branch_id).await?;
-                    ensure!(
-                        owner_agent_id == agent_id,
-                        "inference for agent {agent_id} references messages from branch {} owned by agent {owner_agent_id}",
-                        range.branch_id
-                    );
+                    // Ownership of every range's branch was already checked
+                    // once, up front, for the whole request - see
+                    // `check_message_range_ownership`.
                     ensure!(
                         range.first_position <= range.last_position,
                         "message range {}..={} is invalid",
@@ -5244,53 +5208,22 @@ impl Store {
     ) -> Result<(Vec<RawHistoryEntry>, Option<RawHistoryCursor>)> {
         self.inspecting(viewer_id, world_id).await?;
         let head = match after {
-            Some(cursor) => cursor.head,
+            Some(cursor) => self.branch_head_from_cursor(cursor.head, world_id, agent_id).await?,
             None => match branch_id {
-                Some(branch_id) => self.current_head_for_branch(branch_id).await?,
-                None => self.current_head(agent_id).await?,
+                Some(branch_id) => self.branch_head_for_branch(branch_id, world_id, agent_id).await?,
+                None => self.branch_head_for_agent(world_id, agent_id).await?,
             },
         };
-        // A successful inference's own history entry renders nothing on its
-        // own - its assistant message entry is what appears. Only a failed
-        // inference (no message was ever produced) needs its own row, so
-        // resolving happens after this filter rather than skipping entries
-        // post hoc, keeping the page's `limit` meaning "this many visible
-        // rows" rather than "this many raw entries, some invisible".
-        let mut all_entries = Vec::new();
-        for entry in self.history_range(head, world_id, agent_id).await? {
-            if entry.kind == history::EntryKind::Inference {
-                let succeeded: bool = sqlx::query_scalar(
-                    "SELECT error IS NULL FROM inference WHERE history_entry_id = ?",
-                )
-                .bind(entry.id)
-                .fetch_one(&self.pool)
-                .await
-                .with_context(|| format!("checking inference outcome for history entry {}", entry.id))?;
-                if succeeded {
-                    continue;
-                }
-            }
-            all_entries.push(entry);
-        }
-        let start = match after {
-            Some(cursor) => all_entries
-                .iter()
-                .position(|entry| {
-                    entry.branch_id == cursor.next_branch_id && entry.position == cursor.next_position
-                })
-                .unwrap_or(all_entries.len()),
-            None => 0,
-        };
-        let limit = usize::try_from(limit).context("raw history page limit must not be negative")?;
-        let page = &all_entries[start..(start + limit).min(all_entries.len())];
+        let cursor_position = after.map(|cursor| (cursor.next_branch_id, cursor.next_position));
+        let (page, next) = self.raw_page(head, cursor_position, limit).await?;
         let mut entries = Vec::with_capacity(page.len());
         for entry in page {
-            entries.push(self.resolve_raw_history_entry(*entry).await?);
+            entries.push(self.resolve_raw_history_entry(entry).await?);
         }
-        let next_cursor = all_entries.get(start + page.len()).map(|next| RawHistoryCursor {
-            head,
-            next_branch_id: next.branch_id,
-            next_position: next.position,
+        let next_cursor = next.map(|(next_branch_id, next_position)| RawHistoryCursor {
+            head: head.head(),
+            next_branch_id,
+            next_position,
         });
         Ok((entries, next_cursor))
     }
@@ -6979,6 +6912,61 @@ mod tests {
         );
     }
 
+    /// `check_message_range_ownership` validates every `Segment::Messages`
+    /// branch in one batched query (design.md/plan: "one query over all
+    /// message ranges, not once per segment") - a merge's recipe can carry
+    /// several. This proves it actually checks every one, not only the first.
+    #[tokio::test]
+    async fn request_for_segments_rejects_a_foreign_branch_among_several_message_ranges() {
+        let (store, _db, agent, segments, request) = store_with_history().await;
+        store
+            .record_inference(
+                agent,
+                &segments,
+                &request,
+                InferenceOutcome::Response(response()),
+                "test-model",
+                14,
+            )
+            .await
+            .unwrap();
+        let world: i64 = sqlx::query_scalar("SELECT world_id FROM agent WHERE id = ?")
+            .bind(agent)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        let other = store.create_agent(world).await.unwrap();
+        let other_branch = store.branch_id_for_agent(other).await.unwrap();
+        let Segment::Messages { messages: own_range } = segments[1].clone() else {
+            panic!("expected a message range segment");
+        };
+        let recipe = vec![
+            Segment::Messages { messages: own_range },
+            Segment::Messages {
+                messages: PositionRange {
+                    branch_id: other_branch,
+                    first_position: 0,
+                    last_position: 0,
+                },
+            },
+        ];
+        let error = store
+            .request_for_segments(agent, &recipe, Sampling::default())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!("branch {other_branch}")),
+            "the second, foreign range must be caught even though the first is agent's own: {error:#}"
+        );
+        // The valid range alone must still succeed, confirming the rejection
+        // above is really about the foreign branch, not something else in
+        // the recipe.
+        store
+            .request_for_segments(agent, &[Segment::Messages { messages: own_range }], Sampling::default())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn latest_summary_replaces_only_the_history_it_covers() {
         let (store, _db, agent, segments, request) = store_with_history().await;
@@ -7893,10 +7881,16 @@ mod tests {
             .await
             .unwrap();
         let other = store.create_agent(world).await.unwrap();
+        // Isolate the summary-ownership check from check_message_range_ownership's
+        // now-batched, up-front message-range check (which would otherwise
+        // reject this recipe first, for the unrelated reason that its
+        // message range also belongs to `agent`, not `other`): reference
+        // only the cross-agent summary here.
+        let summary_only_recipe = vec![Segment::Summary { summary }];
         let error = store
             .request_for_segments(
                 other,
-                &recipe,
+                &summary_only_recipe,
                 Sampling {
                     temperature: 0.7,
                     ..Default::default()
@@ -8430,6 +8424,38 @@ mod tests {
                 .all(|entry| matches!(entry, RawHistoryEntry::Message { content, .. }
                     if matches!(content, MessageContent::Text(text) if text != "only message"))),
             "the busy agent's page must never contain the quiet agent's entry"
+        );
+    }
+
+    /// design.md's paging contract: an unknown cursor position is an error,
+    /// never silently treated as end-of-history (the previous
+    /// `unwrap_or(all_entries.len())` behavior this replaced).
+    #[tokio::test]
+    async fn agent_raw_history_rejects_a_cursor_position_outside_the_reach() {
+        let (store, _db, world_id, owner, _player) = inspectable_world().await;
+        store
+            .set_developer_mode(owner.id, world_id, true)
+            .await
+            .unwrap();
+        let agent = store.create_agent(world_id).await.unwrap();
+        store
+            .append_message(agent, &Message::text(Role::User, "only message"))
+            .await
+            .unwrap();
+        let branch_id = Store::branch_for_agent(&store, agent).await.unwrap();
+        // A position well past this agent's one real entry, on its real branch.
+        let bogus_cursor = RawHistoryCursor {
+            head: history::HistoryHead { branch_id, cut: 0 },
+            next_branch_id: branch_id,
+            next_position: 999,
+        };
+        let error = store
+            .agent_raw_history(owner.id, world_id, agent, None, Some(bogus_cursor), 50)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("outside this history"),
+            "{error:#}"
         );
     }
 

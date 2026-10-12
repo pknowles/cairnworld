@@ -15,8 +15,8 @@ this plan specifies changes and their order. It does not mark the feature done.
 | Calls/results in their actual tree and order | [Agent syntax and tool calls](../user_declarations.md#agent-syntax-and-tool-calls), [Developer Mode](../user_declarations.md#developer-mode) | Durable execution relationships | C, F |
 | Live inspectable raw data, usage, navigation | [Developer Mode](../user_declarations.md#developer-mode) | Live inspection protocol; Browser selection and raw fields | A, E, F |
 
-The next increment is [Required corrections before D](#required-corrections-before-d);
-A–C are not yet accepted as complete.
+The next increment is [Bounded history ranges](#bounded-history-ranges), then
+E2 and F. D and E1 are implemented.
 
 A–F are ordered complete implementation slices. Each includes its own working
 queries/UI integration and verification. Schema changes and their producers and
@@ -139,243 +139,182 @@ once per inference; distinguish foreground wall time from summed inference time.
 The brief future-agent failure-context proposal is separate from raw recording
 and requires the user's Product decision before changing model messages.
 
-## Required corrections before D
-
-This is the next work in this plan. Finish these corrections to A–C before
-starting group/presence work. They restore existing requirements; they do not
-change product policy or await the outstanding Product decisions. Each subsection
-below is an ordered, independently verifiable increment. Apply the acceptance and
-commit gate at the end of this plan to each increment.
-
-Review baseline: `a7191bd`, 2026-09-17. The existing Rust suite passed 84 tests
-with 9 opt-in tests skipped. The real-browser suite failed. Temporary probes
-through production Store/tool-loop methods reproduced the defects below; those
-probes were removed after review. Add permanent behavioral regressions with the
-fixes. These observations are evidence of unresolved work, not completed tests
-for the future implementation.
-
-### Restore the browser verification path
-
-**Requirement:** Developer Mode's live inspection and exact execution ancestry
-([declaration](../user_declarations.md#developer-mode)); design's Live inspection
-protocol and Durable execution relationships; A5/C3.
-
-**Problem:** `web.rs`'s test-only `start_live_inference` handler calls
-`create_tool_executions(parent_inference_id, 1)` for every synthetic child.
-The parent already owns ordinal 0. `npm run test:hydration` fails with
-`UNIQUE constraint failed: tool_execution.inference_id, tool_execution.ordinal`
-at the first live-inference step in `check_developer_mode.cjs`.
-
-**Implementation:** Have the fixture record its tool-bearing parent inference
-and complete batch once. Include its actual parent tool-execution ID in the
-fixture data. Change the test-only start request and JavaScript helper to pass
-that ID into `start_invocation`; a root passes no parent. Each independent
-synthetic invocation needing a different causal call gets a fresh recorded
-parent call, not another execution row fabricated on an existing output.
-Keep the real Axum inspection websocket, Store writes and broadcast path.
-
-**Alternatives:** Reusing the real recorded call follows the production schema
-and removes fixture-only creation logic; it requires updating the fixture wire
-fields. Ignoring uniqueness errors would hide invalid ancestry. Dropping the
-constraint or restoring a fake inspection socket would lose the guarantee being
-tested; neither is acceptable.
-
-**Verification:** Run the complete browser suite without skipping assertions.
-Check each child invocation references an existing ordinal in its parent's
-recorded output. Repeated fixture requests cannot duplicate executions. This
-restores the harness only; it does not by itself prove every A acceptance case.
-
-### Use bounded history ranges and validate their owners
+## Bounded history ranges
 
 **Requirement:** Original, inspectable histories and isolated GM branches
 ([Developer Mode](../user_declarations.md#developer-mode),
-[GM interaction](../user_declarations.md#gm-interaction)); design's Chat schema
-and Groups and shared GM history / Context order; B3–B5.
+[GM interaction](../user_declarations.md#gm-interaction)); player latency
+([Scheduling](../user_declarations.md#scheduling)); design's Chat schema ("Raw
+history queries traverse bounded parent branches, then their own entries in
+position order") and Context assembly.
 
-**Problems:** `history.rs::range` recursively loads every history-entry row and
-uses linear searches through accumulated entries to remove duplicates.
-`live_segments` scans that vector to select a summary/tail. `agent_raw_history`
-also queries each inference's outcome before slicing a page. A two-row page in
-a local probe took about 5.5 ms for 100 inference records and 52 ms for 1,000;
-these are observations, not portable performance thresholds. `branch_owner`
-looks through the current `agent_history` head, and only the requested head is
-validated. A probe linking an authorized head to another world's branch returned
-that world's message. Normal gameplay has no parent writer yet; correct this
-before D introduces one.
+The other corrections to A–C landed (browser harness `778f865`, output identity
+`8decc4d`, transactional action resolution `8ddff77`, batch finalization
+`a6be8ce`), and parent-link validity is a schema property (`8f32f75`). This is
+the last one, and it is on every inference's path, not only Developer Mode's.
 
-**Implementation:** Replace the entry-vector traversal with ordered
-`PositionRange` metadata in `store/history.rs`. Resolve ownership from
-`history_branch.agent_id JOIN agent`, including retained historical branches,
-and validate every traversed parent against the requested agent/world. Keep
-cycle/missing-reference errors with branch IDs. Subtract visited intervals per
-branch before traversing shared ancestry again; do not deduplicate loaded message
-rows or equal text. Preserve parent ordinal order and bounded cuts.
+**2026-09-25 status.** Steps 1 (reach as one recursive query, `5809f24`), 2
+(validated `BranchHead`, `8d00d01`), 3 (live context without entry rows,
+`7ba72c0`), 4 (raw pages by keyset, `1a87f14`) and 5 (`request_for_segments`
+ownership check once per request, next commit) are all done. `branch_owner`'s
+fallback was also confirmed dead and removed as part of step 2: every
+`history_branch`-creating call site already binds `agent_id` directly
+(`spawn_group_branch` always uses the world's `world_gm.agent_id`), so
+`history_branch.agent_id JOIN agent` alone was already correct - no fallback
+through `agent_history`/`group` was ever needed. Step 5
+(`request_for_segments` ownership check once per request) remains.
 
-For raw pages, walk those ranges from the cursor and select visible entries in
-SQL, joining inference outcome/ID there. Apply position bounds, ordered keyset
-continuation and `LIMIT remaining + 1`; load payloads for the returned page only.
-Keep the selected head fixed across pages. Reject invalid cursor positions
-rather than silently treating them as end-of-history. For live context, query
-summary activation/coverage metadata first, then fetch only the selected summary
-and uncovered raw ranges. Preserve the existing linear summary semantics;
-D5 adds the declared multiple-parent summary selection using this same range
-representation, without another traversal implementation.
+**Problems** (as of `8f32f75`, before this section's own work):
 
-**Alternatives:** The current load-all approach is short locally but makes each
-page and inference depend on total history and duplicates ancestor work. A
-cached flattened transcript adds invalidation and another persisted/copied
-history. Bounded range metadata uses the existing index and immutable edges;
-it needs interval traversal code, but bounds entry/payload reads and serves both
-inspection and model context. Select it as already required by design.md.
+- `store/history.rs::range` recurses once per parent *path*. A branch reachable
+  by k paths is read k times; each split-then-merge round doubles the paths to
+  everything above it, so the root is read 2^rounds times. Deduplication is a
+  linear scan per entry (O(n²)). **Fixed** (step 1).
+- `Store::live_segments` loads every entry row of every reachable branch, of
+  every kind and including everything already covered by summaries, on every
+  inference. It only needs, per branch, the newest summary and the first/last
+  uncovered message position. **Fixed** (step 3).
+- `agent_raw_history` re-walks the whole history for each page, issues one
+  inference-outcome query per inference entry, slices in memory, and treats a
+  cursor it cannot find as end-of-history (`unwrap_or(len)`). **Fixed** (step
+  4): `raw_page` selects and pages entirely in SQL via a keyset scan, and an
+  unknown cursor position is now a rejected error, not silent
+  end-of-history - `store.rs::agent_raw_history_rejects_a_cursor_position_outside_the_reach`
+  is the regression test for that.
+- `request_for_segments` runs `branch_owner` once per message segment and one
+  query per summary; `branch_owner` resolves through `agent_history`/`group`
+  with a fallback rather than `history_branch.agent_id`. **Fixed** (steps 2
+  and 5): the fallback is gone, and `check_message_range_ownership` validates
+  every `Segment::Messages` branch a request references in one batched query
+  (`history_branch WHERE id IN (...)`) before assembly starts, rather than
+  once per range as the loop reaches it -
+  `request_for_segments_rejects_a_foreign_branch_among_several_message_ranges`
+  proves a foreign branch is still caught even when mixed with the agent's
+  own. `Segment::Summary`'s ownership check (`summary.agent_id == agent_id`,
+  already a single cheap row read against the already-loaded summary) was
+  left as-is.
+- `live_segments(agent_id, Option<branch_id>)` and `agent_raw_history(...,
+  Option<branch_id>, Option<cursor>)` use `Option` to select between two head
+  resolutions, and every entry point re-validates ownership. `HistoryHead` is
+  a plain `{branch_id, cut}` any caller can construct. **Partly fixed**:
+  `BranchHead` (step 2) means validation happens once, at construction, not
+  on every read - `history_range`/`history_live_segments` no longer
+  re-validate. The `Option<branch_id>` parameters themselves stay on
+  `live_segments`/`agent_raw_history` (real callers thread a genuine
+  agent-vs-explicit-group-branch choice through `agent.rs`/`context.rs`'s
+  `Invocation`, not just this module) - see
+  [code-quality.md](code-quality.md#design-refactors)'s broader `Option`
+  triage for that.
 
-**Verification:** Paginate mixed messages, failures, summaries and notices across
-boundaries; append data between pages and retain the original head. Exercise a
-shared-ancestor diamond, overlapping parent cuts, equal-text distinct entries,
-retired heads, cycles, missing parents, and foreign-agent/world parents. No
-foreign payload may be returned. Measure fixed-size pages at increasing history
-sizes and inspect query plans/row counts: no per-inference query over the entire
-past, and no covered historical entries loaded for ordinary compacted context.
-Topology metadata may scale with branch count. Compare reconstructed requests
-before/after and exercise normal chat/compaction through the configured model.
+A 2026-09-17 probe measured a two-row raw page at about 5.5 ms for 100
+inference records and 52 ms for 1,000 (observations, not thresholds, from
+before steps 1-5 below).
 
-### Reuse output content and preserve inference identity
+**2026-09-25 verification results** (temporary in-process benchmarks, not
+committed - measurements, not portable thresholds): `live_segments` with a
+summary covering everything except a small raw tail stayed at ~0.4-0.5ms as
+the compacted-away history grew from 100 to 10,000 entries - the actual point
+of step 3, confirmed to hold, not merely argued. A 64-way diamond fan-in (6
+rounds of every branch splitting into 2, converging back on one 3-message
+root - the exact k=2^rounds re-read pathology step 1's "Problems" described)
+resolved `live_segments` in ~9.5ms; the old per-path recursion would have
+re-read that 3-message root 64 separate times. Reconstructed requests already
+match before/after for every existing recorded-inference test
+(`reconstructs_history_recipe_without_copying_messages` and others), and a
+real configured-model chat with compaction
+(`real_model_compacts_a_long_chat_and_keeps_an_early_fact`) passed against the
+final code twice.
 
-**Requirement:** Record once, reference original data, inspect failures accurately
-([Debugging and Telemetry](../user_declarations.md#debugging-and-telemetry),
-[Developer Mode](../user_declarations.md#developer-mode)); design's Chat schema
-and Inference records; B4–B6.
+`EXPLAIN QUERY PLAN` on the `reach`, `raw_page` and `history_live_segments`
+queries against a populated test database (temporary, not committed) showed
+every table access as an indexed `SEARCH` (`history_parent`'s
+`(branch_id, ordinal)` key for `reach`'s recursive step, `history_entry`'s
+`(branch_id, position)` unique index for `raw_page`'s keyset scan and the
+inference-outcome exclusion join, and a `COVERING INDEX` for
+`history_live_segments`' summary lookup) - no full table scan anywhere; the
+`TEMP B-TREE` steps for `GROUP BY`/`ORDER BY` operate on the small
+reach/bounded result set (branch count), not on `history_entry` itself.
 
-**Problems:** `finish_chat_inference` writes an inference output, reads it back,
-then calls `insert_message`, which creates a second recorded_content row. A probe
-found output ID 1 and assistant-message content ID 2 for the same response.
-Narration recipients reuse the output ID, but the GM's own message does not.
-Separately, `resolve_raw_history_entry` returns `history_entry.id` as the failed
-inference's ID. A probe found the displayed ID 2 for actual inference 1. The
-current UI labels it incorrectly; it does not yet render a clickable failure link.
+A real split-then-merge exercised together with a real configured-model chat
+turn: `real_model_assembles_context_after_a_split_and_merge`
+(`src/game.rs`) reuses the existing merge test's real split_group/merge_groups
+tool-call setup, then attaches an actual `MistralRsBackend` for one more
+turn against the resulting merged branch DAG. It passed: one real inference,
+no tool call, a genuine text reply, proving `live_segments`/
+`request_for_segments` assemble a chat-template-valid context from a real
+multi-branch merge for a real model to consume - not only for the scripted
+test backend the structural merge test itself uses. (An earlier attempt with
+an open "what do we do?" prompt hit `limits.max_inferences_per_chat` from the
+small model repeatedly calling `look` without settling on a reply - every one
+of those inferences completed successfully, so this was a prompt-design
+issue, not a context-assembly failure; a closed, descriptive prompt matching
+the other real-model tests' style settled in one turn.)
 
-**Implementation:** Pass the existing output ID directly to
-`insert_message_with_content` with Role::Assistant and source inference ID,
-inside the existing completion transaction. Remove the read/deserialization and
-second insertion. Preserve compaction enqueueing against the returned message
-entry ID. Return that same output reference to narration delivery. In raw
-history queries, select `inference.id` alongside its error by history_entry_id;
-keep history position/entry identity separate from inference identity throughout
-paging and presentation.
+All items from this section's own verification bar are now satisfied.
 
-**Alternatives:** Direct references remove work and preserve provenance; they
-require callers to distinguish producing content from linking existing content.
-Global equality deduplication would incorrectly merge independent equal outputs.
-Copying then repairing links retains extra writes and failure boundaries. For
-IDs, joining the existing relationship is sufficient; introducing a global
-shared ID allocator would conflate unrelated entities.
+**Design.** Make the reachable history a value computed once by one query, and
+make its validity a property of its type.
 
-**Verification:** Assert inference output, its own assistant message and all
-narration recipients share one content ID, for both text and tool-bearing output
-where applicable. Two independent equal outputs must still have different IDs.
-Exercise error outcomes with no message. Interleave unrelated messages/inferences
-so their IDs diverge; every failed row must identify the actual failed inference
-and its reconstruction must return the recorded error. Retain summary/tool-result
-sharing tests; do not loosen them to compare text alone.
+1. *Reach as one recursive query.* `history_parent`'s keys guarantee a parent
+   shares the agent and has a smaller id. The reachable prefixes are:
 
-### Keep action resolution authoritative in the transaction
+   ```sql
+   WITH RECURSIVE reach(branch_id, cut) AS (
+       SELECT ?1, ?2
+       UNION
+       SELECT p.parent_branch_id, p.through_position
+       FROM history_parent p JOIN reach r ON p.branch_id = r.branch_id
+   )
+   SELECT branch_id, MAX(cut) FROM reach GROUP BY branch_id ORDER BY branch_id
+   ```
 
-**Requirement:** Rust applies approved actions once and records their real result
-([Agent syntax and tool calls](../user_declarations.md#agent-syntax-and-tool-calls),
-[Character actions](../user_declarations.md#character-actions)); design's Durable
-execution relationships; C4.
+   Several paths to one branch collapse to its longest prefix (the union of
+   prefixes), so there is nothing to deduplicate. Cost scales with branch
+   count, not entry count. Branch-id order is a valid ancestor-first order
+   because of the `CHECK`. Every reader joins this reach on
+   `position <= cut` and reads only the rows it returns.
+2. *Validated head type.* Replace public use of `HistoryHead` with a
+   `BranchHead { world_id, agent_id, branch_id, cut }` whose fields are private
+   and whose only constructors are Store resolutions that validate ownership
+   once from `history_branch.agent_id JOIN agent`: `for_agent` (an agent's
+   single writable branch), `for_group` (a group's GM branch) and `from_cursor`
+   (a browser-supplied head, validated against the viewer's world). This
+   removes the `Option<branch_id>` parameters, `branch_owner`'s fallback lookup
+   and per-reader ownership checks.
+3. *Live context without entry rows.* From the reach, one query selects each
+   branch's newest summary activation at or before its cut, then one query
+   selects each branch's first/last message position after that summary's
+   coverage. Segment shape is unchanged, so recorded recipes and
+   reconstruction are unchanged.
+4. *Raw pages by keyset.* Page over `(branch_id, position)` within the reach
+   from the cursor, excluding successful inference entries in SQL (join
+   `inference.error`), `LIMIT limit + 1` to produce the next cursor, and load
+   payloads for the returned rows only. A cursor outside the reach is an error.
+5. `request_for_segments` checks ownership once per request (one query over all
+   message ranges), not once per segment. It stops checking entirely when
+   [code quality's relational segments](code-quality.md#design-refactors) make
+   segment references foreign keys.
 
-**Problem:** `game.rs::arbitrate` duplicates the Store's durable resolution state
-in an `Arc<Mutex<bool>>`, with claim/release helpers and separate checks in both
-tools. Its retry behavior differs from Store's same-outcome idempotency. This is
-an extra authority rather than structural prevention of a duplicate mutation.
+**Alternatives.**
 
-**Implementation:** Make `resolve_pending_action` return a typed
-`ResolvedAction { id, approved, result_content_id }` representing the persisted
-result. For a pending action, atomically apply/record the result and consume the
-pending row. For an already resolved action, validate world/GM ownership and
-return its original resolution without executing anything. Approval/rejection
-tool closures compare the requested decision with that returned decision:
-matching repeats report the original stored result; a conflicting decision
-becomes `ToolOutcome::Rejected` describing the existing resolution. A new
-rejection reason cannot replace the original reason. Database/infrastructure
-failures remain errors with full context. Remove resolution_claimed,
-claim_resolution and release_resolution; retain the transactional uniqueness
-boundary. Update all callers of the old PendingAction return value together.
+| Option | Pros | Cons / risks |
+| --- | --- | --- |
+| Recursive CTE reach (recommended) | One query; no duplicate reads by construction; shared by live and raw paths; uses existing immutable edges; gives design.md's git-like creation order directly | None found |
+| Rust walk over edge metadata only, then one entry query | Ordering logic stays in Rust | Still one query per branch; hand-written graph walk to maintain |
+| Persisted closure table `branch_ancestor(branch, ancestor, cut)` written by `spawn_group_branch` | Trivial reads | A second, derived copy of the topology; more rows written per split/merge |
+| Interval subtraction over the current recursion (previous proposal) | Minimal change | Keeps the per-path recursion; adds interval code instead of removing the cause |
 
-**Alternatives:** A Store-owned result works across calls and process restarts
-and removes synchronization state, at the cost of adapting the tool return path.
-Keeping both guards requires synchronizing two policies and lifetimes. Keeping
-only the in-memory flag fails across invocations/restarts and cannot protect the
-mutation. Choose the Store-owned result, with ordinary typed game rejection at
-the tool boundary rather than parsing database error strings.
-
-**Verification:** Both approve-then-reject and reject-then-approve preserve the
-first outcome and return a recorded tool rejection. Same-decision repeats return
-the original result after reopening the database, with one mutation/action row.
-Changed rejection text does not replace persisted text. Foreign-world/GM calls
-fail. Exercise the real tool loop as well as Store; preserve behavioral coverage
-of existing conflict tests while updating their expected typed API outcome.
-
-### Finalize the entire tool batch through one exit boundary
-
-**Requirement:** Accurate execution tree and failure propagation
-([Debugging and Telemetry](../user_declarations.md#debugging-and-telemetry),
-[Chat directives](../user_declarations.md#chat)); design's Durable execution
-relationships; C2–C5.
-
-**Problem:** `agent.rs::run_invocation` handles an execution error explicitly,
-but `?` exits from result persistence or CompletedAfter delivery bypass sibling
-finalization. A probe with two calls and a failing first delivery left statuses
-`[completed, running]` even though the invocation had returned an error.
-
-**Implementation:** Run each batch's execution, result recording and delivery in
-one awaited Result-producing block. Track the current ordinal and whether its
-result committed; finalize from one outer match. If execution failed before a
-result committed, record that call failed with its full error. If its result
-already committed, preserve it and the completed mutation; record the delivery
-failure on the invocation/sequence. Mark only subsequent, never-entered calls
-unexecuted. Do not label an entered call unexecuted, replay a committed mutation,
-or rewrite a completed result to make finalization convenient. If persistence
-itself is unavailable, propagate the primary error plus finalization failure;
-startup recovery handles records whose outcome could not be committed.
-
-Use the existing invocation wrapper for one explicit awaited completion on
-normal success/error returns. The current InvocationGuard's Drop only asserts;
-it provides no async cleanup. Remove that wrapper/finished flag if the single
-result boundary makes it redundant, retaining the behavioral lifecycle tests.
-Cancellation/process death remains explicit interruption recovery, not a hidden
-background write from Drop. Remove the newly introduced clippy allow; keep the
-batch's operation in its existing scope instead of adding a generic lifecycle
-framework or a wrapper solely to silence argument-count lint.
-
-**Alternatives:** One outer finalizer covers existing and future error paths with
-less repeated cleanup. Additional cleanup at individual `?` sites is easy to miss
-again. Async work spawned from Drop cannot reliably report completion/failure and
-adds shutdown races. The selected boundary still cannot promise a successful
-write during database failure; surface that failure rather than masking it.
-
-**Verification:** Fault execution, result persistence and after-result delivery
-separately, including failure after a committed action and before a sibling.
-With working persistence, no returned invocation leaves an unreached call
-running. Preserve original committed effects/results, nested-call ancestry and
-full error context. Test recovery for interrupted unfinished records. Do not
-replace behavioral tests with a test that merely asserts the guard panics.
-
-### Re-establish the completion evidence
-
-Run focused regressions, the Rust suite, server/WASM checks and the full real
-browser suite. For changed context/model-facing behavior, apply prompt_standards
-and the real configured-model chat/compaction gate below. Browser assertions
-about races must control response ordering; token-gap injection alone does not
-prove actual broadcast lag. Exercise the A cases with real sockets, including
-lag, slow readers and reconnect state reconciliation. Preserve every existing
-assertion's intended coverage; repair fixtures rather than skipping failures.
-
-Update implementation_reference.md with what actually exists and the evidence
-obtained. Remove obsolete helpers and stale claims that outputs already share
-identity, range reads are bounded, or every error path is finalized. Keep A–C
-completion unverified until this correction gate passes; then continue D–F in
-order. No runtime test or implementation correction is claimed by this plan edit.
+**Verification.** Keep the existing traversal tests (bounded cuts, shared
+ancestors) and add: several split/merge rounds (each branch read once; checked
+with `EXPLAIN QUERY PLAN` and row counts), pagination across mixed messages,
+failures, summaries and notices with appends between pages and a fixed head,
+an unknown cursor rejected, and foreign agent/world heads rejected at
+construction. Measure live-context assembly and a fixed-size page at 100,
+1,000 and 10,000 entries before and after: the page cost must not grow with
+history, and live context must not grow with compacted-away history.
+Reconstructed requests must match before/after for recorded inferences. Run a
+real configured-model chat with compaction and a split/merge, and the browser
+suite.
 
 ## D. Groups and real GM branches
 

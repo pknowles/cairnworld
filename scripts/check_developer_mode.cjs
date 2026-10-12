@@ -197,6 +197,19 @@ checkBrowser(server, async (tab, port) => {
   const copied = await tab.evaluate(() => navigator.clipboard.readText());
   assert.equal(copied, "{}", "copy captures the exact tool call arguments, not a truncated or escaped version");
 
+  // The inference view also exposes the complete record as raw JSON
+  // (design.md: "Render raw JSON ... with ... clipboard controls"), not
+  // only the structured rendering above.
+  await tab.locator("aside details summary").getByText("Raw JSON", { exact: true }).click();
+  const rawJson = await tab.locator("aside details pre").textContent();
+  const parsed = JSON.parse(rawJson);
+  assert.equal(parsed.id, fixture.inference_id, "raw JSON is the real inference record, not a placeholder");
+  assert.equal(parsed.outcome.Response.content.value[0].id, "hp-roll", "raw JSON keeps the tool call's id");
+  await tab.locator("aside details").filter({ hasText: "Raw JSON" }).getByRole("button", { name: "Copy", exact: true }).click();
+  await tab.locator("aside details").filter({ hasText: "Raw JSON" }).getByRole("button", { name: "Copied", exact: true }).waitFor();
+  const copiedJson = await tab.evaluate(() => navigator.clipboard.readText());
+  assert.equal(copiedJson, rawJson, "copy on the raw JSON panel captures exactly what is displayed");
+
   // Live inference progress over the real /inspect/events socket: driving
   // Store::start_inference/publish_token/finish_inference through the
   // /browser/inference/* test-only routes exercises the actual production
@@ -213,7 +226,7 @@ checkBrowser(server, async (tab, port) => {
   const completionRefetch = tab.waitForResponse(r => r.url().endsWith(`/inspect/sequences/${fixture.sequence_id}`));
   await finishLiveInference(liveInferenceId);
   assert.equal((await completionRefetch).status(), 200, "completion re-fetches the turn for the durable recorded text");
-  await tab.locator("aside").getByText("Live reply.", { exact: false }).waitFor();
+  await tab.locator("aside").getByText("Live reply.", { exact: true }).waitFor();
 
   // Completion during snapshot load: reselecting the same turn starts a
   // fresh fetch, and completing a still-running inference concurrently with
@@ -231,7 +244,7 @@ checkBrowser(server, async (tab, port) => {
   // that snapshot is applied, exercising the same-generation refetch path.
   await finishLiveInference(raceInferenceId);
   await tab.locator("aside").getByText(`inference ${raceInferenceId}`, { exact: true }).first().waitFor();
-  await tab.locator("aside").getByText("Live reply.", { exact: false }).first().waitFor();
+  await tab.locator("aside").getByText("Live reply.", { exact: true }).first().waitFor();
 
   // A missing partial-token prefix must be visibly marked: a second live
   // inference whose first token arrives with a nonzero offset (as if an

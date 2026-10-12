@@ -2215,8 +2215,23 @@ mod tests {
         assert_eq!(pending, pending_before);
     }
 
-    #[tokio::test]
-    async fn merge_groups_unions_membership_and_bounds_both_source_branches() {
+    /// Drives a real split_group then merge_groups through the actual GM
+    /// tool-call machinery (a `ScriptedBackend` stands in for the model's own
+    /// reasoning, exactly as the rest of the tool-call surface is tested) and
+    /// returns the resulting state: the store/fixture, the player member,
+    /// and the two source groups plus the merged group/branch the merge
+    /// produced. Shared by the structural merge test and the real-model
+    /// context-assembly test, which both need the identical merged branch
+    /// DAG and differ only in what they do with it afterward.
+    async fn split_then_merge_groups() -> (
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) {
         let db = crate::store::TestDatabase::new("game-test");
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -2380,6 +2395,22 @@ mod tests {
         let merged_mara = store.character_group_id(mara_id).await.unwrap();
         assert_eq!(merged_adventurer, merged_toma, "the merge must reunite all characters");
         assert_eq!(merged_adventurer, merged_mara);
+
+        (
+            store,
+            db,
+            installed.member,
+            adventurer_group,
+            toma_group,
+            merged_adventurer,
+            original_group_id,
+        )
+    }
+
+    #[tokio::test]
+    async fn merge_groups_unions_membership_and_bounds_both_source_branches() {
+        let (store, _db, _member, adventurer_group, toma_group, merged_adventurer, _original_group_id) =
+            split_then_merge_groups().await;
         assert_ne!(merged_adventurer, adventurer_group, "merge retires the sources, not reuses one");
         assert_ne!(merged_adventurer, toma_group);
 
@@ -2423,6 +2454,57 @@ mod tests {
         ];
         source_branches.sort_unstable();
         assert_eq!(parents, source_branches);
+    }
+
+    /// The new part beyond `merge_groups_unions_membership_and_bounds_both_source_branches`
+    /// (which already proves the merge structurally): attaching a REAL model
+    /// to the resulting branch DAG for its next turn, so
+    /// live_segments/request_for_segments must actually assemble a valid
+    /// context (summary + uncovered tail per branch, as bounded history
+    /// ranges' step 3 changed) that a real chat template accepts - not just
+    /// that the scripted test backend received whatever `Vec<Segment>` was
+    /// handed to it.
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn real_model_assembles_context_after_a_split_and_merge() {
+        let (store, _db, member, ..) = split_then_merge_groups().await;
+        let (real_backend, model_path, sampling, _limits) = device_test_game().await;
+        // This test's own point is context assembly succeeding across
+        // however many real inferences one player turn takes on the merged
+        // branch DAG, not constraining the model's agentic tool-use choices
+        // (Look/Say/etc, all legitimate) - a small local model reliably
+        // takes several tool round trips before settling on a reply, so
+        // max_inferences_per_chat (a Game-level per-chat budget, independent
+        // of the backend's own loaded max_context_tokens/KV cache) needs
+        // real gameplay's headroom, not the tight budget other tests use to
+        // assert a specific short interaction.
+        let limits = Limits {
+            max_inferences_per_chat: 24,
+            ..Limits::default()
+        };
+        let real_game = Arc::new(Game::new(
+            store.clone(),
+            InferenceScheduler::new(real_backend, Limits::default())
+                .unwrap()
+                .foreground(),
+            limits,
+            model_path,
+            sampling,
+        ));
+        real_game
+            .player_message(member.clone(), "I say: \"Good to have us all back together.\"")
+            .await
+            .expect("a real model turn must succeed on the merged branch DAG");
+        let player_chat = store
+            .player_chat(&member)
+            .await
+            .expect("player chat should load after the real turn");
+        assert!(
+            player_chat
+                .iter()
+                .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
+            "the real model turn must leave a player-visible assistant reply"
+        );
     }
 
     #[tokio::test]

@@ -764,6 +764,11 @@ fn InferenceCard(
     standalone: bool,
     live_tokens: RwSignal<std::collections::HashMap<i64, String>>,
 ) -> impl IntoView {
+    // The complete record, verbatim, for when the structured rendering below
+    // isn't enough (design.md: "Render raw JSON ... with ... clipboard
+    // controls") - every field this struct has, not a second, narrower
+    // projection of it.
+    let raw_json = serde_json::to_string_pretty(&inference).unwrap_or_default();
     let is_running = matches!(inference.outcome, RecordedOutcome::Running);
     let (outcome_text, outcome_content, reasoning, usage) = match inference.outcome {
         RecordedOutcome::Running => (None, None, String::new(), None),
@@ -868,6 +873,13 @@ fn InferenceCard(
                         <CopyButton text=prompt/>
                     </div>
                 })}
+            </details>
+            <details class="mt-1 border-t border-base-300 pt-1">
+                <summary class="cursor-pointer select-none">"Raw JSON"</summary>
+                <div class="mt-1 flex items-start gap-1">
+                    <pre class="whitespace-pre-wrap font-mono text-xs">{raw_json.clone()}</pre>
+                    <CopyButton text=raw_json/>
+                </div>
             </details>
         </div>
     }

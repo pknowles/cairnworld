@@ -246,19 +246,25 @@ CREATE TABLE recorded_content (
 CREATE TABLE history_branch (
     id INTEGER PRIMARY KEY NOT NULL,
     agent_id INTEGER NOT NULL REFERENCES agent(id),
-    next_position INTEGER NOT NULL DEFAULT 0
+    next_position INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (id, agent_id)
 );
 
 -- Immutable bounded references from a branch to an earlier branch it
 -- continues from, ordered by ordinal. Populated by split_group (one parent:
--- the source) and merge_groups (one parent per source group). Parents belong
--- to the same agent and predate their child.
+-- the source) and merge_groups (one parent per source group). The keys make
+-- invalid links unrepresentable: both branches share agent_id (so one world),
+-- and a parent always has a smaller id than its child, so no cycle exists.
 CREATE TABLE history_parent (
-    branch_id INTEGER NOT NULL REFERENCES history_branch(id),
+    branch_id INTEGER NOT NULL,
+    agent_id INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,
-    parent_branch_id INTEGER NOT NULL REFERENCES history_branch(id),
+    parent_branch_id INTEGER NOT NULL,
     through_position INTEGER NOT NULL,
-    PRIMARY KEY (branch_id, ordinal)
+    PRIMARY KEY (branch_id, ordinal),
+    FOREIGN KEY (branch_id, agent_id) REFERENCES history_branch(id, agent_id),
+    FOREIGN KEY (parent_branch_id, agent_id) REFERENCES history_branch(id, agent_id),
+    CHECK (parent_branch_id < branch_id)
 );
 
 -- The single writable branch of a linear player, NPC, Storyteller or sandbox

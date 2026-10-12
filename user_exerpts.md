@@ -300,3 +300,17 @@ but this needs testing.") as: no. The user should update
 user_declarations.md's World detail page section to remove that TODO and state
 the accepted policy directly, since design proposals do not themselves amend
 declarations.
+
+## 2026-09-25: Merged GM history order and checked SQL
+
+> Treat it like a git history with merges.
+
+Asked how to order a merged group's GM history. design.md's Context order now
+reads every reachable branch once, in creation order (ancestors first), each in
+position order - replacing per-parent ordinal order, which is ambiguous when a
+shared ancestor is reachable through several parents.
+
+> [compile-time checked SQL] sounds like a good decision
+
+The code moves to sqlx's checked query macros to match design.md
+(plans/code-quality.md).
