@@ -24,9 +24,10 @@ corrections and GM event recording are already complete.
 Review of `8f32f75`, 2026-09-24. Clippy is clean and 102 Rust tests pass with 9
 opt-in skipped; the rest is from reading the code and has not been measured.
 
-- **Gates fixed (2026-09-25).** `scripts/check-quality.sh` runs formatting plus
-  server and hydrated-WASM Clippy with warnings denied; both crate roots deny
-  warnings and forbid unsafe code. The gate exposed and the commit corrected
+- **Gates fixed (2026-09-25; package coverage 2026-10-19).** `scripts/check-quality.sh` runs formatting plus
+  server and hydrated-WASM Clippy with warnings denied; Cargo package lint
+  settings deny warnings and forbid unsafe code across all application targets,
+  including build.rs and tests. The gate exposed and the commit corrected
   the inspection pane's over-parameterized fetch helper rather than suppressing
   its warning.
 - **Real-path compaction tests (2026-09-26).** Compaction tests now start with

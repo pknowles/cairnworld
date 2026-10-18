@@ -124,3 +124,8 @@ scripts/check-quality.sh
 
 It checks formatting and treats warnings as errors for both the server and the
 hydrated WASM library.
+Cargo's package lint settings also deny warnings and forbid unsafe code in
+every application target, including the build script and tests. Do not suppress
+lints with `allow` or `expect` attributes. Third-party dependencies retain their
+own lint policies; the application's unsafe-code prohibition does not imply
+that CUDA or other dependencies contain no unsafe code.

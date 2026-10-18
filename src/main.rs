@@ -1,5 +1,3 @@
-#![deny(warnings)]
-#![forbid(unsafe_code)]
 // Leptos's typed view tree nests one generic layer per element/conditional;
 // PlayerChat's inspect pane is now deep enough to exceed rustc's default.
 #![recursion_limit = "256"]

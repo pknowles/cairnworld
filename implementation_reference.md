@@ -3,6 +3,10 @@
 Index of what exists, mapped to design.md sections. Plans describe remaining
 work; their completion claims do not override the source.
 
+Cargo's package lint table denies warnings and forbids unsafe code for every
+application target, including build.rs and tests. `scripts/check-quality.sh`
+checks formatting and server/WASM Clippy; dependency lints remain upstream-owned.
+
 ## Current alignment boundary
 
 Developer Mode has the A–C recording/query foundations, but their completion is
