@@ -513,7 +513,7 @@ where
             let budget = Budget::new(self.limits);
             let branch = self.store.group_branch(group_id).await?;
             self.store
-                .append_event(branch, &request, sequence.id)
+                .append_instruction(branch, &request, sequence.id)
                 .await
                 .context("storing presence transition event")?;
             let settled = agent::complete_with_call_context(
@@ -1374,7 +1374,7 @@ where
             ),
         );
         self.store
-            .append_event(branch, &request, pending.sequence_id)
+            .append_instruction(branch, &request, pending.sequence_id)
             .await
             .with_context(|| format!("storing arbitration event for action {action_id}"))?;
         let settled = agent::complete_with_call_context(
@@ -3136,6 +3136,16 @@ mod tests {
         assert!(
             matches!(response.content, Content::Text(text) if text == "Welcome. Let us make your Adventurer.")
         );
+        let chat = store.player_chat(&member).await.unwrap();
+        assert_eq!(chat.len(), 1, "reload must show only the spoken welcome");
+        assert_eq!(chat[0].text, "Welcome. Let us make your Adventurer.");
+        assert_eq!(
+            store
+                .player_chat_after(&member, Some(chat[0].id))
+                .await
+                .unwrap(),
+            vec![]
+        );
         store
             .set_developer_mode(member.user_id, member.world_id, true)
             .await
@@ -3171,6 +3181,7 @@ mod tests {
                     },
                     Message {
                         role: Role::User,
+                        origin: crate::store::MessageOrigin::Instruction,
                         content: MessageContent::Text(text),
                         ..
                     },

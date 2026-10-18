@@ -53,9 +53,10 @@ pub enum Role {
 /// Why a message was added to a chat history. This does not alter its model
 /// role: an instruction remains a user turn to the model while inspection
 /// names its actual game-side source.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageOrigin {
+    #[default]
     Conversation,
     Instruction,
 }
@@ -102,6 +103,9 @@ impl std::fmt::Display for Role {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Message {
     pub role: Role,
+    /// Game-side provenance; the backend still uses `role` for the model.
+    #[serde(default)]
+    pub origin: MessageOrigin,
     pub content: MessageContent,
     pub reasoning: String,
 }
@@ -121,6 +125,7 @@ impl Message {
     pub fn text(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,
+            origin: MessageOrigin::Conversation,
             content: MessageContent::Text(content.into()),
             reasoning: String::new(),
         }
@@ -133,6 +138,7 @@ impl Message {
         };
         Self {
             role: Role::Assistant,
+            origin: MessageOrigin::Conversation,
             content,
             reasoning,
         }
@@ -141,6 +147,7 @@ impl Message {
     pub fn tool_result(tool_call_id: String, content: String) -> Self {
         Self {
             role: Role::Tool,
+            origin: MessageOrigin::Conversation,
             content: MessageContent::ToolResult {
                 tool_call_id,
                 content,

@@ -978,6 +978,7 @@ mod tests {
                 Message::text(Role::User, "Attack the goblin with my sword."),
                 Message {
                     role: Role::Assistant,
+                    origin: crate::inspection::MessageOrigin::Conversation,
                     content: MessageContent::ToolCalls(vec![ToolCall {
                         id: "c1".to_string(),
                         name: "attack".to_string(),

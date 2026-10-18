@@ -1430,7 +1430,7 @@ fn InferenceCard(
                 <ul class="mt-1 space-y-1">
                     {request_messages.into_iter().map(|message| view! {
                         <li>
-                            <span class="font-semibold">{message.role.as_str()}</span>
+                            <span class="font-semibold">{if message.origin == MessageOrigin::Instruction { "instruction" } else { message.role.as_str() }}</span>
                             <ContentBlock content=message.content/>
                             {(!message.reasoning.is_empty()).then(|| view! {
                                 <details class="text-base-content/60">
@@ -1987,13 +1987,14 @@ pub fn PlayerChat(
     let initial_inspecting = None;
     let inspecting = RwSignal::new(initial_inspecting);
     let restore_inspect_scroll = RwSignal::new(None::<i32>);
-    let inspect_open =
-        RwSignal::new(initial_inspecting.is_some() || dev_error.get_untracked().is_some());
+    // Hydrate the same closed layout the server rendered; the selection
+    // effect opens it afterward, including when restoring an inspect URL.
+    let inspect_open = RwSignal::new(false);
     let last_inspecting = RwSignal::new(initial_inspecting);
     // Narrow screens show one of the already-mounted panes. This is distinct
     // from `inspect_open`: Close still collapses Inspect to its edge strip,
     // whereas these tabs only choose which pane CSS makes visible below `sm`.
-    let narrow_inspect = RwSignal::new(initial_inspecting.is_some());
+    let narrow_inspect = RwSignal::new(false);
     // A signal, not the plain prop: an owner may toggle Developer Mode while
     // this page stays open, and every active member's page must reflect it
     // immediately (user_declarations.md), not only on reload.
@@ -2051,6 +2052,11 @@ pub fn PlayerChat(
                 last_inspecting.set(Some(selected));
                 inspect_open.set(true);
                 narrow_inspect.set(true);
+            }
+        });
+        Effect::new(move |_| {
+            if dev_error.get().is_some() {
+                inspect_open.set(true);
             }
         });
         Effect::new(move |_| {

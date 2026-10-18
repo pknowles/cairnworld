@@ -516,12 +516,22 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   the only code that builds them from the database or serves them over HTTP.
   `MessageOrigin` records a game-authored **Instruction** separately from a
   conversational message while retaining the model-facing `Role::User` where
-  that is the correct chat-template role. `Game::resolve_enter` stores its
+  that is the correct chat-template role. Request reconstruction preserves
+  `Message::origin`, and both raw history and inference input label instructions
+  as such. Input verification hashes exclude this game-side metadata, retaining
+  compatibility with existing saved inferences. `Store::player_chat_after` is
+  the shared visibility query for live delivery, page snapshots and reconnects;
+  it excludes instructions. Both delivery paths use `player_chat_entries` for
+  the browser entry mapping. `Game::resolve_enter` stores its
   one-time player-entry instruction before the opening inference, so later
   player turns and compaction process it as ordinary history; only the current
   player system prompt remains input-only. `RecordedInference` carries the
   existing compaction `cause_inference_id` so the browser does not infer that
   meaning from text.
+  Opening GM narration, presence narration and action arbitration also record
+  their game-authored requests with `append_instruction`.
+  `PlayerChat` restores an inspect URL after hydrating the server's closed pane
+  layout, so reloading an inference link opens its content visibly.
 
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 

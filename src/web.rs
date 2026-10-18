@@ -1159,20 +1159,14 @@ async fn send_new_entries(
     cursor: Option<i64>,
 ) -> Result<Option<i64>> {
     let mut cursor = cursor;
-    for entry in game.player_chat_after(member, cursor).await? {
-        cursor = Some(entry.id);
-        let role = match entry.role {
-            crate::llm::Role::User => ChatRole::User,
-            crate::llm::Role::Assistant => ChatRole::Assistant,
-            crate::llm::Role::Narration => ChatRole::Narration,
-            crate::llm::Role::System | crate::llm::Role::Tool => continue,
-        };
+    for entry in player_chat_entries(game.player_chat_after(member, cursor).await?) {
+        cursor = entry.id;
         send_event(
             socket,
             &ServerEvent::Entry {
-                role,
+                role: entry.role,
                 text: entry.text,
-                id: Some(entry.id),
+                id: entry.id,
                 sequence_id: entry.sequence_id,
             },
         )
@@ -2095,6 +2089,16 @@ mod tests {
             .sequence_tree(owner.id, installed.world_id, sequence.id)
             .await
             .unwrap();
+        let gm_opening = nodes
+            .iter()
+            .find(|node| {
+                node.inference.request.messages.iter().any(|message| {
+                    message.origin == crate::inspection::MessageOrigin::Instruction
+                        && matches!(&message.content, crate::llm::MessageContent::Text(text)
+                            if text.starts_with("A player character has just begun play here."))
+                })
+            })
+            .expect("the real creation sequence must include the GM opening instruction");
         let inference_id = nodes
             .iter()
             .find(|node| {
@@ -2111,6 +2115,13 @@ mod tests {
             .inference
             .id;
         let recorded = store.reconstruct_inference(inference_id).await.unwrap();
+        assert!(
+            recorded
+                .request
+                .messages
+                .iter()
+                .any(|message| message.origin == crate::inspection::MessageOrigin::Instruction)
+        );
         let prompt = recorded.model_prompt.clone().unwrap();
         let evidence = recorded.prompt_evidence.clone().unwrap();
         {
@@ -2191,6 +2202,7 @@ mod tests {
             "after_message_id": after_message_id,
             "sequence_id": sequence.id,
             "inference_id": inference_id,
+            "gm_opening_inference_id": gm_opening.inference.id,
             "tool": "ready_to_begin",
             "request_json": serde_json::to_string(&recorded.request).unwrap(),
             "model_prompt": prompt,

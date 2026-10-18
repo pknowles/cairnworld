@@ -54,6 +54,38 @@ pub struct Store {
     dev_events: Arc<Mutex<HashMap<i64, broadcast::Sender<DevEvent>>>>,
 }
 
+/// Hash model input without game-side provenance. Preserve the original wire
+/// shape so saved inference hashes still verify when inspection gains metadata.
+fn inference_input_hash(request: &Request) -> Result<String> {
+    #[derive(Serialize)]
+    struct InputMessage<'a> {
+        role: &'a Role,
+        content: &'a MessageContent,
+        reasoning: &'a str,
+    }
+    #[derive(Serialize)]
+    struct Input<'a> {
+        messages: Vec<InputMessage<'a>>,
+        tools: &'a [ToolDefinition],
+        sampling: &'a Sampling,
+    }
+    let input = Input {
+        messages: request
+            .messages
+            .iter()
+            .map(|message| InputMessage {
+                role: &message.role,
+                content: &message.content,
+                reasoning: &message.reasoning,
+            })
+            .collect(),
+        tools: &request.tools,
+        sampling: &request.sampling,
+    };
+    let bytes = serde_json::to_vec(&input).context("serializing inference input")?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
 /// A test database at a unique path that deletes its files on drop, including
 /// after a panic. `cargo test` runs every test in one process on many threads,
 /// so a wall-clock timestamp is not a unique name; a process-wide counter is.
@@ -603,6 +635,7 @@ pub struct WorldObjectsQuery {
 struct MessageRow {
     id: i64,
     role: String,
+    origin: String,
     content: i64,
 }
 
@@ -2456,6 +2489,7 @@ impl Store {
              LEFT JOIN inference ON inference.id = message.source_inference_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
              AND player_character.character_id = ? AND player_character.agent_id = ? AND member.access = 'active' AND message.id > ? \
+             AND message.origin = 'conversation' \
              ORDER BY history_entry.position",
         )
         .bind(member.member_id)
@@ -3534,24 +3568,6 @@ impl Store {
             .await
     }
 
-    /// Append the event that begins a turn to its already-validated branch.
-    /// Unlike a role prompt or current context packet, an event is part of the
-    /// conversation: later turns, summaries and Developer Mode must retain it.
-    pub async fn append_event(
-        &self,
-        branch: AgentBranch,
-        message: &Message,
-        trigger_sequence_id: i64,
-    ) -> Result<i64> {
-        self.append_event_with_origin(
-            branch,
-            message,
-            trigger_sequence_id,
-            MessageOrigin::Conversation,
-        )
-        .await
-    }
-
     /// Append a game-authored instruction that the model receives as a user
     /// turn. Its distinct origin prevents Developer Mode from calling it a
     /// human player's message.
@@ -3560,22 +3576,6 @@ impl Store {
         branch: AgentBranch,
         message: &Message,
         trigger_sequence_id: i64,
-    ) -> Result<i64> {
-        self.append_event_with_origin(
-            branch,
-            message,
-            trigger_sequence_id,
-            MessageOrigin::Instruction,
-        )
-        .await
-    }
-
-    async fn append_event_with_origin(
-        &self,
-        branch: AgentBranch,
-        message: &Message,
-        trigger_sequence_id: i64,
-        origin: MessageOrigin,
     ) -> Result<i64> {
         let mut transaction = self.pool.begin().await.with_context(|| {
             format!(
@@ -3591,7 +3591,7 @@ impl Store {
             None,
             None,
             Some(trigger_sequence_id),
-            origin,
+            MessageOrigin::Instruction,
         )
         .await?;
         transaction.commit().await.with_context(|| {
@@ -4119,7 +4119,7 @@ impl Store {
                     // message row. Only every message-kind entry in range
                     // missing its message row is real corruption.
                     let rows = sqlx::query_as::<_, MessageRow>(
-                        "SELECT message.id, message.role, message.content FROM message \
+                        "SELECT message.id, message.role, message.origin, message.content FROM message \
                          JOIN history_entry ON history_entry.id = message.id \
                          WHERE history_entry.branch_id = ? AND history_entry.position BETWEEN ? AND ? \
                          ORDER BY history_entry.position",
@@ -4166,6 +4166,7 @@ impl Store {
                         let (content, _) = self.recorded_content(row.content).await?;
                         messages.push(Message {
                             role,
+                            origin: row.origin.parse().map_err(anyhow::Error::msg)?,
                             content,
                             reasoning: String::new(),
                         });
@@ -4307,9 +4308,8 @@ impl Store {
             serde_json::to_string(input.segments).context("serializing inference segments")?;
         let sampling = serde_json::to_string(&input.request.sampling)
             .context("serializing inference sampling")?;
-        let request = serde_json::to_vec(input.request).context("serializing inference input")?;
         // Verification only: reconstruction uses the bounded recipe, never the hash.
-        let input_hash = blake3::hash(&request).to_hex().to_string();
+        let input_hash = inference_input_hash(input.request)?;
         let mut transaction = self
             .pool
             .begin()
@@ -4790,10 +4790,8 @@ impl Store {
             .request_for_segments(row.agent_id, &segments, sampling)
             .await
             .with_context(|| format!("reassembling inference {} from its recipe", row.id))?;
-        let input =
-            serde_json::to_vec(&request).context("serializing reconstructed inference request")?;
         ensure!(
-            blake3::hash(&input).to_hex().as_str() == row.input_hash,
+            inference_input_hash(&request)? == row.input_hash,
             "inference {} reconstructed input does not match its hash",
             row.id
         );
@@ -5972,6 +5970,19 @@ mod tests {
             )
             .await
             .unwrap();
+        let branch = store.agent_branch(installed.member.agent_id).await.unwrap();
+        let sequence = store
+            .begin_sequence(installed.world_id, "internal instruction")
+            .await
+            .unwrap();
+        store
+            .append_instruction(
+                branch,
+                &Message::text(Role::User, "Speak directly to the player."),
+                sequence.id,
+            )
+            .await
+            .unwrap();
         store
             .append_message(
                 installed.member.agent_id,
@@ -7071,6 +7082,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(messages, 2);
+    }
+
+    #[test]
+    fn inference_hash_preserves_legacy_input_shape_and_ignores_provenance() {
+        let mut request = Request {
+            messages: vec![Message::text(Role::User, "Look.")],
+            tools: vec![],
+            sampling: Sampling::default(),
+        };
+        let legacy = br#"{"messages":[{"role":"User","content":{"type":"Text","value":"Look."},"reasoning":""}],"tools":[],"sampling":{"temperature":0.0,"top_p":null,"top_k":null,"min_p":null,"presence_penalty":null,"enable_thinking":false}}"#;
+        let expected = blake3::hash(legacy).to_hex().to_string();
+        assert_eq!(inference_input_hash(&request).unwrap(), expected);
+        request.messages[0].origin = MessageOrigin::Instruction;
+        assert_eq!(inference_input_hash(&request).unwrap(), expected);
     }
 
     #[tokio::test]
