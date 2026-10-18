@@ -2533,12 +2533,11 @@ impl Store {
             Self::insert_message_with_content(
                 &mut transaction,
                 branch_id,
-                Role::Narration,
+                (Role::Narration, MessageOrigin::Conversation),
                 content_id,
                 source_inference_id,
                 None,
                 None,
-                MessageOrigin::Conversation,
             )
             .await
             .with_context(|| format!("storing location narration for player agent {agent_id}"))?;
@@ -3715,12 +3714,11 @@ impl Store {
         let message_id = Self::insert_message_with_content(
             transaction,
             branch_id,
-            message.role.clone(),
+            (message.role.clone(), origin),
             content,
             source_inference_id,
             source_tool_execution_id,
             trigger_sequence_id,
-            origin,
         )
         .await?;
         Ok((message_id, content))
@@ -3734,12 +3732,11 @@ impl Store {
     async fn insert_message_with_content(
         transaction: &mut Transaction<'_, Sqlite>,
         branch_id: i64,
-        role: Role,
+        (role, origin): (Role, MessageOrigin),
         content: i64,
         source_inference_id: Option<i64>,
         source_tool_execution_id: Option<i64>,
         trigger_sequence_id: Option<i64>,
-        origin: MessageOrigin,
     ) -> Result<i64> {
         let (history_entry_id, _position) =
             Self::append_history_entry(transaction, branch_id, EntryKind::Message).await?;
@@ -4624,12 +4621,11 @@ impl Store {
             let message_id = Self::insert_message_with_content(
                 &mut transaction,
                 branch_id,
-                Role::Assistant,
+                (Role::Assistant, MessageOrigin::Conversation),
                 output.expect("response outcome has content"),
                 Some(id),
                 None,
                 None,
-                MessageOrigin::Conversation,
             )
             .await?;
             if let Some(next_input_tokens) = next_input_tokens
@@ -4687,8 +4683,7 @@ impl Store {
         outcome: InferenceOutcome,
         duration_ms: u64,
         covered_ranges: Option<&[PositionRange]>,
-        reason: &str,
-        retained_messages: i64,
+        (reason, retained_messages): (&str, i64),
     ) -> Result<()> {
         let duration_ms =
             i64::try_from(duration_ms).context("inference duration exceeds SQLite range")?;
@@ -5216,7 +5211,9 @@ impl Store {
                 RawHistoryEntry::Message {
                     id: row.id,
                     role: serde_json::from_str(&row.role).context("decoding raw message role")?,
-                    origin: MessageOrigin::from_str(&row.origin)
+                    origin: row
+                        .origin
+                        .parse::<MessageOrigin>()
                         .map_err(anyhow::Error::msg)
                         .context("decoding raw message origin")?,
                     content,
@@ -5620,8 +5617,7 @@ mod tests {
                     first_position: 0,
                     last_position: covers_through_position,
                 }]),
-                "threshold",
-                2,
+                ("threshold", 2),
             )
             .await?;
         store
@@ -5653,10 +5649,12 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::raw_sql(include_str!("../migrations/0002_consolidate_compaction.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_consolidate_compaction.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let legacy_table: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chat_notice'",
@@ -5664,13 +5662,15 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(legacy_table, 0, "the migration removes the second event table");
-        let summary_columns: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM pragma_table_info('summary') ORDER BY cid",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        assert_eq!(
+            legacy_table, 0,
+            "the migration removes the second event table"
+        );
+        let summary_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('summary') ORDER BY cid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert!(
             summary_columns.ends_with(&["reason".to_owned(), "retained_messages".to_owned()]),
             "the one summary record owns compaction metadata: {summary_columns:?}"
@@ -7429,8 +7429,7 @@ mod tests {
                     first_position: 0,
                     last_position: job.position,
                 }]),
-                "threshold",
-                2,
+                ("threshold", 2),
             )
             .await
             .unwrap();
@@ -7658,8 +7657,7 @@ mod tests {
                     first_position: 0,
                     last_position: job.position,
                 }]),
-                "threshold",
-                2,
+                ("threshold", 2),
             )
             .await
             .unwrap();
@@ -7810,8 +7808,7 @@ mod tests {
                         first_position: 0,
                         last_position: job.position,
                     }]),
-                    "threshold",
-                    2,
+                    ("threshold", 2),
                 )
                 .await
                 .unwrap();
@@ -8676,8 +8673,7 @@ mod tests {
                     first_position: 0,
                     last_position: 1,
                 }]),
-                "threshold",
-                2,
+                ("threshold", 2),
             )
             .await
             .unwrap();

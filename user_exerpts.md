@@ -436,3 +436,59 @@ tool call is anomalous rather than fatal and logs durable turn/inference context
 for investigation. The player prompt explains the silent completion option
 when another game message, such as a GM narration, already communicates the
 result.
+
+## 2026-10-17: Runtime boundaries and build output
+
+> an app specific feature in mistral.rs?
+
+Applied interpretation: application features and persistence belong in
+Cairnworld; mistral.rs changes must provide generic runtime capabilities.
+
+> can we not just have ONE build directory please without LLM sprawl??
+
+Use Cargo's normal `target` output root rather than adding custom build roots.
+
+> you needed to have told me you made changes there
+
+Report dependency-repository changes and any required push explicitly so the
+application is not left depending on an undisclosed unpublished commit.
+
+> can we not have random installs littering this project and have the bare
+> essentials installed by me globally?
+
+> please clear your broken dependencies. I ONLY want a regular rust build dir
+
+Development tools belong in the user's normal machine/user installations.
+The user performs global installations. Ask before downloading or installing
+additional tools; do not provision a private toolchain under `target`.
+
+## 2026-10-18: Cargo tools and dependency changes
+
+> you may use cargo to install normal cargo stuff. it is not a free pass to
+> hack everything through cargo if it's not meant to be
+
+Normal Cargo CLI installations are authorized. This does not authorize using
+Cargo as a substitute installer for unrelated system tools.
+
+> proceed. keep mistral.rs changes separate. you might want to fetch and see if
+> upstream has what we need too
+
+Keep inference-library changes and commits in the mistral.rs repository;
+Cairnworld retains its dependency pin, application tests, and documentation.
+
+## 2026-10-18: Development secrets
+
+> new secret - save in  some ./secrets env file matching where it should be read
+> from in the previous dev env
+
+Keep development OAuth values in Git-excluded `secrets/dev.env`, exported as
+`CAIRNWORLD__` environment overrides through the existing configuration library.
+
+## 2026-10-18: Allocation work order
+
+> Finish runtime restoration, then fix allocation separately
+
+The measured growth of temporary CUDA workspaces after startup remains a gap
+against the startup-only allocation declaration. Complete Windows runtime
+restoration first, then address the complete working-set reservation in the next
+plan. Fixed paged KV capacity remains required throughout.

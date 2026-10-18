@@ -1,5 +1,5 @@
 # Checked-in defaults, shared by everyone. Per-machine overrides (model path,
-# secrets, etc.) go in local.toml, which is gitignored.
+# secrets, etc.) go in gitignored local.toml or CAIRNWORLD__ environment variables.
 
 # Which model to use when --model is not given. Set this in local.toml.
 # model = "llama"
@@ -76,9 +76,9 @@ merge_branch_messages = 64
 # really happen.
 presence_departure_seconds = 60
 
-# Browser serving is deliberately configured only in local.toml: Google OAuth
-# credentials are machine/deployment secrets. `cairnworld serve` fails with a
-# clear message until all fields are set.
+# Configure browser serving in local.toml or CAIRNWORLD__WEB__ environment variables.
+# Google OAuth credentials are machine/deployment secrets. `cairnworld serve`
+# fails with a clear message until all fields are set.
 # [web]
 # bind = "127.0.0.1:3000"
 # google_client_id = "..."

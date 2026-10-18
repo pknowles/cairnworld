@@ -617,6 +617,10 @@ desktop/dev OAuth clients, so one client id in a gitignored config file
 serves development. The client secret and db path are the only deployment
 configuration.
 
+Runtime environment variables prefixed `CAIRNWORLD__` override the TOML
+configuration, with `__` separating nested fields. Development OAuth values
+may be exported from a local `secrets/dev.env` file excluded from Git.
+
 ## Dev mode
 
 Owner-controlled `world.developer_mode` flag: the owner may enable and later

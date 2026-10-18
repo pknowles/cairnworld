@@ -4,6 +4,60 @@ A multiplayer text adventure RPG with AI storytelling
 
 ![banner image](media/banner.png)
 
+## Build prerequisites on Windows ARM
+
+Development tools are installed by the developer in their normal machine/user
+locations. Keep Cargo's ordinary `target` layout; do not install toolchains,
+download archives, or environment bootstrap scripts under it.
+
+- Native ARM64 Rust through rustup, including rustfmt and Clippy. Browser builds
+  also require the `wasm32-unknown-unknown` target and `cargo-leptos` in the normal
+  Cargo tools directory.
+- Visual Studio C++ ARM64 build tools and Windows SDK, with Clang and CMake
+  available from the normal Visual Studio components. The current HTTPS
+  dependencies compile native cryptographic code on Windows ARM.
+- NVIDIA driver and a Windows ARM64 CUDA toolkit for this GPU. NVIDIA introduced
+  RTX Spark Windows ARM support in CUDA 13.4. The vendored inference dependency
+  combines upstream CUDA 13.4 support with Windows paged-attention compatibility.
+- Node.js/npm for the checked-in Tailwind/DaisyUI stylesheet build. Browser tests
+  additionally use an installed Chrome. Python is not a project prerequisite.
+
+Install `cargo-leptos` and `wasm-bindgen-cli` through normal `cargo install`.
+The `wasm-bindgen-cli` version must match `wasm-bindgen` in `Cargo.lock` so
+`cargo-leptos` can use it from `PATH`.
+JavaScript packages use the ordinary project-local `npm ci` installation.
+
+Build in an ARM64 Visual Studio Developer PowerShell with `clang-cl` and `nvcc`
+on `PATH`. Match CUDA's host compiler to Rust's default dynamic C runtime and
+use MSVC's conforming preprocessor, including for Candle's kernels:
+
+```powershell
+$env:NVCC_PREPEND_FLAGS = '-Xcompiler=/Zc:preprocessor -Xcompiler=/MD'
+$env:HF_HOME = "$PWD/models/huggingface"
+cargo build --locked --bin cairnworld -j 4
+```
+
+The first build compiles CUDA kernels and can take tens of minutes. Cargo reuses
+those artifacts on subsequent builds.
+
+`HF_HOME` above reuses the downloaded model metadata. CUDA headers, compiler,
+ARM64 import libraries, and runtime DLLs must come from the same toolkit.
+`build.rs` uses `CUDA_PATH` to put ARM64 libraries first for the final application
+link; the binding crate's automatic search still includes x64 directories.
+On Windows unified-memory GPUs, admission uses the CUDA driver's combined
+dedicated/shared budget. `nvidia-smi` reports only the dedicated carveout;
+free CPU RAM is also not the CUDA allocation budget.
+The backend requires paged attention and reserves the configured context-token
+pool at startup. Model weights, recurrent state, and temporary computation
+buffers also contribute to GPU memory usage. The device test
+`configured_context_capacity_rejects_overflow_and_remains_usable` exercises the
+checked-in context/concurrency limits, logs memory across repeated full-context
+requests, and verifies fixed-cache rejection followed by a valid request.
+
+References: [NVIDIA CUDA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html),
+[ring build requirements](https://github.com/briansmith/ring/blob/main/BUILDING.md),
+and [mistral.rs paged attention](https://docs.mistralrs.dev/guides/perf/paged-attention/).
+
 ## Browser development
 
 The browser is an Axum server with a shared Leptos WASM island, not a separate
@@ -11,13 +65,26 @@ JavaScript application. Build its package and dark-theme stylesheet before
 starting the server:
 
 ```sh
-npm install
+npm ci
 npm run build:frontend
-cargo run -- serve --database /path/to/cairnworld.sqlite --model dev-qwen3
+cargo run -- serve --database /path/to/cairnworld.sqlite --model dev-qwen35
 ```
 
-`local.toml` must provide the `[web]` Google OAuth values declared in
-`default.toml`. The server serves the generated package at `/pkg` and the
+Provide the `[web]` Google OAuth values declared in `default.toml` through
+`local.toml` or environment variables. `CAIRNWORLD__` variables override TOML;
+`__` separates nested fields, for example `CAIRNWORLD__WEB__GOOGLE_CLIENT_ID`.
+For local development, export the values saved in the Git-excluded
+`secrets/dev.env` before the `cargo run` command (Git Bash):
+
+Exclude `/secrets/` in `.git/info/exclude` before creating that local file.
+
+```sh
+set -a
+. secrets/dev.env
+set +a
+```
+
+The server serves the generated package at `/pkg` and the
 checked-in landing artwork at `/media`.
 
 `npm run test:hydration` builds the frontend and runs Rust's browser-test fixture
@@ -36,7 +103,7 @@ fail the command, and negative checks verify that behavior.
 The device-only acceptance test additionally drives a configured CUDA model
 through normal game play, then opens that exact recorded tool inference in the
 browser and compares its request, rendered prompt, token evidence, and tool
-call. It requires Chrome, a working CUDA driver, and the `dev-qwen25` model
+call. It requires Chrome, a working CUDA driver, and the `dev-qwen35` model
 from `default.toml`:
 
 ```sh

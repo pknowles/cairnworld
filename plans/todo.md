@@ -6,6 +6,9 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
+- [Startup-only GPU allocation](fixed-gpu-allocation.md): reserve the complete
+  inference working set before accepting requests; fixed KV capacity alone is
+  insufficient. The user explicitly placed this after runtime restoration.
 - [Code quality](code-quality.md) (steps 2 onward): correctness-by-construction
   refactors (validated handles, persistence by feature with checked SQL,
   read/write pools, `World` objects with lossless presence, relational

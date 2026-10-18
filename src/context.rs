@@ -339,8 +339,7 @@ pub async fn complete_summary_recipe<B: Backend>(
     completion: RecipeCompletion<'_>,
     job: &crate::store::PendingCompaction,
     covered_ranges: Option<&[crate::store::PositionRange]>,
-    reason: &str,
-    retained_messages: i64,
+    summary_metadata: (&str, i64),
     on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
     let run = run_recipe(store, backend, completion, on_token).await?;
@@ -352,8 +351,7 @@ pub async fn complete_summary_recipe<B: Backend>(
             run.outcome,
             run.duration_ms,
             covered_ranges,
-            reason,
-            retained_messages,
+            summary_metadata,
         )
         .await
         .with_context(|| {

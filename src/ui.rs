@@ -337,15 +337,14 @@ struct FetchState {
     in_flight: RwSignal<bool>,
 }
 
-/// Whether the pane is expanded or collapsed to its edge strip, and the
-/// current/last selections that drive both. Grouped together since every
-/// caller and the pane itself always needs the three as one unit - not
-/// unrelated signals passed separately (matches `FetchState`'s reasoning).
+/// The inspection pane's navigation, visibility and retained scroll position.
 #[derive(Clone, Copy)]
-struct PaneVisibility {
+struct PaneState {
     selection: RwSignal<Option<InspectSelection>>,
     open: RwSignal<bool>,
     last_selection: RwSignal<Option<InspectSelection>>,
+    scroll: NodeRef<leptos::html::Aside>,
+    restore_scroll: RwSignal<Option<i32>>,
 }
 
 /// The pane is owned by the chat island, so switching views only changes
@@ -354,15 +353,15 @@ struct PaneVisibility {
 /// navigation" - none of them navigate away from the game page).
 fn inspect_pane(
     world_id: i64,
-    pane: PaneVisibility,
+    pane: PaneState,
     narrow_inspect: RwSignal<bool>,
     dev_events: RwSignal<Option<DevEvent>>,
     developer_mode: RwSignal<bool>,
     dev_error: RwSignal<Option<String>>,
     dev_reconnect_nonce: RwSignal<u32>,
-    scroll: NodeRef<leptos::html::Aside>,
-    restore_scroll: RwSignal<Option<i32>>,
 ) -> AnyView {
+    let scroll = pane.scroll;
+    let restore_scroll = pane.restore_scroll;
     let selection = pane.selection;
     let inspect_open = pane.open;
     let last_inspecting = pane.last_selection;
@@ -980,7 +979,7 @@ fn ContentBlock(content: MessageContent) -> impl IntoView {
         MessageContent::ToolResult {
             tool_call_id: _,
             content,
-        } if content.is_empty() => view! {}.into_any(),
+        } if content.is_empty() => ().into_any(),
         MessageContent::ToolResult {
             tool_call_id: _,
             content,
@@ -1645,7 +1644,7 @@ fn RawHistoryEntryRow(
                 && matches!(&content, MessageContent::Text(text) if text.is_empty());
             let empty_tool_result = matches!(&content, MessageContent::ToolResult { content, .. } if content.is_empty());
             if empty_tool_result {
-                return view! {}.into_any();
+                return ().into_any();
             }
             view! {
             <li class=move || history_entry_class(id, selection)>
@@ -1679,7 +1678,7 @@ fn RawHistoryEntryRow(
             </li>
         }.into_any(),
         RawHistoryEntry::Inference { id, history_entry_id, error } => {
-            let Some(error) = error else { return view! {}.into_any(); };
+            let Some(error) = error else { return ().into_any(); };
             view! {
             <li class=move || format!("alert alert-error text-sm {}", if history_entry_selected(history_entry_id, selection) { "ring-2 ring-primary" } else { "" })>
                 <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>
@@ -2169,13 +2168,15 @@ pub fn PlayerChat(
                 </form>
             </div>
             {move || {
-                let pane = PaneVisibility {
+                let pane = PaneState {
                     selection: inspecting,
                     open: inspect_open,
                     last_selection: last_inspecting,
+                    scroll: inspect_scroll,
+                    restore_scroll: restore_inspect_scroll,
                 };
                 developer_mode.get().then(|| {
-                    inspect_pane(world_id, pane, narrow_inspect, dev_events, developer_mode, dev_error, dev_reconnect_nonce, inspect_scroll, restore_inspect_scroll)
+                    inspect_pane(world_id, pane, narrow_inspect, dev_events, developer_mode, dev_error, dev_reconnect_nonce)
                 })
             }}
         </div>

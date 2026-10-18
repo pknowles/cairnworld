@@ -238,9 +238,13 @@ impl Limits {
 
 impl Settings {
     /// The runtime configuration: checked-in `default.toml` with per-machine
-    /// `local.toml` layered on top.
+    /// `local.toml` layered on top, then `CAIRNWORLD__` environment overrides.
     pub fn load() -> Result<Self> {
-        Self::build(config::File::with_name("local").required(false))
+        let overrides: Vec<Box<dyn config::Source + Send + Sync>> = vec![
+            Box::new(config::File::with_name("local").required(false)),
+            Box::new(config::Environment::with_prefix("CAIRNWORLD").separator("__")),
+        ];
+        Self::build(overrides)
     }
 
     /// `default.toml` with an inline TOML override layered on top and no

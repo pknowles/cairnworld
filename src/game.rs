@@ -1676,21 +1676,23 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant && entry.text.is_empty()),
             "the silent completion must not become a blank player-chat entry"
         );
-        let requests = requests.lock().unwrap();
-        let final_request = requests
-            .last()
-            .expect("player agent must settle after the tool");
-        assert!(matches!(
-            final_request.messages.as_slice(),
-            messages if messages.windows(2).any(|pair| matches!(
-                pair,
-                [
-                    Message { content: MessageContent::ToolResult { content, .. }, .. },
-                    Message { role: Role::Narration, content: MessageContent::Text(narration), .. },
-                ] if content == "Character creation complete."
-                    && narration == "The charcoal hut is quiet."
-            ))
-        ));
+        {
+            let requests = requests.lock().unwrap();
+            let final_request = requests
+                .last()
+                .expect("player agent must settle after the tool");
+            assert!(matches!(
+                final_request.messages.as_slice(),
+                messages if messages.windows(2).any(|pair| matches!(
+                    pair,
+                    [
+                        Message { content: MessageContent::ToolResult { content, .. }, .. },
+                        Message { role: Role::Narration, content: MessageContent::Text(narration), .. },
+                    ] if content == "Character creation complete."
+                        && narration == "The charcoal hut is quiet."
+                ))
+            ));
+        }
         assert!(
             game.opening_complete(&member).await.unwrap(),
             "a durable silent completion must prevent reopening character creation"
@@ -3789,7 +3791,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_compacts_a_long_chat_and_keeps_an_early_fact() {
-        let (backend, model_path, sampling, base_limits) = device_test_game().await;
+        let (mut backend, model_path, sampling, base_limits) = device_test_game().await;
+        let observed_prompts = backend.observe_prompts();
         // A threshold the second turn's context clears, retaining enough tail
         // that the summary has real history to work from.
         let limits = Limits {
@@ -3800,8 +3803,11 @@ mod tests {
         let (game, store, _db, member) =
             opening_game_with_limits(backend, model_path, sampling, limits).await;
 
-        // An early, checkable fact, then enough turns to force a compaction.
-        game.player_message(member.clone(), "Remember the passphrase: BRAMBLEFOX.")
+        // An early character goal, then enough turns to force a compaction.
+        game.player_message(
+            member.clone(),
+            "My character's missing sister is named Maribel. Finding her is my reason for adventuring.",
+        )
             .await
             .expect("first player message");
         for prompt in [
@@ -3825,9 +3831,15 @@ mod tests {
             .expect("summary should load")
             .expect("a compaction must have run");
         assert!(
-            summary.content.to_uppercase().contains("BRAMBLEFOX"),
-            "the summary dropped an early fact it should retain: {}",
-            summary.content
+            summary.content.to_uppercase().contains("MARIBEL"),
+            "the summary dropped an early fact it should retain: {}; actual model prompts: {:#?}",
+            summary.content,
+            observed_prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|observed| &observed.prompt)
+                .collect::<Vec<_>>()
         );
     }
 }

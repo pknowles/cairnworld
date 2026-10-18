@@ -2005,7 +2005,7 @@ mod tests {
     /// Ordinary browser checks remain model-free so they can run on every
     /// development machine.
     #[tokio::test]
-    #[ignore = "device/browser test: needs a CUDA GPU, dev-qwen25, built frontend and Chrome"]
+    #[ignore = "device/browser test: needs a CUDA GPU, dev-qwen35, built frontend and Chrome"]
     async fn real_model_browser_opens_exact_inference_evidence() {
         use crate::{inference::InferenceScheduler, settings::Settings};
 
@@ -2026,7 +2026,7 @@ mod tests {
             .await
             .unwrap();
 
-        let settings = Settings::for_device_test("dev-qwen25").unwrap();
+        let settings = Settings::for_device_test("dev-qwen35").unwrap();
         let model = settings.model(None).unwrap();
         let model_path = model.path.clone();
         let sampling = crate::llm::Sampling {

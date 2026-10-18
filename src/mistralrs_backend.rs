@@ -123,7 +123,7 @@ impl MistralRsBackend {
             let gpu_used_after_mib = log_gpu_memory("after model load")?;
             tracing::info!(
                 allocated_mib = gpu_used_after_mib.saturating_sub(gpu_used_before_mib),
-                "fixed model and KV-cache GPU allocation"
+                "model and KV-cache startup memory delta"
             );
         }
         tracing::info!(
@@ -155,6 +155,9 @@ fn log_gpu_memory(phase: &str) -> Result<usize> {
         .context("querying CUDA memory for model telemetry")?;
     let total_mib = memory.total() / (1024 * 1024);
     let available_mib = memory.available() / (1024 * 1024);
+    let allocator = mistralrs::core::MemoryUsage
+        .query_cuda_allocator(&device)
+        .context("querying CUDA driver memory for model telemetry")?;
     anyhow::ensure!(
         !matches!(device, mistralrs::Device::Cpu),
         "CUDA is unavailable; the model must fit entirely in GPU memory (use --allow-cpu only for explicit CPU/GPU execution)"
@@ -164,6 +167,7 @@ fn log_gpu_memory(phase: &str) -> Result<usize> {
         total_mib,
         available_mib,
         used_mib = total_mib.saturating_sub(available_mib),
+        allocator = ?allocator,
         "CUDA memory telemetry"
     );
     Ok(total_mib.saturating_sub(available_mib))
@@ -691,17 +695,128 @@ mod tests {
             reconstructed.model_prompt.as_deref(),
             Some(observed.lock().unwrap()[0].0.as_str())
         );
-        let observations = observed.lock().unwrap();
-        assert_eq!(
-            observations.len(),
-            1,
-            "observe the normal tokenization exactly once"
+        {
+            let observations = observed.lock().unwrap();
+            assert_eq!(
+                observations.len(),
+                1,
+                "observe the normal tokenization exactly once"
+            );
+            let (prompt, tokens, format) = &observations[0];
+            assert!(format["rendered_at"].is_string());
+            assert_eq!(tokens, &reconstructed_tokens);
+            assert!(prompt.contains("GM narration:\nRain falls. <gate> & café\nThe mill creaks."));
+            assert!(prompt.contains("look"));
+        }
+
+        let failed_observer =
+            request_builder(&request, 16)
+                .unwrap()
+                .with_prompt_observer(Arc::new(|_, _, _| {
+                    Box::pin(async { anyhow::bail!("prompt recording unavailable") })
+                }));
+        let mut stream = backend
+            .model
+            .stream_chat_request(failed_observer)
+            .await
+            .unwrap();
+        match stream
+            .next()
+            .await
+            .expect("observer failure must be returned")
+        {
+            MrResponse::InternalError(error) => {
+                let error = anyhow::Error::from_boxed(error);
+                assert!(
+                    format!("{error:#}").contains("prompt recording unavailable"),
+                    "observer errors must retain their cause: {error:#}"
+                );
+            }
+            _ => panic!("failed prompt observation must prevent generation"),
+        }
+        assert!(
+            stream.next().await.is_none(),
+            "an observer failure must end the stream without generated tokens"
         );
-        let (prompt, tokens, format) = &observations[0];
-        assert!(format["rendered_at"].is_string());
-        assert_eq!(tokens, &reconstructed_tokens);
-        assert!(prompt.contains("GM narration:\nRain falls. <gate> & café\nThe mill creaks."));
-        assert!(prompt.contains("look"));
+    }
+
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn configured_context_capacity_rejects_overflow_and_remains_usable() {
+        show_inference_lifecycle();
+        let settings = Settings::for_test("model = \"dev-qwen35\"").unwrap();
+        let model = settings.model(None).unwrap();
+        let limits = settings.limits;
+        let backend = MistralRsBackend::load(
+            &model.path,
+            model.chat_template.as_deref(),
+            model.source_model.as_deref(),
+            limits,
+            false,
+        )
+        .await
+        .unwrap();
+        let request_for = |repetitions| Request {
+            messages: vec![
+                Message::text(Role::System, "Reply with one short word."),
+                Message::text(Role::User, "x ".repeat(repetitions)),
+            ],
+            tools: vec![],
+            sampling: Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        };
+        let max_input = limits.max_context_tokens - limits.max_output_tokens;
+        let mut lower = 1;
+        let mut upper = limits.max_context_tokens * 2;
+        // Size the boundary fixture with the runtime tokenizer; production admission still uses the generation pass.
+        while lower < upper {
+            let middle = lower + (upper - lower).div_ceil(2);
+            let tokens = backend
+                .model
+                .tokenize_chat_request(
+                    request_builder(&request_for(middle), limits.max_output_tokens).unwrap(),
+                )
+                .await
+                .unwrap();
+            if tokens.len() <= max_input {
+                lower = middle;
+            } else {
+                upper = middle - 1;
+            }
+        }
+        let request = request_for(lower);
+        let tokens = backend
+            .model
+            .tokenize_chat_request(request_builder(&request, limits.max_output_tokens).unwrap())
+            .await
+            .unwrap();
+        assert!(tokens.len() >= max_input - 1);
+        let device = best_device(false).unwrap();
+        log_gpu_memory("before configured-capacity inference").unwrap();
+        for _ in 0..3 {
+            let response = backend.complete(request.clone(), |_| {}).await.unwrap();
+            assert_eq!(response.usage.input_tokens, tokens.len());
+            log_gpu_memory("after configured-capacity inference").unwrap();
+            tracing::info!(
+                allocator = ?mistralrs::core::MemoryUsage.query_cuda_allocator(&device).unwrap(),
+                "configured-capacity CUDA allocation, including pool high-water marks"
+            );
+        }
+        let error = backend
+            .complete(request_for(limits.max_context_tokens * 2), |_| {})
+            .await
+            .expect_err("oversized input must be rejected by the fixed cache");
+        assert!(
+            matches!(
+                error.downcast_ref::<ContextCapacityExceeded>(),
+                Some(ContextCapacityExceeded::FixedKv { .. })
+            ),
+            "expected a fixed-cache rejection, got {error:#}"
+        );
+        backend.complete(request_for(1), |_| {}).await.unwrap();
+        log_gpu_memory("after fixed-cache rejection and recovery").unwrap();
     }
 
     #[tokio::test]

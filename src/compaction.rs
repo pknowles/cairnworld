@@ -109,8 +109,10 @@ async fn run_invocation<B: Backend>(
             },
             job,
             Some(&covered_ranges),
-            reason,
-            i64::try_from(keep).context("retained message count exceeds SQLite range")?,
+            (
+                reason,
+                i64::try_from(keep).context("retained message count exceeds SQLite range")?,
+            ),
             |_| {},
         )
         .await;
@@ -521,12 +523,11 @@ mod tests {
             notice_table, 0,
             "compaction metadata must live on its one summary record, not in a second notice table"
         );
-        let notices: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM history_entry WHERE kind = 'notice'",
-        )
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
+        let notices: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM history_entry WHERE kind = 'notice'")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
         assert_eq!(
             notices, 0,
             "one compaction must not create a second history entry"

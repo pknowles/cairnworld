@@ -111,7 +111,19 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   as a decoded object (the HF convention; Qwen3.5's template iterates it as
   key/value pairs). Cairnworld's own schemas always explicitly declare their
   properties. Its upstream base provides native GGUF loading for supported
-  architectures, including Qwen3.5. Clone with
+  architectures, including Qwen3.5, and CUDA 13.4 bindings. The Windows CUDA
+  implementation enables the same paged-attention kernels, selects ARM64 import
+  libraries, and uses explicit 64-bit cache indices and rotary stream handles.
+  Dtype capability checks query the selected CUDA devices directly instead of
+  parsing `nvidia-smi` output for unrelated devices.
+  Numerical tests cover grouped-query attention at head dimensions 64/128/256,
+  CUDA-graph replay, scale-update boundaries, and rotary position paths.
+  `PromptObserver` supplies the normal generation prompt, token IDs, and retained
+  `ChatTemplateFormat` before generation; an observer error aborts the request.
+  The retained format preserves its clock, content transformations, and
+  tokenizer-specific tool-output escaping for exact reconstruction. Application
+  persistence remains in Cairnworld. Build prerequisites are in `README.md`.
+  Clone with
   `--recurse-submodules`, or run `git submodule update --init` in an existing
   checkout.
 - `templates/hermes-tools.jinja` - the Hermes 3 GGUF ships a bare ChatML
@@ -545,9 +557,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 
 ## Configuration
 
+- `build.rs` - on Windows ARM64 SSR builds, places the installed toolkit's
+  `CUDA_PATH/lib/arm64` first in the final package's native-library search.
+  This prevents transitive CUDA bindings' x64 defaults from selecting the wrong
+  import libraries.
 - `src/settings.rs` - `Settings`, loaded via the `config` crate (toml
   feature only) layering `default.toml` (checked in) under `local.toml`
-  (gitignored, per-machine overrides). Holds the `[models.<name>]` entries
+  (gitignored, per-machine overrides), then runtime `CAIRNWORLD__` environment
+  variables with `__` separating nested fields. Development OAuth values are
+  exported from Git-excluded `secrets/dev.env`; tests use explicit sources and
+  do not read machine-local configuration. Holds the `[models.<name>]` entries
   described above, `model` naming the default among them, and `limits`,
   including `max_concurrent_inferences`, `max_context_tokens`,
   `max_output_tokens`, `compact_before_next_input_tokens`, and
@@ -555,9 +574,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `max_context_tokens` per concurrently admitted inference. A completed turn
   queues compaction only when its measured input plus output would make the
   next input reach the lazy threshold; that agent's next inference waits for
-  it. This normal path and capacity recovery perform no tokenization. Model startup logs the configured token pool, CUDA memory before and
+  it. The real-model compaction test checks that an enduring character goal
+  survives summarization across ordinary player turns. This normal path and capacity recovery perform no tokenization. Model startup logs the configured token pool, CUDA memory before and
   after allocation, and their allocation delta; every inference logs its token capacity and actual
-  input/output token use for the developer inference view.
+  input/output token use for the developer inference view. Temporary CUDA
+  workspaces still grow after startup; the fixed KV reservation is not a bound
+  on the whole inference working set. Startup-only allocation is the next
+  increment in `plans/fixed-gpu-allocation.md`, explicitly ordered separately
+  by the user after Windows runtime restoration.
+  Windows integrated-GPU availability comes from `cuMemGetInfo`, which includes
+  dedicated and shared CUDA memory, rather than an estimate from free CPU RAM.
 - Weights are not checked in; `models/` is gitignored.
 - Cargo's development profile keeps Cairnworld debuggable while compiling its
   dependencies optimized without debug information. This keeps unchanged local

@@ -67,8 +67,12 @@ impl MessageOrigin {
             Self::Instruction => "instruction",
         }
     }
+}
 
-    pub fn from_str(value: &str) -> Result<Self, String> {
+impl std::str::FromStr for MessageOrigin {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "conversation" => Ok(Self::Conversation),
             "instruction" => Ok(Self::Instruction),
