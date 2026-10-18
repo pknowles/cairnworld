@@ -1196,7 +1196,9 @@ The game data must be trivially accessible to coding agents working on the
 project. Moreover, agents may want to test features and repro bugs quickly
 without writing temporary scripts. MCP that claude+codex could talk to directly
 may speed up development and I imagine could reuse the exact same LLM tool
-interfaces that game agents use.
+interfaces that game agents use. As an example, agentd may want to directly
+trigger in-game actions and tool calls to test rather than having to indirectly
+set it up to happen.
 
 # An initial proof of concept
 

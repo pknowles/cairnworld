@@ -12,6 +12,12 @@ Developer Mode's shared query types and group history are prerequisites.
 
 ## Ordered changes
 
+Before implementation, reconcile the MCP design and tool table with the user's
+direct action/tool testing requirement. The current design only reaches GM/NPC
+tools through character-agent inference, which does not meet that requirement.
+Direct calls must reuse production validation, recording and world serialization;
+define their development access scope before implementing the transport.
+
 1. Add the server-only rmcp dependency and `src/mcp.rs`. Add serve's opt-in
    mcp_socket/mcp_user arguments and the thin `mcp --socket` proxy subcommand in
    main.rs. Bind a mode-0600 Unix socket only after resolving the configured
