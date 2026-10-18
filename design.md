@@ -118,7 +118,7 @@ One loaded mistral.rs model accepts concurrent requests and schedules its
 sequences itself. Cairnworld controls admission policy, not model execution:
 `limits.max_concurrent_inferences` is configurable, initially 1 for the target GPU. At model load, the paged KV
 cache reserves `max_context_tokens` for every admitted sequence; this fixed
-total input-plus-output capacity, not compaction, determines the VRAM budget.
+total input-plus-output capacity, not compaction, determines the KV-cache budget.
 `max_output_tokens` bounds one generated reply within that capacity. After a
 completed turn, its reported input plus output is the starting size of the next
 input; reaching `compact_before_next_input_tokens` queues lazy compaction. The
@@ -128,6 +128,15 @@ priority; deferred work uses capacity not needed by them. When the cap is full,
 lower-priority work waits rather than increasing player latency. This remains a
 policy setting, so measurement can tune it for the available GPU without
 duplicating the backend scheduler.
+
+Before the model becomes ready, compute its GPU memory budget from the loaded
+model, context limit and concurrency: model/cache allocations, maximum prompt
+workspace, allocator retention and safety headroom. Verify that the additional
+memory is available and print the breakdown; insufficient capacity fails model
+startup. Runtime allocations must stay bounded by those settings. Reserving the
+complete working set at launch is preferred where the backend supports it, but
+is not required by the bounded-allocation declaration. Other processes can
+reduce available memory after this launch check.
 
 Deferred work is persisted before it is admitted. Restarting loads unfinished
 jobs again, so a completed reply cannot lose its required compaction merely

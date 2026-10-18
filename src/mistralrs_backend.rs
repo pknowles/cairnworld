@@ -120,6 +120,32 @@ impl MistralRsBackend {
                 }
             })?;
         if !allow_cpu {
+            let budgets = model
+                .inner()
+                .validate_cuda_prompt_capacity(None, limits.max_context_tokens)
+                .await
+                .context(
+                    "validating startup GPU workspace for the configured context and concurrency",
+                )?;
+            for budget in budgets {
+                tracing::info!(
+                    device = budget.device,
+                    pool_used_mib = budget.pool_used_bytes / (1024 * 1024),
+                    attention_workspace_mib = budget.attention_workspace_bytes / (1024 * 1024),
+                    allocator_headroom_mib = budget.allocator_headroom_bytes / (1024 * 1024),
+                    safety_headroom_mib = budget.safety_headroom_bytes / (1024 * 1024),
+                    estimated_peak_mib = (budget.pool_used_bytes
+                        + budget.attention_workspace_bytes
+                        + budget.allocator_headroom_bytes
+                        + budget.safety_headroom_bytes)
+                        .div_ceil(1024 * 1024),
+                    additional_required_mib = budget.additional_device_bytes.div_ceil(1024 * 1024),
+                    available_mib = budget.available_device_bytes / (1024 * 1024),
+                    max_context_tokens = limits.max_context_tokens,
+                    max_concurrent_inferences = limits.max_concurrent_inferences,
+                    "startup GPU workspace capacity verified"
+                );
+            }
             let gpu_used_after_mib = log_gpu_memory("after model load")?;
             tracing::info!(
                 allocated_mib = gpu_used_after_mib.saturating_sub(gpu_used_before_mib),
@@ -795,10 +821,42 @@ mod tests {
         assert!(tokens.len() >= max_input - 1);
         let device = best_device(false).unwrap();
         log_gpu_memory("before configured-capacity inference").unwrap();
+        let startup_budget = backend
+            .model
+            .inner()
+            .validate_cuda_prompt_capacity(None, limits.max_context_tokens)
+            .await
+            .unwrap();
+        let model_limit = backend.model.max_sequence_length().unwrap().unwrap();
+        let rejected = backend
+            .model
+            .inner()
+            .validate_cuda_prompt_capacity(None, model_limit)
+            .await
+            .expect_err("the model's much larger native context must not fit this device budget");
+        assert!(
+            rejected.to_string().contains("additional device bytes"),
+            "{rejected:#}"
+        );
         for _ in 0..3 {
             let response = backend.complete(request.clone(), |_| {}).await.unwrap();
             assert_eq!(response.usage.input_tokens, tokens.len());
             log_gpu_memory("after configured-capacity inference").unwrap();
+            let pool = mistralrs::core::MemoryUsage
+                .query_cuda_allocator(&device)
+                .unwrap()
+                .unwrap()
+                .async_pool
+                .unwrap();
+            let budget = &startup_budget[0];
+            let estimated_peak = budget.pool_used_bytes
+                + budget.attention_workspace_bytes
+                + budget.allocator_headroom_bytes
+                + budget.safety_headroom_bytes;
+            assert!(
+                pool.reserved_high <= estimated_peak,
+                "startup estimate {estimated_peak} did not cover actual pool reservation {pool:?}"
+            );
             tracing::info!(
                 allocator = ?mistralrs::core::MemoryUsage.query_cuda_allocator(&device).unwrap(),
                 "configured-capacity CUDA allocation, including pool high-water marks"

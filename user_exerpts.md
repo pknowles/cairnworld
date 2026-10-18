@@ -492,3 +492,8 @@ The measured growth of temporary CUDA workspaces after startup remains a gap
 against the startup-only allocation declaration. Complete Windows runtime
 restoration first, then address the complete working-set reservation in the next
 plan. Fixed paged KV capacity remains required throughout.
+
+Updated 2026-10-19: the user revised Memory Usage to require bounded allocation
+and a launch-time capacity check: "I.e. we compute a maximum we will use and
+make sure it's free." Full upfront allocation is preferred where supported,
+rather than mandatory. This supersedes the startup-only requirement above.

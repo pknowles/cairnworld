@@ -535,6 +535,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 
 ## Dev CLI (design.md: Dev CLI: chat, replay)
 
+- GPU model loading calls mistral.rs's `validate_cuda_prompt_capacity` before
+  publishing the game model as ready. It estimates attention workspace for the
+  configured context at full scheduler concurrency, allows another workspace
+  for allocator retention/in-flight buffers, adds the existing CUDA maintenance
+  safety margin and accounts for reusable pool memory. Insufficient available
+  capacity fails loading with required/available byte counts. This is a startup
+  capacity check, not a physical reservation or a guarantee against other
+  processes consuming memory later. It implements the bounded-allocation launch
+  check in the Memory Usage declaration.
+
 - `src/main.rs` - `cairnworld chat [--model <name|path>] [--temperature <f32>]
   [--enable-thinking <bool>] [--system <text>] [--database <path>]
   [--chat-template <path>]` creates a sandbox world and agent, then resolves
@@ -588,10 +598,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   survives summarization across ordinary player turns. This normal path and capacity recovery perform no tokenization. Model startup logs the configured token pool, CUDA memory before and
   after allocation, and their allocation delta; every inference logs its token capacity and actual
   input/output token use for the developer inference view. Temporary CUDA
-  workspaces still grow after startup; the fixed KV reservation is not a bound
-  on the whole inference working set. Startup-only allocation is the next
-  increment in `plans/fixed-gpu-allocation.md`, explicitly ordered separately
-  by the user after Windows runtime restoration.
+  workspaces grow within configured context/concurrency bounds and are included
+  in the startup capacity estimate alongside allocator and safety headroom;
+  fixed KV capacity is only one component of that budget.
   Windows integrated-GPU availability comes from `cuMemGetInfo`, which includes
   dedicated and shared CUDA memory, rather than an estimate from free CPU RAM.
 - Weights are not checked in; `models/` is gitignored.

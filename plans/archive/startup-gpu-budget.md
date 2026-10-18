@@ -1,16 +1,30 @@
-# Enforce startup-only GPU allocation
+# Check bounded GPU memory at startup
+
+Completed and verified: 2026-10-19.
 
 ## Goal and scope
 
-Meet the GPU-memory declaration: reserve the complete inference working set at
-startup and keep subsequent requests within that reservation. Fixed paged KV
-capacity alone does not satisfy this requirement.
-
-On 2026-10-18 the user explicitly ordered: "Finish runtime restoration, then fix
-allocation separately". This is the next increment after runtime restoration;
-the declaration remains unchanged.
+Meet user_declarations.md's Memory Usage requirement: compute a bounded working
+set from current model/context/concurrency settings, check available memory at
+launch and print the budget. Fixed paged KV capacity alone is insufficient.
+Full upfront reservation is preferred if supported, rather than a requirement.
 
 ## Evidence and implementation order
+
+Reuse mistral.rs's prompt workspace estimator with the configured per-request
+context and the scheduler's full sequence count and prefill chunk length. Budget
+one additional workspace for cached/in-flight allocations, plus the existing
+CUDA maintenance safety margin, and subtract reusable idle pool memory. Reject
+insufficient capacity before publishing the loaded game model. Log each
+component. Verify the estimate covers the measured pool-reservation peak, not
+only live tensor bytes, and test exact-fit/insufficient/reusable-pool accounting.
+
+Launch validation verified on 2026-10-19: the 16k/single-inference budget is
+9,162 MiB, including allocator and safety headroom. Three near-limit requests
+peaked at 7,712 MiB of pool reservation; the budget also covers the earlier
+8,096 MiB peak. The native 262k context was rejected by capacity estimation
+without allocating that workspace. Fixed-cache overflow rejection and short
+request recovery passed, as did the real-model browser flow.
 
 - The Windows Qwen3.5 16,384-token test completed three near-capacity requests.
   CUDA pool high-water usage reached 7,186,696,608 bytes and reservation reached
@@ -19,15 +33,10 @@ the declaration remains unchanged.
   5.56 GB between requests. These pool measurements are distinct from host-RAM
   estimates and the CUDA driver's combined dedicated/shared budget.
 - Use the measured allocation attribution below to bound attention workspace.
-  Check remaining allocations outside the CUDA pool and all supported request
-  paths before declaring a complete startup reservation sufficient.
-- Compare existing backend reservation controls, startup execution of the full
-  supported workload with retained buffers, and explicit reusable workspace
-  ownership. Measure coverage and overhead before choosing; avoid an additional
-  allocator abstraction unless existing controls cannot meet the requirement.
-- Reserve the measured complete working set before accepting requests. Fail
-  startup with the required and available bytes if it cannot fit. Preserve
-  configured context/output limits and typed capacity errors for compaction.
+  Include allocator growth and allocations outside the CUDA pool in headroom.
+- Fail model startup with required and available bytes if it cannot fit.
+  Preserve configured context/output limits and typed capacity errors for
+  compaction. The check estimates capacity rather than allocating a test workload.
 
 ## Measured allocation attribution
 
@@ -64,20 +73,13 @@ query-chunk length times cached-context length times query-head count. It is
 bounded by configured token/concurrency limits; the measurement does not show
 an unbounded per-conversation leak.
 
-Compare a fused paged-prefill path, smaller workspace-budgeted query chunks,
-and reusable buffers for the current gather path. Fused attention could avoid
-materializing the large score/probability matrices; smaller chunks reduce those
-matrices but retain the full-context KV copies. Measure correctness, memory and
-throughput before choosing. Startup warm-up only changes allocation timing and
-does not reduce these buffer requirements.
-
 ## Verification and review
 
-Exercise the real chat path at maximum context/concurrency, repeated long and
-short turns, tool continuations, cancellation, overflow rejection and recovery.
-Assert no new device reservation after startup, including allocations outside
-the pool. Check a deliberately insufficient startup budget fails before listen.
-Compare output correctness and throughput with the restoration baseline.
+Exercise the real chat path and configured maximum context/concurrency, repeated
+long and short turns, tool continuations, overflow rejection and recovery.
+Assert measured peak reservation stays within the startup estimate. Check a
+deliberately insufficient budget is rejected without allocating its workspace.
+Verify an ordinary real-model chat becomes ready and remains usable.
 
 Follow coding_standards.md, prompt_standards.md and AGENTS.md's complete
 post-feature/pre-commit checklist. Update design and implementation references

@@ -1249,11 +1249,13 @@ even better - less code for us to maintain and we get a feature for free.
 ## Memory Usage
 
 LLMs are big and VRAM intensive. Much like any video game, we should not do any
-dynamic allocation so that once launched successfully we can be confident the
-server won't crash due to OOM. It would be nice if we could have our
-conversation compaction limit guide this initial allocation as I expect our
-chosen input and output size for the model will contribute significantly to
-memory requirements. I'd like to see the amounts allocated. This should be
+possibly unbounded dynamic allocation so that once launched successfully we can
+be confident the server won't crash due to OOM. I.e. we compute a maximum we
+will use and make sure it's free. Ideally it would all be allocated once at
+launch, but backends probably don't support that. It would be nice if we could
+have our conversation compaction limit guide the expected usage limit as I
+expect our chosen input and output size for the model will be the main memory
+requirement drivers. I'd like to see the amounts allocated. This should be
 printed during initial allocation. It would be interesting to see the
 conversation's memory usage breakdown in the developer's inference view too.
 I.e. to guide balancing allocations, context, system/tool prompts, conversation
