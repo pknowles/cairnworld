@@ -647,7 +647,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   turns and presence. `GameLoad` and `Game` share that same world map. `Game`
   owns the model-backed worker handles and aborts them on drop; idle workers
   hold only a weak game reference. World installation is serialized with model
-  readiness, so worlds created while loading also get their worker before play.
+  readiness: `GameLoad::finish` constructs Game after backend loading, and later
+  installations pass their World directly to `Game::start_world`. Queue-completion
+  checks cover workers installed before and after readiness.
   `Game::connect`/`disconnect` hold the world's presence lock across
   each durable zero/one transition and update the connection set only after a
   successful write. Changed characters are coalesced in a set and signalled by

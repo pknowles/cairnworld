@@ -128,13 +128,10 @@ impl GameLoad {
         })
     }
 
-    pub async fn finish(&self, result: Result<Arc<Game<MistralRsBackend>>>) {
+    pub async fn finish(&self, build: impl FnOnce() -> Result<Arc<Game<MistralRsBackend>>>) {
         let mut current = self.state.write().await;
-        let state = match result {
-            Ok(game) => {
-                game.start_worlds();
-                GameLoadState::Ready(game)
-            }
+        let state = match build() {
+            Ok(game) => GameLoadState::Ready(game),
             Err(error) => GameLoadState::Failed(format!("{error:#}")),
         };
         *current = state;
@@ -443,9 +440,9 @@ async fn create_bread_thief_world(
     // loading is included before play becomes available.
     let state = app.game.state.write().await;
     let installed = app.store.install_scenario(&user, &scenario).await?;
-    crate::world::World::install(&app.game.worlds, installed.world_id);
+    let world = crate::world::World::install(&app.game.worlds, installed.world_id);
     if let GameLoadState::Ready(game) = &*state {
-        game.install_world(installed.world_id);
+        game.start_world(world);
     }
     Ok(Redirect::to(&format!("/world/{}", installed.world_id)))
 }
@@ -2075,44 +2072,48 @@ mod tests {
         .await
         .unwrap();
         let observed_prompts = backend.observe_prompts();
-        let game = Game::new(
-            store.clone(),
-            game_load.worlds(),
-            InferenceScheduler::new(backend, settings.limits)
-                .unwrap()
-                .foreground(),
-            settings.limits,
-            model_path,
-            sampling,
-        );
-        // Exercise both installation boundaries through the authenticated
-        // route: after Game's snapshot but before readiness, and after ready.
+        let backend = InferenceScheduler::new(backend, settings.limits)
+            .unwrap()
+            .foreground();
+        // Every installation must receive a worker, including those completed
+        // while the backend loads and those added after readiness.
         let creation_cookie = session_cookie(&store, owner.id).await;
-        for already_ready in [false, true] {
-            assert_eq!(
-                request(&app, "POST", "/worlds", Some(&creation_cookie)).await,
-                StatusCode::SEE_OTHER
-            );
-            if !already_ready {
-                game_load.finish(Ok(Arc::clone(&game))).await;
-            }
-            let world_id = store
-                .owned_worlds(owner.id)
-                .await
+        assert_eq!(
+            request(&app, "POST", "/worlds", Some(&creation_cookie)).await,
+            StatusCode::SEE_OTHER
+        );
+        game_load
+            .finish(|| {
+                Ok(Game::new(
+                    store.clone(),
+                    game_load.worlds(),
+                    backend,
+                    settings.limits,
+                    model_path,
+                    sampling,
+                ))
+            })
+            .await;
+        let GameAvailability::Ready(game) = game_load.availability().await else {
+            panic!("game must be ready after successful model loading");
+        };
+        assert_eq!(
+            request(&app, "POST", "/worlds", Some(&creation_cookie)).await,
+            StatusCode::SEE_OTHER
+        );
+        for world in store.owned_worlds(owner.id).await.unwrap() {
+            let (settled, processed) = tokio::sync::oneshot::channel();
+            game_load
+                .world(world.id)
                 .unwrap()
-                .iter()
-                .map(|world| world.id)
-                .max()
-                .unwrap();
-            let character_id = store.world_members(world_id).await.unwrap()[0].characters[0].id;
-            let member = store
-                .active_player_character(owner.id, world_id, character_id)
+                .sender
+                .send(crate::world::WorldEvent::Settled(settled))
                 .await
-                .unwrap()
                 .unwrap();
-            game.subscribe(&member)
+            tokio::time::timeout(std::time::Duration::from_secs(10), processed)
                 .await
-                .expect("installed worlds must be loaded before play");
+                .expect("each installed world must process its queue before play")
+                .unwrap();
         }
         game.wait_for_opening(installed.member.clone())
             .await
@@ -2324,7 +2325,7 @@ mod tests {
         );
         let world_id = store.owned_worlds(owner.id).await.unwrap()[0].id;
         let mut events = game.world(world_id).unwrap().events.subscribe();
-        game.finish(Err(anyhow::anyhow!("model startup failed")))
+        game.finish(|| Err(anyhow::anyhow!("model startup failed")))
             .await;
         assert!(matches!(
             game.availability().await,

@@ -20,14 +20,13 @@ mod world;
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rustyline::{DefaultEditor, error::ReadlineError};
 
-use inference::InferenceScheduler;
+use inference::{InferenceScheduler, ScheduledBackend};
 use llm::{Backend, Message, Role, Sampling};
 use mistralrs_backend::MistralRsBackend;
 use settings::Settings;
@@ -207,14 +206,28 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 tracing::info!(model = %model.path, "starting game model load");
                 let result =
-                    load_game(loading_store, worlds, model, sampling, limits, allow_cpu).await;
-                match &result {
-                    Ok(_) => tracing::info!("game model is ready"),
-                    Err(error) => {
-                        tracing::error!(error = %format!("{error:#}"), "game model failed to load")
-                    }
-                }
-                loading_game.finish(result).await;
+                    load_game_backend(&loading_store, &worlds, &model, limits, allow_cpu).await;
+                loading_game
+                    .finish(|| {
+                        let result = result.map(|backend| {
+                            game::Game::new(
+                                loading_store,
+                                worlds,
+                                backend,
+                                limits,
+                                model.path,
+                                sampling,
+                            )
+                        });
+                        match &result {
+                            Ok(_) => tracing::info!("game model is ready"),
+                            Err(error) => {
+                                tracing::error!(error = %format!("{error:#}"), "game model failed to load")
+                            }
+                        }
+                        result
+                    })
+                    .await;
             });
             web::serve(store, web, game).await
         }
@@ -308,28 +321,20 @@ async fn backend(
     .context("failed to load model")
 }
 
-async fn load_game(
-    store: Store,
-    worlds: world::Worlds,
-    model: settings::Model,
-    sampling: Sampling,
+async fn load_game_backend(
+    store: &Store,
+    worlds: &world::Worlds,
+    model: &settings::Model,
     limits: settings::Limits,
     allow_cpu: bool,
-) -> Result<Arc<game::Game<MistralRsBackend>>> {
-    let scheduler = InferenceScheduler::new(backend(&model, limits, allow_cpu).await?, limits)
+) -> Result<ScheduledBackend<MistralRsBackend>> {
+    let scheduler = InferenceScheduler::new(backend(model, limits, allow_cpu).await?, limits)
         .context("configuring inference scheduling")?;
     scheduler
-        .resume(&store, &worlds)
+        .resume(store, worlds)
         .await
         .context("resuming deferred compactions")?;
-    Ok(game::Game::new(
-        store,
-        worlds,
-        scheduler.foreground(),
-        limits,
-        model.path,
-        sampling,
-    ))
+    Ok(scheduler.foreground())
 }
 
 async fn run_chat(

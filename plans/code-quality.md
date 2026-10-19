@@ -17,6 +17,13 @@ provides bca function metrics/checks. Use these tools, not similarly named crate
 
 Steps 1-4 completed and verified, 2026-10-19. Next: step 5.
 
+Startup-order simplification completed and verified, 2026-10-19. Backend loading
+runs outside the readiness lock; Game construction and readiness publication run
+inside it. Each existing world starts once; later installations pass their World
+directly to worker startup. Queue completion covers both installation boundaries.
+All 113 ordinary tests, browser and configured-Qwen checks, and native/WASM Clippy
+pass. Self-review followed the AGENTS.md checklist and both standards documents.
+
 World state and notification channels are constructed before model loading and
 shared by the web layer and Game. Game owns model-backed worker lifetimes;
 Store owns no live channels. Operations publish directly after their writes, and

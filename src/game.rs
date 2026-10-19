@@ -37,7 +37,7 @@ pub struct Game<B> {
     model: String,
     sampling: Sampling,
     worlds: Worlds,
-    tasks: RwLock<HashMap<i64, JoinHandle<()>>>,
+    tasks: RwLock<Vec<JoinHandle<()>>>,
     /// Process-local, never restored after restart (design.md's Membership
     /// and presence: "Live connection IDs are process-local").
     next_connection_id: AtomicI64,
@@ -49,7 +49,7 @@ impl<B> Drop for Game<B> {
             .tasks
             .get_mut()
             .expect("world tasks lock poisoned")
-            .values()
+            .iter()
         {
             task.abort();
         }
@@ -98,29 +98,23 @@ where
             model,
             sampling,
             worlds,
-            tasks: RwLock::new(HashMap::new()),
+            tasks: RwLock::new(Vec::new()),
             next_connection_id: AtomicI64::new(1),
         });
-        game.start_worlds();
+        for world in game.worlds.read().expect("worlds lock poisoned").values() {
+            game.start_world(Arc::clone(world));
+        }
         game
     }
 
-    pub fn start_worlds(self: &Arc<Self>) {
-        for world in self.worlds.read().expect("worlds lock poisoned").values() {
-            self.start_world(Arc::clone(world));
-        }
-    }
-
-    fn start_world(self: &Arc<Self>, world: Arc<World>) {
+    pub fn start_world(self: &Arc<Self>, world: Arc<World>) {
         self.tasks
             .write()
             .expect("world tasks lock poisoned")
-            .entry(world.id)
-            .or_insert_with(|| tokio::spawn(Self::process_world(Arc::downgrade(self), world)));
-    }
-
-    pub fn install_world(self: &Arc<Self>, id: i64) {
-        self.start_world(World::install(&self.worlds, id));
+            .push(tokio::spawn(Self::process_world(
+                Arc::downgrade(self),
+                world,
+            )));
     }
 
     fn world(&self, id: i64) -> Result<Arc<World>> {
@@ -3334,6 +3328,17 @@ mod tests {
     async fn worlds_are_loaded_at_construction_and_released_with_the_game() {
         let (backend, _) = ScriptedBackend::recording([]);
         let (game, _store, _db, member) = blank_opening_game(backend).await;
+        let (settled, processed) = oneshot::channel();
+        game.world(member.world_id)
+            .unwrap()
+            .sender
+            .send(WorldEvent::Settled(settled))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), processed)
+            .await
+            .expect("a world must process its queue after construction")
+            .unwrap();
         let world = Arc::downgrade(&game.world(member.world_id).unwrap());
         assert_eq!(game.worlds.read().unwrap().len(), 1);
         let closed = game.world(member.world_id).unwrap().sender.clone();

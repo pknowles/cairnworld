@@ -1052,6 +1052,9 @@ are constructed before model loading and when installed, rather than on first
 access, so live inspection does not depend on model readiness. The web layer and
 `Game` share these same world values. `Game` owns their model-backed worker tasks
 and cancels them on drop; workers hold only a weak game reference while idle.
+Backend loading finishes before `Game` is constructed. Construction and publishing
+readiness share the world-installation lock, so each existing world starts once;
+later installations pass their new world directly to worker startup.
 Persistence owns no notification channels. The code performing an operation
 publishes to its world's channel after committing the durable change. An active
 inference retains its IDs and the channel through start, token delivery and
