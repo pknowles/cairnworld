@@ -307,5 +307,10 @@ cost and requires explicit rationale and user signoff.
 ## implementation_reference.md
 
 The specific implementation references go here. Consider this an index to both
-reference and detail how components in design.md are realised. It must be kept
-up to date before committing changes.
+reference and detail how components in design.md are realised, as brief as
+possible just to let devs know what exists. It must be kept up to date before
+committing changes, but only add items if appropriate. Make sure and review for
+a balance of each entry's significance. The point of this document is to be a
+reference and anything beyond pointers will clog agents' context that is
+irrelevant to their task. Correct any existing unbalanced areas or incorrect
+entries where appropriate.
