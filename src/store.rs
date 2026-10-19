@@ -1039,23 +1039,15 @@ impl Store {
         .context("consuming invitation slot")?
         .rows_affected();
         ensure!(consumed == 1, "invitation `{token}` has no remaining slots");
-        let starting_group_id: i64 = sqlx::query_scalar(
-            "SELECT character_group.group_id FROM player_character \
-             JOIN character_group ON character_group.character_id = player_character.character_id \
-             JOIN world_member ON world_member.id = player_character.member_id \
-             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
-             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
-        )
-        .bind(invitation.world_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .context("finding invitation world starting group")?
-        .with_context(|| {
-            format!(
-                "world {} has no owner Adventurer group",
-                invitation.world_id
-            )
-        })?;
+        let starting_group_id = Self::owner_starting_group(&mut transaction, invitation.world_id)
+            .await
+            .context("finding invitation world starting group")?
+            .with_context(|| {
+                format!(
+                    "world {} has no owner Adventurer group",
+                    invitation.world_id
+                )
+            })?;
         let joined = Self::join_world(
             &mut transaction,
             user,
@@ -1610,7 +1602,7 @@ impl Store {
     }
 
     /// Create a new blank Adventurer for an active membership. Each character
-    /// receives its own player agent and is placed at the durable world start.
+    /// receives its own player agent in the selected owner character's group.
     pub async fn create_player_character(
         &self,
         user_id: i64,
@@ -1630,18 +1622,10 @@ impl Store {
         .await
         .context("resolving active membership for new character")?
         .with_context(|| format!("user {user_id} has no active access to world {world_id}"))?;
-        let starting_group_id: i64 = sqlx::query_scalar(
-            "SELECT character_group.group_id FROM player_character \
-             JOIN character_group ON character_group.character_id = player_character.character_id \
-             JOIN world_member ON world_member.id = player_character.member_id \
-             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
-             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
-        )
-        .bind(world_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .context("loading world starting group")?
-        .with_context(|| format!("world {world_id} has no starting group"))?;
+        let starting_group_id = Self::owner_starting_group(&mut transaction, world_id)
+            .await
+            .context("loading world starting group")?
+            .with_context(|| format!("world {world_id} has no starting group"))?;
         let (character_id, agent_id, _) =
             Self::create_adventurer(&mut transaction, member_id, world_id, starting_group_id)
                 .await?;
@@ -1656,6 +1640,21 @@ impl Store {
             character_id,
             agent_id,
         })
+    }
+
+    /// Invitations, extra characters and scenario export share this existing
+    /// owner-character selection rule, using the caller's actual connection.
+    async fn owner_starting_group(
+        connection: &mut SqliteConnection,
+        world_id: i64,
+    ) -> Result<Option<i64>> {
+        sqlx::query_scalar(
+            "SELECT character_group.group_id FROM player_character \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN world_member ON world_member.id = player_character.member_id \
+             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
+             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
+        ).bind(world_id).fetch_optional(connection).await.context("selecting owner starting group")
     }
 
     /// Load exactly the player-visible state for the member's current location.
@@ -3401,33 +3400,25 @@ impl Store {
                 })
             })
             .collect::<Result<_>>()?;
-        let starting_location: String = sqlx::query_scalar(
-            "SELECT location.name FROM player_character \
-             JOIN character_group ON character_group.character_id = player_character.character_id \
-             JOIN \"group\" ON \"group\".id = character_group.group_id \
-             JOIN location ON location.id = \"group\".location_id \
-             JOIN world_member ON world_member.id = player_character.member_id \
-             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
-             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
-        )
-        .bind(world_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("loading scenario start location")?
-        .context("scenario world has no owner Adventurer location")?;
-        let starting_group: String = sqlx::query_scalar(
-            "SELECT \"group\".name FROM player_character \
-             JOIN character_group ON character_group.character_id = player_character.character_id \
-             JOIN \"group\" ON \"group\".id = character_group.group_id \
-             JOIN world_member ON world_member.id = player_character.member_id \
-             JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
-             WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
-        )
-        .bind(world_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("loading scenario starting group")?
-        .context("scenario world has no owner Adventurer group")?;
+        let (starting_group, starting_location): (String, String) = {
+            let mut connection = self
+                .pool
+                .acquire()
+                .await
+                .context("acquiring scenario start connection")?;
+            let group_id = Self::owner_starting_group(&mut connection, world_id)
+                .await
+                .context("loading scenario start location")?
+                .context("scenario world has no owner Adventurer location")?;
+            sqlx::query_as(
+                "SELECT \"group\".name, location.name FROM \"group\" \
+                 JOIN location ON location.id = \"group\".location_id WHERE \"group\".id = ?",
+            )
+            .bind(group_id)
+            .fetch_one(&mut *connection)
+            .await
+            .context("loading scenario starting group and location")?
+        };
         let connections: Vec<ScenarioConnection> = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
             "SELECT from_location.name, to_location.name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
              FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id \
@@ -6143,6 +6134,115 @@ mod tests {
                 (&Role::Narration, "Toma watches from the doorway."),
             ],
             "a page snapshot cursor must receive each later visible entry once"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_group_lookup_sees_uncommitted_topology_and_preserves_rollback() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("owner@example.test", "Owner")
+            .await
+            .unwrap();
+        let scenario = test_scenario("shared starting group");
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let companion = store
+            .create_player_character(owner.id, installed.world_id)
+            .await
+            .unwrap();
+        let original = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let source = WorldGroup {
+            id: original,
+            branch: store.group_branch(original).await.unwrap(),
+        };
+        let mut transaction = store.pool.begin().await.unwrap();
+        Store::apply_split(
+            &mut transaction,
+            source,
+            vec![
+                tools::GroupPartition {
+                    character_ids: vec![installed.member.character_id],
+                    name: "first".into(),
+                    description: String::new(),
+                },
+                tools::GroupPartition {
+                    character_ids: vec![companion.character_id],
+                    name: "second".into(),
+                    description: String::new(),
+                },
+            ],
+            None,
+            60,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let selected = Store::owner_starting_group(&mut transaction, installed.world_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let new_groups: Vec<i64> =
+            sqlx::query_scalar("SELECT group_id FROM character_group WHERE character_id IN (?, ?)")
+                .bind(installed.member.character_id)
+                .bind(companion.character_id)
+                .fetch_all(&mut *transaction)
+                .await
+                .unwrap();
+        assert_ne!(
+            selected, original,
+            "the lookup must see this transaction's uncommitted split"
+        );
+        assert!(new_groups.contains(&selected));
+        transaction.rollback().await.unwrap();
+
+        let invited = store
+            .find_or_create_user("invited@example.test", "Invited")
+            .await
+            .unwrap();
+        let invitation = store
+            .create_invitation(owner.id, installed.world_id, Some(1))
+            .await
+            .unwrap();
+        // Deliberate write fault after the invitation slot and starting group
+        // have been resolved: neither membership nor slot may partially commit.
+        sqlx::query(&format!("CREATE TRIGGER reject_invited_character BEFORE INSERT ON player_character WHEN (SELECT user_id FROM world_member WHERE id = NEW.member_id) = {} BEGIN SELECT RAISE(ABORT, 'invited character failure'); END", invited.id))
+            .execute(&store.pool).await.unwrap();
+        let error = store
+            .accept_invitation(&invited, &invitation.token)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("invited character failure"));
+        assert!(
+            !store
+                .has_active_membership(invited.id, installed.world_id)
+                .await
+                .unwrap()
+        );
+        sqlx::query("DROP TRIGGER reject_invited_character")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let invited = store
+            .accept_invitation(&invited, &invitation.token)
+            .await
+            .expect("failed acceptance must leave the one invitation slot available");
+        let extra = store
+            .create_player_character(owner.id, installed.world_id)
+            .await
+            .unwrap();
+        for member in [&installed.member, &companion, &invited, &extra] {
+            assert_eq!(
+                store.character_group_id(member.character_id).await.unwrap(),
+                original
+            );
+        }
+        assert_eq!(
+            store.export_scenario(installed.world_id).await.unwrap(),
+            scenario
         );
     }
 

@@ -565,6 +565,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
   loader/validator and the checked-in Bread Thief setup: a shared hut location,
   Mara, Toma, flour and cache items, typed item data, and pre-written notes.
+  `Store::owner_starting_group` shares the existing owner-character selection
+  between invitation acceptance, extra characters and export, using the caller's
+  connection. Export reads both start names from that one selected group.
 - `src/settings.rs` - `[models.<name>]` entries pair a GGUF path with the chat
   template that file needs, so `--model hermes` carries its template
   automatically. `--model` also accepts a path directly, and `--chat-template`

@@ -4,13 +4,13 @@ Scope reviewed 2026-10-19. Remaining implementation is pending.
 
 ## Goal and authority
 
-Fix demonstrated incorrect behavior, remove a specific duplicated operation, and
-make statically shaped SQL compile-time checked. Keep the existing warning and
+Make statically shaped SQL compile-time checked. Keep the existing warning and
 unsafe-code gates. Authority: [coding standards](../coding_standards.md),
 [user declarations](../user_declarations.md), and the explicit acceptance of
 checked SQL in [user excerpts](../user_exerpts.md#2026-09-25-merged-gm-history-order-and-checked-sql).
 
-The previously completed lint, history ownership and world-isolation work is
+The completed lint, history ownership, presence, world-isolation and shared
+starting-group lookup work is
 indexed in [implementation reference](../implementation_reference.md).
 This plan does not require replacing every Store method, Option, or runtime check.
 In content.rs, text_in interns prompt text while content_in records per-event
@@ -20,31 +20,9 @@ content and reasoning. They are different operations, not duplicate query twins.
 
 | Item | Verified evidence | Decision |
 | --- | --- | --- |
-| Repeated starting-group selection | In src/store.rs, accept_invitation and create_player_character repeat the same owner/membership/character/group lookup. export_scenario repeats that ownership join for starting location and group name. These are four occurrences of the same selection rule, not four identical complete SQL statements. | Consolidate that operation only; preserve selection behavior. |
 | Unchecked SQL | Cargo uses sqlx, but statically shaped queries in Store are runtime query/query_as/query_scalar calls. design.md explicitly requires checked macros. | Fulfil the accepted requirement incrementally. This is an unmet build-time guarantee, not a claim that a particular current query is broken. |
 
 ## Ordered increments
-
-### One definition of starting-group selection
-
-- Introduce one feature-local query taking the caller's SqliteConnection and a
-  world ID. Both invitation acceptance and character creation use it inside
-  their existing transactions.
-- Export resolves that same selected group once, then obtains its group/location
-  names together. Do not replace the current rule with a persisted starting-group
-  policy or change which owner's character is selected as part of this cleanup.
-- Preserve missing-owner/group errors and their caller context. Keep writes in
-  existing transactions; avoid pool acquisition from inside a transaction.
-- Verify invitation acceptance, additional characters, multiple owner characters,
-  scenario export, rollback and visibility of uncommitted membership data.
-  Compare existing results before/after; any ambiguous selection policy discovered
-  during this work must be resolved explicitly, not silently changed.
-
-| Solution | Benefit | Cost / risk |
-| --- | --- | --- |
-| Keep four ownership joins | No churn | Selection semantics and fixes can diverge. |
-| Shared connection-based lookup; recommended | One selection rule; usable within the existing transactions; little code movement | Callers must pass their actual connection. Export must retain the same selected group. |
-| Database view | One SQL definition usable from multiple projections | Additional schema object and checked-query metadata for a small duplication. No demonstrated benefit over the function here. |
 
 ### Incremental checked SQL
 
@@ -53,7 +31,7 @@ content and reasoning. They are different operations, not duplicate query twins.
   sufficient when this increment starts; no system installations are part of it.
 - Prepare an isolated schema database under target using the real migrations.
   Commit standard .sqlx offline metadata and verify an offline build.
-- Start with the shared lookup above and its callers. Continue in coherent
+- Start with the shared starting-group lookup and its callers. Continue in coherent
   feature batches: membership/scenario operations, group/presence operations,
   recording/history, then inspection. No separate whole-tree file move is needed.
 - Keep genuinely dynamic QueryBuilder operations parameterized and test their

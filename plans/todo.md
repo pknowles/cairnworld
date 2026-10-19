@@ -6,8 +6,8 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Focused code quality](code-quality.md): consolidate the repeated starting-group
-  lookup, then implement checked SQL in feature batches. Broader redesigns and
+- [Focused code quality](code-quality.md): implement checked SQL in feature
+  batches. Broader redesigns and
   additional metrics gates require evidence; they are not prerequisites.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
