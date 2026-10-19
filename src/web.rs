@@ -1027,9 +1027,9 @@ async fn play(
     }
 }
 
-async fn play_connection(
+async fn play_connection<B: Backend + Send + Sync + 'static>(
     mut socket: WebSocket,
-    game: Arc<Game<MistralRsBackend>>,
+    game: Arc<Game<B>>,
     member: PlayerAgent,
     after_message_id: Option<i64>,
 ) -> Result<()> {
@@ -1052,9 +1052,9 @@ async fn play_connection(
     result
 }
 
-async fn play_connected(
+async fn play_connected<B: Backend + Send + Sync + 'static>(
     socket: &mut WebSocket,
-    game: &Arc<Game<MistralRsBackend>>,
+    game: &Arc<Game<B>>,
     member: &PlayerAgent,
     after_message_id: Option<i64>,
 ) -> Result<()> {
@@ -1149,16 +1149,17 @@ async fn play_connected(
                     send_event(socket, &ServerEvent::CanAct { value: true }).await?;
                     continue;
                 }
-                cursor = send_new_entries(socket, game, member, cursor).await?;
                 send_event(socket, &ServerEvent::CanAct { value: true }).await?;
             }
             narration = broadcasts.recv() => match narration {
-                Ok(_) => {
-                    cursor = send_new_entries(socket, game, member, cursor).await?;
+                Ok(change) => {
+                    send_chat_failure(socket, game, member, change).await?;
+                    cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    cursor = send_new_entries(socket, game, member, cursor).await?;
                     send_event(socket, &ServerEvent::Error {
-                        message: format!("{skipped} earlier live messages were missed; reload the page to recover the stored history."),
+                        message: format!("{skipped} live notifications were missed; stored chat has been recovered, but error notifications may have been missed."),
                     }).await?;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
@@ -1172,9 +1173,9 @@ async fn play_connected(
 /// string), and returns the new cursor. Reuses the same query SSR and page
 /// reconnect use, so a live turn is inspectable immediately, not only after a
 /// reload re-resolves it.
-async fn send_new_entries(
+async fn send_new_entries<B: Backend + Send + Sync + 'static>(
     socket: &mut WebSocket,
-    game: &Arc<Game<MistralRsBackend>>,
+    game: &Arc<Game<B>>,
     member: &PlayerAgent,
     cursor: Option<i64>,
 ) -> Result<Option<i64>> {
@@ -1210,26 +1211,49 @@ where
     game.wait_for_opening(member).await
 }
 
-async fn send_ready_broadcasts(
+async fn send_ready_broadcasts<B: Backend + Send + Sync + 'static>(
     socket: &mut WebSocket,
-    game: &Arc<Game<MistralRsBackend>>,
+    game: &Arc<Game<B>>,
     member: &PlayerAgent,
-    broadcasts: &mut tokio::sync::broadcast::Receiver<String>,
+    broadcasts: &mut tokio::sync::broadcast::Receiver<crate::world::ChatChange>,
     cursor: Option<i64>,
 ) -> Result<Option<i64>> {
-    let mut cursor = cursor;
+    let mut missed = 0;
     loop {
         match broadcasts.try_recv() {
-            Ok(_) => cursor = send_new_entries(socket, game, member, cursor).await?,
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return Ok(cursor),
-            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                send_event(socket, &ServerEvent::Error {
-                    message: format!("{skipped} earlier live messages were missed; reload the page to recover the stored history."),
-                }).await?;
+            Ok(change) => {
+                send_chat_failure(socket, game, member, change).await?;
             }
-            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return Ok(cursor),
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                missed += skipped;
+            }
         }
     }
+    let cursor = send_new_entries(socket, game, member, cursor).await?;
+    if missed > 0 {
+        send_event(socket, &ServerEvent::Error {
+            message: format!("{missed} live notifications were missed; stored chat has been recovered, but error notifications may have been missed."),
+        }).await?;
+    }
+    Ok(cursor)
+}
+
+async fn send_chat_failure<B: Backend + Send + Sync + 'static>(
+    socket: &mut WebSocket,
+    game: &Arc<Game<B>>,
+    member: &PlayerAgent,
+    change: crate::world::ChatChange,
+) -> Result<()> {
+    if let crate::world::ChatChange::Failed { sequence_id } = change
+        && let Some(message) = game.chat_failure(member, sequence_id).await?
+    {
+        send_event(socket, &ServerEvent::Error { message }).await?;
+    }
+    Ok(())
 }
 
 async fn send_event(socket: &mut WebSocket, event: &ServerEvent) -> Result<()> {
@@ -1519,8 +1543,18 @@ mod tests {
         use crate::store::{InferenceInput, InferenceOutcome};
         use std::{collections::VecDeque, sync::Mutex};
 
+        std::fs::create_dir_all("target/browser-tests").unwrap();
+        tracing_subscriber::fmt()
+            .with_env_filter("sqlx::query=debug")
+            .with_ansi(false)
+            .with_writer(Mutex::new(
+                std::fs::File::create("target/browser-tests/presence-sql.log").unwrap(),
+            ))
+            .try_init()
+            .unwrap();
+
         struct ScriptedBackend {
-            responses: Mutex<VecDeque<Response>>,
+            responses: Arc<Mutex<VecDeque<Response>>>,
             requests: Arc<Mutex<Vec<crate::llm::Request>>>,
         }
 
@@ -1531,7 +1565,7 @@ mod tests {
                 let requests = Arc::new(Mutex::new(Vec::new()));
                 (
                     Self {
-                        responses: Mutex::new(responses.into_iter().collect()),
+                        responses: Arc::new(Mutex::new(responses.into_iter().collect())),
                         requests: Arc::clone(&requests),
                     },
                     requests,
@@ -1708,7 +1742,7 @@ mod tests {
             )
             .await
             .unwrap();
-        store.apply_topology_changes(changes).await.unwrap();
+        store.apply_topology_changes(changes, 60).await.unwrap();
         // This fixture used to construct an inference, tool execution and
         // reply directly in Store. E2 must inspect the records normal play
         // creates, so exercise Game's ordinary player-message loop instead.
@@ -1729,6 +1763,7 @@ mod tests {
             serde_json::from_str(include_str!("../testdata/real_model_creation_round.json"))
                 .unwrap();
         let (backend, captured_requests) = ScriptedBackend::new(responses);
+        let chat_responses = Arc::clone(&backend.responses);
         let scheduler = crate::inference::InferenceScheduler::new(backend, browser_limits).unwrap();
         let game = Game::new(
             store.clone(),
@@ -1775,6 +1810,125 @@ mod tests {
             "the inspection record must preserve the request Game sent to the model"
         );
         let agent_id = installed.member.agent_id;
+        // These viewers exercise the production websocket body with scripted
+        // model output, keeping delivery tests independent of model decisions.
+        let mut chat_viewers = Vec::new();
+        for _ in 0..2 {
+            let member = store
+                .create_player_character(owner.id, world_id)
+                .await
+                .unwrap();
+            store
+                .roll_hit_protection(&member, creation.id, None)
+                .await
+                .unwrap();
+            store
+                .roll_attributes(&member, creation.id, None)
+                .await
+                .unwrap();
+            store
+                .ready_to_begin(&member, creation.id, None)
+                .await
+                .unwrap();
+            chat_viewers.push(member);
+        }
+        let chat_store = store.clone();
+        let chat_members = chat_viewers.clone();
+        let chat_page = move |Path(index): Path<usize>| {
+            let store = chat_store.clone();
+            let member = chat_members[index].clone();
+            async move {
+                let history = store.player_chat(&member).await.unwrap();
+                Html(render_page("Cairnworld", true, move || {
+                    view! {
+                        <GamePage world_id character_id=member.character_id history developer_mode=false/>
+                    }
+                }))
+            }
+        };
+        let chat_game = Arc::clone(&game);
+        let chat_members = chat_viewers.clone();
+        let chat_socket = move |Path(index): Path<usize>,
+                                Query(cursor): Query<ChatCursor>,
+                                socket: WebSocketUpgrade| {
+            let game = Arc::clone(&chat_game);
+            let member = chat_members[index].clone();
+            async move {
+                socket.on_upgrade(move |socket| async move {
+                    play_connection(socket, game, member, cursor.after_message_id)
+                        .await
+                        .unwrap();
+                })
+            }
+        };
+        let chat_game = Arc::clone(&game);
+        let chat_store = store.clone();
+        let actor = installed.member.clone();
+        let isolated = chat_viewers[1].clone();
+        let chat_action = move |Path(stage): Path<usize>| {
+            let game = Arc::clone(&chat_game);
+            let store = chat_store.clone();
+            let actor = actor.clone();
+            let isolated = isolated.clone();
+            let responses = Arc::clone(&chat_responses);
+            async move {
+                use crate::llm::ToolCall;
+                let group = store.character_group_id(actor.character_id).await.unwrap();
+                let mut calls = vec![ToolCall {
+                    id: format!("approve-{stage}"),
+                    name: "approve_action".into(),
+                    arguments: serde_json::json!({"action_id": stage + 1}).to_string(),
+                }];
+                if stage == 0 {
+                    let members: Vec<i64> = store
+                        .party_presence(actor.character_id)
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .map(|member| member.character_id)
+                        .filter(|id| *id != mara_id && *id != isolated.character_id)
+                        .collect();
+                    calls.push(ToolCall {id: "split-chat".into(), name: "split_group".into(), arguments: serde_json::json!({
+                        "group_id": group, "partitions": [
+                            {"character_ids": members, "name": "chat players", "description": "together"},
+                            {"character_ids": [mara_id, isolated.character_id], "name": "chat companions", "description": "apart"}
+                        ], "continue_with_character_id": actor.character_id
+                    }).to_string()});
+                } else if stage == 3 {
+                    let other = store
+                        .character_group_id(isolated.character_id)
+                        .await
+                        .unwrap();
+                    calls.push(ToolCall {id: "merge-chat".into(), name: "merge_groups".into(), arguments: serde_json::json!({"group_ids": [group, other], "name": "chat reunited", "description": "together"}).to_string()});
+                }
+                let narration = [
+                    "Passive split narration.",
+                    "Private one-viewer narration.",
+                    "Private four-viewer narration.",
+                    "Passive merge narration.",
+                ][stage];
+                let reply = |content| Response {
+                    content,
+                    reasoning: String::new(),
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
+                };
+                responses.lock().unwrap().extend([
+                    reply(Content::ToolCalls(vec![ToolCall {
+                        id: format!("look-{stage}"),
+                        name: "look".into(),
+                        arguments: r#"{"description":"the room"}"#.into(),
+                    }])),
+                    reply(Content::ToolCalls(calls)),
+                    reply(Content::Text(narration.into())),
+                    reply(Content::Text("Done.".into())),
+                ]);
+                game.player_message(actor, "Look around.").await.unwrap();
+                StatusCode::NO_CONTENT
+            }
+        };
         // Live update checks drive Store's test-only event hooks one step at
         // a time. Give them their own valid, un-compacted history instead of
         // fabricating a new inference from the action above after its real
@@ -1936,7 +2090,28 @@ mod tests {
                 .unwrap();
         }
 
+        let lag_notifications = game_load.world(world_id).unwrap().broadcasts.clone();
         let app = app
+            .route("/browser/chat/{index}", get(chat_page))
+            .route("/browser/chat/{index}/ws", get(chat_socket))
+            .route("/browser/chat/action/{stage}", post(chat_action))
+            .route("/browser/chat/metrics", get(|| async {
+                let log = std::fs::read_to_string("target/browser-tests/presence-sql.log").unwrap();
+                Json(serde_json::json!({
+                    "queries": log.matches("sqlx::query:").count(),
+                    "transcript_fetches": log.matches("SELECT message.id, message.role, message.content, message.trigger_sequence_id").count()
+                }))
+            }))
+            .route(
+                "/browser/chat/lag",
+                post(move || {
+                    for _ in 0..100 {
+                        let _no_live_viewers =
+                            lag_notifications.send(crate::world::ChatChange::Entries);
+                    }
+                    async { StatusCode::NO_CONTENT }
+                }),
+            )
             .route("/browser/render", post(render_browser_page))
             .route(
                 "/browser/loading",
@@ -1961,6 +2136,7 @@ mod tests {
             "live_agent_id": live_agent_id, "live_sequence_id": live_sequence.id,
             "live_message_id": live_message_id,
             "gm_agent_id": gm_history.agent_id,
+            "chat_characters": chat_viewers.iter().map(|member| member.character_id).collect::<Vec<_>>(),
         })
         .to_string();
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
@@ -1978,6 +2154,7 @@ mod tests {
             "check_player_chat.cjs",
             "check_developer_mode.cjs",
             "check_world_detail.cjs",
+            "check_presence_chat.cjs",
         ] {
             let output = tokio::process::Command::new("node")
                 .arg(format!("scripts/{script}"))
@@ -1987,6 +2164,9 @@ mod tests {
                 .await
                 .unwrap();
             println!("{script}: {}", output.status);
+            if script == "check_presence_chat.cjs" {
+                println!("{}", String::from_utf8_lossy(&output.stdout));
+            }
             if !output.status.success() {
                 eprintln!("{}", String::from_utf8_lossy(&output.stderr));
             }

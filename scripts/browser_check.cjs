@@ -40,8 +40,8 @@ async function forward(request, response, path = request.url, data) {
 // either leg are reported through the test's own HTTP `server` (the same
 // object `checkBrowser` already listens for "error" on), so a proxy failure
 // fails the check exactly like a forwarded HTTP request failure would.
-function forwardWebSocket(errorServer, path) {
-    const upstreamUrl = fixture.base.replace(/^http/, "ws") + path;
+function forwardWebSocket(errorServer, path, upstreamPath = path) {
+    const upstreamUrl = fixture.base.replace(/^http/, "ws") + upstreamPath;
     return (request, socket, head) => {
         assert.equal(request.url, path);
         const upgrader = new WebSocketServer({ noServer: true });
@@ -89,25 +89,28 @@ async function checkBrowser(server, check) {
   try {
     await Promise.race([new Promise(resolve => server.listen(0, "127.0.0.1", resolve)), failure]);
     browser = await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] });
-    const tab = await browser.newPage();
+    const context = await browser.newContext();
     // Copy-to-clipboard buttons in Developer Mode need this to be readable
     // back for verification; harmless for checks that never touch it.
-    await tab.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-    tab.on("pageerror", fail);
-    tab.on("console", message => {
-      if (message.type() === "error") fail(new Error(`Browser console: ${message.text()}`));
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    context.on("page", tab => {
+      tab.on("pageerror", fail);
+      tab.on("console", message => {
+        if (message.type() === "error") fail(new Error(`Browser console: ${message.text()}`));
+      });
+      tab.on("response", response => {
+        if (response.status() >= 400) fail(new Error(`HTTP ${response.status()}: ${response.url()}`));
+      });
+      tab.on("requestfailed", async request => {
+        const error = request.failure().errorText;
+        // Readiness reloads the page as soon as fetch receives its successful
+        // headers. Chrome can report that already-successful request as aborted.
+        const response = await request.response();
+        if (error === "net::ERR_ABORTED" && response?.ok()) return;
+        fail(new Error(`${error}: ${request.url()}`));
+      });
     });
-    tab.on("response", response => {
-      if (response.status() >= 400) fail(new Error(`HTTP ${response.status()}: ${response.url()}`));
-    });
-    tab.on("requestfailed", async request => {
-      const error = request.failure().errorText;
-      // Readiness reloads the page as soon as fetch receives its successful
-      // headers. Chrome can report that already-successful request as aborted.
-      const response = await request.response();
-      if (error === "net::ERR_ABORTED" && response?.ok()) return;
-      fail(new Error(`${error}: ${request.url()}`));
-    });
+    const tab = await context.newPage();
     // Negative checks prove each browser failure channel fails the command.
     if (process.env.CAIRNWORLD_INJECT_BROWSER_ERROR) {
       await tab.addInitScript(kind => {

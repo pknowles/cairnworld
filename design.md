@@ -1061,7 +1061,7 @@ creates no characters. Routes are POST `/world/{id}/members/{user}/ban` and
 `/reactivate`; WorldDetail renders active members and an owner-only collapsed
 Ban list. Both update Store membership and publish AccessChanged after commit.
 
-Each world's `World` owns its action queue, Developer Mode and group broadcasts,
+Each world's `World` owns its action queue, Developer Mode and chat wake-ups,
 opening turns, connection IDs and a coalesced set of changed characters. Worlds
 are constructed before model loading and when installed, rather than on first
 access, so live inspection does not depend on model readiness. The web layer and
@@ -1078,7 +1078,7 @@ Game::connect/disconnect serialize the durable zero/one transition and connectio
 set update under the same presence lock. A successful transition adds the
 character to the changed set and notifies the world task. These methods never
 wait for an ongoing model turn; changed state cannot overflow the action queue.
-The world task owns pending presence deadlines and processes due deadlines and
+The world task reads the earliest durable presence deadline and processes it and
 changed state between actions. Every event error is logged even if its requester
 has disconnected;
 narration delivery reads the current set when committing recipient references.
@@ -1089,7 +1089,8 @@ last_connected_at, absent_since, generation)`; timestamps are server UTC.
 Live connection IDs are process-local and are never restored after restart.
 
 `presence_narration(group_id PRIMARY KEY, last_announced_character_ids,
-due_at, generation)` records the announced online set and outstanding transition.
+due_at, generation, waiting_for_return)` records the last narrated online set,
+outstanding transition and empty-period phase separately.
 Only characters whose creation is ready participate in this protocol: opening
 play owns the first narration after `ready_to_begin`, while presence narration
 only describes later arrivals and departures.
@@ -1101,18 +1102,30 @@ if anyone remains online, narrate the difference and persist the new announced
 set with the narration; if nobody remains, retain the difference without running
 an inference. First arrival after an empty period sets a new 60-second deadline
 and narrates the consolidated old-to-new state then. The world task retains
-pending deadlines and waits for the earliest one, then handles its
-generation-tagged event; stale timer events do nothing.
+no duplicate timer map: it queries the earliest active-group deadline on each
+wake and waits for it alongside its queue and presence notification. It consumes
+the generation-tagged deadline before inference; stale events do nothing and
+failed inference is recorded and surfaced without automatic retry. Empty periods
+preserve the last narrated set and wait for a return to arm the next window.
 
 At restart, clear all connection sets and timestamp formerly connected characters
 as absent at recovery. Retain pending/announced transitions; when a real connection
 returns, apply the same empty-group transition above. Split partitions the
-announced set; merge unions it. Timer validation and group changes are serialized in the world task; each timer
+announced set and copies pending deadlines; merge unions it and retains the earliest
+deadline. Empty results await return; an occupied result with an unannounced
+difference arms the configured window. Timer validation and group changes are serialized in the world task; each timer
 rechecks the current presence generation and group, so stale events cannot narrate
 membership from a retired group. `party_presence()` resolves the caller's group and returns character IDs,
 names and online state from this data. It does not mutate group membership.
 Narration recipients are NPCs and connected PCs in the interacting group;
 offline PCs do not receive it (accepted 2026-09-18, see user_exerpts.md).
+
+All recipient references and the narrated presence snapshot commit in one short
+transaction. Generated inference and completed actions remain recorded if delivery
+fails. One world chat channel carries only wake-ups or failed sequence IDs;
+sockets subscribe once and fetch their own authorized history with a durable
+cursor, including after lag or group changes. Failure details are resolved from
+the recorded sequence under current membership and group authorization.
 
 ## Recap storage and execution
 

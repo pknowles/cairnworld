@@ -6,9 +6,6 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Presence correctness and chat delivery](multiplayer-presence.md): restart and
-  empty-period recovery, presence continuity through split/merge, transactional
-  narration delivery and wake-ups for already-open passive viewers.
 - [Focused code quality](code-quality.md): consolidate the repeated starting-group
   lookup, then implement checked SQL in feature batches. Broader redesigns and
   additional metrics gates require evidence; they are not prerequisites.

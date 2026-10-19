@@ -13,7 +13,13 @@ use crate::{
 };
 
 pub type Worlds = Arc<RwLock<HashMap<i64, Arc<World>>>>;
-pub type GroupBroadcasts = Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>;
+pub type ChatChanges = broadcast::Sender<ChatChange>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChatChange {
+    Entries,
+    Failed { sequence_id: i64 },
+}
 
 /// Live state exists independently of model loading. Database operations never
 /// own these channels; their callers publish only after committed writes.
@@ -22,7 +28,7 @@ pub struct World {
     pub events: broadcast::Sender<DevEvent>,
     pub sender: mpsc::Sender<WorldEvent>,
     pub queued: Mutex<mpsc::Receiver<WorldEvent>>,
-    pub broadcasts: GroupBroadcasts,
+    pub broadcasts: ChatChanges,
     pub presence: Mutex<Presence>,
     pub changed: Notify,
     pub openings: Mutex<HashMap<i64, watch::Receiver<OpeningState>>>,
@@ -36,7 +42,7 @@ impl World {
             events: broadcast::channel(256).0,
             sender,
             queued: Mutex::new(queued),
-            broadcasts: Arc::new(Mutex::new(HashMap::new())),
+            broadcasts: broadcast::channel(64).0,
             presence: Mutex::new(Presence::default()),
             changed: Notify::new(),
             openings: Mutex::new(HashMap::new()),

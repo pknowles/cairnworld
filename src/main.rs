@@ -198,6 +198,10 @@ async fn main() -> Result<()> {
                 .context("opening web database")?;
             let model = resolve_model(model.as_deref(), None, &settings)?;
             let sampling = settings.sampling(&model);
+            store
+                .recover_presence()
+                .await
+                .context("recovering execution-host presence")?;
             let game = web::GameLoad::loading(&store).await?;
             let worlds = game.worlds();
             let loading_game = game.clone();

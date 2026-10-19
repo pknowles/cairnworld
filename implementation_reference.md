@@ -640,7 +640,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   according to durable character state.
 - Presence (Developer Mode plan D2; design.md's Membership and presence).
   `world::World::load` constructs shared world values before model loading.
-  Every `World` owns its action queue, Developer Mode/group broadcasts, opening
+  Every `World` owns its action queue, Developer Mode/chat channels, opening
   turns and presence. `GameLoad` and `Game` share that same world map. `Game`
   owns the model-backed worker handles and aborts them on drop; idle workers
   hold only a weak game reference. World installation is serialized with model
@@ -651,23 +651,28 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   each durable zero/one transition and update the connection set only after a
   successful write. Changed characters are coalesced in a set and signalled by
   `Notify`, independently of the bounded action queue. The worker drains changes
-  and due deadlines between actions; it owns pending timers instead of spawning
-  detached timer tasks. Zero-delay deadlines are processed before later actions.
+  by current group and processes deadlines between actions. It queries the earliest
+  durable active-group deadline on each wake, with no duplicate timer map or
+  detached timer tasks. Already-due deadlines run before later actions.
   Event errors are logged with world/character or group identity even when a
   requesting connection has gone. Arrival into an occupied group narrates
   immediately; departures and empty-period arrivals share a deadline. A deadline
   with an unchanged online set clears the transition without inference.
-  `handle_presence_deadline` validates the generation before acting. Presence
+  `handle_presence_deadline` consumes the matching generation before inference,
+  preventing automatic retries on failure. Presence
   narration uses an ordinary recorded GM turn and delivers one content reference
   to connected active PCs in the group. Only creation-ready PCs participate.
   `party_presence()` returns group membership and current connection presence.
-  Process-restart reconciliation of stale durable presence remains planned;
-  constructing an empty connection set does not implement that recovery policy.
-  Pending recovery, topology and chat-delivery corrections are specified in
-  [the presence plan](plans/multiplayer-presence.md).
-- Group-scoped narration. `World.broadcasts`, `Game::subscribe` and
-  `deliver_narration` key live delivery by group. `Store::append_group_narration`
-  selects connected active PCs in that same group for durable history, so
+  `serve` calls `Store::recover_presence` before accepting connections, releasing
+  former process connections while preserving narrated sets and pending deadlines.
+  Migration 0003 adds `waiting_for_return`: empty periods retain last-narrated
+  membership, and returns start a shared window even for the same returning set.
+  Split partitions snapshots and copies deadlines; merge unions snapshots and
+  keeps the earliest deadline, all within the topology transaction.
+- Group-scoped narration. `Store::append_group_narration` selects connected
+  active PCs inside one transaction and commits every recipient reference together.
+  `append_presence_narration` also advances the narrated snapshot in that transaction.
+  Delivery rollback retains generated inference and completed actions. Thus
   sharing a physical location cannot leak narration on reload. After a topology
   tool batch, the GM's settled reply is delivered to the triggering character's
   resulting group. The isolation test performs real split/action/GM tool rounds
@@ -677,8 +682,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   delivery for departure-window cases. Regression tests also cover more presence
   transitions than a full action queue can hold during inference, failed presence
   writes, and release of idle world ownership. `gm_scene` includes group-local
-  description and notes. Existing browser sockets do not yet resubscribe when
-  their character's group changes.
+  description and notes. The stable world chat channel carries only entry wake-ups
+  and failed sequence IDs. Existing sockets follow split/merge through their own
+  authorized stored-history cursor. Failure details require current membership
+  and player-agent or current-group invocation authorization.
 - Group changes: `Store::resolve_topology_changes` constructs `TopologyChanges`
   from the recorded invoking Game Master's world. Private `WorldGroup` values
   scope both `agent::compact_merge_sources` and transaction writes; unavailable
@@ -783,9 +790,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `send_new_entries` re-fetches everything past that cursor through
   `Game::player_chat_after` (the same query SSR and reconnect use) rather than
   forwarding the bare broadcast text - a live entry is inspectable as soon as
-  it is sent, not only after a page reload re-resolves it. The narration
-  broadcast channel itself still only carries text; it exists to wake a
-  connection, not to name the row. `message.trigger_sequence_id` records the
+  it is sent, not only after a page reload re-resolves it. Wake-ups are coalesced
+  before fetching history; lag recovers stored entries through the same cursor
+  and reports any missed error notifications. `message.trigger_sequence_id` records the
   sequence a player message began, since no inference exists yet at that point
   to resolve it through; every other entry resolves its sequence via
   `source_inference_id`.

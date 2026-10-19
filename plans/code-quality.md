@@ -20,16 +20,10 @@ content and reasoning. They are different operations, not duplicate query twins.
 
 | Item | Verified evidence | Decision |
 | --- | --- | --- |
-| Presence and chat delivery | Restart/empty-period failures were reproduced during branch review. Further real game-path probes reproduce lost presence state after split/merge, missed passive-viewer wake-ups, and partial recipient delivery on an injected write failure. | Complete [presence and chat delivery](multiplayer-presence.md) first. |
 | Repeated starting-group selection | In src/store.rs, accept_invitation and create_player_character repeat the same owner/membership/character/group lookup. export_scenario repeats that ownership join for starting location and group name. These are four occurrences of the same selection rule, not four identical complete SQL statements. | Consolidate that operation only; preserve selection behavior. |
 | Unchecked SQL | Cargo uses sqlx, but statically shaped queries in Store are runtime query/query_as/query_scalar calls. design.md explicitly requires checked macros. | Fulfil the accepted requirement incrementally. This is an unmet build-time guarantee, not a claim that a particular current query is broken. |
 
 ## Ordered increments
-
-### Presence correctness and chat delivery
-
-Finish and verify the linked plan before the following cleanup. It covers real
-runtime defects; file size and quality-tool scores are not its motivation.
 
 ### One definition of starting-group selection
 

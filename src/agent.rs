@@ -416,7 +416,10 @@ pub async fn complete_with_call_context<B: Backend>(
                     .await
                     .context("compacting merge source branches before applying topology changes")?;
                 store
-                    .apply_topology_changes(pending_changes)
+                    .apply_topology_changes(
+                        pending_changes,
+                        budget.limits().presence_departure_seconds,
+                    )
                     .await
                     .context("applying group topology changes")?;
             }
@@ -1217,7 +1220,10 @@ mod tests {
             .await
             .unwrap();
 
-        store.apply_topology_changes(changes).await.unwrap();
+        store
+            .apply_topology_changes(changes, Limits::default().presence_departure_seconds)
+            .await
+            .unwrap();
 
         let over_group_id = store
             .character_group_id(installed.member.character_id)

@@ -1,16 +1,16 @@
 # Presence correctness and chat delivery
 
-Implementation pending. Investigation reviewed 2026-10-19.
+Completed and verified 2026-10-19; implementation and standards self-review passed.
 
 ## Goal and authority
 
 Preserve correct presence and complete chat histories across server restarts,
 empty periods, group changes and delivery failures. An open passive viewer must
 receive committed narration without reloading. Authority:
-[World game page](../user_declarations.md#world-game-page),
-[Game Master interaction](../user_declarations.md#gm-interaction), the accepted
-[recipient policy](../user_exerpts.md#2026-09-18-narration-recipient-policy-accepted),
-and [design / membership and presence](../design.md#membership-and-presence).
+[World game page](../../user_declarations.md#world-game-page),
+[Game Master interaction](../../user_declarations.md#gm-interaction), the accepted
+[recipient policy](../../user_exerpts.md#2026-09-18-narration-recipient-policy-accepted),
+and [design / membership and presence](../../design.md#membership-and-presence).
 
 This is repair of existing behavior. It does not add a recap system, polling,
 automatic model retries, an outbox, or another worker framework.
@@ -149,9 +149,10 @@ Implement them together rather than building temporary plumbing between commits.
   initial snapshots, reconnect and lag recovery.
 - Verify no successful-delivery notification is published for a
   failed transaction and no previously completed action is rerun.
-- Measure one committed narration with one and four open viewers across two
-  groups, using the scripted backend to exclude model time. Record transcript
-  fetch/query counts and another viewer's chat/inspection latency before/after.
+- Measure the same ordinary look action with one and four open viewers across two
+  groups, using the scripted backend to exclude model time. Record actual SQL and
+  transcript-fetch counts and concurrent inspection latency. Compare fan-out cost;
+  do not treat the broken previous subscription path as a performance baseline.
   Review an observed regression before adding targeted channel state; do not
   invent a hard latency threshold or add a new pool merely to mask the cost.
 
@@ -177,6 +178,19 @@ Run appropriate real browser and configured-model chats and inspect the captured
 model input when context changes. Present any new LLM behavior test design for
 the user review required by coding_standards.md before implementing that test.
 Run the Rust suite and quality script at commit checkpoints. Complete the
-[AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
-[coding standards](../coding_standards.md) and [prompt standards](../prompt_standards.md)
+[AGENTS.md checklist](../../AGENTS.md#post-feature-and-pre-commit-checklist),
+[coding standards](../../coding_standards.md) and [prompt standards](../../prompt_standards.md)
 self-review. Update implementation_reference.md only after implementation passes.
+
+Verification: 119 Rust tests pass; server and WebAssembly lint gates pass. Real
+Chrome checks cover stable passive subscriptions through split/merge, two tabs,
+group isolation, notification lag and reload without duplicate entries. Existing
+configured-Qwen split/merge context and browser evidence checks pass. The rebuilt
+server starts against the preserved development database and returns ready (204).
+
+The scripted browser comparison measured one/four viewers at 72/309 ms to visible
+narration, with concurrent inspection at 6.7/5.0 ms. SQL logging counted 238/306
+statements, including the action and inspection, and 2/8 transcript fetches. This
+is one browser measurement, not a throughput or percentile claim. Extra reads are
+the explicit tradeoff for removing subscription retargeting; inspection did not
+show queueing growth in this check. No additional pool or channel state was added.

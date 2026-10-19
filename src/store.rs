@@ -21,7 +21,7 @@ use anyhow::{Context, Result, ensure};
 use rand::{Rng, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    FromRow, Sqlite, SqlitePool, Transaction,
+    FromRow, Sqlite, SqliteConnection, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
@@ -186,6 +186,7 @@ pub struct PresenceNarration {
     pub last_announced_character_ids: Vec<i64>,
     pub due_at: Option<String>,
     pub generation: i64,
+    pub waiting_for_return: bool,
 }
 
 #[derive(FromRow)]
@@ -194,6 +195,7 @@ struct PresenceNarrationRow {
     last_announced_character_ids: String,
     due_at: Option<String>,
     generation: i64,
+    waiting_for_return: bool,
 }
 
 impl TryFrom<PresenceNarrationRow> for PresenceNarration {
@@ -206,6 +208,7 @@ impl TryFrom<PresenceNarrationRow> for PresenceNarration {
                 .context("decoding announced character ids")?,
             due_at: row.due_at,
             generation: row.generation,
+            waiting_for_return: row.waiting_for_return,
         })
     }
 }
@@ -1948,7 +1951,11 @@ impl Store {
     /// batch), a stale or invalid one is rejected rather than applied, and
     /// every proposal's tool-result message is appended in call order
     /// alongside the ordinary calls this same batch already committed.
-    pub async fn apply_topology_changes(&self, changes: TopologyChanges) -> Result<()> {
+    pub async fn apply_topology_changes(
+        &self,
+        changes: TopologyChanges,
+        presence_seconds: u64,
+    ) -> Result<()> {
         let TopologyChanges {
             inference_id,
             branch,
@@ -1973,6 +1980,7 @@ impl Store {
                         group_id,
                         partitions,
                         continue_with_character_id,
+                        presence_seconds,
                     )
                     .await?
                 }
@@ -1980,7 +1988,16 @@ impl Store {
                     group_ids,
                     name,
                     description,
-                }) => Self::apply_merge(&mut transaction, group_ids, name, description).await?,
+                }) => {
+                    Self::apply_merge(
+                        &mut transaction,
+                        group_ids,
+                        name,
+                        description,
+                        presence_seconds,
+                    )
+                    .await?
+                }
                 Err(rejection) => Err(rejection),
             };
             let status = if result.is_ok() {
@@ -2080,6 +2097,7 @@ impl Store {
         group: WorldGroup,
         partitions: Vec<tools::GroupPartition>,
         continue_with_character_id: Option<i64>,
+        presence_seconds: u64,
     ) -> Result<Result<String, String>> {
         let group_id = group.id;
         let world_id = group.branch.world_id();
@@ -2154,6 +2172,13 @@ impl Store {
             }
             result_group_ids.push(new_group_id);
         }
+        Self::transfer_presence(
+            transaction,
+            &[group_id],
+            &result_group_ids,
+            presence_seconds,
+        )
+        .await?;
         sqlx::query("UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP WHERE id = ?")
             .bind(group_id)
             .execute(&mut **transaction)
@@ -2178,6 +2203,7 @@ impl Store {
         mut groups: Vec<WorldGroup>,
         name: String,
         description: String,
+        presence_seconds: u64,
     ) -> Result<Result<String, String>> {
         groups.sort_unstable_by_key(|group| group.id);
         groups.dedup_by_key(|group| group.id);
@@ -2245,6 +2271,13 @@ impl Store {
                 .await
                 .with_context(|| format!("retiring merged group {group_id}"))?;
         }
+        Self::transfer_presence(
+            transaction,
+            &groups.iter().map(|group| group.id).collect::<Vec<_>>(),
+            &[new_group_id],
+            presence_seconds,
+        )
+        .await?;
         Ok(Ok(format!(
             "Groups {} merged into group {new_group_id}.",
             groups
@@ -2253,6 +2286,49 @@ impl Store {
                 .collect::<Vec<_>>()
                 .join(", ")
         )))
+    }
+
+    /// Narrated membership follows characters; the earliest shared window
+    /// follows the resulting groups. This runs inside the topology transaction.
+    async fn transfer_presence(
+        transaction: &mut Transaction<'_, Sqlite>,
+        sources: &[i64],
+        targets: &[i64],
+        presence_seconds: u64,
+    ) -> Result<()> {
+        let sources = serde_json::to_string(sources)?;
+        let announced: Vec<i64> = sqlx::query_scalar(
+            "SELECT DISTINCT announced.value FROM presence_narration, json_each(last_announced_character_ids) AS announced \
+             WHERE group_id IN (SELECT value FROM json_each(?)) ORDER BY announced.value",
+        ).bind(&sources).fetch_all(&mut **transaction).await.context("loading source announced membership")?;
+        let deadline: Option<String> = sqlx::query_scalar(
+            "SELECT min(due_at) FROM presence_narration WHERE group_id IN (SELECT value FROM json_each(?))",
+        ).bind(&sources).fetch_one(&mut **transaction).await.context("loading source presence deadline")?;
+        for group_id in targets {
+            let members: Vec<i64> = sqlx::query_scalar(
+                "SELECT character_id FROM character_group WHERE group_id = ? ORDER BY character_id",
+            )
+            .bind(group_id)
+            .fetch_all(&mut **transaction)
+            .await
+            .context("loading resulting group membership")?;
+            let online = Self::ready_online_characters(transaction, *group_id).await?;
+            let announced: Vec<i64> = announced
+                .iter()
+                .copied()
+                .filter(|id| members.contains(id))
+                .collect();
+            sqlx::query(
+                "INSERT INTO presence_narration (group_id, last_announced_character_ids, due_at, waiting_for_return) \
+                 VALUES (?, ?, CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN datetime(CURRENT_TIMESTAMP, ? || ' seconds') END, ?)",
+            ).bind(group_id).bind(serde_json::to_string(&announced)?)
+                .bind(&deadline).bind(&deadline).bind(!online.is_empty() && online != announced)
+                .bind(i64::try_from(presence_seconds)?).bind(online.is_empty())
+                .execute(&mut **transaction).await.context("transferring group presence")?;
+        }
+        sqlx::query("UPDATE presence_narration SET due_at = NULL, generation = generation + 1 WHERE group_id IN (SELECT value FROM json_each(?))")
+            .bind(sources).execute(&mut **transaction).await.context("invalidating retired presence deadlines")?;
+        Ok(())
     }
 
     /// Display names for a set of characters, in the order given by the
@@ -2303,21 +2379,27 @@ impl Store {
             .collect())
     }
 
-    /// Every character in a group whose `character_presence` is currently
-    /// connected (a non-null `last_connected_at` with no later
-    /// `absent_since`), for computing the announced-set difference.
-    pub async fn group_online_character_ids(&self, group_id: i64) -> Result<Vec<i64>> {
+    /// Creation-ready, connected characters participate in arrival/departure
+    /// narration. Physical presence remains separately visible in party_presence.
+    pub async fn group_ready_online_character_ids(&self, group_id: i64) -> Result<Vec<i64>> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .context("acquiring group presence connection")?;
+        Self::ready_online_characters(&mut connection, group_id).await
+    }
+
+    async fn ready_online_characters(
+        connection: &mut SqliteConnection,
+        group_id: i64,
+    ) -> Result<Vec<i64>> {
         sqlx::query_scalar(
             "SELECT character_group.character_id FROM character_group \
-             JOIN character_presence ON character_presence.character_id = character_group.character_id \
-             WHERE character_group.group_id = ? \
-               AND character_presence.absent_since IS NULL \
+             JOIN character_presence USING (character_id) JOIN character ON character.id = character_group.character_id \
+             WHERE group_id = ? AND absent_since IS NULL AND json_type(sheet, '$.ready') = 'true' \
              ORDER BY character_group.character_id",
-        )
-        .bind(group_id)
-        .fetch_all(&self.pool)
-        .await
-        .with_context(|| format!("loading online characters for group {group_id}"))
+        ).bind(group_id).fetch_all(connection).await.with_context(|| format!("loading ready online characters for group {group_id}"))
     }
 
     /// The current announced set and any outstanding transition deadline for
@@ -2327,7 +2409,7 @@ impl Store {
         sqlx::query_as::<_, PresenceNarrationRow>(
             "INSERT INTO presence_narration (group_id) VALUES (?) \
              ON CONFLICT (group_id) DO UPDATE SET group_id = group_id \
-             RETURNING group_id, last_announced_character_ids, due_at, generation",
+             RETURNING group_id, last_announced_character_ids, due_at, generation, waiting_for_return",
         )
         .bind(group_id)
         .fetch_one(&self.pool)
@@ -2346,15 +2428,36 @@ impl Store {
         character_ids: &[i64],
         generation: i64,
     ) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting presence announcement")?;
+        Self::announce_presence_in(&mut transaction, group_id, character_ids, generation).await?;
+        transaction
+            .commit()
+            .await
+            .context("committing presence announcement")
+    }
+
+    async fn announce_presence_in(
+        transaction: &mut Transaction<'_, Sqlite>,
+        group_id: i64,
+        character_ids: &[i64],
+        generation: i64,
+    ) -> Result<()> {
         let ids = serde_json::to_string(character_ids).context("serializing announced set")?;
         let updated = sqlx::query(
-            "UPDATE presence_narration SET last_announced_character_ids = ?, due_at = NULL, generation = generation + 1 \
+            "UPDATE presence_narration SET last_announced_character_ids = CASE WHEN ? THEN last_announced_character_ids ELSE ? END, \
+             waiting_for_return = ?, due_at = NULL, generation = generation + 1 \
              WHERE group_id = ? AND generation = ?",
         )
+        .bind(character_ids.is_empty())
         .bind(ids)
+        .bind(character_ids.is_empty())
         .bind(group_id)
         .bind(generation)
-        .execute(&self.pool)
+        .execute(&mut **transaction)
         .await
         .with_context(|| format!("announcing presence for group {group_id}"))?
         .rows_affected();
@@ -2365,13 +2468,81 @@ impl Store {
         Ok(())
     }
 
+    /// Only the execution host calls recovery, before accepting connections.
+    /// Inspection and command-line database readers must not change live presence.
+    pub async fn recover_presence(&self) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting presence recovery")?;
+        sqlx::query("UPDATE character_presence SET absent_since = CURRENT_TIMESTAMP, generation = generation + 1 WHERE absent_since IS NULL")
+            .execute(&mut *transaction).await.context("releasing lost process connections")?;
+        sqlx::query("UPDATE presence_narration SET waiting_for_return = 1")
+            .execute(&mut *transaction)
+            .await
+            .context("restoring empty-period presence state")?;
+        transaction
+            .commit()
+            .await
+            .context("committing presence recovery")
+    }
+
+    pub async fn next_presence_deadline(&self, world_id: i64) -> Result<Option<(i64, i64, i64)>> {
+        sqlx::query_as(
+            "SELECT presence_narration.group_id, presence_narration.generation, \
+             max(0, unixepoch(due_at) - unixepoch('now')) FROM presence_narration \
+             JOIN \"group\" ON \"group\".id = presence_narration.group_id \
+             WHERE \"group\".world_id = ? AND \"group\".retired_at IS NULL AND due_at IS NOT NULL \
+             ORDER BY due_at, presence_narration.group_id LIMIT 1",
+        )
+        .bind(world_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("selecting durable presence deadline")
+    }
+
+    pub async fn chat_failure(
+        &self,
+        member: &PlayerAgent,
+        sequence_id: i64,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT sequence.error FROM sequence \
+             JOIN world_member ON world_member.world_id = sequence.world_id \
+             JOIN player_character ON player_character.member_id = world_member.id \
+             JOIN character_group ON character_group.character_id = player_character.character_id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             WHERE sequence.id = ? AND sequence.world_id = ? AND sequence.error IS NOT NULL \
+             AND world_member.user_id = ? AND world_member.access = 'active' \
+             AND player_character.agent_id = ? AND player_character.character_id = ? \
+             AND EXISTS (SELECT 1 FROM invocation WHERE invocation.sequence_id = sequence.id \
+                         AND (invocation.agent_id = player_character.agent_id OR invocation.branch_id = \"group\".branch_id))",
+        ).bind(sequence_id).bind(member.world_id).bind(member.user_id).bind(member.agent_id).bind(member.character_id)
+            .fetch_optional(&self.pool).await.context("authorizing recorded chat failure")
+    }
+
+    /// Claim once before inference. An error must not turn an overdue row into
+    /// an automatic model retry loop; the last narrated set remains unchanged.
+    pub async fn consume_presence_deadline(
+        &self,
+        group_id: i64,
+        generation: i64,
+    ) -> Result<Option<PresenceNarration>> {
+        sqlx::query_as::<_, PresenceNarrationRow>(
+            "UPDATE presence_narration SET due_at = NULL, generation = generation + 1 \
+             WHERE group_id = ? AND generation = ? AND due_at IS NOT NULL \
+             AND EXISTS (SELECT 1 FROM \"group\" WHERE id = group_id AND retired_at IS NULL) \
+             RETURNING group_id, last_announced_character_ids, due_at, generation, waiting_for_return",
+        ).bind(group_id).bind(generation).fetch_optional(&self.pool).await
+            .context("consuming presence deadline")?.map(TryInto::try_into).transpose()
+    }
+
     /// Schedule (or reschedule) a group's pending deadline `after_seconds`
     /// from now, bumping its generation so an earlier-scheduled timer
     /// recognizes itself as stale. Fails if `generation` no longer matches -
-    /// a stale caller must reload. Returns the new generation; the caller's
-    /// own `tokio::time::sleep(Duration::from_secs(after_seconds))` is the
-    /// actual scheduling mechanism, so `due_at` here is a durable record for
-    /// recovery/display, not something re-parsed back for timing.
+    /// a stale caller must reload. Returns the new generation. The world
+    /// worker selects this durable UTC deadline on its next wake.
     pub async fn schedule_presence_deadline(
         &self,
         group_id: i64,
@@ -2380,7 +2551,7 @@ impl Store {
     ) -> Result<i64> {
         sqlx::query_scalar(
             "UPDATE presence_narration \
-             SET due_at = datetime(CURRENT_TIMESTAMP, ? || ' seconds'), generation = generation + 1 \
+             SET due_at = datetime(CURRENT_TIMESTAMP, ? || ' seconds'), waiting_for_return = 0, generation = generation + 1 \
              WHERE group_id = ? AND generation = ? RETURNING generation",
         )
         .bind(after_seconds)
@@ -2538,6 +2709,51 @@ impl Store {
         group_id: i64,
         content_id: i64,
     ) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting group narration delivery")?;
+        Self::append_group_narration_in(&mut transaction, world_id, group_id, content_id).await?;
+        transaction
+            .commit()
+            .await
+            .context("committing group narration delivery")
+    }
+
+    pub async fn append_presence_narration(
+        &self,
+        world_id: i64,
+        narration: &PresenceNarration,
+        character_ids: &[i64],
+        content_id: i64,
+    ) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting presence narration delivery")?;
+        Self::append_group_narration_in(&mut transaction, world_id, narration.group_id, content_id)
+            .await?;
+        Self::announce_presence_in(
+            &mut transaction,
+            narration.group_id,
+            character_ids,
+            narration.generation,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .context("committing presence narration delivery")
+    }
+
+    async fn append_group_narration_in(
+        transaction: &mut Transaction<'_, Sqlite>,
+        world_id: i64,
+        group_id: i64,
+        content_id: i64,
+    ) -> Result<()> {
         // Recipients are connected PCs in the interacting group (design.md's
         // Membership and presence: "Narration recipients are NPCs and
         // connected PCs in the interacting group; offline PCs do not receive
@@ -2555,22 +2771,19 @@ impl Store {
         )
         .bind(world_id)
         .bind(group_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut **transaction)
         .await
         .context("finding connected player agents in narrated group")?;
         let source_inference_id: Option<i64> =
             sqlx::query_scalar("SELECT id FROM inference WHERE output = ?")
                 .bind(content_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut **transaction)
                 .await
                 .context("resolving GM narration's producing inference")?;
         for agent_id in agents {
-            let mut transaction = self.pool.begin().await.with_context(|| {
-                format!("starting narration delivery transaction for agent {agent_id}")
-            })?;
-            let branch_id = history::branch_for_agent(&mut transaction, agent_id).await?;
+            let branch_id = history::branch_for_agent(transaction, agent_id).await?;
             Self::insert_message_with_content(
-                &mut transaction,
+                transaction,
                 branch_id,
                 (Role::Narration, MessageOrigin::Conversation),
                 content_id,
@@ -2580,9 +2793,6 @@ impl Store {
             )
             .await
             .with_context(|| format!("storing group narration for player agent {agent_id}"))?;
-            transaction.commit().await.with_context(|| {
-                format!("committing location narration for player agent {agent_id}")
-            })?;
         }
         Ok(())
     }
@@ -2854,23 +3064,6 @@ impl Store {
             .commit()
             .await
             .context("committing Adventurer readiness check")?;
-        Ok(serde_json::from_str::<serde_json::Value>(&sheet)
-            .context("decoding Adventurer sheet")?
-            .get("ready")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false))
-    }
-
-    /// Presence narration describes established characters, never an
-    /// Adventurer still in character creation. The creation owner performs
-    /// its own opening narration when it records readiness.
-    pub async fn character_is_ready(&self, character_id: i64) -> Result<bool> {
-        let sheet: Option<String> = sqlx::query_scalar("SELECT sheet FROM character WHERE id = ?")
-            .bind(character_id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("loading readiness for character {character_id}"))?;
-        let sheet = sheet.with_context(|| format!("character {character_id} does not exist"))?;
         Ok(serde_json::from_str::<serde_json::Value>(&sheet)
             .context("decoding Adventurer sheet")?
             .get("ready")
@@ -7987,7 +8180,7 @@ mod tests {
             .await
             .unwrap();
 
-        store.apply_topology_changes(changes).await.unwrap();
+        store.apply_topology_changes(changes, 60).await.unwrap();
 
         let player_group_id = store
             .character_group_id(installed.member.character_id)
