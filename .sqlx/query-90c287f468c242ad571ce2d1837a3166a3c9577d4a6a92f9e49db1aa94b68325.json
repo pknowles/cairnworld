@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT travel_time FROM connection WHERE id = ? AND world_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "travel_time",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "90c287f468c242ad571ce2d1837a3166a3c9577d4a6a92f9e49db1aa94b68325"
+}

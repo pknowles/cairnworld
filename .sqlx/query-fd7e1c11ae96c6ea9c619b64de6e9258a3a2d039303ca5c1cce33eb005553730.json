@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH object_index AS ( SELECT 'character' AS object_type, id, name, description, gm_notes, storyteller_notes FROM character WHERE world_id = ? UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name, connection.description, connection.gm_notes, connection.storyteller_notes FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? UNION ALL SELECT 'group', id, name, description, gm_notes, storyteller_notes FROM \"group\" WHERE world_id = ? UNION ALL SELECT 'item', id, name, description, gm_notes, storyteller_notes FROM item WHERE world_id = ? UNION ALL SELECT 'item_type', id, name, description, gm_notes, storyteller_notes FROM item_type WHERE world_id = ? UNION ALL SELECT 'location', id, name, description, gm_notes, storyteller_notes FROM location WHERE world_id = ? ) SELECT object_type, id, name, description, gm_notes, storyteller_notes FROM object_index WHERE (? IS NULL OR object_type = ?) AND (? IS NULL OR id = ?) AND (? IS NULL OR name LIKE '%' || ? || '%' OR object_type LIKE '%' || ? || '%' OR CAST(id AS TEXT) LIKE '%' || ? || '%') AND (? IS NULL OR object_type > ? OR (object_type = ? AND id > ?)) ORDER BY object_type, id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "object_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "gm_notes",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_notes",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 19
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fd7e1c11ae96c6ea9c619b64de6e9258a3a2d039303ca5c1cce33eb005553730"
+}

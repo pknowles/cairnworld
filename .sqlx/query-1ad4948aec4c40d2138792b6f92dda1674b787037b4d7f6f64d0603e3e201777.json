@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 'location' AS object_type, location.id, location.name AS label FROM connection JOIN location ON location.id IN (connection.from_location_id, connection.to_location_id) WHERE connection.id = ?1 ORDER BY location.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "object_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "label",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1ad4948aec4c40d2138792b6f92dda1674b787037b4d7f6f64d0603e3e201777"
+}

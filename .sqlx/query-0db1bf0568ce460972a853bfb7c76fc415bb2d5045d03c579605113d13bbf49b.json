@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT sequence.id, sequence.trigger, sequence.started_at, COUNT(inference.id) AS inference_count FROM sequence LEFT JOIN inference ON inference.sequence_id = sequence.id WHERE sequence.world_id = ? AND sequence.id < ? GROUP BY sequence.id ORDER BY sequence.id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "trigger",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "started_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "inference_count",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0db1bf0568ce460972a853bfb7c76fc415bb2d5045d03c579605113d13bbf49b"
+}

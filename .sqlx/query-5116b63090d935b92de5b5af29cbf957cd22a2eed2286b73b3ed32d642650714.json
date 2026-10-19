@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM \"group\" WHERE location_id = ?1 UNION ALL SELECT 'item', item.id, item.name FROM item_location JOIN item ON item.id = item_location.item_id WHERE item_location.location_id = ?1 UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.from_location_id = ?1 OR connection.to_location_id = ?1 ORDER BY object_type, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "object_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "label",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5116b63090d935b92de5b5af29cbf957cd22a2eed2286b73b3ed32d642650714"
+}

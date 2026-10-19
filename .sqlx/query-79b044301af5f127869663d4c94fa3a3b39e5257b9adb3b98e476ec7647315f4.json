@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 FROM inference JOIN agent ON agent.id = inference.agent_id WHERE inference.id = ? AND agent.world_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "79b044301af5f127869663d4c94fa3a3b39e5257b9adb3b98e476ec7647315f4"
+}

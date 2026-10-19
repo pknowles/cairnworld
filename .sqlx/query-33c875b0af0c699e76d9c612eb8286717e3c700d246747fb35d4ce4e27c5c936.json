@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT agent.id, CASE WHEN player_character.agent_id IS NOT NULL THEN 'player' WHEN npc_agent.agent_id IS NOT NULL THEN 'npc' WHEN world_gm.agent_id IS NOT NULL THEN 'world_gm' ELSE 'unknown' END AS role, COALESCE(pc.name, npc.name) AS character_name, NULL AS \"location_name?: String\" FROM agent LEFT JOIN player_character ON player_character.agent_id = agent.id LEFT JOIN character AS pc ON pc.id = player_character.character_id LEFT JOIN npc_agent ON npc_agent.agent_id = agent.id LEFT JOIN character AS npc ON npc.id = npc_agent.character_id LEFT JOIN world_gm ON world_gm.agent_id = agent.id WHERE agent.world_id = ? ORDER BY agent.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "role",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "character_name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_name?: String",
+        "ordinal": 3,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "33c875b0af0c699e76d9c612eb8286717e3c700d246747fb35d4ce4e27c5c936"
+}

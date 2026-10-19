@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action.id, tool_execution.inference_id AS request_inference_id, tool_execution.ordinal AS request_ordinal, inference.output AS request_output, approving.inference_id AS approval_inference_id, action.result_content_id FROM action LEFT JOIN tool_execution ON tool_execution.id = action.requesting_tool_execution_id LEFT JOIN inference ON inference.id = tool_execution.inference_id LEFT JOIN tool_execution AS approving ON approving.id = action.approving_tool_execution_id WHERE tool_execution.inference_id = ? ORDER BY action.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "request_inference_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "request_ordinal",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "request_output",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "approval_inference_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "result_content_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "3c53de9dceb930bf8f17fcfca36853edc98ae70f7dc6e32e0a3fd9d703dd0149"
+}

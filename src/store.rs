@@ -616,7 +616,7 @@ struct RawSummaryRow {
     id: i64,
     covered_ranges: String,
     inference_id: i64,
-    content: String,
+    content: Option<String>,
     reason: String,
     retained_messages: i64,
 }
@@ -1857,42 +1857,36 @@ impl Store {
             self.world_id_for_agent(agent_id).await? == world_id,
             "agent {agent_id} is not in world {world_id}"
         );
-        let branch_ids: Vec<i64> =
-            sqlx::query_scalar("SELECT id FROM history_branch WHERE agent_id = ? ORDER BY id")
-                .bind(agent_id)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(|| format!("loading branches for agent {agent_id}"))?;
+        let branch_ids: Vec<i64> = sqlx::query_scalar!(
+            "SELECT id FROM history_branch WHERE agent_id = ? ORDER BY id",
+            agent_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading branches for agent {agent_id}"))?;
         let mut nodes = Vec::with_capacity(branch_ids.len());
         for branch_id in branch_ids {
-            let parents = sqlx::query_as::<_, (i64, i64)>(
-                "SELECT parent_branch_id, through_position FROM history_parent \
+            let parents = sqlx::query_as!(
+                BranchParent,
+                "SELECT parent_branch_id AS branch_id, through_position FROM history_parent \
                  WHERE branch_id = ? ORDER BY ordinal",
+                branch_id,
             )
-            .bind(branch_id)
             .fetch_all(&self.pool)
             .await
-            .with_context(|| format!("loading parents of branch {branch_id}"))?
-            .into_iter()
-            .map(|(branch_id, through_position)| BranchParent {
+            .with_context(|| format!("loading parents of branch {branch_id}"))?;
+            let head = sqlx::query_as!(
+                BranchGroup,
+                "SELECT id AS group_id, name AS group_name FROM \"group\" WHERE branch_id = ? AND retired_at IS NULL",
                 branch_id,
-                through_position,
-            })
-            .collect();
-            let head: Option<(i64, String)> = sqlx::query_as(
-                "SELECT id, name FROM \"group\" WHERE branch_id = ? AND retired_at IS NULL",
             )
-            .bind(branch_id)
             .fetch_optional(&self.pool)
             .await
             .with_context(|| format!("checking current group head for branch {branch_id}"))?;
             nodes.push(BranchNode {
                 branch_id,
                 parents,
-                head: head.map(|(group_id, group_name)| BranchGroup {
-                    group_id,
-                    group_name,
-                }),
+                head,
             });
         }
         Ok(nodes)
@@ -4985,11 +4979,12 @@ impl Store {
     }
 
     pub async fn reconstruct_inference(&self, id: i64) -> Result<RecordedInference> {
-        let row = sqlx::query_as::<_, InferenceRow>(
+        let row = sqlx::query_as!(
+            InferenceRow,
             "SELECT inference.id, inference.agent_id, history_entry.branch_id, inference.history_entry_id, inference.sequence_id, inference.invocation_id, invocation.cause_inference_id, inference.segments, inference.sampling, inference.output, inference.error, inference.input_hash, inference.input_tokens, inference.output_tokens, inference.duration_ms, inference.model \
              FROM inference JOIN history_entry ON history_entry.id = inference.history_entry_id JOIN invocation ON invocation.id = inference.invocation_id WHERE inference.id = ?",
+            id,
         )
-        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading inference {id}"))?
@@ -5069,11 +5064,13 @@ impl Store {
     /// then built from each inference's `parent_inference_id`. Consumed by the
     /// Developer Mode inspection queries.
     pub(crate) async fn sequence_inference_ids(&self, sequence_id: i64) -> Result<Vec<i64>> {
-        sqlx::query_scalar("SELECT id FROM inference WHERE sequence_id = ? ORDER BY created_at, id")
-            .bind(sequence_id)
-            .fetch_all(&self.pool)
-            .await
-            .with_context(|| format!("loading inferences for sequence {sequence_id}"))
+        sqlx::query_scalar!(
+            "SELECT id FROM inference WHERE sequence_id = ? ORDER BY created_at, id",
+            sequence_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading inferences for sequence {sequence_id}"))
     }
 
     /// The chat entries an inference produced: its assistant reply and, for a
@@ -5082,11 +5079,12 @@ impl Store {
         &self,
         inference_id: i64,
     ) -> Result<Vec<InferenceMessage>> {
-        sqlx::query_as::<_, InferenceMessageRow>(
+        sqlx::query_as!(
+            InferenceMessageRow,
             "SELECT id, role, source_tool_execution_id FROM message \
              WHERE source_inference_id = ? ORDER BY id",
+            inference_id,
         )
-        .bind(inference_id)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading messages produced by inference {inference_id}"))?
@@ -5130,7 +5128,8 @@ impl Store {
     /// requesting tool_execution's originating call; `result` from its
     /// recorded result content.
     pub(crate) async fn inference_actions(&self, inference_id: i64) -> Result<Vec<RecordedAction>> {
-        let rows = sqlx::query_as::<_, RecordedActionRow>(
+        let rows = sqlx::query_as!(
+            RecordedActionRow,
             "SELECT action.id, \
                     tool_execution.inference_id AS request_inference_id, \
                     tool_execution.ordinal AS request_ordinal, \
@@ -5142,8 +5141,8 @@ impl Store {
              LEFT JOIN inference ON inference.id = tool_execution.inference_id \
              LEFT JOIN tool_execution AS approving ON approving.id = action.approving_tool_execution_id \
              WHERE tool_execution.inference_id = ? ORDER BY action.id",
+            inference_id,
         )
-        .bind(inference_id)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading actions from inference {inference_id}"))?;
@@ -5201,16 +5200,18 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<SequenceSummary>> {
         self.inspecting(viewer_id, world_id).await?;
-        sqlx::query_as::<_, SequenceSummaryRow>(
+        let before_id = before_id.unwrap_or(i64::MAX);
+        sqlx::query_as!(
+            SequenceSummaryRow,
             "SELECT sequence.id, sequence.trigger, sequence.started_at, \
                     COUNT(inference.id) AS inference_count \
              FROM sequence LEFT JOIN inference ON inference.sequence_id = sequence.id \
              WHERE sequence.world_id = ? AND sequence.id < ? \
              GROUP BY sequence.id ORDER BY sequence.id DESC LIMIT ?",
+            world_id,
+            before_id,
+            limit,
         )
-        .bind(world_id)
-        .bind(before_id.unwrap_or(i64::MAX))
-        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading sequences for world {world_id}"))?
@@ -5229,13 +5230,14 @@ impl Store {
         sequence_id: i64,
     ) -> Result<Vec<SequenceNode>> {
         self.inspecting(viewer_id, world_id).await?;
-        let in_world: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM sequence WHERE id = ? AND world_id = ?")
-                .bind(sequence_id)
-                .bind(world_id)
-                .fetch_optional(&self.pool)
-                .await
-                .context("checking sequence world")?;
+        let in_world: Option<i64> = sqlx::query_scalar!(
+            "SELECT 1 FROM sequence WHERE id = ? AND world_id = ?",
+            sequence_id,
+            world_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("checking sequence world")?;
         ensure!(
             in_world.is_some(),
             "sequence {sequence_id} is not in world {world_id}"
@@ -5261,12 +5263,12 @@ impl Store {
         inference_id: i64,
     ) -> Result<RecordedInference> {
         self.inspecting(viewer_id, world_id).await?;
-        let in_world: Option<i64> = sqlx::query_scalar(
+        let in_world: Option<i64> = sqlx::query_scalar!(
             "SELECT 1 FROM inference JOIN agent ON agent.id = inference.agent_id \
              WHERE inference.id = ? AND agent.world_id = ?",
+            inference_id,
+            world_id,
         )
-        .bind(inference_id)
-        .bind(world_id)
         .fetch_optional(&self.pool)
         .await
         .context("checking inference world")?;
@@ -5282,7 +5284,8 @@ impl Store {
     /// world data, not a chat agent.)
     pub async fn world_agents(&self, viewer_id: i64, world_id: i64) -> Result<Vec<AgentInfo>> {
         self.inspecting(viewer_id, world_id).await?;
-        sqlx::query_as::<_, AgentInfoRow>(
+        sqlx::query_as!(
+            AgentInfoRow,
             "SELECT agent.id, \
                     CASE \
                       WHEN player_character.agent_id IS NOT NULL THEN 'player' \
@@ -5290,7 +5293,7 @@ impl Store {
                       WHEN world_gm.agent_id IS NOT NULL THEN 'world_gm' \
                       ELSE 'unknown' END AS role, \
                     COALESCE(pc.name, npc.name) AS character_name, \
-                    NULL AS location_name \
+                    NULL AS \"location_name?: String\" \
              FROM agent \
              LEFT JOIN player_character ON player_character.agent_id = agent.id \
              LEFT JOIN character AS pc ON pc.id = player_character.character_id \
@@ -5298,8 +5301,8 @@ impl Store {
              LEFT JOIN character AS npc ON npc.id = npc_agent.character_id \
              LEFT JOIN world_gm ON world_gm.agent_id = agent.id \
              WHERE agent.world_id = ? ORDER BY agent.id",
+            world_id,
         )
-        .bind(world_id)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading agents for world {world_id}"))?
@@ -5410,10 +5413,11 @@ impl Store {
     ) -> Result<RawHistoryEntry> {
         Ok(match entry.kind {
             history::EntryKind::Message => {
-                let row: RawMessageRow = sqlx::query_as(
+                let row: RawMessageRow = sqlx::query_as!(
+                    RawMessageRow,
                     "SELECT id, role, origin, content, source_inference_id, source_tool_execution_id FROM message WHERE id = ?",
+                    entry.id,
                 )
-                .bind(entry.id)
                 .fetch_one(&self.pool)
                 .await
                 .with_context(|| format!("loading raw history message {}", entry.id))?;
@@ -5433,12 +5437,13 @@ impl Store {
                 }
             }
             history::EntryKind::Summary => {
-                let row: RawSummaryRow = sqlx::query_as(
+                let row: RawSummaryRow = sqlx::query_as!(
+                    RawSummaryRow,
                     "SELECT summary.id, summary.covered_ranges, summary.inference_id, summary.reason, summary.retained_messages, \
-                            json_extract(summary.body, '$.content.value') AS content \
+                            json_extract(summary.body, '$.content.value') AS \"content?: _\" \
                      FROM summary_content AS summary WHERE summary.history_entry_id = ?",
+                    entry.id,
                 )
-                .bind(entry.id)
                 .fetch_one(&self.pool)
                 .await
                 .with_context(|| format!("loading raw history summary {}", entry.id))?;
@@ -5447,18 +5452,22 @@ impl Store {
                     covered_ranges: serde_json::from_str(&row.covered_ranges)
                         .context("decoding raw history summary covered ranges")?,
                     inference_id: row.inference_id,
-                    text: row.content,
+                    text: row
+                        .content
+                        .with_context(|| format!("summary {} has no text content", row.id))?,
                     reason: row.reason,
                     retained_messages: row.retained_messages,
                 }
             }
             history::EntryKind::Inference => {
-                let (inference_id, error): (i64, Option<String>) =
-                    sqlx::query_as("SELECT id, error FROM inference WHERE history_entry_id = ?")
-                        .bind(entry.id)
-                        .fetch_one(&self.pool)
-                        .await
-                        .with_context(|| format!("loading raw history inference {}", entry.id))?;
+                let (inference_id, error): (i64, Option<String>) = sqlx::query!(
+                    "SELECT id, error FROM inference WHERE history_entry_id = ?",
+                    entry.id
+                )
+                .map(|row| (row.id, row.error))
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("loading raw history inference {}", entry.id))?;
                 RawHistoryEntry::Inference {
                     id: inference_id,
                     history_entry_id: entry.id,
@@ -5478,11 +5487,12 @@ impl Store {
         query: WorldObjectsQuery,
     ) -> Result<WorldObjects> {
         self.inspecting(viewer_id, world_id).await?;
-        let world: WorldObjectRow = sqlx::query_as(
+        let world: WorldObjectRow = sqlx::query_as!(
+            WorldObjectRow,
             "SELECT name, time, initial_prompt, storyteller_summary, gm_notes, storyteller_notes \
              FROM world WHERE id = ?",
+            world_id,
         )
-        .bind(world_id)
         .fetch_one(&self.pool)
         .await
         .with_context(|| format!("loading world object {world_id}"))?;
@@ -5493,7 +5503,9 @@ impl Store {
             .as_ref()
             .map(|cursor| cursor.object_type.as_str());
         let after_id = query.after.as_ref().map(|cursor| cursor.id);
-        let rows = sqlx::query_as::<_, ObjectIndexRow>(
+        let limit_plus_one = query.limit + 1;
+        let rows = sqlx::query_as!(
+            ObjectIndexRow,
             "WITH object_index AS ( \
                 SELECT 'character' AS object_type, id, name, description, gm_notes, storyteller_notes FROM character WHERE world_id = ? \
                 UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name, connection.description, connection.gm_notes, connection.storyteller_notes FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? \
@@ -5507,26 +5519,26 @@ impl Store {
                AND (? IS NULL OR name LIKE '%' || ? || '%' OR object_type LIKE '%' || ? || '%' OR CAST(id AS TEXT) LIKE '%' || ? || '%') \
                AND (? IS NULL OR object_type > ? OR (object_type = ? AND id > ?)) \
              ORDER BY object_type, id LIMIT ?",
+            world_id,
+            world_id,
+            world_id,
+            world_id,
+            world_id,
+            world_id,
+            object_type,
+            object_type,
+            query.object_id,
+            query.object_id,
+            search,
+            search,
+            search,
+            search,
+            after_type,
+            after_type,
+            after_type,
+            after_id,
+            limit_plus_one,
         )
-        .bind(world_id)
-        .bind(world_id)
-        .bind(world_id)
-        .bind(world_id)
-        .bind(world_id)
-        .bind(world_id)
-        .bind(&object_type)
-        .bind(&object_type)
-        .bind(query.object_id)
-        .bind(query.object_id)
-        .bind(&search)
-        .bind(&search)
-        .bind(&search)
-        .bind(&search)
-        .bind(after_type)
-        .bind(after_type)
-        .bind(after_type)
-        .bind(after_id)
-        .bind(query.limit + 1)
         .fetch_all(&self.pool)
         .await
         .context("loading paged world objects")?;
@@ -5579,49 +5591,83 @@ impl Store {
         object_type: ObjectType,
         id: i64,
     ) -> Result<(Vec<ObjectField>, Vec<ObjectLink>)> {
-        let links = |sql: &'static str| async move {
-            let rows = sqlx::query_as::<_, ObjectLinkRow>(sql)
-                .bind(id)
-                .fetch_all(&self.pool)
-                .await
-                .context("loading world object relationships")?;
-            rows.into_iter()
-                .map(|row| {
-                    Ok::<ObjectLink, anyhow::Error>(ObjectLink {
-                        object_type: ObjectType::parse(&row.object_type).with_context(|| {
-                            format!("unknown related object type {}", row.object_type)
-                        })?,
-                        id: row.id,
-                        label: row.label,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()
-        };
-        match object_type {
-            ObjectType::Character => Ok((Vec::new(), links(
-                "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM character_group JOIN \"group\" ON \"group\".id = character_group.group_id WHERE character_group.character_id = ?1",
-            ).await?)),
+        let (fields, rows) = match object_type {
+            ObjectType::Character => (
+                Vec::new(),
+                sqlx::query_as!(
+                    ObjectLinkRow,
+                    "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM character_group JOIN \"group\" ON \"group\".id = character_group.group_id WHERE character_group.character_id = ?1",
+                    id,
+                ).fetch_all(&self.pool).await,
+            ),
             ObjectType::Connection => {
-                let travel_time: i64 = sqlx::query_scalar("SELECT travel_time FROM connection WHERE id = ? AND world_id = ?")
-                    .bind(id).bind(world_id).fetch_one(&self.pool).await
-                    .with_context(|| format!("loading connection {id}"))?;
-                Ok((vec![ObjectField { label: "travel time".to_owned(), value: travel_time.to_string() }], links(
-                    "SELECT 'location' AS object_type, location.id, location.name AS label FROM connection JOIN location ON location.id IN (connection.from_location_id, connection.to_location_id) WHERE connection.id = ?1 ORDER BY location.id",
-                ).await?))
+                let travel_time: i64 = sqlx::query_scalar!(
+                    "SELECT travel_time FROM connection WHERE id = ? AND world_id = ?",
+                    id,
+                    world_id,
+                )
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("loading connection {id}"))?;
+                (
+                    vec![ObjectField {
+                        label: "travel time".to_owned(),
+                        value: travel_time.to_string(),
+                    }],
+                    sqlx::query_as!(
+                        ObjectLinkRow,
+                        "SELECT 'location' AS object_type, location.id, location.name AS label FROM connection JOIN location ON location.id IN (connection.from_location_id, connection.to_location_id) WHERE connection.id = ?1 ORDER BY location.id",
+                        id,
+                    ).fetch_all(&self.pool).await,
+                )
             }
-            ObjectType::Group => Ok((Vec::new(), links(
-                "SELECT 'location' AS object_type, location.id, location.name AS label FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".id = ?1 UNION ALL SELECT 'character', character.id, character.name FROM character_group JOIN character ON character.id = character_group.character_id WHERE character_group.group_id = ?1 ORDER BY object_type, id",
-            ).await?)),
-            ObjectType::Item => Ok((Vec::new(), links(
-                "SELECT 'item_type' AS object_type, item_type.id, item_type.name AS label FROM item JOIN item_type ON item_type.id = item.item_type_id WHERE item.id = ?1 UNION ALL SELECT 'location', location.id, location.name FROM item_location JOIN location ON location.id = item_location.location_id WHERE item_location.item_id = ?1 UNION ALL SELECT 'character', character.id, character.name FROM item_character JOIN character ON character.id = item_character.character_id WHERE item_character.item_id = ?1 ORDER BY object_type, id",
-            ).await?)),
-            ObjectType::ItemType => Ok((Vec::new(), links(
-                "SELECT 'item' AS object_type, id, name AS label FROM item WHERE item_type_id = ?1 ORDER BY id",
-            ).await?)),
-            ObjectType::Location => Ok((Vec::new(), links(
-                "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM \"group\" WHERE location_id = ?1 UNION ALL SELECT 'item', item.id, item.name FROM item_location JOIN item ON item.id = item_location.item_id WHERE item_location.location_id = ?1 UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.from_location_id = ?1 OR connection.to_location_id = ?1 ORDER BY object_type, id",
-            ).await?)),
-        }
+            ObjectType::Group => (
+                Vec::new(),
+                sqlx::query_as!(
+                    ObjectLinkRow,
+                    "SELECT 'location' AS object_type, location.id, location.name AS label FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".id = ?1 UNION ALL SELECT 'character', character.id, character.name FROM character_group JOIN character ON character.id = character_group.character_id WHERE character_group.group_id = ?1 ORDER BY object_type, id",
+                    id,
+                ).fetch_all(&self.pool).await,
+            ),
+            ObjectType::Item => (
+                Vec::new(),
+                sqlx::query_as!(
+                    ObjectLinkRow,
+                    "SELECT 'item_type' AS object_type, item_type.id, item_type.name AS label FROM item JOIN item_type ON item_type.id = item.item_type_id WHERE item.id = ?1 UNION ALL SELECT 'location', location.id, location.name FROM item_location JOIN location ON location.id = item_location.location_id WHERE item_location.item_id = ?1 UNION ALL SELECT 'character', character.id, character.name FROM item_character JOIN character ON character.id = item_character.character_id WHERE item_character.item_id = ?1 ORDER BY object_type, id",
+                    id,
+                ).fetch_all(&self.pool).await,
+            ),
+            ObjectType::ItemType => (
+                Vec::new(),
+                sqlx::query_as!(
+                    ObjectLinkRow,
+                    "SELECT 'item' AS object_type, id, name AS label FROM item WHERE item_type_id = ?1 ORDER BY id",
+                    id,
+                ).fetch_all(&self.pool).await,
+            ),
+            ObjectType::Location => (
+                Vec::new(),
+                sqlx::query_as!(
+                    ObjectLinkRow,
+                    "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM \"group\" WHERE location_id = ?1 UNION ALL SELECT 'item', item.id, item.name FROM item_location JOIN item ON item.id = item_location.item_id WHERE item_location.location_id = ?1 UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.from_location_id = ?1 OR connection.to_location_id = ?1 ORDER BY object_type, id",
+                    id,
+                ).fetch_all(&self.pool).await,
+            ),
+        };
+        let rows = rows.context("loading world object relationships")?;
+        let relationships = rows
+            .into_iter()
+            .map(|row| {
+                Ok(ObjectLink {
+                    object_type: ObjectType::parse(&row.object_type).with_context(|| {
+                        format!("unknown related object type {}", row.object_type)
+                    })?,
+                    id: row.id,
+                    label: row.label,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((fields, relationships))
     }
 
     #[cfg(test)]
@@ -8584,6 +8630,13 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("references summary"));
 
+        let branch = store.agent_branch(agent).await.unwrap();
+        let cursor = store.first_raw_cursor(branch).await.unwrap();
+        let (entries, _) = store.raw_page(cursor, 100).await.unwrap();
+        let summary_entry = entries
+            .into_iter()
+            .find(|entry| entry.kind == EntryKind::Summary)
+            .unwrap();
         // A missing JSON field is SQL NULL, not an empty conversation summary.
         sqlx::query(
             "UPDATE recorded_content SET body = json_remove(body, '$.content.value') \
@@ -8604,6 +8657,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{request_error:#}").contains("has no text content"));
+        store
+            .resolve_raw_history_entry(summary_entry)
+            .await
+            .unwrap_err();
 
         // JSON has no declared SQL type: retain SQLx's runtime type check too.
         sqlx::query(
@@ -8621,6 +8678,10 @@ mod tests {
             .unwrap_err();
         store
             .request_for_segments(agent, &summary_only_recipe, Sampling::default())
+            .await
+            .unwrap_err();
+        store
+            .resolve_raw_history_entry(summary_entry)
             .await
             .unwrap_err();
     }

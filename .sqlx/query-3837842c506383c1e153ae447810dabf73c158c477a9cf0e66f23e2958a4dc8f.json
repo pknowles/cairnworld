@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM character_group JOIN \"group\" ON \"group\".id = character_group.group_id WHERE character_group.character_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "object_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "label",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3837842c506383c1e153ae447810dabf73c158c477a9cf0e66f23e2958a4dc8f"
+}

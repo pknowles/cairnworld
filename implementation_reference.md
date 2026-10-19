@@ -9,10 +9,9 @@ checks formatting and server/WASM Clippy; dependency lints remain upstream-owned
 
 ## Current alignment boundary
 
-Developer Mode has the A–C recording/query foundations, but their completion is
-not verified. Review of `a7191bd` on 2026-09-17 found several defects; the
-corrections below have landed, including bounded history ranges
-([plan](plans/developer-inspection.md#bounded-history-ranges)). Status:
+Developer Mode implements recording, reconstruction and inspection with bounded
+history ranges ([design](design.md#persistence-and-recording)). The following
+constraints are enforced by the implementation:
 
 - **Fixed:** `game.rs::arbitrate` no longer mirrors durable resolution in a
   per-turn `Arc<Mutex<bool>>`. `Store::resolve_pending_action` is the sole
@@ -207,18 +206,18 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 
 ## Persistence and recording (design.md: Persistence and recording)
 
-- World/user/membership queries, character construction, scenario import,
-  static export, group topology, presence, player-action and recording/history
-  queries use SQLx
-  checked macros and committed `.sqlx` metadata.
-  Existing JSON columns use SQLx's `Json` encoding. `.cargo/config.toml` defaults builds
+- Fixed-shape application queries in `src/store.rs` and `src/store/` use SQLx
+  checked macros and committed `.sqlx` metadata, including recording, history
+  reconstruction and Developer Mode inspection. JSON encoding and semantic
+  validation remain at the existing boundaries. `.cargo/config.toml` defaults builds
   to offline checking; `scripts/check-quality.sh` validates metadata against
-  migrations in `target/sqlx-schema.sqlite` using SQLx CLI 0.8.6. Remaining
-  runtime queries are being converted by feature, retaining semantic checks.
+  migrations in `target/sqlx-schema.sqlite` using SQLx CLI 0.8.6.
   JSON summary extraction retains runtime type checking (`content?: _`) and
   rejects missing text before constructing a Summary.
   `export_item_types` binds the world ID while its private callers select the
   `item_type` or `spell_type` table; both dynamic forms are exercised by export tests.
+  The variable-length branch-ownership query uses bound `QueryBuilder` values;
+  reconstruction tests exercise empty, shared and foreign branch references.
 - `src/store.rs` and `migrations/` - SQLite store, WAL mode,
   identity-only sandbox worlds and chat-history agents; OAuth email identities
   with non-unique display names; durable world-owner, membership,
@@ -243,9 +242,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `GroupHistory { agent_id, branch_id }`, and sheet through that character
   relationship. `pending_action.gm_agent_id`/`gm_branch_id` record the acting
   character's resolved group GM identity at submission time, used unchanged
-  through arbitration and resolution. Until real user databases exist, the
-  checked-in schema is rebuilt in place and existing local databases are
-  intentionally replaced; later schema evolution requires forward migrations.
+  through arbitration and resolution. Store::open applies the forward migrations in `migrations/` through SQLx.
 
 - Ordered raw history (design.md: Chat schema; plan slice B). Every chat agent
   (player, NPC, Storyteller) owns one `history_branch` at construction
@@ -259,11 +256,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   history"). `AgentBranch` proves the selected world, agent and branch once;
   `agent::Turn`/`context::segments`/`store::live_segments` carry that proof,
   so a GM call cannot fall back to an unrelated agent-history branch.
-  `store::history::branch_owner`
-  resolves a branch's owning agent/world directly from
-  `history_branch.agent_id JOIN agent` - `spawn_group_branch` always binds a
-  world_gm agent's own `agent_id` to every group branch it creates, so this
-  needs no fallback through `agent_history`/`group`, unlike before D4.
+  `Store::agent_branch`, `group_branch` and `history_branch` resolve ownership
+  from durable relationships; `branch_for_viewer` also validates the requested
+  world/agent against inspection access before returning an `AgentBranch`.
   `history_entry(branch_id, position, kind)` is the
   one ordered index every message, inference start, and summary activation
   appends to (`src/store/history.rs`'s `allocate_position`/
@@ -274,8 +269,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   unique columns, since an inference's start and completion are the same row
   while a summary's activation is a distinct entry from the message range it
   covers (`summary.covered_ranges`, JSON `[{branch_id, first_position,
-  last_position}, ...]` - always length 1 until slice D's branch splits/merges
-  exist). `history_parent(branch_id, agent_id, ordinal, parent_branch_id,
+  last_position}, ...]`). `history_parent(branch_id, agent_id, ordinal, parent_branch_id,
   through_position)` is the bounded-parent list `split_group`/`merge_groups`
   (D4, `Store::spawn_group_branch`) populate: a split's resulting branches
   each get one parent (the source), a merge's resulting branch gets one
@@ -283,80 +277,29 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `history_branch(id, agent_id)` make both branches share one agent (and so
   one world), and `CHECK (parent_branch_id < branch_id)` makes cycles
   unrepresentable, so readers never check either.
-  `store::history::BranchHead` is a `HistoryHead` already proven to belong to
-  its world/agent - private fields, constructed only by
-  `Store::branch_head_for_agent` (an agent's own current head, validated
-  against its caller-claimed world), `branch_head_for_branch` (an explicit
-  branch, validated against a caller-claimed world/agent - the world_gm group
-  case) or `branch_head_from_cursor` (a browser-supplied cursor, validated
-  the same way). Holding one proves the check passed, so
-  `reach(head)` is one recursive query
-  (`WITH RECURSIVE reach(branch_id, cut) AS (...)`) collapsing every path
-  from `head` to a branch into that branch's single furthest-reaching cut
-  (`GROUP BY branch_id, MAX(cut)`), in ancestor-first order for free via
-  `ORDER BY branch_id` (the `CHECK (parent_branch_id < branch_id)` constraint
-  guarantees this ordering) - a shared ancestor is read once regardless of
-  how many paths reach it, replacing the old per-path recursion and its
-  linear-scan deduplication. `history_range(head: BranchHead)` performs no
-  validation of its own (holding a `BranchHead` already proves it), loads
-  every entry up to each reached branch's bounded cut regardless of kind, and
-  is now `#[cfg(test)]`-only: no production caller needs this unfiltered a
-  load, since `history_live_segments` and `raw_page` (below) each select
-  only what they need directly - it exists to test `reach`'s bounding/dedup
-  behavior precisely, which neither of those two (each with its own
-  additional filtering) can exercise as exactly.
-  `store::history::Store::raw_page(head: BranchHead, after: Option<(branch_id,
-  position)>, limit)` is `agent_raw_history`'s keyset-paged raw selector: one
-  query joins `reach` against `history_entry`, retaining every inference
-  entry so raw history can link each recorded model call (including tool-only
-  calls) to its exact inference view, and resumes from `after` via the
-  standard `(branch_id > ?) OR (branch_id = ? AND position >= ?)` keyset
-  condition rather than reloading and re-slicing every prior page.
-  A direct history link names both its branch and entry; `raw_cursor_at`
-  validates that entry against the same branch and fixed cut before paging
-  from it, so an old/foreign entry cannot be treated as a valid snapshot.
-  Each branch section keeps that cursor independent; its intersection sentinel
-  invokes the same next-page request as the accessible Load more control.
-  `LIMIT limit + 1` reveals whether another page follows. When `after` is
-  given, its position is first checked against `head`'s own reach and
-  rejected (`ensure!`, not silently treated as end-of-history) if it names a
-  branch outside the reach or a position past that branch's bounded cut.
-  `store::history::Store::history_live_segments(head: BranchHead)` is the
-  other, separate consumer of `reach` and does not call `history_range` at
-  all, so it is no longer on the unbounded path: per reached branch it runs
-  one query for that branch's newest summary activation within its bounded
-  cut (`history_entry JOIN summary`, `MAX` position), then decodes only that
-  summary's `covered_ranges` (bounded by branch count, not entry count) to
-  find the actual highest still-covered position **on that branch** (distinct
-  from the activation's own position in the unified index, which can sit
-  after messages the summary does not cover - a branch's own summaries are
-  already monotonic, so cross-branch overlap cannot occur; `PositionRange` is
-  scoped to one branch_id), then one more query selects only the uncovered
-  `kind = 'message'` position range past that. No covered or non-message
-  entry is ever loaded. After a merge, this means each parent branch
-  contributes its own summary + uncovered tail independently, rather than
-  only the single newest summary across the whole merged DAG silently
-  absorbing every other parent's raw messages uncompacted
-  (plans/developer-inspection.md's D5 "longest-disjoint-summary selector").
-  `Store::live_segments(agent_id, branch_id)` is the thin production entry
-  point every real inference calls: it resolves the caller's
-  `agent_id`/`branch_id` to a validated `BranchHead` and delegates here.
-  `Store::tail_split` and `enqueue_capacity_compaction`/`abandon_pending_compaction`
-  work in the same position space. `pending_compaction` is keyed by
-  `branch_id` (still 1:1 with an agent in this slice) with a plain `position`
-  cut column.
-  `Store::check_message_range_ownership(agent_id, segments)` validates every
-  `Segment::Messages` range's branch in one batched query
-  (`history_branch WHERE id IN (...)` via `sqlx::QueryBuilder`, since a
-  merge's recipe can carry several distinct branches) before
-  `request_for_segments` assembles anything, instead of one `branch_owner`
-  lookup per range as the loop reaches each one.
+  `reach(AgentBranch, cut)` traverses bounded parents with one recursive query,
+  taking the furthest cut for each reached branch. Parent IDs precede child IDs,
+  so ordering by branch ID gives ancestor-first traversal without a visited set.
+  `RawCursor` adds a fixed cut and next branch/position to that validated owner.
+  `first_raw_cursor`, `raw_cursor_at` and `resume_raw_cursor` construct it; the
+  latter two reject positions outside the selected history's reach.
+  `raw_page(RawCursor, limit)` joins that reach to history entries, selecting all
+  kinds with keyset pagination and one extra row to determine the next cursor.
+  `history_live_segments(AgentBranch)` instead selects each reached branch's
+  newest summary within its cut, then only messages outside that summary's
+  covered range on that branch. Each merged parent contributes its own summary
+  and uncovered tail; summary activation positions do not stand in for coverage.
+  `Store::live_segments(AgentBranch)` delegates to this shared selector.
+  `tail_split_for_branch` and the compaction operations use the same branch
+  position space. Pending compaction is keyed by branch, including each GM head.
+  `check_message_range_ownership(agent_id, segments)` validates all referenced
+  branches with one parameterized QueryBuilder query before assembling a request.
 - `Store::finish_chat_inference` and `finish_summary_inference` are the two
   single-transaction completion operations design.md's Chat schema
   describes (`finish_inference` stays the plain outcome-only op, used only by
   detached replay/`cairnworld replay`). `finish_chat_inference` completes the
-  inference row, then reads/deserializes that output and inserts a duplicate
-  content row for its own assistant message. Tool results instead go through
+  inference row and appends its assistant message using the same recorded-content
+  reference. Tool results instead go through
   `complete_tool_result`. It enqueues compaction only when the
   outcome settled with `Content::Text` and its exact next-context size
   (input+output, no re-tokenizing) reaches the caller's `CompactionPolicy`.
@@ -370,23 +313,23 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   and `RunOutcome.result` keeps the original `anyhow::Error` (not a
   re-wrapped string) so a caller can still `downcast_ref::<ContextCapacityExceeded>`
   through it.
-- `Store::agent_raw_history` resolves `agent_id`/`branch_id`/`after` to a
-  validated `BranchHead`, pages it through `raw_page` (above), then resolves
-  each returned entry's `message`/`summary`/failed-`inference`
-  payload and returns an opaque `RawHistoryCursor{head, next_branch_id,
-  next_position}`, so a page boundary landing exactly on a failure or summary
-  is neither skipped nor duplicated in the existing paging tests.
+- `first_raw_history_cursor`, `raw_history_cursor_at` and
+  `resume_raw_history_cursor` validate browser selections before returning a
+  `RawCursor`. `Store::agent_raw_history(viewer_id, cursor, limit)` rechecks
+  inspection access, pages through `raw_page`, resolves each entry's payload,
+  and returns an opaque `RawHistoryCursor{branch_id, cut, next_branch_id,
+  next_position}`. Page boundaries preserve failures and summary activations.
   A failed inference resolves its own real `inference.id` (not the
   `history_entry.id` primary key its row shares) as the ID a browser
   inference-view link must name.
   `web.rs`'s `RawHistoryPage` query param carries the cursor JSON-encoded
   plus an optional `branch` (D6) used only when `after` is absent, to page a
   specific one of a world_gm agent's several branches rather than the
-  `current_head(agent_id)` a player/NPC/Storyteller agent still resolves by
+  `agent_branch(agent_id)` a player/NPC/Storyteller agent resolves by
   default. `Store::gm_branch_graph(viewer_id, world_id, agent_id)` (D6)
   returns every branch that agent owns (`BranchNode{branch_id, parents:
   Vec<BranchParent{branch_id, through_position}>, head:
-  Option<BranchHead{group_id, group_name}>}`) - unpaged, since branch count
+  Option<BranchGroup{group_id, group_name}>}`) - unpaged, since branch count
   only grows with split/merge events. `ui.rs`'s `AgentHistoryView` fetches
   that graph first, then every returned branch's own first history page in
   parallel, combining them into `InspectData::AgentHistory{agent_id,
@@ -520,7 +463,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   browser both use: model request/response (`Request`, `Response`, `Message`,
   etc., moved from `src/llm.rs`, which re-exports them) and the inspection
   view types (`RecordedInference`, `SequenceNode`, `RawHistoryEntry`,
-  `BranchNode`/`BranchParent`/`BranchHead`, `WorldObjects`/`GameObject`/
+  `BranchNode`/`BranchParent`/`BranchGroup`, `WorldObjects`/`GameObject`/
   `ConnectionObject`, etc., moved from `src/store.rs`, which re-exports them).
   Exposed unconditionally through `lib.rs` (`pub mod inspection`) with no
   sqlx/tokio/mistralrs dependency, so the `hydrate` (browser/wasm) build can

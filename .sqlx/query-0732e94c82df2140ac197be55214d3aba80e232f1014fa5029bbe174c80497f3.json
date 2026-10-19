@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT parent_branch_id AS branch_id, through_position FROM history_parent WHERE branch_id = ? ORDER BY ordinal",
+  "describe": {
+    "columns": [
+      {
+        "name": "branch_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "through_position",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0732e94c82df2140ac197be55214d3aba80e232f1014fa5029bbe174c80497f3"
+}

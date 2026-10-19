@@ -1,17 +1,17 @@
 # Focused code quality
 
-Scope reviewed 2026-10-19. Remaining implementation is pending.
+Completed and verified 2026-10-19 after tests, browser/GPU checks and self-review.
 
 ## Goal and authority
 
 Make statically shaped SQL compile-time checked. Keep the existing warning and
-unsafe-code gates. Authority: [coding standards](../coding_standards.md),
-[user declarations](../user_declarations.md), and the explicit acceptance of
-checked SQL in [user excerpts](../user_exerpts.md#2026-09-25-merged-gm-history-order-and-checked-sql).
+unsafe-code gates. Authority: [coding standards](../../coding_standards.md),
+[user declarations](../../user_declarations.md), and the explicit acceptance of
+checked SQL in [user excerpts](../../user_exerpts.md#2026-09-25-merged-gm-history-order-and-checked-sql).
 
 The completed lint, history ownership, presence, world-isolation and shared
 starting-group lookup work is
-indexed in [implementation reference](../implementation_reference.md).
+indexed in [implementation reference](../../implementation_reference.md).
 This plan does not require replacing every Store method, Option, or runtime check.
 In content.rs, text_in interns prompt text while content_in records per-event
 content and reasoning. They are different operations, not duplicate query twins.
@@ -69,8 +69,8 @@ specific new evidence and an explicit decision.
 
 ## Verification and completion
 
-Every increment follows the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
-[coding standards](../coding_standards.md) and [prompt standards](../prompt_standards.md).
+Every increment follows the [AGENTS.md checklist](../../AGENTS.md#post-feature-and-pre-commit-checklist),
+[coding standards](../../coding_standards.md) and [prompt standards](../../prompt_standards.md).
 Review before implementation and before committing.
 
 Use production operations for fixtures and appropriate end-to-end checks; preserve

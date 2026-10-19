@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT inference.id, inference.agent_id, history_entry.branch_id, inference.history_entry_id, inference.sequence_id, inference.invocation_id, invocation.cause_inference_id, inference.segments, inference.sampling, inference.output, inference.error, inference.input_hash, inference.input_tokens, inference.output_tokens, inference.duration_ms, inference.model FROM inference JOIN history_entry ON history_entry.id = inference.history_entry_id JOIN invocation ON invocation.id = inference.invocation_id WHERE inference.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "branch_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "history_entry_id",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sequence_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "invocation_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cause_inference_id",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "segments",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "sampling",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "output",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "error",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "input_hash",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 12,
+        "type_info": "Integer"
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 13,
+        "type_info": "Integer"
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 14,
+        "type_info": "Integer"
+      },
+      {
+        "name": "model",
+        "ordinal": 15,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "00dc1ba5bbd633b35bc1be5f00abe3df8ededf5a9ce1df22cf43a4e851e20f09"
+}

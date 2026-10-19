@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 'location' AS object_type, location.id, location.name AS label FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".id = ?1 UNION ALL SELECT 'character', character.id, character.name FROM character_group JOIN character ON character.id = character_group.character_id WHERE character_group.group_id = ?1 ORDER BY object_type, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "object_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "label",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a2eb3c09cd7e1d896c35732f55fb79be57c9e1de8bc3d65fecbe78de2d883e45"
+}

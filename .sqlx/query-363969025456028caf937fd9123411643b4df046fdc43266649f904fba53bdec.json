@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 'item' AS object_type, id, name AS label FROM item WHERE item_type_id = ?1 ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "object_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "label",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "363969025456028caf937fd9123411643b4df046fdc43266649f904fba53bdec"
+}
