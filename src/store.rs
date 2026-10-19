@@ -140,6 +140,35 @@ pub struct GroupHistory {
     pub branch_id: i64,
 }
 
+/// Immutable group ownership, resolved inside the invoking GM's world.
+struct WorldGroup {
+    id: i64,
+    branch: AgentBranch,
+}
+
+/// One recorded tool batch scoped before any merge preparation can run.
+pub struct TopologyChanges {
+    inference_id: i64,
+    branch: AgentBranch,
+    changes: Vec<(
+        String,
+        i64,
+        Result<tools::TopologyChange<WorldGroup>, String>,
+    )>,
+}
+
+impl TopologyChanges {
+    pub fn merge_branches(&self) -> impl Iterator<Item = AgentBranch> + '_ {
+        self.changes
+            .iter()
+            .flat_map(|(_, _, change)| match change {
+                Ok(tools::TopologyChange::Merge { group_ids, .. }) => group_ids.as_slice(),
+                _ => &[],
+            })
+            .map(|group| group.branch)
+    }
+}
+
 /// One character in `party_presence()`'s result: identity, display name and
 /// current online state.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1736,31 +1765,6 @@ impl Store {
             .with_context(|| format!("group {group_id} does not exist"))
     }
 
-    /// This group's own branch, if it currently exists and is not retired -
-    /// `None` otherwise, for a caller that only wants to act on a group
-    /// still eligible to participate in a topology change (the real
-    /// existence/retirement rejection is `apply_merge`/`apply_split`'s own
-    /// job inside their transaction; this is a read-only pre-check for work
-    /// that must happen before that transaction, e.g. merge-time compaction,
-    /// so it fails soft rather than erroring on a proposal that will end up
-    /// rejected anyway).
-    pub async fn active_group_branch(&self, group_id: i64) -> Result<Option<AgentBranch>> {
-        let row = sqlx::query_as::<_, (i64, i64, i64)>(
-            "SELECT \"group\".world_id, world_gm.agent_id, \"group\".branch_id \
-             FROM \"group\" JOIN world_gm ON world_gm.world_id = \"group\".world_id \
-             WHERE \"group\".id = ? AND retired_at IS NULL",
-        )
-        .bind(group_id)
-        .fetch_optional(&self.pool)
-        .await
-        .with_context(|| format!("checking group {group_id} is active"))?;
-        Ok(row.map(|(world_id, agent_id, branch_id)| AgentBranch {
-            world_id,
-            agent_id,
-            branch_id,
-        }))
-    }
-
     /// A group's world_gm identity and its own branch (design.md's
     /// `GroupHistory { agent_id, branch_id }` - agent_id alone cannot select
     /// a GM history once a world_gm plays several groups).
@@ -1844,6 +1848,99 @@ impl Store {
         Ok(nodes)
     }
 
+    /// Scope a complete proposal before exposing any source to compaction.
+    pub async fn resolve_topology_changes(
+        &self,
+        inference_id: i64,
+        changes: Vec<(String, i64, tools::TopologyChange)>,
+    ) -> Result<TopologyChanges> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .context("acquiring group-resolution connection")?;
+        let (world_id, agent_id, branch_id): (i64, i64, i64) = sqlx::query_as(
+            "SELECT world_gm.world_id, world_gm.agent_id, history_entry.branch_id FROM inference \
+             JOIN world_gm ON world_gm.agent_id = inference.agent_id \
+             JOIN history_entry ON history_entry.id = inference.history_entry_id \
+             WHERE inference.id = ?",
+        )
+        .bind(inference_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .context("resolving topology invocation authority")?
+        .with_context(|| {
+            format!("inference {inference_id} does not belong to a world Game Master")
+        })?;
+        let mut resolved = Vec::with_capacity(changes.len());
+        for (call_id, execution_id, change) in changes {
+            let ids = match &change {
+                tools::TopologyChange::Split { group_id, .. } => std::slice::from_ref(group_id),
+                tools::TopologyChange::Merge { group_ids, .. } => group_ids.as_slice(),
+            };
+            let mut groups = Vec::with_capacity(ids.len());
+            let resolution = async {
+                for &id in ids {
+                    let branch_id: Option<i64> = sqlx::query_scalar(
+                        "SELECT \"group\".branch_id FROM \"group\" \
+                         JOIN history_branch ON history_branch.id = \"group\".branch_id \
+                         WHERE \"group\".id = ? AND \"group\".world_id = ? \
+                         AND history_branch.agent_id = ? AND retired_at IS NULL",
+                    )
+                    .bind(id)
+                    .bind(world_id)
+                    .bind(agent_id)
+                    .fetch_optional(&mut *connection)
+                    .await
+                    .with_context(|| format!("resolving group {id} in world {world_id}"))?;
+                    let Some(branch_id) = branch_id else {
+                        return Ok::<_, anyhow::Error>(Err(format!(
+                            "Tool arguments were rejected: group {id} is unavailable in this world"
+                        )));
+                    };
+                    groups.push(WorldGroup {
+                        id,
+                        branch: AgentBranch {
+                            world_id,
+                            agent_id,
+                            branch_id,
+                        },
+                    });
+                }
+                Ok(Ok(()))
+            }
+            .await?;
+            let scoped = resolution.map(|()| match change {
+                tools::TopologyChange::Split {
+                    partitions,
+                    continue_with_character_id,
+                    ..
+                } => tools::TopologyChange::Split {
+                    group_id: groups.pop().expect("split resolves exactly one group"),
+                    partitions,
+                    continue_with_character_id,
+                },
+                tools::TopologyChange::Merge {
+                    name, description, ..
+                } => tools::TopologyChange::Merge {
+                    group_ids: groups,
+                    name,
+                    description,
+                },
+            });
+            resolved.push((call_id, execution_id, scoped));
+        }
+        Ok(TopologyChanges {
+            inference_id,
+            branch: AgentBranch {
+                world_id,
+                agent_id,
+                branch_id,
+            },
+            changes: resolved,
+        })
+    }
+
     /// Validate and apply every grouping proposal collected from one tool
     /// batch, in call order, in a single transaction (design.md's "Tool
     /// boundary"): each split/merge is checked against state as it stands at
@@ -1851,37 +1948,26 @@ impl Store {
     /// batch), a stale or invalid one is rejected rather than applied, and
     /// every proposal's tool-result message is appended in call order
     /// alongside the ordinary calls this same batch already committed.
-    pub async fn apply_topology_changes(
-        &self,
-        inference_id: i64,
-        changes: Vec<(String, i64, tools::TopologyChange)>,
-    ) -> Result<()> {
+    pub async fn apply_topology_changes(&self, changes: TopologyChanges) -> Result<()> {
+        let TopologyChanges {
+            inference_id,
+            branch,
+            changes,
+        } = changes;
         let mut transaction = self
             .pool
             .begin()
             .await
             .context("starting topology change transaction")?;
-        // The branch every proposal's own tool-result message is appended
-        // to - the same branch every ordinary call in this batch already
-        // used (complete_tool_result's own comment: the inference's own
-        // recorded branch, not a fresh agent_history lookup).
-        let branch_id: i64 = sqlx::query_scalar(
-            "SELECT history_entry.branch_id FROM inference \
-             JOIN history_entry ON history_entry.id = inference.history_entry_id \
-             WHERE inference.id = ?",
-        )
-        .bind(inference_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .context("loading topology change batch's own branch")?
-        .with_context(|| format!("inference {inference_id} does not exist"))?;
+        // Tool results stay on the recorded branch, even after a split retires it.
+        let branch_id = branch.branch_id();
         for (tool_call_id, tool_execution_id, change) in changes {
             let result = match change {
-                tools::TopologyChange::Split {
+                Ok(tools::TopologyChange::Split {
                     group_id,
                     partitions,
                     continue_with_character_id,
-                } => {
+                }) => {
                     Self::apply_split(
                         &mut transaction,
                         group_id,
@@ -1890,11 +1976,12 @@ impl Store {
                     )
                     .await?
                 }
-                tools::TopologyChange::Merge {
+                Ok(tools::TopologyChange::Merge {
                     group_ids,
                     name,
                     description,
-                } => Self::apply_merge(&mut transaction, group_ids, name, description).await?,
+                }) => Self::apply_merge(&mut transaction, group_ids, name, description).await?,
+                Err(rejection) => Err(rejection),
             };
             let status = if result.is_ok() {
                 "completed"
@@ -1990,27 +2077,19 @@ impl Store {
     /// which still propagates via `?`).
     async fn apply_split(
         transaction: &mut Transaction<'_, Sqlite>,
-        group_id: i64,
+        group: WorldGroup,
         partitions: Vec<tools::GroupPartition>,
         continue_with_character_id: Option<i64>,
     ) -> Result<Result<String, String>> {
-        let Some((world_id, location_id, branch_id, retired_at)): Option<(
-            i64,
-            i64,
-            i64,
-            Option<String>,
-        )> = sqlx::query_as(
-            "SELECT world_id, location_id, branch_id, retired_at FROM \"group\" WHERE id = ?",
-        )
-        .bind(group_id)
-        .fetch_optional(&mut **transaction)
-        .await
-        .with_context(|| format!("loading group {group_id} for split"))?
-        else {
-            return Ok(Err(format!(
-                "Tool arguments were rejected: group {group_id} does not exist"
-            )));
-        };
+        let group_id = group.id;
+        let world_id = group.branch.world_id();
+        let branch_id = group.branch.branch_id();
+        let (location_id, retired_at): (i64, Option<String>) =
+            sqlx::query_as("SELECT location_id, retired_at FROM \"group\" WHERE id = ?")
+                .bind(group_id)
+                .fetch_one(&mut **transaction)
+                .await
+                .with_context(|| format!("loading group {group_id} for split"))?;
         if retired_at.is_some() {
             return Ok(Err(format!(
                 "Tool arguments were rejected: group {group_id} is already retired"
@@ -2028,19 +2107,11 @@ impl Store {
             .flat_map(|partition| partition.character_ids.iter().copied())
             .collect();
         partitioned.sort_unstable();
-        let mut current_sorted = current.clone();
-        current_sorted.sort_unstable();
-        let is_disjoint = partitioned.len()
-            == partitions
-                .iter()
-                .map(|partition| partition.character_ids.len())
-                .sum::<usize>();
         if partitions.is_empty()
             || partitions
                 .iter()
                 .any(|partition| partition.character_ids.is_empty())
-            || !is_disjoint
-            || partitioned != current_sorted
+            || partitioned != current
         {
             return Ok(Err(format!(
                 "Tool arguments were rejected: partitions must be a complete, nonempty, disjoint split of group {group_id}'s current membership"
@@ -2059,7 +2130,7 @@ impl Store {
                 .fetch_one(&mut **transaction)
                 .await
                 .context("loading source branch's settled position")?;
-        let world_gm_agent_id = Self::world_gm_agent_id_tx(transaction, world_id).await?;
+        let world_gm_agent_id = group.branch.agent_id();
         let mut result_group_ids = Vec::new();
         for partition in &partitions {
             let (new_group_id, _new_branch_id) = Self::spawn_group_branch(
@@ -2104,49 +2175,34 @@ impl Store {
     /// "Merge").
     async fn apply_merge(
         transaction: &mut Transaction<'_, Sqlite>,
-        mut group_ids: Vec<i64>,
+        mut groups: Vec<WorldGroup>,
         name: String,
         description: String,
     ) -> Result<Result<String, String>> {
-        group_ids.sort_unstable();
-        group_ids.dedup();
-        if group_ids.len() < 2 {
+        groups.sort_unstable_by_key(|group| group.id);
+        groups.dedup_by_key(|group| group.id);
+        if groups.len() < 2 {
             return Ok(Err(
                 "Tool arguments were rejected: merge_groups requires at least two distinct groups"
                     .to_string(),
             ));
         }
-        let mut world_id = None;
+        let authority = groups[0].branch;
         let mut location_id = None;
         let mut parents = Vec::new();
-        for group_id in &group_ids {
-            let Some((group_world_id, group_location_id, branch_id, retired_at)): Option<(
-                i64,
-                i64,
-                i64,
-                Option<String>,
-            )> = sqlx::query_as(
-                "SELECT world_id, location_id, branch_id, retired_at FROM \"group\" WHERE id = ?",
-            )
-            .bind(group_id)
-            .fetch_optional(&mut **transaction)
-            .await
-            .with_context(|| format!("loading group {group_id} for merge"))?
-            else {
-                return Ok(Err(format!(
-                    "Tool arguments were rejected: group {group_id} does not exist"
-                )));
-            };
+        for group in &groups {
+            let group_id = group.id;
+            let branch_id = group.branch.branch_id();
+            let (group_location_id, retired_at): (i64, Option<String>) =
+                sqlx::query_as("SELECT location_id, retired_at FROM \"group\" WHERE id = ?")
+                    .bind(group_id)
+                    .fetch_one(&mut **transaction)
+                    .await
+                    .with_context(|| format!("loading group {group_id} for merge"))?;
             if retired_at.is_some() {
                 return Ok(Err(format!(
                     "Tool arguments were rejected: group {group_id} is already retired"
                 )));
-            }
-            if *world_id.get_or_insert(group_world_id) != group_world_id {
-                return Ok(Err(
-                    "Tool arguments were rejected: merge_groups requires groups in the same world"
-                        .to_string(),
-                ));
             }
             if *location_id.get_or_insert(group_location_id) != group_location_id {
                 return Ok(Err(
@@ -2162,20 +2218,19 @@ impl Store {
                     .context("loading source branch's settled position")?;
             parents.push((branch_id, through_position));
         }
-        let world_id = world_id.expect("at least two group ids were validated above");
         let location_id = location_id.expect("at least two group ids were validated above");
-        let world_gm_agent_id = Self::world_gm_agent_id_tx(transaction, world_id).await?;
         let (new_group_id, _new_branch_id) = Self::spawn_group_branch(
             transaction,
-            world_id,
-            world_gm_agent_id,
+            authority.world_id(),
+            authority.agent_id(),
             location_id,
             &name,
             &description,
             &parents,
         )
         .await?;
-        for group_id in &group_ids {
+        for group in &groups {
+            let group_id = group.id;
             sqlx::query("UPDATE character_group SET group_id = ? WHERE group_id = ?")
                 .bind(new_group_id)
                 .bind(group_id)
@@ -2192,24 +2247,12 @@ impl Store {
         }
         Ok(Ok(format!(
             "Groups {} merged into group {new_group_id}.",
-            group_ids
+            groups
                 .iter()
-                .map(i64::to_string)
+                .map(|group| group.id.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         )))
-    }
-
-    async fn world_gm_agent_id_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        world_id: i64,
-    ) -> Result<i64> {
-        sqlx::query_scalar("SELECT agent_id FROM world_gm WHERE world_id = ?")
-            .bind(world_id)
-            .fetch_optional(&mut **transaction)
-            .await
-            .with_context(|| format!("looking up world GM for world {world_id}"))?
-            .with_context(|| format!("world {world_id} has no world GM"))
     }
 
     /// Display names for a set of characters, in the order given by the
@@ -7917,8 +7960,8 @@ mod tests {
                 .fetch_one(&store.pool())
                 .await
                 .unwrap();
-        store
-            .apply_topology_changes(
+        let changes = store
+            .resolve_topology_changes(
                 inference,
                 vec![(
                     "split-1".to_string(),
@@ -7943,6 +7986,8 @@ mod tests {
             )
             .await
             .unwrap();
+
+        store.apply_topology_changes(changes).await.unwrap();
 
         let player_group_id = store
             .character_group_id(installed.member.character_id)

@@ -1678,8 +1678,8 @@ mod tests {
             .create_tool_executions(split_inference, 1)
             .await
             .unwrap();
-        store
-            .apply_topology_changes(
+        let changes = store
+            .resolve_topology_changes(
                 split_inference,
                 vec![(
                     "split-1".to_string(),
@@ -1708,6 +1708,7 @@ mod tests {
             )
             .await
             .unwrap();
+        store.apply_topology_changes(changes).await.unwrap();
         // This fixture used to construct an inference, tool execution and
         // reply directly in Store. E2 must inspect the records normal play
         // creates, so exercise Game's ordinary player-message loop instead.

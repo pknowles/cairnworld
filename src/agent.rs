@@ -408,11 +408,15 @@ pub async fn complete_with_call_context<B: Backend>(
                 return Err(error);
             }
             if !pending_changes.is_empty() {
+                let pending_changes = store
+                    .resolve_topology_changes(completion.inference_id, pending_changes)
+                    .await
+                    .context("resolving group proposals in the invoking Game Master's world")?;
                 compact_merge_sources(store, backend, &pending_changes, budget.limits(), &turn)
                     .await
                     .context("compacting merge source branches before applying topology changes")?;
                 store
-                    .apply_topology_changes(completion.inference_id, pending_changes)
+                    .apply_topology_changes(pending_changes)
                     .await
                     .context("applying group topology changes")?;
             }
@@ -450,9 +454,8 @@ pub async fn complete_with_call_context<B: Backend>(
 /// `apply_topology_changes`'s own transaction - no database transaction may
 /// span inference execution - so `apply_merge` naturally reads each source
 /// branch's already-updated settled position as its parent cut, with no
-/// change needed there. A group that turns out invalid or already retired
-/// is left alone here; `apply_merge`'s own validation still produces the
-/// real rejection for it.
+/// change needed there. Only proposals resolved in the invoking Game Master's
+/// world expose sources here; rejected proposals cannot trigger preparation.
 ///
 /// A branch may already have a pending job unrelated to this merge (e.g. an
 /// ordinary token-threshold trigger, independent of raw message count) even
@@ -463,45 +466,36 @@ pub async fn complete_with_call_context<B: Backend>(
 async fn compact_merge_sources<B: Backend>(
     store: &Store,
     backend: &B,
-    changes: &[(String, i64, tools::TopologyChange)],
+    changes: &crate::store::TopologyChanges,
     limits: Limits,
     turn: &Turn<'_>,
 ) -> Result<()> {
-    for (_, _, change) in changes {
-        let tools::TopologyChange::Merge { group_ids, .. } = change else {
-            continue;
-        };
-        for &group_id in group_ids {
-            let Some(branch) = store.active_group_branch(group_id).await? else {
-                continue;
-            };
-            let branch_id = branch.branch_id();
-            if store.uncovered_message_count(branch_id).await? > limits.merge_branch_messages as i64
-            {
-                store
-                    .enqueue_capacity_compaction(
-                        branch,
-                        0,
-                        CompactionPolicy {
-                            sequence_id: None,
-                            compact_before_next_input_tokens: 0,
-                            sampling: &turn.sampling,
-                            model: turn.model,
-                            static_segments: &[],
-                        },
-                    )
-                    .await
-                    .with_context(|| {
-                        format!("enqueueing merge-time compaction for branch {branch_id}")
-                    })?;
-            }
-            backend
-                .before_agent(store, branch, &turn.events)
+    for branch in changes.merge_branches() {
+        let branch_id = branch.branch_id();
+        if store.uncovered_message_count(branch_id).await? > limits.merge_branch_messages as i64 {
+            store
+                .enqueue_capacity_compaction(
+                    branch,
+                    0,
+                    CompactionPolicy {
+                        sequence_id: None,
+                        compact_before_next_input_tokens: 0,
+                        sampling: &turn.sampling,
+                        model: turn.model,
+                        static_segments: &[],
+                    },
+                )
                 .await
                 .with_context(|| {
-                    format!("waiting for compaction on merge source branch {branch_id}")
+                    format!("enqueueing merge-time compaction for branch {branch_id}")
                 })?;
         }
+        backend
+            .before_agent(store, branch, &turn.events)
+            .await
+            .with_context(|| {
+                format!("waiting for compaction on merge source branch {branch_id}")
+            })?;
     }
     Ok(())
 }
@@ -1196,8 +1190,8 @@ mod tests {
             .create_tool_executions(split_inference, 1)
             .await
             .unwrap();
-        store
-            .apply_topology_changes(
+        let changes = store
+            .resolve_topology_changes(
                 split_inference,
                 vec![(
                     "split-1".to_string(),
@@ -1222,6 +1216,8 @@ mod tests {
             )
             .await
             .unwrap();
+
+        store.apply_topology_changes(changes).await.unwrap();
 
         let over_group_id = store
             .character_group_id(installed.member.character_id)
@@ -1315,6 +1311,10 @@ mod tests {
                 description: "reunited".into(),
             },
         )];
+        let changes = store
+            .resolve_topology_changes(split_inference, changes)
+            .await
+            .unwrap();
         compact_merge_sources(&store, &backend, &changes, limits, &turn)
             .await
             .unwrap();

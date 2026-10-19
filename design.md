@@ -402,6 +402,12 @@ The resulting GM context includes both histories. No transcript is copied.
 
 **Tool boundary.** Grouping tools produce a typed pending topology change in
 `ToolOutcome`; it is applied at the end of the current model-returned tool batch.
+The recorded invoking Game Master establishes the world. Group IDs resolve only
+within that world into private, validated group values before merge compaction
+or mutation. A proposal containing an unavailable or foreign group is rejected
+without preparing any of its sources. Compaction and private mutation functions
+accept only these resolved values; activity and location constraints are checked
+in the commit transaction.
 Other calls in that batch execute in returned order against the pre-transition
 group, which is the context in which the model generated them. The grouping tool
 schema explicitly describes this batch boundary. Each tool execution retains

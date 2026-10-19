@@ -28,14 +28,14 @@ pub type AfterToolResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 /// current model-returned tool batch (design.md's "Tool boundary": "Other
 /// calls in that batch execute in returned order against the pre-transition
 /// group, which is the context in which the model generated them").
-pub enum TopologyChange {
+pub enum TopologyChange<G = i64> {
     Split {
-        group_id: i64,
+        group_id: G,
         partitions: Vec<GroupPartition>,
         continue_with_character_id: Option<i64>,
     },
     Merge {
-        group_ids: Vec<i64>,
+        group_ids: Vec<G>,
         name: String,
         description: String,
     },

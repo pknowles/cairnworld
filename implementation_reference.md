@@ -677,40 +677,14 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   writes, and release of idle world ownership. `gm_scene` includes group-local
   description and notes. Existing browser sockets do not yet resubscribe when
   their character's group changes.
-- `split_group`/`merge_groups` (Developer Mode plan D4). Two GM tool calls,
-  never applied at the point they execute (design.md's "Tool boundary"):
-  `agent::complete_with_call_context`'s batch loop collects
-  `tools::ToolOutcome::PendingTopologyChange` outcomes in call order and
-  applies them all together, once, only after every ordinary call in the
-  batch has settled with no error - so every sibling call still to come in
-  the same batch executes against the pre-transition group, the context the
-  model actually generated them against. `Store::apply_topology_changes`
-  validates each proposal against state as it stands at that point (which
-  may already reflect an earlier proposal in the same batch) and appends its
-  tool-result message in call order alongside the batch's ordinary results;
-  a stale or invalid proposal is rejected rather than applied.
-  `Store::apply_split` requires a complete, disjoint partition of the
-  group's exact current membership and (for a GM event with no single
-  triggering character) an explicit `continue_with_character_id`.
-  `Store::apply_merge` requires at least two distinct, non-retired groups in
-  the same world and location. Both call `Store::spawn_group_branch`, which
-  creates one new `history_branch`, one `history_parent` row per listed
-  `(parent_branch_id, through_position)` pair, and the new `"group"` row;
-  split spawns one branch per partition (one parent each, the source),
-  merge spawns one branch with one parent per source group. The source
-  group(s) are retired (`"group".retired_at`) and their members'
-  `character_group` rows move to the new group(s). Before a merge's
-  transaction starts, `agent::compact_merge_sources` compacts each source
-  branch whose own unique suffix (`Store::uncovered_message_count`) exceeds
-  `limits.merge_branch_messages`, so `apply_merge`'s own fresh
-  `next_position - 1` read of the source branch's settled position already
-  includes the new summary/notice - no special casing needed in
-  `apply_merge` itself. It enqueues via the existing branch-explicit
-  `enqueue_capacity_compaction`, then calls `backend.before_agent(store,
-  agent_id, Some(branch_id))` rather than running compaction directly, so a
-  branch with an unrelated already-pending job (e.g. a token-threshold
-  trigger) is waited on through the same admission path a concurrently
-  running deferred compaction uses, never resolved twice.
+- Group changes: `Store::resolve_topology_changes` constructs `TopologyChanges`
+  from the recorded invoking Game Master's world. Private `WorldGroup` values
+  scope both `agent::compact_merge_sources` and transaction writes; unavailable
+  or foreign groups reject the whole proposal before preparation. The tool loop
+  preserves sibling results and proposal order. Private split/merge functions
+  recheck mutable constraints, then `spawn_group_branch` commits bounded parent
+  histories and membership changes. The game regression covers foreign splits,
+  foreign and mixed merges, missing IDs, compaction isolation and sibling results.
 - `src/web.rs` - `cairnworld serve`'s Axum routes. Google OIDC discovers and
   exchanges through `openidconnect`; SQLite-backed `tower-sessions` holds the
   verified account id. The landing page updates only a non-unique display

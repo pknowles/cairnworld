@@ -15,8 +15,29 @@ access rules; [jscpd-rs](https://github.com/vv-bogdanov/jscpd-rs) provides the
 jscpd clone detector; [big-code-analysis](https://github.com/dekobon/big-code-analysis)
 provides bca function metrics/checks. Use these tools, not similarly named crates.
 
-Steps 1-4 and reviewed simplifications completed and verified, 2026-10-19.
-Next: step 5's feature-module migration and checked SQL.
+Steps 1-4, reviewed simplifications and world isolation completed and verified,
+2026-10-19. Next: the remaining presence review fixes below, then step 5's
+feature-module migration and checked SQL.
+
+World-isolation correction before step 5: resolve topology proposals against the
+recorded invoking Game Master's world before preparing any merge sources; carry
+validated group identities through preparation and private transaction writes.
+Verify foreign splits, wholly foreign and mixed-world merges leave all targeted
+groups and compaction state unchanged, while valid and stale same-world batches
+retain their behavior. Reuse the normal game/tool path, run the full Rust and
+browser checks, and complete the AGENTS.md pre-commit checklist plus both
+standards reviews. Per-operation checks and separate world databases were
+considered; world-scoped resolution removes the unchecked-ID boundary with less
+duplication and no storage restructuring.
+
+World-isolation verification: 115 ordinary Rust tests, browser checks, real
+Qwen3.5 merged-history and browser evidence, server build and server/WASM lint
+checks pass. Self-review followed AGENTS.md and both standards documents.
+
+Remaining review fixes before step 5: reconcile lost connections and restore
+presence deadlines at startup ([presence plan](multiplayer-presence.md), and
+retain the last narrated membership set when an empty group's deadline fires.
+Verify restart and empty-period return transitions through the normal game path.
 
 Backend loading runs outside the readiness lock; Game construction and readiness publication run
 inside it. Each existing world starts once; later installations pass their World
@@ -43,7 +64,7 @@ Store owns no live channels. Operations publish directly after their writes, and
 inference values retain their world channel through streaming, completion and
 deferred compaction. Finishing consumes the inference value.
 
-Verification: 114 ordinary Rust tests pass in parallel, including world/channel
+Verification: 115 ordinary Rust tests pass in parallel, including world/channel
 isolation, model-load failure, worker shutdown and actual startup-resumed
 compaction. Browser checks (including negative error-channel checks), real
 Qwen3.5/browser evidence and installation-boundary checks, formatting,

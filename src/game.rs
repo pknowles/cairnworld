@@ -3638,6 +3638,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn group_tools_reject_foreign_worlds_before_compaction_or_mutation() {
+        for case in 0..5 {
+            let (backend, requests) = ScriptedBackend::recording([]);
+            let responses = Arc::clone(&backend.responses);
+            let (game, store, _db, member, _) = two_player_bread_thief_game(backend).await;
+            let owner = store
+                .find_or_create_user("other@example.test", "Other")
+                .await
+                .unwrap();
+            let mut scenario = Scenario::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/scenarios/bread_thief.json"
+            ))
+            .unwrap();
+            let mut second_group = scenario.groups[0].clone();
+            second_group.name = "other group".into();
+            scenario.npcs[0].group = second_group.name.clone();
+            scenario.groups.push(second_group);
+            let other = store.install_scenario(&owner, &scenario).await.unwrap();
+            game.start_world(World::install(&game.worlds, other.world_id));
+            let foreign_groups: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM \"group\" WHERE world_id = ? ORDER BY id")
+                    .bind(other.world_id)
+                    .fetch_all(&store.pool())
+                    .await
+                    .unwrap();
+            let local_group = store.character_group_id(member.character_id).await.unwrap();
+            // Every potential merge source exceeds the real preparation threshold.
+            for group in [local_group, foreign_groups[0], foreign_groups[1]] {
+                let branch = store.group_branch(group).await.unwrap();
+                let sequence = store
+                    .begin_sequence(branch.world_id(), "source history")
+                    .await
+                    .unwrap();
+                for _ in 0..=Limits::default().merge_branch_messages {
+                    store
+                        .append_instruction(
+                            branch,
+                            &Message::text(Role::User, "Earlier scene."),
+                            sequence.id,
+                        )
+                        .await
+                        .unwrap();
+                }
+                store.finish_sequence(sequence.id, None).await.unwrap();
+            }
+            let characters: Vec<i64> = sqlx::query_scalar(
+                "SELECT character_id FROM character_group WHERE group_id = ? ORDER BY character_id",
+            )
+            .bind(foreign_groups[0])
+            .fetch_all(&store.pool())
+            .await
+            .unwrap();
+            let (name, arguments) = match case {
+                0 | 4 => (
+                    "split_group",
+                    serde_json::json!({
+                        "group_id": if case == 0 { foreign_groups[0] } else { i64::MAX },
+                        "partitions": [{"character_ids": characters, "name": "Changed", "description": "Changed"}],
+                        "continue_with_character_id": other.member.character_id,
+                    }),
+                ),
+                _ => (
+                    "merge_groups",
+                    serde_json::json!({
+                        "group_ids": match case {
+                            1 => foreign_groups.clone(),
+                            2 => vec![local_group, foreign_groups[0]],
+                            _ => vec![foreign_groups[0], local_group],
+                        },
+                        "name": "Changed", "description": "Changed",
+                    }),
+                ),
+            };
+            let before_groups: Vec<(i64, i64, Option<String>)> =
+                sqlx::query_as("SELECT id, branch_id, retired_at FROM \"group\" ORDER BY id")
+                    .fetch_all(&store.pool())
+                    .await
+                    .unwrap();
+            let before_members: Vec<(i64, i64)> = sqlx::query_as(
+                "SELECT character_id, group_id FROM character_group ORDER BY character_id",
+            )
+            .fetch_all(&store.pool())
+            .await
+            .unwrap();
+            responses.lock().unwrap().extend([
+                response(Content::ToolCalls(vec![ToolCall {
+                    id: "look-1".into(),
+                    name: "look".into(),
+                    arguments: r#"{"description":"Look around."}"#.into(),
+                }])),
+                response(Content::ToolCalls(vec![
+                    ToolCall {
+                        id: "invalid-change".into(),
+                        name: name.into(),
+                        arguments: arguments.to_string(),
+                    },
+                    ToolCall {
+                        id: "approve-1".into(),
+                        name: "approve_action".into(),
+                        arguments: r#"{"action_id":1}"#.into(),
+                    },
+                ])),
+                response(Content::Text("The scene is unchanged.".into())),
+                response(Content::Text("Done.".into())),
+            ]);
+            game.player_message(member.clone(), "Look around.")
+                .await
+                .unwrap();
+            let after_groups: Vec<(i64, i64, Option<String>)> =
+                sqlx::query_as("SELECT id, branch_id, retired_at FROM \"group\" ORDER BY id")
+                    .fetch_all(&store.pool())
+                    .await
+                    .unwrap();
+            let after_members: Vec<(i64, i64)> = sqlx::query_as(
+                "SELECT character_id, group_id FROM character_group ORDER BY character_id",
+            )
+            .fetch_all(&store.pool())
+            .await
+            .unwrap();
+            assert_eq!(
+                after_groups, before_groups,
+                "group structure changed in case {case}"
+            );
+            assert_eq!(
+                after_members, before_members,
+                "membership changed in case {case}"
+            );
+            assert!(
+                store.pending_compactions().await.unwrap().is_empty(),
+                "case {case} queued compaction"
+            );
+            let summaries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM summary")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+            assert_eq!(summaries, 0, "case {case} ran compaction");
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                4,
+                "case {case} ran extra model work"
+            );
+            let statuses: Vec<String> = sqlx::query_scalar("SELECT tool_execution.status FROM tool_execution JOIN inference ON inference.id = tool_execution.inference_id WHERE inference.agent_id = ? ORDER BY tool_execution.ordinal")
+                .bind(store.group_branch(local_group).await.unwrap().agent_id())
+                .fetch_all(&store.pool()).await.unwrap();
+            assert_eq!(
+                statuses,
+                ["rejected", "completed"],
+                "case {case} lost the ordinary sibling result"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn party_presence_reports_group_members_and_online_state() {
         let (backend, _recorded_requests) = ScriptedBackend::recording([]);
         let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
