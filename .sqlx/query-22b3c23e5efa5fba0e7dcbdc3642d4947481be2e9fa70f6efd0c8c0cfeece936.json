@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO world_starting_location (world_id, location_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "22b3c23e5efa5fba0e7dcbdc3642d4947481be2e9fa70f6efd0c8c0cfeece936"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO character_group (character_id, group_id, description) VALUES (?, ?, '')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "971a419ca2c5fcebbabe3a5d50b30d4c96b6ce9c19572d4c1b3097ca6e87aa25"
+}

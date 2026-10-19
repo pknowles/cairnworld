@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "180da1924c0439fafa8173aeaf1cbafd8cb7164aa5fe272a9180cd44414efc3b"
+}

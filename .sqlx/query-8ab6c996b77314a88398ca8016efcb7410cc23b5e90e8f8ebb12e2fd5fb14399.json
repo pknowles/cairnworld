@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM world_member WHERE user_id = ? AND world_id = ? AND access = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8ab6c996b77314a88398ca8016efcb7410cc23b5e90e8f8ebb12e2fd5fb14399"
+}

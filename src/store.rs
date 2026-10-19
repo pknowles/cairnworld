@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{
     FromRow, Sqlite, SqliteConnection, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    types::Json,
 };
 
 use crate::llm::{
@@ -821,8 +822,7 @@ impl Store {
     }
 
     pub async fn create_world(&self, name: &str) -> Result<i64> {
-        let result = sqlx::query("INSERT INTO world (name) VALUES (?)")
-            .bind(name)
+        let result = sqlx::query!("INSERT INTO world (name) VALUES (?)", name,)
             .execute(&self.pool)
             .await
             .context("creating world")?;
@@ -834,8 +834,7 @@ impl Store {
             self.pool.begin().await.with_context(|| {
                 format!("starting agent creation transaction for world {world_id}")
             })?;
-        let agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
-            .bind(world_id)
+        let agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id,)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating agent in world {world_id}"))?
@@ -857,18 +856,19 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         agent_id: i64,
     ) -> Result<i64> {
-        let branch_id = sqlx::query("INSERT INTO history_branch (agent_id) VALUES (?)")
-            .bind(agent_id)
+        let branch_id = sqlx::query!("INSERT INTO history_branch (agent_id) VALUES (?)", agent_id,)
             .execute(&mut **transaction)
             .await
             .with_context(|| format!("creating history branch for agent {agent_id}"))?
             .last_insert_rowid();
-        sqlx::query("INSERT INTO agent_history (agent_id, branch_id) VALUES (?, ?)")
-            .bind(agent_id)
-            .bind(branch_id)
-            .execute(&mut **transaction)
-            .await
-            .with_context(|| format!("linking history branch for agent {agent_id}"))?;
+        sqlx::query!(
+            "INSERT INTO agent_history (agent_id, branch_id) VALUES (?, ?)",
+            agent_id,
+            branch_id,
+        )
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("linking history branch for agent {agent_id}"))?;
         Ok(branch_id)
     }
 
@@ -882,14 +882,14 @@ impl Store {
         world_id: i64,
         enabled: bool,
     ) -> Result<()> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE world SET developer_mode = ? \
              WHERE id = ? AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+            enabled,
+            world_id,
+            world_id,
+            owner_id,
         )
-        .bind(enabled)
-        .bind(world_id)
-        .bind(world_id)
-        .bind(owner_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("setting developer mode for world {world_id}"))?;
@@ -908,19 +908,19 @@ impl Store {
     /// "Live inspection protocol". A single query keeps membership and mode
     /// authoritative from one source rather than caching either half.
     pub async fn access_for(&self, viewer_id: i64, world_id: i64) -> Result<Access> {
-        let row: Option<(bool,)> = sqlx::query_as(
-            "SELECT world.developer_mode FROM world_member \
+        let row = sqlx::query_scalar!(
+            "SELECT world.developer_mode AS \"developer_mode: bool\" FROM world_member \
              JOIN world ON world.id = world_member.world_id \
              WHERE world_member.world_id = ? AND world_member.user_id = ? \
                AND world_member.access = 'active'",
+            world_id,
+            viewer_id,
         )
-        .bind(world_id)
-        .bind(viewer_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("checking inspection access for user {viewer_id}"))?;
         Ok(match row {
-            Some((developer_mode,)) => Access {
+            Some(developer_mode) => Access {
                 active_member: true,
                 developer_mode,
             },
@@ -957,13 +957,14 @@ impl Store {
         if let Some(max_uses) = max_uses {
             ensure!(max_uses > 0, "an invitation use limit must be positive");
         }
-        let owns: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?")
-                .bind(world_id)
-                .bind(owner_id)
-                .fetch_optional(&self.pool)
-                .await
-                .with_context(|| format!("checking ownership of world {world_id}"))?;
+        let owns: Option<i64> = sqlx::query_scalar!(
+            "SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?",
+            world_id,
+            owner_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("checking ownership of world {world_id}"))?;
         ensure!(
             owns.is_some(),
             "user {owner_id} does not own world {world_id}"
@@ -973,13 +974,15 @@ impl Store {
             .take(32)
             .map(char::from)
             .collect::<String>();
-        sqlx::query("INSERT INTO world_invitation (token, world_id, max_uses) VALUES (?, ?, ?)")
-            .bind(&token)
-            .bind(world_id)
-            .bind(max_uses)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("creating invitation for world {world_id}"))?;
+        sqlx::query!(
+            "INSERT INTO world_invitation (token, world_id, max_uses) VALUES (?, ?, ?)",
+            token,
+            world_id,
+            max_uses,
+        )
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("creating invitation for world {world_id}"))?;
         Ok(Invitation {
             token,
             world_id,
@@ -996,30 +999,32 @@ impl Store {
             .begin()
             .await
             .context("starting invitation acceptance")?;
-        let invitation: Invitation = sqlx::query_as(
+        let invitation: Invitation = sqlx::query_as!(
+            Invitation,
             "SELECT token, world_id, max_uses, uses FROM world_invitation WHERE token = ?",
+            token,
         )
-        .bind(token)
         .fetch_optional(&mut *transaction)
         .await
         .context("loading invitation")?
         .with_context(|| format!("invitation `{token}` does not exist or was revoked"))?;
-        let existing: Option<PlayerAgent> = sqlx::query_as(
+        let existing: Option<PlayerAgent> = sqlx::query_as!(
+            PlayerAgent,
             "SELECT member.id AS member_id, member.world_id, member.user_id, player.character_id, player.agent_id \
              FROM world_member AS member \
              JOIN player_character AS player ON player.member_id = member.id \
              WHERE member.world_id = ? AND member.user_id = ?",
+            invitation.world_id,
+            user.id,
         )
-        .bind(invitation.world_id)
-        .bind(user.id)
         .fetch_optional(&mut *transaction)
         .await
         .context("loading existing invitation membership")?;
         if let Some(member) = existing {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE world_member SET access = 'active' WHERE id = ? AND access = 'removed'",
+                member.member_id,
             )
-            .bind(member.member_id)
             .execute(&mut *transaction)
             .await
             .context("restoring invitation membership")?;
@@ -1029,11 +1034,11 @@ impl Store {
                 .context("committing returning member")?;
             return Ok(member);
         }
-        let consumed = sqlx::query(
+        let consumed = sqlx::query!(
             "UPDATE world_invitation SET uses = uses + 1 \
              WHERE token = ? AND (max_uses IS NULL OR uses < max_uses)",
+            token,
         )
-        .bind(token)
         .execute(&mut *transaction)
         .await
         .context("consuming invitation slot")?
@@ -1070,14 +1075,14 @@ impl Store {
     }
 
     pub async fn revoke_invitation(&self, owner_id: i64, world_id: i64, token: &str) -> Result<()> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "DELETE FROM world_invitation WHERE token = ? AND world_id = ? \
              AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+            token,
+            world_id,
+            world_id,
+            owner_id,
         )
-        .bind(token)
-        .bind(world_id)
-        .bind(world_id)
-        .bind(owner_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("revoking invitation `{token}` for world {world_id}"))?;
@@ -1091,16 +1096,16 @@ impl Store {
     /// An owner may revoke a member's current access without deleting the
     /// membership, player history, or character it owns.
     pub async fn remove_member(&self, owner_id: i64, world_id: i64, user_id: i64) -> Result<()> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE world_member SET access = 'removed' WHERE world_id = ? AND user_id = ? \
              AND access = 'active' AND user_id != (SELECT user_id FROM world_owner WHERE world_id = ?) \
              AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+            world_id,
+            user_id,
+            world_id,
+            world_id,
+            owner_id,
         )
-        .bind(world_id)
-        .bind(user_id)
-        .bind(world_id)
-        .bind(world_id)
-        .bind(owner_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("removing user {user_id} from world {world_id}"))?;
@@ -1222,75 +1227,86 @@ impl Store {
     /// Create an account only when its verified OAuth email is first seen.
     /// Display names deliberately participate in neither identity nor lookup.
     pub async fn find_or_create_user(&self, email: &str, display_name: &str) -> Result<User> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO user (email, display_name) VALUES (?, ?) ON CONFLICT(email) DO NOTHING",
+            email,
+            display_name,
         )
-        .bind(email)
-        .bind(display_name)
         .execute(&self.pool)
         .await
         .with_context(|| format!("creating user for {email}"))?;
-        sqlx::query_as("SELECT id, email, display_name FROM user WHERE email = ?")
-            .bind(email)
-            .fetch_one(&self.pool)
-            .await
-            .with_context(|| format!("loading user for {email}"))
+        sqlx::query_as!(
+            User,
+            "SELECT id, email, display_name FROM user WHERE email = ?",
+            email,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("loading user for {email}"))
     }
 
     pub async fn user(&self, user_id: i64) -> Result<Option<User>> {
-        sqlx::query_as("SELECT id, email, display_name FROM user WHERE id = ?")
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("loading user {user_id}"))
+        sqlx::query_as!(
+            User,
+            "SELECT id, email, display_name FROM user WHERE id = ?",
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading user {user_id}"))
     }
 
     /// Change presentation only; OAuth email remains the account identity.
     pub async fn rename_user(&self, user_id: i64, display_name: &str) -> Result<User> {
-        sqlx::query("UPDATE user SET display_name = ? WHERE id = ?")
-            .bind(display_name)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("updating display name for user {user_id}"))?;
+        sqlx::query!(
+            "UPDATE user SET display_name = ? WHERE id = ?",
+            display_name,
+            user_id,
+        )
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("updating display name for user {user_id}"))?;
         self.user(user_id)
             .await?
             .with_context(|| format!("display-name update references missing user {user_id}"))
     }
 
     pub async fn owned_worlds(&self, owner_id: i64) -> Result<Vec<World>> {
-        sqlx::query_as(
-            "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode FROM world \
+        sqlx::query_as!(
+            World,
+            "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\" FROM world \
              JOIN world_owner ON world_owner.world_id = world.id \
              WHERE world_owner.user_id = ? ORDER BY world.id",
+            owner_id,
         )
-        .bind(owner_id)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading worlds owned by user {owner_id}"))
     }
 
     pub async fn world(&self, world_id: i64) -> Result<Option<World>> {
-        sqlx::query_as(
-            "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode FROM world \
+        sqlx::query_as!(
+            World,
+            "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\" FROM world \
              JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
+            world_id,
         )
-        .bind(world_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading world {world_id}"))
     }
 
     pub async fn world_members(&self, world_id: i64) -> Result<Vec<WorldMember>> {
-        let rows: Vec<WorldMemberCharacterRow> = sqlx::query_as(
+        let rows: Vec<WorldMemberCharacterRow> = sqlx::query_as!(
+            WorldMemberCharacterRow,
             "SELECT member.id AS member_id, member.user_id, user.display_name, member.access, character.id AS character_id, character.name AS character_name \
              FROM world_member AS member \
              JOIN user ON user.id = member.user_id \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
              WHERE member.world_id = ? ORDER BY member.id, character.id",
+            world_id,
         )
-        .bind(world_id)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading members of world {world_id}"))?;
@@ -1319,14 +1335,15 @@ impl Store {
     }
 
     pub async fn invitations(&self, owner_id: i64, world_id: i64) -> Result<Vec<Invitation>> {
-        sqlx::query_as(
+        sqlx::query_as!(
+            Invitation,
             "SELECT invitation.token, invitation.world_id, invitation.max_uses, invitation.uses \
              FROM world_invitation AS invitation JOIN world_owner \
              ON world_owner.world_id = invitation.world_id \
              WHERE invitation.world_id = ? AND world_owner.user_id = ? ORDER BY invitation.rowid",
+            world_id,
+            owner_id,
         )
-        .bind(world_id)
-        .bind(owner_id)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading invitations for world {world_id}"))
@@ -1347,38 +1364,44 @@ impl Store {
             .begin()
             .await
             .with_context(|| format!("starting scenario transaction for {}", owner.email))?;
-        let world_id = sqlx::query(
+        let gm_notes = Json(&scenario.notes.gm);
+        let storyteller_notes = Json(&scenario.notes.storyteller);
+        let world_id = sqlx::query!(
             "INSERT INTO world (name, initial_prompt, storyteller_summary, gm_notes, storyteller_notes) \
              VALUES (?, ?, ?, ?, ?)",
+            scenario.name,
+            scenario.initial_prompt,
+            scenario.storyteller_summary,
+            gm_notes,
+            storyteller_notes,
         )
-            .bind(&scenario.name)
-            .bind(&scenario.initial_prompt)
-            .bind(&scenario.storyteller_summary)
-            .bind(serde_json::to_string(&scenario.notes.gm)?)
-            .bind(serde_json::to_string(&scenario.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
             .context("creating scenario world")?
             .last_insert_rowid();
-        sqlx::query("INSERT INTO world_owner (world_id, user_id) VALUES (?, ?)")
-            .bind(world_id)
-            .bind(owner.id)
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("recording owner for world {world_id}"))?;
+        sqlx::query!(
+            "INSERT INTO world_owner (world_id, user_id) VALUES (?, ?)",
+            world_id,
+            owner.id,
+        )
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("recording owner for world {world_id}"))?;
 
         let mut locations = HashMap::new();
         for location in &scenario.locations {
-            let location_id = sqlx::query(
+            let gm_notes = Json(&location.notes.gm);
+            let storyteller_notes = Json(&location.notes.storyteller);
+            let location_id = sqlx::query!(
                 "INSERT INTO location (world_id, name, kind, description, gm_notes, storyteller_notes) \
                  VALUES (?, ?, ?, ?, ?, ?)",
+                world_id,
+                location.name,
+                location.kind,
+                location.description,
+                gm_notes,
+                storyteller_notes,
             )
-            .bind(world_id)
-            .bind(&location.name)
-            .bind(&location.kind)
-            .bind(&location.description)
-            .bind(serde_json::to_string(&location.notes.gm)?)
-            .bind(serde_json::to_string(&location.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating location {}", location.name))?
@@ -1387,54 +1410,61 @@ impl Store {
         }
 
         for connection in &scenario.connections {
-            sqlx::query(
+            let gm_notes = Json(&connection.notes.gm);
+            let storyteller_notes = Json(&connection.notes.storyteller);
+            sqlx::query!(
                 "INSERT INTO connection (world_id, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) \
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
+                world_id,
+                locations[connection.from.as_str()],
+                locations[connection.to.as_str()],
+                connection.travel_time,
+                connection.description,
+                gm_notes,
+                storyteller_notes,
             )
-            .bind(world_id)
-            .bind(locations[connection.from.as_str()])
-            .bind(locations[connection.to.as_str()])
-            .bind(connection.travel_time)
-            .bind(&connection.description)
-            .bind(serde_json::to_string(&connection.notes.gm)?)
-            .bind(serde_json::to_string(&connection.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
             .context("creating scenario connection")?;
         }
 
-        let world_gm_agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
-            .bind(world_id)
+        let world_gm_agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id,)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating world GM for world {world_id}"))?
             .last_insert_rowid();
-        sqlx::query("INSERT INTO world_gm (world_id, agent_id) VALUES (?, ?)")
-            .bind(world_id)
-            .bind(world_gm_agent_id)
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("linking world GM for world {world_id}"))?;
+        sqlx::query!(
+            "INSERT INTO world_gm (world_id, agent_id) VALUES (?, ?)",
+            world_id,
+            world_gm_agent_id,
+        )
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("linking world GM for world {world_id}"))?;
 
         let mut groups = HashMap::new();
         for group in &scenario.groups {
-            let branch_id = sqlx::query("INSERT INTO history_branch (agent_id) VALUES (?)")
-                .bind(world_gm_agent_id)
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| format!("creating history branch for group {}", group.name))?
-                .last_insert_rowid();
-            let group_id = sqlx::query(
+            let branch_id = sqlx::query!(
+                "INSERT INTO history_branch (agent_id) VALUES (?)",
+                world_gm_agent_id,
+            )
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("creating history branch for group {}", group.name))?
+            .last_insert_rowid();
+            let gm_notes = Json(&group.notes.gm);
+            let storyteller_notes = Json(&group.notes.storyteller);
+            let group_id = sqlx::query!(
                 "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id, gm_notes, storyteller_notes) \
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
+                world_id,
+                group.name,
+                locations[group.location.as_str()],
+                group.description,
+                branch_id,
+                gm_notes,
+                storyteller_notes,
             )
-            .bind(world_id)
-            .bind(&group.name)
-            .bind(locations[group.location.as_str()])
-            .bind(&group.description)
-            .bind(branch_id)
-            .bind(serde_json::to_string(&group.notes.gm)?)
-            .bind(serde_json::to_string(&group.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating group {}", group.name))?
@@ -1444,15 +1474,18 @@ impl Store {
 
         let mut item_types = HashMap::new();
         for item_type in &scenario.item_types {
-            let item_type_id = sqlx::query(
+            let stats = Json(&item_type.stats);
+            let gm_notes = Json(&item_type.notes.gm);
+            let storyteller_notes = Json(&item_type.notes.storyteller);
+            let item_type_id = sqlx::query!(
                 "INSERT INTO item_type (world_id, name, description, stats, gm_notes, storyteller_notes) VALUES (?, ?, ?, ?, ?, ?)",
+                world_id,
+                item_type.name,
+                item_type.description,
+                stats,
+                gm_notes,
+                storyteller_notes,
             )
-            .bind(world_id)
-            .bind(&item_type.name)
-            .bind(&item_type.description)
-            .bind(serde_json::to_string(&item_type.stats)?)
-            .bind(serde_json::to_string(&item_type.notes.gm)?)
-            .bind(serde_json::to_string(&item_type.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating item type {}", item_type.name))?
@@ -1460,40 +1493,47 @@ impl Store {
             item_types.insert(item_type.name.as_str(), item_type_id);
         }
         for spell_type in &scenario.spell_types {
-            sqlx::query(
+            let stats = Json(&spell_type.stats);
+            let gm_notes = Json(&spell_type.notes.gm);
+            let storyteller_notes = Json(&spell_type.notes.storyteller);
+            sqlx::query!(
                 "INSERT INTO spell_type (world_id, name, description, stats, gm_notes, storyteller_notes) VALUES (?, ?, ?, ?, ?, ?)",
+                world_id,
+                spell_type.name,
+                spell_type.description,
+                stats,
+                gm_notes,
+                storyteller_notes,
             )
-            .bind(world_id)
-            .bind(&spell_type.name)
-            .bind(&spell_type.description)
-            .bind(serde_json::to_string(&spell_type.stats)?)
-            .bind(serde_json::to_string(&spell_type.notes.gm)?)
-            .bind(serde_json::to_string(&spell_type.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating spell type {}", spell_type.name))?;
         }
         for item in &scenario.items {
-            let item_id = sqlx::query(
+            let gm_notes = Json(&item.notes.gm);
+            let storyteller_notes = Json(&item.notes.storyteller);
+            let item_id = sqlx::query!(
                 "INSERT INTO item (world_id, item_type_id, name, description, gm_notes, storyteller_notes) \
                  VALUES (?, ?, ?, ?, ?, ?)",
+                world_id,
+                item_types[item.item_type.as_str()],
+                item.name,
+                item.description,
+                gm_notes,
+                storyteller_notes,
             )
-            .bind(world_id)
-            .bind(item_types[item.item_type.as_str()])
-            .bind(&item.name)
-            .bind(&item.description)
-            .bind(serde_json::to_string(&item.notes.gm)?)
-            .bind(serde_json::to_string(&item.notes.storyteller)?)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating item {}", item.name))?
             .last_insert_rowid();
-            sqlx::query("INSERT INTO item_location (item_id, location_id) VALUES (?, ?)")
-                .bind(item_id)
-                .bind(locations[item.location.as_str()])
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| format!("placing item {}", item.name))?;
+            sqlx::query!(
+                "INSERT INTO item_location (item_id, location_id) VALUES (?, ?)",
+                item_id,
+                locations[item.location.as_str()],
+            )
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("placing item {}", item.name))?;
         }
 
         for npc in &scenario.npcs {
@@ -1512,35 +1552,38 @@ impl Store {
                 },
             )
             .await?;
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO character_group (character_id, group_id, description) VALUES (?, ?, '')",
+                character_id,
+                groups[npc.group.as_str()],
             )
-            .bind(character_id)
-            .bind(groups[npc.group.as_str()])
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("placing NPC {}", npc.name))?;
-            let agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
-                .bind(world_id)
+            let agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id,)
                 .execute(&mut *transaction)
                 .await
                 .with_context(|| format!("creating NPC agent for {}", npc.name))?
                 .last_insert_rowid();
             Self::create_agent_history(&mut transaction, agent_id).await?;
-            sqlx::query("INSERT INTO npc_agent (character_id, agent_id) VALUES (?, ?)")
-                .bind(character_id)
-                .bind(agent_id)
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| format!("linking NPC agent for {}", npc.name))?;
-        }
-
-        sqlx::query("INSERT INTO world_starting_location (world_id, location_id) VALUES (?, ?)")
-            .bind(world_id)
-            .bind(locations[scenario.starting_location.as_str()])
+            sqlx::query!(
+                "INSERT INTO npc_agent (character_id, agent_id) VALUES (?, ?)",
+                character_id,
+                agent_id,
+            )
             .execute(&mut *transaction)
             .await
-            .with_context(|| format!("recording starting location for world {world_id}"))?;
+            .with_context(|| format!("linking NPC agent for {}", npc.name))?;
+        }
+
+        sqlx::query!(
+            "INSERT INTO world_starting_location (world_id, location_id) VALUES (?, ?)",
+            world_id,
+            locations[scenario.starting_location.as_str()],
+        )
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("recording starting location for world {world_id}"))?;
 
         let member = Self::join_world(
             &mut transaction,
@@ -1573,15 +1616,16 @@ impl Store {
         world_id: i64,
         character_id: i64,
     ) -> Result<Option<PlayerAgent>> {
-        sqlx::query_as(
+        sqlx::query_as!(
+            PlayerAgent,
             "SELECT member.id AS member_id, member.world_id, member.user_id, player.character_id, player.agent_id \
              FROM world_member AS member \
              JOIN player_character AS player ON player.member_id = member.id \
              WHERE member.user_id = ? AND member.world_id = ? AND player.character_id = ? AND member.access = 'active'",
+            user_id,
+            world_id,
+            character_id,
         )
-        .bind(user_id)
-        .bind(world_id)
-        .bind(character_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| {
@@ -1590,11 +1634,11 @@ impl Store {
     }
 
     pub async fn has_active_membership(&self, user_id: i64, world_id: i64) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM world_member WHERE user_id = ? AND world_id = ? AND access = 'active'",
+        Ok(sqlx::query_scalar!(
+            "SELECT id FROM world_member WHERE user_id = ? AND world_id = ? AND access = 'active'",
+            user_id,
+            world_id,
         )
-        .bind(user_id)
-        .bind(world_id)
         .fetch_optional(&self.pool)
         .await
         .context("checking active membership")?
@@ -1613,11 +1657,11 @@ impl Store {
             .begin()
             .await
             .context("starting player-character creation")?;
-        let member_id: i64 = sqlx::query_scalar(
+        let member_id: i64 = sqlx::query_scalar!(
             "SELECT id FROM world_member WHERE user_id = ? AND world_id = ? AND access = 'active'",
+            user_id,
+            world_id,
         )
-        .bind(user_id)
-        .bind(world_id)
         .fetch_optional(&mut *transaction)
         .await
         .context("resolving active membership for new character")?
@@ -3354,11 +3398,11 @@ impl Store {
     /// characters, histories, or allocated handles. The result can initialize
     /// another fresh world rather than copying a particular playthrough.
     pub async fn export_scenario(&self, world_id: i64) -> Result<Scenario> {
-        let held_items: i64 = sqlx::query_scalar(
+        let held_items: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM item_character \
              JOIN item ON item.id = item_character.item_id WHERE item.world_id = ?",
+            world_id,
         )
-        .bind(world_id)
         .fetch_one(&self.pool)
         .await
         .context("checking scenario item holders")?;
@@ -3366,41 +3410,20 @@ impl Store {
             held_items == 0,
             "world {world_id} has player-held items and cannot be exported as a fresh scenario"
         );
-        let (name, initial_prompt, storyteller_summary, gm_notes, storyteller_notes): (
-            String,
-            String,
-            String,
-            String,
-            String,
-        ) = sqlx::query_as(
-            "SELECT name, initial_prompt, storyteller_summary, gm_notes, storyteller_notes \
-             FROM world WHERE id = ?",
-        )
-        .bind(world_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("loading scenario world")?
-        .with_context(|| format!("world {world_id} does not exist"))?;
-        let notes = decode_notes(&gm_notes, &storyteller_notes)?;
-        let locations: Vec<Location> =
-            sqlx::query_as::<_, (String, String, String, String, String)>(
-                "SELECT name, kind, description, gm_notes, storyteller_notes FROM location \
-             WHERE world_id = ? ORDER BY id",
-            )
-            .bind(world_id)
-            .fetch_all(&self.pool)
-            .await
-            .context("loading scenario locations")?
-            .into_iter()
-            .map(|(name, kind, description, gm, storyteller)| {
-                Ok(Location {
-                    name,
-                    kind,
-                    description,
-                    notes: decode_notes(&gm, &storyteller)?,
-                })
-            })
-            .collect::<Result<_>>()?;
+        let world = sqlx::query!(
+            "SELECT name, initial_prompt, storyteller_summary, gm_notes, storyteller_notes FROM world WHERE id = ?",
+            world_id,
+        ).fetch_optional(&self.pool).await.context("loading scenario world")?
+            .with_context(|| format!("world {world_id} does not exist"))?;
+        let notes = decode_notes(&world.gm_notes, &world.storyteller_notes)?;
+        let locations = sqlx::query!(
+            "SELECT name, kind, description, gm_notes, storyteller_notes FROM location WHERE world_id = ? ORDER BY id",
+            world_id,
+        ).fetch_all(&self.pool).await.context("loading scenario locations")?.into_iter()
+            .map(|row| Ok(Location {
+                name: row.name, kind: row.kind, description: row.description,
+                notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
+            })).collect::<Result<_>>()?;
         let (starting_group, starting_location): (String, String) = {
             let mut connection = self
                 .pool
@@ -3421,77 +3444,53 @@ impl Store {
             .context("loading scenario starting group and location")?;
             (start.group_name, start.location_name)
         };
-        let connections: Vec<ScenarioConnection> = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
-            "SELECT from_location.name, to_location.name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
+        let connections = sqlx::query!(
+            "SELECT from_location.name AS from_name, to_location.name AS to_name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
              FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id \
-             JOIN location AS to_location ON to_location.id = connection.to_location_id \
-             WHERE connection.world_id = ? ORDER BY connection.id",
-        )
-        .bind(world_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("loading scenario connections")?
-        .into_iter()
-        .map(|(from, to, travel_time, description, gm, storyteller)| {
-            Ok(ScenarioConnection { from, to, travel_time, description, notes: decode_notes(&gm, &storyteller)? })
-        })
-        .collect::<Result<_>>()?;
-        let groups: Vec<ScenarioGroup> = sqlx::query_as::<_, (String, String, String, String, String)>(
-            "SELECT \"group\".name, location.name, \"group\".description, \"group\".gm_notes, \"group\".storyteller_notes \
-             FROM \"group\" JOIN location ON location.id = \"group\".location_id \
-             WHERE \"group\".world_id = ? ORDER BY \"group\".id",
-        )
-        .bind(world_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("loading scenario groups")?
-        .into_iter()
-        .map(|(name, location, description, gm, storyteller)| {
-            Ok(ScenarioGroup {
-                name,
-                location,
-                description,
-                notes: decode_notes(&gm, &storyteller)?,
-            })
-        })
-        .collect::<Result<_>>()?;
-        let npcs: Vec<Npc> = sqlx::query_as::<_, (String, String, String, String, String, String, String, String, String)>(
-            "SELECT character.name, \"group\".name, character.description, character.background, character.motive, character.ambition, character.sheet, character.gm_notes, character.storyteller_notes \
+             JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? ORDER BY connection.id",
+            world_id,
+        ).fetch_all(&self.pool).await.context("loading scenario connections")?.into_iter()
+            .map(|row| Ok(ScenarioConnection {
+                from: row.from_name, to: row.to_name, travel_time: row.travel_time, description: row.description,
+                notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
+            })).collect::<Result<_>>()?;
+        let groups = sqlx::query!(
+            "SELECT \"group\".name, location.name AS location_name, \"group\".description, \"group\".gm_notes, \"group\".storyteller_notes \
+             FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".world_id = ? ORDER BY \"group\".id",
+            world_id,
+        ).fetch_all(&self.pool).await.context("loading scenario groups")?.into_iter()
+            .map(|row| Ok(ScenarioGroup {
+                name: row.name, location: row.location_name, description: row.description,
+                notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
+            })).collect::<Result<_>>()?;
+        let npcs = sqlx::query!(
+            "SELECT character.name, \"group\".name AS group_name, character.description, character.background, character.motive, character.ambition, character.sheet, character.gm_notes, character.storyteller_notes \
              FROM character JOIN character_group ON character_group.character_id = character.id \
-             JOIN \"group\" ON \"group\".id = character_group.group_id \
-             WHERE character.world_id = ? AND character.role = 'npc' ORDER BY character.id",
-        )
-        .bind(world_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("loading scenario NPCs")?
-        .into_iter()
-        .map(|(name, group, description, background, motive, ambition, sheet, gm, storyteller)| {
-            Ok(Npc { name, group, description, background, motive, ambition, sheet: serde_json::from_str(&sheet).context("decoding NPC sheet")?, notes: decode_notes(&gm, &storyteller)? })
-        })
-        .collect::<Result<_>>()?;
+             JOIN \"group\" ON \"group\".id = character_group.group_id WHERE character.world_id = ? AND character.role = 'npc' ORDER BY character.id",
+            world_id,
+        ).fetch_all(&self.pool).await.context("loading scenario NPCs")?.into_iter()
+            .map(|row| Ok(Npc {
+                name: row.name, group: row.group_name, description: row.description, background: row.background,
+                motive: row.motive, ambition: row.ambition,
+                sheet: serde_json::from_str(&row.sheet).context("decoding NPC sheet")?,
+                notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
+            })).collect::<Result<_>>()?;
         let item_types = self.export_item_types("item_type", world_id).await?;
         let spell_types = self.export_item_types("spell_type", world_id).await?;
-        let items: Vec<Item> = sqlx::query_as::<_, (String, String, String, String, String, String)>(
-            "SELECT item.name, item_type.name, location.name, item.description, item.gm_notes, item.storyteller_notes \
-             FROM item JOIN item_type ON item_type.id = item.item_type_id \
-             JOIN item_location ON item_location.item_id = item.id \
-             JOIN location ON location.id = item_location.location_id \
-             WHERE item.world_id = ? ORDER BY item.id",
-        )
-        .bind(world_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("loading scenario items")?
-        .into_iter()
-        .map(|(name, item_type, location, description, gm, storyteller)| {
-            Ok(Item { name, item_type, location, description, notes: decode_notes(&gm, &storyteller)? })
-        })
-        .collect::<Result<_>>()?;
+        let items = sqlx::query!(
+            "SELECT item.name, item_type.name AS item_type, location.name AS location_name, item.description, item.gm_notes, item.storyteller_notes \
+             FROM item JOIN item_type ON item_type.id = item.item_type_id JOIN item_location ON item_location.item_id = item.id \
+             JOIN location ON location.id = item_location.location_id WHERE item.world_id = ? ORDER BY item.id",
+            world_id,
+        ).fetch_all(&self.pool).await.context("loading scenario items")?.into_iter()
+            .map(|row| Ok(Item {
+                name: row.name, item_type: row.item_type, location: row.location_name, description: row.description,
+                notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
+            })).collect::<Result<_>>()?;
         Ok(Scenario {
-            name,
-            initial_prompt,
-            storyteller_summary,
+            name: world.name,
+            initial_prompt: world.initial_prompt,
+            storyteller_summary: world.storyteller_summary,
             notes,
             starting_location,
             starting_group,
@@ -3533,11 +3532,11 @@ impl Store {
         world_id: i64,
         starting_group_id: i64,
     ) -> Result<JoinedWorld> {
-        let member_id = sqlx::query(
+        let member_id = sqlx::query!(
             "INSERT INTO world_member (world_id, user_id, access) VALUES (?, ?, 'active')",
+            world_id,
+            user.id,
         )
-        .bind(world_id)
-        .bind(user.id)
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("joining user {} to world {world_id}", user.email))?
@@ -3558,8 +3557,7 @@ impl Store {
         world_id: i64,
         starting_group_id: i64,
     ) -> Result<(i64, i64, i64)> {
-        let agent_id = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
-            .bind(world_id)
+        let agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id,)
             .execute(&mut **transaction)
             .await
             .with_context(|| format!("creating player agent for world {world_id}"))?
@@ -3585,20 +3583,20 @@ impl Store {
             },
         )
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO player_character (member_id, character_id, agent_id) VALUES (?, ?, ?)",
+            member_id,
+            character_id,
+            agent_id,
         )
-        .bind(member_id)
-        .bind(character_id)
-        .bind(agent_id)
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("linking Adventurer for world {world_id}"))?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO character_group (character_id, group_id, description) VALUES (?, ?, '')",
+            character_id,
+            starting_group_id,
         )
-        .bind(character_id)
-        .bind(starting_group_id)
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("placing Adventurer in world {world_id}"))?;
@@ -3686,22 +3684,25 @@ impl Store {
         tool_id: i64,
         character: CharacterSeed<'_>,
     ) -> Result<i64> {
-        Ok(sqlx::query(
+        let sheet = Json(character.sheet);
+        let gm_notes = Json(&character.notes.gm);
+        let storyteller_notes = Json(&character.notes.storyteller);
+        Ok(sqlx::query!(
             "INSERT INTO character \
              (world_id, tool_id, name, role, description, background, motive, ambition, sheet, gm_notes, storyteller_notes) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            world_id,
+            tool_id,
+            character.name,
+            character.role,
+            character.description,
+            character.background,
+            character.motive,
+            character.ambition,
+            sheet,
+            gm_notes,
+            storyteller_notes,
         )
-        .bind(world_id)
-        .bind(tool_id)
-        .bind(character.name)
-        .bind(character.role)
-        .bind(character.description)
-        .bind(character.background)
-        .bind(character.motive)
-        .bind(character.ambition)
-        .bind(serde_json::to_string(character.sheet)?)
-        .bind(serde_json::to_string(&character.notes.gm)?)
-        .bind(serde_json::to_string(&character.notes.storyteller)?)
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("creating {} character {}", character.role, character.name))?
@@ -3714,11 +3715,11 @@ impl Store {
             let upper = lower
                 .checked_mul(10)
                 .context("character handle range overflow")?;
-            let used: Vec<i64> = sqlx::query_scalar(
+            let used: Vec<i64> = sqlx::query_scalar!(
                 "SELECT tool_id FROM character WHERE tool_id >= ? AND tool_id < ?",
+                lower,
+                upper,
             )
-            .bind(lower)
-            .bind(upper)
             .fetch_all(&mut **transaction)
             .await
             .context("loading allocated character handles")?;

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT token, world_id, max_uses, uses FROM world_invitation WHERE token = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "token",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "world_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "max_uses",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "uses",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "bf2a1607443b9b5e2c242ac81f6832045a0a4da7e04c196f1b97595555f6b6e0"
+}

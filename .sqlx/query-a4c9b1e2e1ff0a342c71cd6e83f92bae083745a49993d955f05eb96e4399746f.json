@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO world_member (world_id, user_id, access) VALUES (?, ?, 'active')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a4c9b1e2e1ff0a342c71cd6e83f92bae083745a49993d955f05eb96e4399746f"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO item (world_id, item_type_id, name, description, gm_notes, storyteller_notes) VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "d65ac637a584e155a873615814337b2b82f56b195e4793aa0fde11f683445890"
+}

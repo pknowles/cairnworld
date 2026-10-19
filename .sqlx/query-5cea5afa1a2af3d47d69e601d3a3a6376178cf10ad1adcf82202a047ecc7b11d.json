@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT \"group\".name, location.name AS location_name, \"group\".description, \"group\".gm_notes, \"group\".storyteller_notes FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".world_id = ? ORDER BY \"group\".id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "gm_notes",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_notes",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5cea5afa1a2af3d47d69e601d3a3a6376178cf10ad1adcf82202a047ecc7b11d"
+}

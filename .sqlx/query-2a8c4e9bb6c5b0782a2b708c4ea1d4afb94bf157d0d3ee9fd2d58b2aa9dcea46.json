@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO npc_agent (character_id, agent_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2a8c4e9bb6c5b0782a2b708c4ea1d4afb94bf157d0d3ee9fd2d58b2aa9dcea46"
+}

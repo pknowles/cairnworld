@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM world_invitation WHERE token = ? AND world_id = ? AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e9d4c00e66d9666b90098191e58a2c2d207c88ab4561d3bab39e64b720fd3d25"
+}

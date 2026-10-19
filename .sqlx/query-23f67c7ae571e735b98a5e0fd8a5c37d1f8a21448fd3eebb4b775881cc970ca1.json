@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name, initial_prompt, storyteller_summary, gm_notes, storyteller_notes FROM world WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "initial_prompt",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_summary",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "gm_notes",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_notes",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "23f67c7ae571e735b98a5e0fd8a5c37d1f8a21448fd3eebb4b775881cc970ca1"
+}

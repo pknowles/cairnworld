@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT item.name, item_type.name AS item_type, location.name AS location_name, item.description, item.gm_notes, item.storyteller_notes FROM item JOIN item_type ON item_type.id = item.item_type_id JOIN item_location ON item_location.item_id = item.id JOIN location ON location.id = item_location.location_id WHERE item.world_id = ? ORDER BY item.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "item_type",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "gm_notes",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_notes",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5f61feb3ecd21933860f0ba241f39424e2fd8a2f57e5b701ea3b491ccded3062"
+}

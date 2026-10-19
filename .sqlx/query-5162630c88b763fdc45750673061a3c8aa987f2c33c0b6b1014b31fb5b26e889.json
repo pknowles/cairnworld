@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO player_character (member_id, character_id, agent_id) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5162630c88b763fdc45750673061a3c8aa987f2c33c0b6b1014b31fb5b26e889"
+}

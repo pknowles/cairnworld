@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT from_location.name AS from_name, to_location.name AS to_name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? ORDER BY connection.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "from_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "to_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "travel_time",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "gm_notes",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_notes",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b367bfb8419f834ccd2b4e97ff5649eb769fe4a8d9af757d22bf56d8679e7aff"
+}

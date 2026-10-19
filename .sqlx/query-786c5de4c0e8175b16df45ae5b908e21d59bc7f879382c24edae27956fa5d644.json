@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT invitation.token, invitation.world_id, invitation.max_uses, invitation.uses FROM world_invitation AS invitation JOIN world_owner ON world_owner.world_id = invitation.world_id WHERE invitation.world_id = ? AND world_owner.user_id = ? ORDER BY invitation.rowid",
+  "describe": {
+    "columns": [
+      {
+        "name": "token",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "world_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "max_uses",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "uses",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "786c5de4c0e8175b16df45ae5b908e21d59bc7f879382c24edae27956fa5d644"
+}

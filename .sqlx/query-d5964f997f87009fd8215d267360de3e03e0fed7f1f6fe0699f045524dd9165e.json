@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT member.id AS member_id, member.world_id, member.user_id, player.character_id, player.agent_id FROM world_member AS member JOIN player_character AS player ON player.member_id = member.id WHERE member.user_id = ? AND member.world_id = ? AND player.character_id = ? AND member.access = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "member_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "world_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "character_id",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d5964f997f87009fd8215d267360de3e03e0fed7f1f6fe0699f045524dd9165e"
+}

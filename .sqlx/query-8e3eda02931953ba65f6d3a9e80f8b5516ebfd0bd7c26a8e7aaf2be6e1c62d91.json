@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO world (name) VALUES (?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8e3eda02931953ba65f6d3a9e80f8b5516ebfd0bd7c26a8e7aaf2be6e1c62d91"
+}

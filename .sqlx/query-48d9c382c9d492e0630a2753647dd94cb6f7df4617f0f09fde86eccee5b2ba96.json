@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user (email, display_name) VALUES (?, ?) ON CONFLICT(email) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "48d9c382c9d492e0630a2753647dd94cb6f7df4617f0f09fde86eccee5b2ba96"
+}

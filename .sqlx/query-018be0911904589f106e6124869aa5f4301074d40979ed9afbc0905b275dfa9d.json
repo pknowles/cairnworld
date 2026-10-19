@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world.developer_mode AS \"developer_mode: bool\" FROM world_member JOIN world ON world.id = world_member.world_id WHERE world_member.world_id = ? AND world_member.user_id = ? AND world_member.access = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "developer_mode: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "018be0911904589f106e6124869aa5f4301074d40979ed9afbc0905b275dfa9d"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world_member SET access = 'removed' WHERE world_id = ? AND user_id = ? AND access = 'active' AND user_id != (SELECT user_id FROM world_owner WHERE world_id = ?) AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "e8afbc01e50f78b943100676a0a05cb6cfd6e7372b5e7c30d918ee31932f52cf"
+}

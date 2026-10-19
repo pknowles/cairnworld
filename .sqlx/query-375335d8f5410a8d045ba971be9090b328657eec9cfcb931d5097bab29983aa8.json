@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO item_location (item_id, location_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "375335d8f5410a8d045ba971be9090b328657eec9cfcb931d5097bab29983aa8"
+}

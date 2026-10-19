@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name, kind, description, gm_notes, storyteller_notes FROM location WHERE world_id = ? ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "gm_notes",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_notes",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0e4fe7c8e184fecdb093dd6c55d91ecb1b31483287f826994e23c0453c112543"
+}

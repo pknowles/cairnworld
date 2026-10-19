@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO character (world_id, tool_id, name, role, description, background, motive, ambition, sheet, gm_notes, storyteller_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "9b1076e63a54e2c00381ba7cf35da6e43a82269500f49e9c8a19b5da37b6919e"
+}

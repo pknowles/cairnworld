@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world SET developer_mode = ? WHERE id = ? AND EXISTS (SELECT 1 FROM world_owner WHERE world_id = ? AND user_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "745f7c9476431f5599d0e104d83d30f0d89db3137316b3a519e5d826b8e5effa"
+}

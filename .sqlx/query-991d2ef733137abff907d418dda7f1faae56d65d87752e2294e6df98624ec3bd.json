@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO agent_history (agent_id, branch_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "991d2ef733137abff907d418dda7f1faae56d65d87752e2294e6df98624ec3bd"
+}

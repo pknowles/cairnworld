@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world_member SET access = 'active' WHERE id = ? AND access = 'removed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "88146337dd16899d3be3a7477afa508c00089dc83abad0ee3755fdbd34b344e5"
+}

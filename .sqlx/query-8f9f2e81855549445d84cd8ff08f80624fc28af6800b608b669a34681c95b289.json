@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tool_id FROM character WHERE tool_id >= ? AND tool_id < ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "tool_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8f9f2e81855549445d84cd8ff08f80624fc28af6800b608b669a34681c95b289"
+}

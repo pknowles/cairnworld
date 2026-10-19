@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\" FROM world JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "owner_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "developer_mode: bool",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b6de40ce5ed80e0d9ba8d2eff084dafc805cef80d774116140ff1c8db186aa35"
+}

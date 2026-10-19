@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world_invitation SET uses = uses + 1 WHERE token = ? AND (max_uses IS NULL OR uses < max_uses)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "480bc443dd3fafbc8e7641544f9aac732fc949274dee864b81878e3ad63e5e23"
+}

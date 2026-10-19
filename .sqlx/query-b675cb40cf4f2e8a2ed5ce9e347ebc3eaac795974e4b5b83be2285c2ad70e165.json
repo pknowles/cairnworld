@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO world_gm (world_id, agent_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b675cb40cf4f2e8a2ed5ce9e347ebc3eaac795974e4b5b83be2285c2ad70e165"
+}
