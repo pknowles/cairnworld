@@ -6,7 +6,7 @@
 //! walk the same selector instead of duplicating branch logic.
 
 use anyhow::{Context, Result, ensure};
-use sqlx::{FromRow, Sqlite, Transaction};
+use sqlx::{FromRow, Sqlite, SqliteConnection, Transaction};
 
 use super::Store;
 
@@ -20,9 +20,9 @@ use crate::inspection::Segment;
 /// receive the proof rather than raw IDs they would need to validate again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AgentBranch {
-    world_id: i64,
-    agent_id: i64,
-    branch_id: i64,
+    pub(super) world_id: i64,
+    pub(super) agent_id: i64,
+    pub(super) branch_id: i64,
 }
 
 impl AgentBranch {
@@ -385,6 +385,26 @@ impl Store {
         })
     }
 
+    /// Resolve an exact stored branch, including a retired group's history.
+    /// Browser-selected identifiers must use `branch_for_viewer` instead.
+    pub async fn history_branch(&self, branch_id: i64) -> Result<AgentBranch> {
+        let (world_id, agent_id, branch_id) = sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT agent.world_id, history_branch.agent_id, history_branch.id AS branch_id \
+             FROM history_branch JOIN agent ON agent.id = history_branch.agent_id \
+             WHERE history_branch.id = ?",
+        )
+        .bind(branch_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading history branch {branch_id}"))?
+        .with_context(|| format!("history branch {branch_id} does not exist"))?;
+        Ok(AgentBranch {
+            world_id,
+            agent_id,
+            branch_id,
+        })
+    }
+
     /// Validate a browser-selected branch against its authorized world and
     /// requested agent before any reader receives it.
     pub async fn branch_for_viewer(
@@ -488,33 +508,19 @@ impl Store {
             next_position,
         })
     }
+}
 
-    /// The branch backing an agent's single writable history.
-    pub(super) async fn branch_for_agent(&self, agent_id: i64) -> Result<i64> {
-        sqlx::query_scalar("SELECT branch_id FROM agent_history WHERE agent_id = ?")
-            .bind(agent_id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("loading history branch for agent {agent_id}"))?
-            .with_context(|| format!("agent {agent_id} has no history branch"))
-    }
-
-    /// As `branch_for_agent`, but reading through an already-open transaction
-    /// rather than a fresh pool connection. The pool is configured with a
-    /// single connection, so any query against `&self.pool` while a
-    /// transaction is open would otherwise deadlock waiting for a connection
-    /// the open transaction is holding.
-    pub(super) async fn branch_for_agent_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        agent_id: i64,
-    ) -> Result<i64> {
-        sqlx::query_scalar("SELECT branch_id FROM agent_history WHERE agent_id = ?")
-            .bind(agent_id)
-            .fetch_optional(&mut **transaction)
-            .await
-            .with_context(|| format!("loading history branch for agent {agent_id}"))?
-            .with_context(|| format!("agent {agent_id} has no history branch"))
-    }
+/// Reuse the caller's connection so reads observe its uncommitted writes too.
+pub(super) async fn branch_for_agent(
+    connection: &mut SqliteConnection,
+    agent_id: i64,
+) -> Result<i64> {
+    sqlx::query_scalar("SELECT branch_id FROM agent_history WHERE agent_id = ?")
+        .bind(agent_id)
+        .fetch_optional(connection)
+        .await
+        .with_context(|| format!("loading history branch for agent {agent_id}"))?
+        .with_context(|| format!("agent {agent_id} has no history branch"))
 }
 
 #[cfg(test)]
@@ -688,5 +694,46 @@ mod tests {
         let agent = store.create_agent(world).await.unwrap();
         let branch = store.agent_branch(agent).await.unwrap();
         assert_eq!(branch.world_id(), world);
+        assert_eq!(
+            store.history_branch(branch.branch_id()).await.unwrap(),
+            branch
+        );
+        assert!(store.history_branch(i64::MAX).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn branch_lookup_observes_the_callers_uncommitted_history() {
+        let db = TestDatabase::new("history-test");
+        let store = Store::open(db.path()).await.unwrap();
+        let world = store.create_world("test").await.unwrap();
+        let mut transaction = store.pool.begin().await.unwrap();
+        let agent = sqlx::query("INSERT INTO agent (world_id) VALUES (?)")
+            .bind(world)
+            .execute(&mut *transaction)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let branch = Store::create_agent_history(&mut transaction, agent)
+            .await
+            .unwrap();
+        assert_eq!(
+            branch_for_agent(&mut transaction, agent).await.unwrap(),
+            branch
+        );
+        transaction.rollback().await.unwrap();
+        {
+            let mut connection = store.pool.acquire().await.unwrap();
+            let error = branch_for_agent(&mut connection, agent).await.unwrap_err();
+            assert!(format!("{error:#}").contains(&format!("agent {agent} has no history branch")));
+        }
+        let committed_agent = store.create_agent(world).await.unwrap();
+        let committed_branch = store.agent_branch(committed_agent).await.unwrap();
+        let mut connection = store.pool.acquire().await.unwrap();
+        assert_eq!(
+            branch_for_agent(&mut connection, committed_agent)
+                .await
+                .unwrap(),
+            committed_branch.branch_id(),
+        );
     }
 }

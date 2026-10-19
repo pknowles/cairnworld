@@ -15,7 +15,6 @@ use crate::{
 /// Everything required to record one agent inference from its visible context.
 pub struct RecordedCompletion<'a> {
     pub events: broadcast::Sender<DevEvent>,
-    pub agent_id: i64,
     /// The already-validated branch this completion reads and appends to.
     pub branch: AgentBranch,
     pub sequence_id: Option<i64>,
@@ -56,7 +55,7 @@ pub async fn complete_recorded<B: Backend>(
             backend,
             RecipeCompletion {
                 events: completion.events.clone(),
-                agent_id: completion.agent_id,
+                agent_id: completion.branch.agent_id(),
                 sequence_id: completion.sequence_id,
                 invocation_id: completion.invocation_id,
                 segments: &segments,
@@ -97,8 +96,7 @@ pub async fn complete_recorded<B: Backend>(
                 let static_segments = static_segments(&segments);
                 store
                     .enqueue_capacity_compaction(
-                        completion.agent_id,
-                        Some(completion.branch.branch_id()),
+                        completion.branch,
                         *requested_tokens,
                         CompactionPolicy {
                             sequence_id: completion.sequence_id,
@@ -112,21 +110,11 @@ pub async fn complete_recorded<B: Backend>(
                     .await
                     .context("persisting capacity recovery compaction")?;
                 backend
-                    .after_agent(
-                        store,
-                        completion.agent_id,
-                        Some(completion.branch.branch_id()),
-                        &completion.events,
-                    )
+                    .after_agent(store, completion.branch, &completion.events)
                     .await
                     .context("admitting capacity recovery compaction")?;
                 backend
-                    .before_agent(
-                        store,
-                        completion.agent_id,
-                        Some(completion.branch.branch_id()),
-                        &completion.events,
-                    )
+                    .before_agent(store, completion.branch, &completion.events)
                     .await
                     .context("waiting for capacity recovery compaction")?;
                 let still_pending = store
@@ -135,7 +123,7 @@ pub async fn complete_recorded<B: Backend>(
                 ensure!(
                     still_pending.is_none(),
                     "backend did not resolve capacity recovery compaction for agent {}; use the scheduled model backend",
-                    completion.agent_id
+                    completion.branch.agent_id()
                 );
             }
             Err(error) => return Err(error),
@@ -551,7 +539,12 @@ mod tests {
         let world_id = store.world_id_for_agent(agent).await.unwrap();
         let sequence = store.begin_sequence(world_id, "test").await.unwrap();
         store
-            .start_invocation(Some(sequence.id), agent, None, None, None)
+            .start_invocation(
+                Some(sequence.id),
+                store.agent_branch(agent).await.unwrap(),
+                None,
+                None,
+            )
             .await
             .unwrap()
     }
@@ -578,7 +571,6 @@ mod tests {
             &StreamingBackend,
             RecordedCompletion {
                 events: world.events.clone(),
-                agent_id: agent,
                 branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
                 invocation_id,
@@ -637,7 +629,6 @@ mod tests {
             &FailingBackend,
             RecordedCompletion {
                 events,
-                agent_id: agent,
                 branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
                 invocation_id,
@@ -731,7 +722,6 @@ mod tests {
             &backend,
             RecordedCompletion {
                 events: broadcast::channel(256).0,
-                agent_id: agent,
                 branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
                 invocation_id,

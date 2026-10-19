@@ -218,6 +218,13 @@ reference and any due compaction obligation in one transaction. Summary completi
 writes the outcome, summary activation and obligation removal together.
 Detached replay writes only the outcome. The three producer operations share the
 private content insertion code; they do not perform a later copy-and-link step.
+History selection resolves one `AgentBranch` containing its world, agent and
+branch. Turns, invocation creation, deferred-work admission and capacity recovery
+carry that value instead of independently supplied identifiers or an optional
+branch selector. Persisted compaction jobs derive the same ownership from their
+history branch; replay selects the recorded branch. Group activity is still
+validated when topology changes commit. Shared history queries accept the
+caller's SQLite connection, including a transaction's existing connection.
 Unexpected summary output remains a recorded response with a failed invocation,
 not a fabricated successful summary.
 
@@ -663,7 +670,9 @@ recorded content; it never copies the left chat or builds a separate log.
 
 The owner enables Developer Mode on world detail through a warning modal that
 explains full internal visibility and requires explicit confirmation. The
-owner may later disable the persisted setting. Every active member sees an enabled
+modal opens and cancels through native HTML controls, independently of hydration;
+confirmation submits the ordinary authorized form.
+The owner may later disable the persisted setting. Every active member sees an enabled
 indicator on both world detail and play, including already connected browsers.
 Every inspection request and live subscription resolves active membership,
 the world's enabled setting, and the requested object's world on the server.

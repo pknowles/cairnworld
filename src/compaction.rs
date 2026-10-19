@@ -36,13 +36,7 @@ pub async fn run<B: Backend>(
     // wall time". `job.sequence_id` is carried for display/linkage only;
     // this invocation's own start/finish never touches that sequence's row.
     let invocation_id = store
-        .start_invocation(
-            job.sequence_id,
-            job.agent_id,
-            Some(job.branch_id),
-            None,
-            job.cause_inference_id,
-        )
+        .start_invocation(job.sequence_id, job.branch, None, job.cause_inference_id)
         .await
         .context("starting deferred compaction invocation")?;
     let result = run_invocation(store, backend, job, limits, invocation_id, events).await;
@@ -77,7 +71,7 @@ async fn run_invocation<B: Backend>(
     let mut recovering_capacity = false;
     loop {
         let (segments, branch_id, split, covered) =
-            summary_segments(store, job.branch_id, keep).await?;
+            summary_segments(store, job.branch.branch_id(), keep).await?;
         if split <= covered {
             if recovering_capacity {
                 anyhow::bail!(
@@ -102,7 +96,7 @@ async fn run_invocation<B: Backend>(
             backend,
             context::RecipeCompletion {
                 events: events.clone(),
-                agent_id: job.agent_id,
+                agent_id: job.branch.agent_id(),
                 // Ties the summary's inference to the event that queued this job.
                 sequence_id: job.sequence_id,
                 invocation_id,
@@ -263,7 +257,7 @@ mod tests {
             .unwrap();
         let static_segments = context::static_segments(&segments);
         let invocation_id = store
-            .start_invocation(None, agent_id, Some(branch.branch_id()), None, None)
+            .start_invocation(None, branch, None, None)
             .await
             .unwrap();
         context::complete_recipe(

@@ -535,7 +535,6 @@ where
                 &budget,
                 agent::Turn {
                     events: self.world(world_id)?.events.clone(),
-                    agent_id: gm_history.agent_id,
                     branch,
                     static_messages: &[role],
                     dynamic_context: &[scene_packet.as_str()],
@@ -642,7 +641,6 @@ where
                 &budget,
                 agent::Turn {
                     events: self.world(member.world_id)?.events.clone(),
-                    agent_id: member.agent_id,
                     branch: self.store.agent_branch(member.agent_id).await?,
                     static_messages: &[prompt],
                     dynamic_context: &[],
@@ -752,7 +750,6 @@ where
                 &budget,
                 agent::Turn {
                     events: self.world(member.world_id)?.events.clone(),
-                    agent_id: member.agent_id,
                     branch,
                     static_messages: &[prompt],
                     dynamic_context: &[],
@@ -1136,7 +1133,6 @@ where
             &budget,
             agent::Turn {
                 events: self.world(member.world_id)?.events.clone(),
-                agent_id: gm_history.agent_id,
                 branch,
                 static_messages: &[role],
                 dynamic_context: &[scene_packet.as_str()],
@@ -1397,7 +1393,6 @@ where
             &budget,
             agent::Turn {
                 events: self.world(pending.world_id)?.events.clone(),
-                agent_id: pending.gm_agent_id,
                 branch,
                 static_messages: &[role],
                 dynamic_context: &[scene_packet.as_str()],
@@ -2788,14 +2783,7 @@ mod tests {
             .unwrap();
         let requesting_tool_execution_id = crate::store::record_tool_call_for_test(
             &store,
-            member.agent_id,
-            Some(
-                store
-                    .agent_branch(member.agent_id)
-                    .await
-                    .unwrap()
-                    .branch_id(),
-            ),
+            store.agent_branch(member.agent_id).await.unwrap(),
             Some(sequence.id),
             "say-1",
             "say",
@@ -4047,9 +4035,10 @@ mod tests {
         }
 
         let branch_id = store
-            .branch_id_for_agent(member.agent_id)
+            .agent_branch(member.agent_id)
             .await
-            .expect("branch should resolve");
+            .expect("branch should resolve")
+            .branch_id();
         let summary = store
             .latest_summary_for_branch(branch_id)
             .await

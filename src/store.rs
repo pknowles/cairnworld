@@ -677,8 +677,7 @@ impl TryFrom<SummaryRow> for Summary {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingCompaction {
-    pub agent_id: i64,
-    pub branch_id: i64,
+    pub branch: AgentBranch,
     /// The branch position this obligation covers: the reply (or
     /// capacity-rejected history) that made compaction due.
     pub position: i64,
@@ -712,6 +711,7 @@ pub struct CompactionPolicy<'a> {
 
 #[derive(Debug, FromRow)]
 struct PendingCompactionRow {
+    world_id: i64,
     agent_id: i64,
     branch_id: i64,
     position: i64,
@@ -728,8 +728,11 @@ impl TryFrom<PendingCompactionRow> for PendingCompaction {
 
     fn try_from(row: PendingCompactionRow) -> Result<Self> {
         Ok(Self {
-            agent_id: row.agent_id,
-            branch_id: row.branch_id,
+            branch: AgentBranch {
+                world_id: row.world_id,
+                agent_id: row.agent_id,
+                branch_id: row.branch_id,
+            },
             position: row.position,
             sequence_id: row.sequence_id,
             cause_inference_id: row.cause_inference_id,
@@ -1126,28 +1129,22 @@ impl Store {
     /// sequence (`parent_tool_execution_id` NULL, `cause_inference_id` NULL),
     /// a nested call spawned by an exact tool_execution, or deferred
     /// compaction (its triggering inference as `cause_inference_id`).
-    /// `branch_id` selects an explicit branch (a world_gm agent has one per
-    /// group - design.md's `GroupHistory { agent_id, branch_id }`); `None`
-    /// resolves the agent's single `agent_history` branch as before.
+    /// The selected branch fixes this invocation's world and agent too.
     pub async fn start_invocation(
         &self,
         sequence_id: Option<i64>,
-        agent_id: i64,
-        branch_id: Option<i64>,
+        branch: AgentBranch,
         parent_tool_execution_id: Option<i64>,
         cause_inference_id: Option<i64>,
     ) -> Result<i64> {
-        let branch_id = match branch_id {
-            Some(branch_id) => branch_id,
-            None => self.branch_for_agent(agent_id).await?,
-        };
+        let agent_id = branch.agent_id();
         let result = sqlx::query(
             "INSERT INTO invocation (sequence_id, agent_id, branch_id, parent_tool_execution_id, cause_inference_id) \
              VALUES (?, ?, ?, ?, ?)",
         )
         .bind(sequence_id)
         .bind(agent_id)
-        .bind(branch_id)
+        .bind(branch.branch_id())
         .bind(parent_tool_execution_id)
         .bind(cause_inference_id)
         .execute(&self.pool)
@@ -1747,12 +1744,21 @@ impl Store {
     /// that must happen before that transaction, e.g. merge-time compaction,
     /// so it fails soft rather than erroring on a proposal that will end up
     /// rejected anyway).
-    pub async fn active_group_branch(&self, group_id: i64) -> Result<Option<i64>> {
-        sqlx::query_scalar("SELECT branch_id FROM \"group\" WHERE id = ? AND retired_at IS NULL")
-            .bind(group_id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("checking group {group_id} is active"))
+    pub async fn active_group_branch(&self, group_id: i64) -> Result<Option<AgentBranch>> {
+        let row = sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT \"group\".world_id, world_gm.agent_id, \"group\".branch_id \
+             FROM \"group\" JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             WHERE \"group\".id = ? AND retired_at IS NULL",
+        )
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("checking group {group_id} is active"))?;
+        Ok(row.map(|(world_id, agent_id, branch_id)| AgentBranch {
+            world_id,
+            agent_id,
+            branch_id,
+        }))
     }
 
     /// A group's world_gm identity and its own branch (design.md's
@@ -2519,7 +2525,7 @@ impl Store {
             let mut transaction = self.pool.begin().await.with_context(|| {
                 format!("starting narration delivery transaction for agent {agent_id}")
             })?;
-            let branch_id = Self::branch_for_agent_tx(&mut transaction, agent_id).await?;
+            let branch_id = history::branch_for_agent(&mut transaction, agent_id).await?;
             Self::insert_message_with_content(
                 &mut transaction,
                 branch_id,
@@ -3566,7 +3572,7 @@ impl Store {
             .begin()
             .await
             .with_context(|| format!("starting message transaction for agent {agent_id}"))?;
-        let branch_id = Self::branch_for_agent_tx(&mut transaction, agent_id).await?;
+        let branch_id = history::branch_for_agent(&mut transaction, agent_id).await?;
         let (message_id, _content_id) = Self::insert_message(
             &mut transaction,
             branch_id,
@@ -3707,21 +3713,16 @@ impl Store {
         Ok(history_entry_id)
     }
 
-    /// Every pending compaction, whichever relation owns its branch: an
-    /// ordinary agent's single `agent_history` row, or - for a world_gm
-    /// agent, which has no such row - the group whose `branch_id` it is
-    /// (design.md's `GroupHistory`). A plain `agent_history` JOIN alone would
-    /// silently exclude every world_gm branch's jobs, including at startup
-    /// recovery.
+    /// History branches retain their ownership after a group is retired.
+    /// Decode that identity once for both ordinary and GM compaction jobs.
     pub async fn pending_compactions(&self) -> Result<Vec<PendingCompaction>> {
         let rows = sqlx::query_as::<_, PendingCompactionRow>(
-            "SELECT COALESCE(agent_history.agent_id, world_gm.agent_id) AS agent_id, \
+            "SELECT agent.world_id, history_branch.agent_id, \
                     pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
                     next_input_tokens, sampling, model, static_segments \
              FROM pending_compaction \
-             LEFT JOIN agent_history ON agent_history.branch_id = pending_compaction.branch_id \
-             LEFT JOIN \"group\" ON \"group\".branch_id = pending_compaction.branch_id \
-             LEFT JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             JOIN history_branch ON history_branch.id = pending_compaction.branch_id \
+             JOIN agent ON agent.id = history_branch.agent_id \
              ORDER BY pending_compaction.branch_id",
         )
         .fetch_all(&self.pool)
@@ -3735,7 +3736,7 @@ impl Store {
     /// explicit branch because a world GM has several.
     #[cfg(test)]
     pub async fn pending_compaction(&self, agent_id: i64) -> Result<Option<PendingCompaction>> {
-        self.pending_compaction_for_branch(self.branch_for_agent(agent_id).await?)
+        self.pending_compaction_for_branch(self.agent_branch(agent_id).await?.branch_id())
             .await
     }
 
@@ -3747,13 +3748,12 @@ impl Store {
         branch_id: i64,
     ) -> Result<Option<PendingCompaction>> {
         sqlx::query_as::<_, PendingCompactionRow>(
-            "SELECT COALESCE(agent_history.agent_id, world_gm.agent_id) AS agent_id, \
+            "SELECT agent.world_id, history_branch.agent_id, \
                     pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
                     next_input_tokens, sampling, model, static_segments \
              FROM pending_compaction \
-             LEFT JOIN agent_history ON agent_history.branch_id = pending_compaction.branch_id \
-             LEFT JOIN \"group\" ON \"group\".branch_id = pending_compaction.branch_id \
-             LEFT JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             JOIN history_branch ON history_branch.id = pending_compaction.branch_id \
+             JOIN agent ON agent.id = history_branch.agent_id \
              WHERE pending_compaction.branch_id = ?",
         )
         .bind(branch_id)
@@ -3771,15 +3771,12 @@ impl Store {
     /// completed inference, so there is no final reply to attach it to.
     pub async fn enqueue_capacity_compaction(
         &self,
-        agent_id: i64,
-        branch_id: Option<i64>,
+        branch: AgentBranch,
         requested_tokens: usize,
         policy: CompactionPolicy<'_>,
     ) -> Result<()> {
-        let branch_id = match branch_id {
-            Some(branch_id) => branch_id,
-            None => self.branch_for_agent(agent_id).await?,
-        };
+        let branch_id = branch.branch_id();
+        let agent_id = branch.agent_id();
         let position: i64 =
             sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
                 .bind(branch_id)
@@ -3840,7 +3837,7 @@ impl Store {
     /// directly instead.
     #[cfg(test)]
     pub async fn latest_summary(&self, agent_id: i64) -> Result<Option<Summary>> {
-        let branch_id = self.branch_for_agent(agent_id).await?;
+        let branch_id = self.agent_branch(agent_id).await?.branch_id();
         self.latest_summary_for_branch(branch_id).await
     }
 
@@ -4305,14 +4302,6 @@ impl Store {
         Ok(inference_id)
     }
 
-    /// The world an agent belongs to.
-    /// The branch backing an agent's single writable history - the branch id
-    /// a `Segment::Messages`/`Segment::Summary` range or a compaction job is
-    /// keyed by.
-    pub async fn branch_id_for_agent(&self, agent_id: i64) -> Result<i64> {
-        self.branch_for_agent(agent_id).await
-    }
-
     pub async fn world_id_for_agent(&self, agent_id: i64) -> Result<i64> {
         sqlx::query_scalar("SELECT world_id FROM agent WHERE id = ?")
             .bind(agent_id)
@@ -4571,9 +4560,12 @@ impl Store {
         .await?;
         if !is_error {
             if let Some(covered_ranges) = covered_ranges {
-                let (summary_entry_id, _position) =
-                    Self::append_history_entry(&mut transaction, job.branch_id, EntryKind::Summary)
-                        .await?;
+                let (summary_entry_id, _position) = Self::append_history_entry(
+                    &mut transaction,
+                    job.branch.branch_id(),
+                    EntryKind::Summary,
+                )
+                .await?;
                 sqlx::query(
                     "INSERT INTO summary (history_entry_id, covered_ranges, inference_id, reason, retained_messages) VALUES (?, ?, ?, ?, ?)",
                 )
@@ -4588,17 +4580,20 @@ impl Store {
             }
             let result =
                 sqlx::query("DELETE FROM pending_compaction WHERE branch_id = ? AND position = ?")
-                    .bind(job.branch_id)
+                    .bind(job.branch.branch_id())
                     .bind(job.position)
                     .execute(&mut *transaction)
                     .await
                     .with_context(|| {
-                        format!("retiring compaction job for branch {}", job.branch_id)
+                        format!(
+                            "retiring compaction job for branch {}",
+                            job.branch.branch_id()
+                        )
                     })?;
             ensure!(
                 result.rows_affected() == 1,
                 "compaction job for branch {} changed before it could complete",
-                job.branch_id
+                job.branch.branch_id()
             );
         }
         transaction
@@ -4614,20 +4609,25 @@ impl Store {
         let mut transaction = self.pool.begin().await.with_context(|| {
             format!(
                 "starting compaction abandonment for branch {}",
-                job.branch_id
+                job.branch.branch_id()
             )
         })?;
         let result =
             sqlx::query("DELETE FROM pending_compaction WHERE branch_id = ? AND position = ?")
-                .bind(job.branch_id)
+                .bind(job.branch.branch_id())
                 .bind(job.position)
                 .execute(&mut *transaction)
                 .await
-                .with_context(|| format!("retiring compaction job for branch {}", job.branch_id))?;
+                .with_context(|| {
+                    format!(
+                        "retiring compaction job for branch {}",
+                        job.branch.branch_id()
+                    )
+                })?;
         ensure!(
             result.rows_affected() == 1,
             "compaction job for branch {} changed before it could complete",
-            job.branch_id
+            job.branch.branch_id()
         );
         transaction
             .commit()
@@ -5281,7 +5281,7 @@ impl Store {
         agent_id: i64,
         position: i64,
     ) -> Option<i64> {
-        let branch_id = self.branch_for_agent(agent_id).await.unwrap();
+        let branch_id = self.agent_branch(agent_id).await.unwrap().branch_id();
         sqlx::query_scalar(
             "SELECT message.source_inference_id FROM message \
              JOIN history_entry ON history_entry.id = message.id \
@@ -5319,13 +5319,13 @@ impl Store {
 #[cfg(test)]
 pub(crate) async fn record_tool_call_for_test(
     store: &Store,
-    agent_id: i64,
-    branch_id: Option<i64>,
+    branch: AgentBranch,
     sequence_id: Option<i64>,
     call_id: &str,
     tool: &str,
     arguments: &str,
 ) -> i64 {
+    let agent_id = branch.agent_id();
     let request = Request {
         messages: vec![],
         tools: vec![],
@@ -5338,17 +5338,14 @@ pub(crate) async fn record_tool_call_for_test(
         Some(id) => id,
         None => {
             store
-                .begin_sequence(
-                    store.world_id_for_agent(agent_id).await.unwrap(),
-                    "test tool call",
-                )
+                .begin_sequence(branch.world_id(), "test tool call")
                 .await
                 .unwrap()
                 .id
         }
     };
     let invocation_id = store
-        .start_invocation(Some(sequence_id), agent_id, branch_id, None, None)
+        .start_invocation(Some(sequence_id), branch, None, None)
         .await
         .unwrap();
     let inference_id = store
@@ -5398,11 +5395,12 @@ mod tests {
         model: &str,
         duration_ms: u64,
     ) -> Result<i64> {
+        let branch = store.agent_branch(agent_id).await?;
         let sequence = store
-            .begin_sequence(store.world_id_for_agent(agent_id).await?, "test inference")
+            .begin_sequence(branch.world_id(), "test inference")
             .await?;
         let invocation_id = store
-            .start_invocation(Some(sequence.id), agent_id, None, None, None)
+            .start_invocation(Some(sequence.id), branch, None, None)
             .await?;
         let inference_id = store
             .start_inference(InferenceInput {
@@ -5428,12 +5426,12 @@ mod tests {
         content: &str,
         covers_through_position: i64,
     ) -> Result<i64> {
-        let branch_id = store.agent_branch(agent_id).await?.branch_id();
+        let branch = store.agent_branch(agent_id).await?;
+        let branch_id = branch.branch_id();
         let sampling = Sampling::default();
         store
             .enqueue_capacity_compaction(
-                agent_id,
-                Some(branch_id),
+                branch,
                 1,
                 CompactionPolicy {
                     sequence_id: None,
@@ -5449,10 +5447,10 @@ mod tests {
             .await?
             .context("test summary did not queue compaction")?;
         let sequence = store
-            .begin_sequence(store.world_id_for_agent(agent_id).await?, "test summary")
+            .begin_sequence(branch.world_id(), "test summary")
             .await?;
         let invocation_id = store
-            .start_invocation(Some(sequence.id), agent_id, Some(branch_id), None, None)
+            .start_invocation(Some(sequence.id), branch, None, None)
             .await?;
         let inference_id = store
             .start_inference(InferenceInput {
@@ -5643,7 +5641,7 @@ mod tests {
             )
             .await
             .expect("request should assemble");
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         let stored_reasoning: String = sqlx::query_scalar(
             "SELECT json_extract(recorded_content.body, '$.reasoning') FROM message \
              JOIN history_entry ON history_entry.id = message.id \
@@ -6215,8 +6213,7 @@ mod tests {
         let args = r#"{"description":"look through the rear window"}"#;
         let requesting_tool_execution_id = record_tool_call_for_test(
             &store,
-            installed.member.agent_id,
-            None,
+            store.agent_branch(installed.member.agent_id).await.unwrap(),
             Some(sequence.id),
             "call-1",
             "look",
@@ -6252,8 +6249,7 @@ mod tests {
 
         let approving_tool_execution_id = record_tool_call_for_test(
             &store,
-            group_gm,
-            Some(action.gm_branch_id),
+            store.history_branch(action.gm_branch_id).await.unwrap(),
             Some(sequence.id),
             "approve-1",
             "approve_action",
@@ -6369,8 +6365,7 @@ mod tests {
             .unwrap();
         let requesting_tool_execution_id = record_tool_call_for_test(
             &store,
-            installed.member.agent_id,
-            None,
+            store.agent_branch(installed.member.agent_id).await.unwrap(),
             Some(sequence.id),
             "call-1",
             "take",
@@ -6389,8 +6384,7 @@ mod tests {
             .unwrap();
         let approving_tool_execution_id = record_tool_call_for_test(
             &store,
-            action.gm_agent_id,
-            Some(action.gm_branch_id),
+            store.history_branch(action.gm_branch_id).await.unwrap(),
             Some(sequence.id),
             "approve-1",
             "approve_action",
@@ -6493,8 +6487,7 @@ mod tests {
             .unwrap();
         let requesting_tool_execution_id = record_tool_call_for_test(
             &store,
-            installed.member.agent_id,
-            None,
+            store.agent_branch(installed.member.agent_id).await.unwrap(),
             Some(sequence.id),
             "call-1",
             "take",
@@ -6513,8 +6506,7 @@ mod tests {
             .unwrap();
         let approving_tool_execution_id = record_tool_call_for_test(
             &store,
-            action.gm_agent_id,
-            Some(action.gm_branch_id),
+            store.history_branch(action.gm_branch_id).await.unwrap(),
             Some(sequence.id),
             "approve-1",
             "approve_action",
@@ -6533,8 +6525,7 @@ mod tests {
             .unwrap();
         let reject_tool_execution_id = record_tool_call_for_test(
             &store,
-            action.gm_agent_id,
-            Some(action.gm_branch_id),
+            store.history_branch(action.gm_branch_id).await.unwrap(),
             Some(sequence.id),
             "reject-1",
             "reject_action",
@@ -6592,7 +6583,7 @@ mod tests {
     async fn inference_identity_survives_execution_failure_and_restart() {
         let (store, db, agent, segments, request) = store_with_history().await;
         let invocation_id = store
-            .start_invocation(None, agent, None, None, None)
+            .start_invocation(None, store.agent_branch(agent).await.unwrap(), None, None)
             .await
             .unwrap();
         let id = store
@@ -6720,7 +6711,7 @@ mod tests {
         let world = store.create_world("test world").await.unwrap();
         let agent = store.create_agent(world).await.unwrap();
         let invocation = store
-            .start_invocation(None, agent, None, None, None)
+            .start_invocation(None, store.agent_branch(agent).await.unwrap(), None, None)
             .await
             .unwrap();
         let inference_id = store
@@ -6777,7 +6768,7 @@ mod tests {
         // (design.md's Chat schema: "No uniqueness constraint on body") -
         // sharing must be an explicit reference, not accidental interning.
         let other_invocation = store
-            .start_invocation(None, agent, None, None, None)
+            .start_invocation(None, store.agent_branch(agent).await.unwrap(), None, None)
             .await
             .unwrap();
         let other_inference_id = store
@@ -7005,7 +6996,7 @@ mod tests {
             .execute(&store.pool)
             .await
             .unwrap();
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         sqlx::query(
             "DELETE FROM message WHERE id = (SELECT id FROM history_entry WHERE branch_id = ? AND position = 1)",
         )
@@ -7049,8 +7040,8 @@ mod tests {
             .await
             .unwrap();
         let other = store.create_agent(world).await.unwrap();
-        let other_branch = store.branch_id_for_agent(other).await.unwrap();
-        let own_branch = store.branch_id_for_agent(agent).await.unwrap();
+        let other_branch = store.agent_branch(other).await.unwrap().branch_id();
+        let own_branch = store.agent_branch(agent).await.unwrap().branch_id();
         if let Segment::Messages { messages } = &mut segments[1] {
             messages.branch_id = other_branch;
         }
@@ -7110,7 +7101,7 @@ mod tests {
             .await
             .unwrap();
         let other = store.create_agent(world).await.unwrap();
-        let other_branch = store.branch_id_for_agent(other).await.unwrap();
+        let other_branch = store.agent_branch(other).await.unwrap().branch_id();
         let Segment::Messages {
             messages: own_range,
         } = segments[1].clone()
@@ -7238,7 +7229,12 @@ mod tests {
         // The reply that crossed the threshold served this sequence.
         let trigger = store.begin_sequence(world, "player message").await.unwrap();
         let reply_invocation = store
-            .start_invocation(Some(trigger.id), agent, None, None, None)
+            .start_invocation(
+                Some(trigger.id),
+                store.agent_branch(agent).await.unwrap(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let reply_inference = store
@@ -7291,7 +7287,12 @@ mod tests {
         // invocation has no parent tool call; it records its triggering
         // inference as cause_inference_id instead (design.md).
         let compaction_invocation = store
-            .start_invocation(job.sequence_id, agent, None, None, Some(reply_inference))
+            .start_invocation(
+                job.sequence_id,
+                store.agent_branch(agent).await.unwrap(),
+                None,
+                Some(reply_inference),
+            )
             .await
             .unwrap();
         let summary_inference = store
@@ -7309,7 +7310,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         store
             .finish_summary_inference(
                 summary_inference,
@@ -7376,6 +7377,7 @@ mod tests {
             .unwrap();
         let gm_history = store.group_gm_history(group_id).await.unwrap();
 
+        assert!(store.agent_branch(gm_history.agent_id).await.is_err());
         assert!(
             store
                 .pending_compaction_for_branch(gm_history.branch_id)
@@ -7392,8 +7394,7 @@ mod tests {
         let reply_invocation = store
             .start_invocation(
                 Some(trigger.id),
-                gm_history.agent_id,
-                Some(gm_history.branch_id),
+                store.history_branch(gm_history.branch_id).await.unwrap(),
                 None,
                 None,
             )
@@ -7439,14 +7440,14 @@ mod tests {
             .await
             .unwrap()
             .expect("the over-threshold GM reply queued compaction on its own branch");
-        assert_eq!(job.agent_id, gm_history.agent_id);
+        assert_eq!(job.branch, store.group_branch(group_id).await.unwrap());
         assert!(
             store
                 .pending_compactions()
                 .await
                 .unwrap()
                 .iter()
-                .any(|job| job.branch_id == gm_history.branch_id),
+                .any(|job| job.branch.branch_id() == gm_history.branch_id),
             "the unfiltered listing (used at startup recovery) must also see a world_gm's job, \
              not silently exclude it the way a bare agent_history JOIN would"
         );
@@ -7458,8 +7459,7 @@ mod tests {
         let second_invocation = store
             .start_invocation(
                 Some(trigger.id),
-                gm_history.agent_id,
-                Some(gm_history.branch_id),
+                store.history_branch(gm_history.branch_id).await.unwrap(),
                 None,
                 None,
             )
@@ -7514,18 +7514,12 @@ mod tests {
         // branch on invocation start, since start_invocation falling back to
         // branch_for_agent would fail for a world_gm agent.
         let compaction_invocation = store
-            .start_invocation(
-                job.sequence_id,
-                job.agent_id,
-                Some(job.branch_id),
-                None,
-                Some(reply_inference),
-            )
+            .start_invocation(job.sequence_id, job.branch, None, Some(reply_inference))
             .await
             .unwrap();
         let summary_inference = store
             .start_inference(InferenceInput {
-                agent_id: job.agent_id,
+                agent_id: job.branch.agent_id(),
                 sequence_id: job.sequence_id,
                 invocation_id: compaction_invocation,
                 segments: &[],
@@ -7548,7 +7542,7 @@ mod tests {
                 }),
                 1,
                 Some(&[PositionRange {
-                    branch_id: job.branch_id,
+                    branch_id: job.branch.branch_id(),
                     first_position: 0,
                     last_position: job.position,
                 }]),
@@ -7622,7 +7616,12 @@ mod tests {
         ) {
             let trigger = store.begin_sequence(world_id, "seed").await.unwrap();
             let invocation = store
-                .start_invocation(Some(trigger.id), agent_id, Some(branch_id), None, None)
+                .start_invocation(
+                    Some(trigger.id),
+                    store.history_branch(branch_id).await.unwrap(),
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
             let inference = store
@@ -7665,13 +7664,7 @@ mod tests {
                 .unwrap()
                 .expect("the settled reply must have queued compaction on its own branch");
             let summary_invocation = store
-                .start_invocation(
-                    job.sequence_id,
-                    job.agent_id,
-                    Some(job.branch_id),
-                    None,
-                    Some(inference),
-                )
+                .start_invocation(job.sequence_id, job.branch, None, Some(inference))
                 .await
                 .unwrap();
             let summary_inference = store
@@ -7896,8 +7889,7 @@ mod tests {
         let invocation = store
             .start_invocation(
                 Some(trigger.id),
-                gm_history.agent_id,
-                Some(gm_history.branch_id),
+                store.history_branch(gm_history.branch_id).await.unwrap(),
                 None,
                 None,
             )
@@ -8063,7 +8055,7 @@ mod tests {
             .append_message(agent, &Message::text(Role::User, "And then?"))
             .await
             .unwrap();
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         let new_position: i64 =
             sqlx::query_scalar("SELECT position FROM history_entry WHERE id = ?")
                 .bind(new_message)
@@ -8136,7 +8128,7 @@ mod tests {
     #[tokio::test]
     async fn an_assembled_request_must_be_a_well_formed_conversation() {
         let (store, _db, agent, ..) = store_with_history().await;
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         let prompt = store.store_prompt_text("Guide.").await.unwrap();
         let system = Segment::Text {
             text: prompt,
@@ -8311,7 +8303,12 @@ mod tests {
             .await
             .unwrap();
         let other_invocation = store
-            .start_invocation(Some(other_sequence.id), other_agent, None, None, None)
+            .start_invocation(
+                Some(other_sequence.id),
+                store.agent_branch(other_agent).await.unwrap(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let other_inference = store
@@ -8347,7 +8344,7 @@ mod tests {
         assert!(format!("{agent_error:#}").contains("is not in world"));
 
         let local_agent = store.create_agent(world_id).await.unwrap();
-        let foreign_branch = Store::branch_for_agent(&store, other_agent).await.unwrap();
+        let foreign_branch = store.agent_branch(other_agent).await.unwrap().branch_id();
         let branch_error = store
             .branch_for_viewer(owner.id, world_id, local_agent, foreign_branch)
             .await
@@ -8395,7 +8392,12 @@ mod tests {
             .await
             .unwrap();
         let root_invocation = store
-            .start_invocation(Some(sequence.id), agent, None, None, None)
+            .start_invocation(
+                Some(sequence.id),
+                store.agent_branch(agent).await.unwrap(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let parent = store
@@ -8430,8 +8432,7 @@ mod tests {
         let child_invocation = store
             .start_invocation(
                 Some(sequence.id),
-                agent,
-                None,
+                store.agent_branch(agent).await.unwrap(),
                 Some(parent_tool_execution_id),
                 None,
             )
@@ -8491,7 +8492,7 @@ mod tests {
         }
         // A failed inference for this agent.
         let failed_invocation = store
-            .start_invocation(None, agent, None, None, None)
+            .start_invocation(None, store.agent_branch(agent).await.unwrap(), None, None)
             .await
             .unwrap();
         let failed = store
@@ -8515,7 +8516,7 @@ mod tests {
             .unwrap();
         // A compaction covering the first two messages.
         let summary_invocation = store
-            .start_invocation(None, agent, None, None, None)
+            .start_invocation(None, store.agent_branch(agent).await.unwrap(), None, None)
             .await
             .unwrap();
         let summary_inference = store
@@ -8533,11 +8534,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         store
             .enqueue_capacity_compaction(
-                agent,
-                Some(branch_id),
+                store.history_branch(branch_id).await.unwrap(),
                 1,
                 CompactionPolicy {
                     sequence_id: None,
@@ -8752,7 +8752,7 @@ mod tests {
             .append_message(agent, &Message::text(Role::User, "only message"))
             .await
             .unwrap();
-        let branch_id = Store::branch_for_agent(&store, agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         // A position well past this agent's one real entry, on its real branch.
         let bogus_cursor = RawHistoryCursor {
             branch_id,

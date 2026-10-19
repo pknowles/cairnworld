@@ -22,11 +22,11 @@ server.on("upgrade", (request, socket, head) => {
 checkBrowser(server, async (tab, port) => {
   await tab.goto(`http://127.0.0.1:${port}/`);
   const opening = "The player has entered the world and has not chosen to roll yet. Speak directly to them.";
-  await tab.waitForFunction(() => !document.querySelector('input[name="text"]').disabled);
+  await tab.waitForFunction(() => !document.querySelector('#message button[type="submit"]').disabled);
   assert.equal(await tab.locator("#chat").getByText(opening, { exact: true }).count(), 0,
     "snapshot and websocket catch-up must hide the entry instruction");
   await tab.reload();
-  await tab.waitForFunction(() => !document.querySelector('input[name="text"]').disabled);
+  await tab.waitForFunction(() => !document.querySelector('#message button[type="submit"]').disabled);
   assert.equal(await tab.locator("#chat").getByText(opening, { exact: true }).count(), 0,
     "reloading and reconnecting must keep instructions out of player chat");
   const sequenceEntry = tab.locator(`[data-inspect-sequence="${fixture.sequence_id}"]`);

@@ -15,14 +15,27 @@ access rules; [jscpd-rs](https://github.com/vv-bogdanov/jscpd-rs) provides the
 jscpd clone detector; [big-code-analysis](https://github.com/dekobon/big-code-analysis)
 provides bca function metrics/checks. Use these tools, not similarly named crates.
 
-Steps 1-4 completed and verified, 2026-10-19. Next: step 5.
+Steps 1-4 and reviewed simplifications completed and verified, 2026-10-19.
+Next: step 5's feature-module migration and checked SQL.
 
-Startup-order simplification completed and verified, 2026-10-19. Backend loading
-runs outside the readiness lock; Game construction and readiness publication run
+Backend loading runs outside the readiness lock; Game construction and readiness publication run
 inside it. Each existing world starts once; later installations pass their World
 directly to worker startup. Queue completion covers both installation boundaries.
-All 113 ordinary tests, browser and configured-Qwen checks, and native/WASM Clippy
-pass. Self-review followed the AGENTS.md checklist and both standards documents.
+
+Runtime history selection and deferred compaction carry AgentBranch instead of
+redundant agent identifiers and optional branch selectors. The branch_for_agent
+query accepts the caller's connection; its _tx twin is gone. Historical branches
+and transaction-time group activity checks are preserved. Replay uses the exact
+recorded branch, including a world GM's group history.
+
+Browser verification exposed early clicks reaching server-rendered controls
+before hydration. The Developer Mode warning and form use native dialog commands
+instead of hydrated open/close handlers. Waiting to enable
+the button would add lifecycle state; retaining JavaScript would keep this
+unnecessary hydration dependency. The browser check opens/cancels with JavaScript
+assets held, then releases assets before confirmation and checks all errors.
+The inference browser check waits for the server's CanAct signal (enabled
+Send), since the text input deliberately permits typing before that signal.
 
 World state and notification channels are constructed before model loading and
 shared by the web layer and Game. Game owns model-backed worker lifetimes;
@@ -30,12 +43,15 @@ Store owns no live channels. Operations publish directly after their writes, and
 inference values retain their world channel through streaming, completion and
 deferred compaction. Finishing consumes the inference value.
 
-Verification: 113 ordinary Rust tests pass in parallel, including world/channel
+Verification: 114 ordinary Rust tests pass in parallel, including world/channel
 isolation, model-load failure, worker shutdown and actual startup-resumed
 compaction. Browser checks (including negative error-channel checks), real
 Qwen3.5/browser evidence and installation-boundary checks, formatting,
 server/WASM Clippy and the normal server build pass. No lint suppressions or
-application unsafe code were introduced.
+application unsafe code were introduced. Real CLI replay reproduces the old GM
+failure and verifies the fix retains the request hash and branch without changing
+chat or compaction state. Self-review followed the AGENTS.md checklist and both
+standards documents.
 
 ## Findings
 

@@ -372,6 +372,7 @@ async fn run_chat(
         .map(|content| Message::text(Role::System, content))
         .collect::<Vec<_>>();
     let tools: [tools::Tool; 0] = [];
+    let branch = store.agent_branch(agent).await?;
 
     let mut editor = DefaultEditor::new().context("starting chat line editor")?;
     loop {
@@ -394,7 +395,7 @@ async fn run_chat(
         // Do this before appending the next user row: an earlier compaction
         // must never see a newer chat message in the history it summarizes.
         backend
-            .before_agent(&store, agent, None, &events)
+            .before_agent(&store, branch, &events)
             .await
             .context("finishing earlier deferred work for this chat")?;
 
@@ -412,8 +413,7 @@ async fn run_chat(
             &budget,
             agent::Turn {
                 events: events.clone(),
-                agent_id: agent,
-                branch: store.agent_branch(agent).await?,
+                branch,
                 static_messages: &static_messages,
                 dynamic_context: &[],
                 tools: &tools,
@@ -479,16 +479,16 @@ async fn run_replay(
     // inference belongs to one - but this invocation is never finished as
     // part of a live turn; it exists only to give the replayed inference a
     // valid parent.
-    let world_id = store
-        .world_id_for_agent(recorded.agent_id)
+    let branch = store
+        .history_branch(recorded.branch_id)
         .await
-        .context("resolving replayed inference's world")?;
+        .context("resolving replayed inference's history branch")?;
     let sequence = store
-        .begin_sequence(world_id, "detached replay")
+        .begin_sequence(branch.world_id(), "detached replay")
         .await
         .context("starting detached replay sequence")?;
     let invocation_id = store
-        .start_invocation(Some(sequence.id), recorded.agent_id, None, None, None)
+        .start_invocation(Some(sequence.id), branch, None, None)
         .await
         .context("starting detached replay invocation")?;
     let run = context::run_recipe(

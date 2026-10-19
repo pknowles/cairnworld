@@ -128,7 +128,6 @@ impl Drop for ActiveAgent {
 /// live output remain invocation-local rather than becoming persisted state.
 pub struct Turn<'a> {
     pub events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
-    pub agent_id: i64,
     /// The branch selected and validated before this invocation begins.
     pub branch: AgentBranch,
     pub static_messages: &'a [Message],
@@ -170,18 +169,11 @@ impl<'a> InvocationGuard<'a> {
     async fn start(
         store: &'a Store,
         sequence_id: Option<i64>,
-        agent_id: i64,
-        branch_id: Option<i64>,
+        branch: AgentBranch,
         parent_tool_execution_id: Option<i64>,
     ) -> Result<Self> {
         let invocation_id = store
-            .start_invocation(
-                sequence_id,
-                agent_id,
-                branch_id,
-                parent_tool_execution_id,
-                None,
-            )
+            .start_invocation(sequence_id, branch, parent_tool_execution_id, None)
             .await
             .context("starting agent invocation")?;
         Ok(Self {
@@ -246,24 +238,18 @@ pub async fn complete_with_call_context<B: Backend>(
     mut on_token: impl FnMut(&str) + Send,
     mut on_activity: impl FnMut(String),
 ) -> Result<Settled> {
-    let _active = call.enter(turn.agent_id)?;
+    let _active = call.enter(turn.branch.agent_id())?;
     let invocation = InvocationGuard::start(
         store,
         call.sequence_id,
-        turn.agent_id,
-        Some(turn.branch.branch_id()),
+        turn.branch,
         call.parent_tool_execution_id,
     )
     .await?;
     let invocation_id = invocation.invocation_id;
     let result: Result<Settled> = async {
         backend
-            .before_agent(
-                store,
-                turn.agent_id,
-                Some(turn.branch.branch_id()),
-                &turn.events,
-            )
+            .before_agent(store, turn.branch, &turn.events)
             .await
             .context("waiting for earlier deferred work for this agent")?;
         let definitions =
@@ -280,7 +266,6 @@ pub async fn complete_with_call_context<B: Backend>(
                 backend,
                 context::RecordedCompletion {
                     events: turn.events.clone(),
-                    agent_id: turn.agent_id,
                     branch: turn.branch,
                     sequence_id: call.sequence_id,
                     invocation_id,
@@ -305,12 +290,7 @@ pub async fn complete_with_call_context<B: Backend>(
             // reply is done.
             let Content::ToolCalls(calls) = &response.content else {
                 backend
-                    .after_agent(
-                        store,
-                        turn.agent_id,
-                        Some(turn.branch.branch_id()),
-                        &turn.events,
-                    )
+                    .after_agent(store, turn.branch, &turn.events)
                     .await
                     .context("admitting any due deferred compaction")?;
                 let output_content_id = completion
@@ -492,16 +472,15 @@ async fn compact_merge_sources<B: Backend>(
             continue;
         };
         for &group_id in group_ids {
-            let Some(branch_id) = store.active_group_branch(group_id).await? else {
+            let Some(branch) = store.active_group_branch(group_id).await? else {
                 continue;
             };
-            let gm_history = store.group_gm_history(group_id).await?;
+            let branch_id = branch.branch_id();
             if store.uncovered_message_count(branch_id).await? > limits.merge_branch_messages as i64
             {
                 store
                     .enqueue_capacity_compaction(
-                        gm_history.agent_id,
-                        Some(branch_id),
+                        branch,
                         0,
                         CompactionPolicy {
                             sequence_id: None,
@@ -517,7 +496,7 @@ async fn compact_merge_sources<B: Backend>(
                     })?;
             }
             backend
-                .before_agent(store, gm_history.agent_id, Some(branch_id), &turn.events)
+                .before_agent(store, branch, &turn.events)
                 .await
                 .with_context(|| {
                     format!("waiting for compaction on merge source branch {branch_id}")
@@ -595,7 +574,6 @@ mod tests {
     fn scripted_turn<'a>(branch: AgentBranch, tools: &'a [Tool]) -> Turn<'a> {
         Turn {
             events: tokio::sync::broadcast::channel(256).0,
-            agent_id: branch.agent_id(),
             branch,
             static_messages: &[],
             dynamic_context: &[],
@@ -1139,9 +1117,14 @@ mod tests {
     #[should_panic(expected = "dropped without an explicit outcome")]
     async fn invocation_guard_panics_in_debug_if_dropped_unfinished() {
         let (store, _db, agent_id) = test_store().await;
-        let guard = InvocationGuard::start(&store, None, agent_id, None, None)
-            .await
-            .unwrap();
+        let guard = InvocationGuard::start(
+            &store,
+            None,
+            store.agent_branch(agent_id).await.unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
         drop(guard);
     }
 
@@ -1188,8 +1171,7 @@ mod tests {
         let split_invocation = store
             .start_invocation(
                 Some(split_trigger.id),
-                gm_history.agent_id,
-                Some(gm_history.branch_id),
+                store.history_branch(gm_history.branch_id).await.unwrap(),
                 None,
                 None,
             )
@@ -1259,8 +1241,7 @@ mod tests {
             let invocation = store
                 .start_invocation(
                     Some(trigger.id),
-                    over_history.agent_id,
-                    Some(over_history.branch_id),
+                    store.history_branch(over_history.branch_id).await.unwrap(),
                     None,
                     None,
                 )
@@ -1318,7 +1299,6 @@ mod tests {
         let backend = scheduler.foreground();
         let turn = Turn {
             events: tokio::sync::broadcast::channel(256).0,
-            agent_id: over_history.agent_id,
             branch: store.group_branch(over_group_id).await.unwrap(),
             static_messages: &[],
             dynamic_context: &[],

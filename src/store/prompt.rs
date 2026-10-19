@@ -163,7 +163,7 @@ mod tests {
         .await
         .unwrap();
         let invocation_id = store
-            .start_invocation(None, agent, None, None, None)
+            .start_invocation(None, store.agent_branch(agent).await.unwrap(), None, None)
             .await
             .unwrap();
         let mut ids = Vec::new();

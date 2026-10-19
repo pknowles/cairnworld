@@ -51,14 +51,11 @@ corrections below have landed, including bounded history ranges
   different primary key) for a `FailedInference` row, and `ui.rs` renders it
   as a clickable link to that inference's view, matching the existing pattern
   for a summary's source-inference link.
-- **Fixed:** `store::history::AgentBranch` is the private-field proof that a
-  selected branch belongs to its world and agent. Turns, context assembly and
-  live history take it directly; `agent_branch`, `group_branch`, and the
-  browser-gated `branch_for_viewer` are its only constructors. `RawCursor`
-  validates its fixed head and next key before paging. `reach()` is the single
-  recursive traversal definition, whose JSON result feeds the literal raw-page
-  query; there is no whole-index load, sentinel cursor or production-only test
-  traversal. The browser suite confirms the shared inspection types hydrate.
+- `store::history::AgentBranch` carries validated ownership through turns,
+  invocations, deferred compaction and replay. Browser selection uses
+  `branch_for_viewer`; stored jobs decode ownership from their history branch.
+  The connection-based `branch_for_agent` query also works inside transactions.
+  `RawCursor` validates paging; `reach()` supplies the shared bounded traversal.
 
 D (groups and their heads) and E (raw fields/evidence, including the
 product-path verification against real model boundary captures) are complete.
@@ -729,12 +726,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   /world/:id/inspect/*` routes (sequences, one sequence, one inference, agents,
   one agent's history, objects) each resolve the signed-in viewer and return
   JSON, deferring the active-membership-and-enabled-mode check to the `Store`
-  query. Rendering of these lives in a later Developer Mode step. The World
-  detail page hydrates (`ui::DeveloperModeEnableButton` island) so the owner's
-  enable control can hold the required warning behind a client-side confirm
-  step before it submits the real POST; the indicator ("Developer Mode is on")
-  is visible to every active member from plain SSR, and disabling is a plain
-  form with no warning, since only enabling exposes new data. `router()`
+  query. World detail's native warning dialog gates the owner's enable POST;
+  every active member sees the enabled indicator. Disabling is a plain form.
+  `router()`
   builds the complete route table from an `App` and session store without
   binding a listener, so `web::tests` drives it directly with real
   `tower::ServiceExt::oneshot` requests against a real `Store` and session
@@ -802,13 +796,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   no parallel handwritten JavaScript loop.
   The loading island displays the complete server startup error when available
   rather than hiding it behind an HTTP status.
-  `DeveloperModeEnableButton` is a third island: it renders a real
-  `<dialog class="modal">` (daisyUI's modal convention), opened via
-  `HtmlDialogElement::show_modal()` on click and closed via `.close()` on
-  cancel, holding the warning text and the real toggle form's submit button -
-  the SSR markup always includes the dialog and its form (so the toggle works
-  without JS), just closed by default; there is still no fetch/socket of its
-  own, the form is a normal POST to `/world/{id}/developer-mode`.
+  `DeveloperModeEnableButton` renders a native dialog and confirmation form;
+  HTML commands open/cancel it before hydration. Confirmation uses the normal
+  POST to `/world/{id}/developer-mode`. The browser check holds JavaScript assets
+  while opening/cancelling, then releases them before confirming.
   `ChatEntry`/`ServerEvent::Entry` carry an optional `id` and `sequence_id`
   for Developer Mode's chat-entry inspect button (design.md: Developer Mode).
   `web.rs::play_connection` tracks a message-id cursor across the whole

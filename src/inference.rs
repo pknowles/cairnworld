@@ -106,9 +106,8 @@ where
     pub async fn resume(&self, store: &Store, worlds: &Worlds) -> Result<()> {
         store.interrupt_open_inferences().await?;
         for job in store.pending_compactions().await? {
-            let world_id = store.world_id_for_agent(job.agent_id).await?;
-            let events = World::get(worlds, world_id)?.events.clone();
-            self.admit_deferred(store.clone(), job.branch_id, events)
+            let events = World::get(worlds, job.branch.world_id())?.events.clone();
+            self.admit_deferred(store.clone(), job.branch.branch_id(), events)
                 .await;
         }
         Ok(())
@@ -282,34 +281,25 @@ where
     async fn before_agent(
         &self,
         store: &Store,
-        agent_id: i64,
-        branch_id: Option<i64>,
+        branch: crate::store::AgentBranch,
         events: &broadcast::Sender<DevEvent>,
     ) -> Result<()> {
         // A pending job was created with the previous final reply. It must
         // finish before this branch can assemble another context, otherwise
         // the same over-threshold history would be inferred again. Other
         // agents/branches remain schedulable while this one waits.
-        let branch_id = match branch_id {
-            Some(branch_id) => branch_id,
-            None => store.branch_id_for_agent(agent_id).await?,
-        };
         self.scheduler
-            .wait_for_branch(store, branch_id, events)
+            .wait_for_branch(store, branch.branch_id(), events)
             .await
     }
 
     async fn after_agent(
         &self,
         store: &Store,
-        agent_id: i64,
-        branch_id: Option<i64>,
+        branch: crate::store::AgentBranch,
         events: &broadcast::Sender<DevEvent>,
     ) -> Result<()> {
-        let branch_id = match branch_id {
-            Some(branch_id) => branch_id,
-            None => store.branch_id_for_agent(agent_id).await?,
-        };
+        let branch_id = branch.branch_id();
         if store
             .pending_compaction_for_branch(branch_id)
             .await?
@@ -462,7 +452,7 @@ mod tests {
             },
         };
         let invocation_id = store
-            .start_invocation(None, agent, None, None, None)
+            .start_invocation(None, store.agent_branch(agent).await.unwrap(), None, None)
             .await
             .unwrap();
         let inference_id = store
@@ -521,7 +511,7 @@ mod tests {
         let events = World::get(&worlds, world).unwrap().events.clone();
         let mut notifications = events.subscribe();
         scheduler.resume(&store, &worlds).await.unwrap();
-        let branch_id = store.branch_id_for_agent(agent).await.unwrap();
+        let branch_id = store.agent_branch(agent).await.unwrap().branch_id();
         scheduler
             .wait_for_branch(&store, branch_id, &events)
             .await

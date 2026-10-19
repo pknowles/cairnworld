@@ -41,15 +41,11 @@ pub trait Backend {
         self.complete(request, on_token)
     }
 
-    /// `branch_id` is the explicit branch this turn is using, when the
-    /// agent's single `agent_history` branch is not it (a world_gm agent
-    /// plays several groups, each its own branch - design.md's
-    /// `GroupHistory`). `None` for every other agent kind.
+    /// Finish earlier work for the exact history selected by this turn.
     async fn before_agent(
         &self,
         _store: &crate::store::Store,
-        _agent_id: i64,
-        _branch_id: Option<i64>,
+        _branch: crate::store::AgentBranch,
         _events: &tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
     ) -> Result<()> {
         Ok(())
@@ -58,8 +54,7 @@ pub trait Backend {
     async fn after_agent(
         &self,
         _store: &crate::store::Store,
-        _agent_id: i64,
-        _branch_id: Option<i64>,
+        _branch: crate::store::AgentBranch,
         _events: &tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
     ) -> Result<()> {
         Ok(())

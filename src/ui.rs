@@ -2316,27 +2316,13 @@ fn chat_activity_text(activity: ChatActivity) -> &'static str {
 /// Disabling needs no warning, so it is a plain form outside this island
 /// (see `WorldDetail`). Recording always runs regardless of this toggle -
 /// only visibility to active members changes.
-#[island]
+#[component]
 pub fn DeveloperModeEnableButton(world_id: i64) -> impl IntoView {
-    let dialog = NodeRef::<leptos::html::Dialog>::new();
+    let dialog_id = format!("developer-mode-warning-{world_id}");
     let action_path = format!("/world/{world_id}/developer-mode");
-    let open_dialog = move |_| {
-        #[cfg(feature = "hydrate")]
-        if let Some(dialog) = dialog.get() {
-            let dialog: web_sys::HtmlDialogElement = dialog.unchecked_into();
-            let _ = dialog.show_modal();
-        }
-    };
-    let close_dialog = move |_| {
-        #[cfg(feature = "hydrate")]
-        if let Some(dialog) = dialog.get() {
-            let dialog: web_sys::HtmlDialogElement = dialog.unchecked_into();
-            dialog.close();
-        }
-    };
     view! {
-        <button class="btn btn-warning btn-sm" on:click=open_dialog>"Enable Developer Mode"</button>
-        <dialog node_ref=dialog class="modal">
+        <button class="btn btn-warning btn-sm" type="button" command="show-modal" commandfor=dialog_id.clone()>"Enable Developer Mode"</button>
+        <dialog id=dialog_id.clone() class="modal">
             <div class="modal-box">
                 <h3 class="text-lg font-bold">"Enable Developer Mode?"</h3>
                 <p class="py-2">
@@ -2351,7 +2337,7 @@ pub fn DeveloperModeEnableButton(world_id: i64) -> impl IntoView {
                         <input type="hidden" name="enabled" value="true"/>
                         <button class="btn btn-warning btn-sm" type="submit">"Enable anyway"</button>
                     </form>
-                    <button class="btn btn-ghost btn-sm" on:click=close_dialog>"Cancel"</button>
+                    <button class="btn btn-ghost btn-sm" type="button" command="close" commandfor=dialog_id.clone()>"Cancel"</button>
                 </div>
             </div>
             <form method="dialog" class="modal-backdrop">

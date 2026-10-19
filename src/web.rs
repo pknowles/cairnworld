@@ -1653,8 +1653,7 @@ mod tests {
         let split_invocation = store
             .start_invocation(
                 Some(split_trigger.id),
-                gm_history.agent_id,
-                Some(gm_history.branch_id),
+                store.history_branch(gm_history.branch_id).await.unwrap(),
                 None,
                 None,
             )
@@ -1834,8 +1833,7 @@ mod tests {
                 let invocation_id = store
                     .start_invocation(
                         Some(step.sequence_id),
-                        step.agent_id,
-                        None,
+                        store.agent_branch(step.agent_id).await.unwrap(),
                         step.parent_tool_execution_id,
                         None,
                     )
