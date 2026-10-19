@@ -82,6 +82,17 @@ implementation.
 Never use 'unsafe', warnings must be errors. Using 'allow(...)' and relaxing
 settings in toml is strictly forbidden.
 
+# Code Smells
+
+Look for repeated conditionals around variables, large branches, use of
+optionals, checking for existence etc.. These are smells for many items above
+where the design structured things awkwardly (ownership, lifetimes, grouping
+things that change together, composition, single responsibility, etc.). Review
+for alternatives and evaluate pros/cons, opoprtunity for keeping the same
+features but with less code and where things just work implicitly without any
+work. Occasionally code needs expanding before the correct factoring makes
+itself apparent.
+
 # Testing
 
 ## Philosophy

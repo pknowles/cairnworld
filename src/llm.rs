@@ -50,6 +50,7 @@ pub trait Backend {
         _store: &crate::store::Store,
         _agent_id: i64,
         _branch_id: Option<i64>,
+        _events: &tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
     ) -> Result<()> {
         Ok(())
     }
@@ -59,6 +60,7 @@ pub trait Backend {
         _store: &crate::store::Store,
         _agent_id: i64,
         _branch_id: Option<i64>,
+        _events: &tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
     ) -> Result<()> {
         Ok(())
     }

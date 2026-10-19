@@ -9,17 +9,13 @@ pub use prompt::PromptEvidence;
 // crate::inspection's doc comment. Re-exported here since this module's
 // queries build and return them.
 pub use crate::inspection::{
-    AgentInfo, BranchGroup, BranchNode, BranchParent, DevEvent, GameObject, InferenceMessage,
-    MessageOrigin, ObjectField, ObjectLink, ObjectType, RawHistoryCursor, RawHistoryEntry,
-    RecordedAction, RecordedInference, RecordedOutcome, Segment, SequenceNode, SequenceSummary,
-    WorldObjectCursor, WorldObjects,
+    AgentInfo, BranchGroup, BranchNode, BranchParent, GameObject, InferenceMessage, MessageOrigin,
+    ObjectField, ObjectLink, ObjectType, RawHistoryCursor, RawHistoryEntry, RecordedAction,
+    RecordedInference, RecordedOutcome, Segment, SequenceNode, SequenceSummary, WorldObjectCursor,
+    WorldObjects,
 };
 
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use rand::{Rng, distr::Alphanumeric};
@@ -28,7 +24,6 @@ use sqlx::{
     FromRow, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
-use tokio::sync::broadcast;
 
 use crate::llm::{
     Content, Message, MessageContent, Request, Response, Role, Sampling, ToolCall, ToolDefinition,
@@ -51,7 +46,6 @@ pub struct Access {
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
-    dev_events: Arc<Mutex<HashMap<i64, broadcast::Sender<DevEvent>>>>,
 }
 
 /// Hash model input without game-side provenance. Preserve the original wire
@@ -781,10 +775,7 @@ impl Store {
             .run(&pool)
             .await
             .context("running database migrations")?;
-        Ok(Self {
-            pool,
-            dev_events: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok(Self { pool })
     }
 
     /// Sessions and game records intentionally share SQLite's durability and
@@ -792,38 +783,6 @@ impl Store {
     /// every Cairnworld table.
     pub fn pool(&self) -> SqlitePool {
         self.pool.clone()
-    }
-
-    /// Subscribes to one world's live Developer Mode events. Deliberately
-    /// unauthenticated by itself - per the live inspection protocol, a
-    /// caller subscribes *before* running the initial access query, so a
-    /// membership/mode change racing the subscribe is never missed between
-    /// "check access" and "start listening". The connection holder is
-    /// responsible for calling `access_for` before treating anything as
-    /// authorized. The channel is created lazily on first subscribe and kept
-    /// for the process lifetime - worlds are few and long-lived, unlike
-    /// per-location chat broadcasts.
-    pub fn subscribe_dev_events(&self, world_id: i64) -> broadcast::Receiver<DevEvent> {
-        self.dev_events
-            .lock()
-            .expect("dev_events lock poisoned")
-            .entry(world_id)
-            .or_insert_with(|| broadcast::channel(256).0)
-            .subscribe()
-    }
-
-    /// Publishes one live event to `world_id`'s Developer Mode subscribers, if
-    /// any are connected. A dropped send (no receivers) is not an error - see
-    /// `DevEvent`'s doc comment: every event is recoverable from durable state.
-    fn publish_dev_event(&self, world_id: i64, event: DevEvent) {
-        if let Some(sender) = self
-            .dev_events
-            .lock()
-            .expect("dev_events lock poisoned")
-            .get(&world_id)
-        {
-            let _ = sender.send(event);
-        }
     }
 
     pub async fn create_world(&self, name: &str) -> Result<i64> {
@@ -903,8 +862,6 @@ impl Store {
             result.rows_affected() == 1,
             "user {owner_id} does not own world {world_id}"
         );
-        self.publish_dev_event(world_id, DevEvent::DeveloperModeChanged { enabled });
-        self.publish_dev_event(world_id, DevEvent::AccessChanged);
         Ok(())
     }
 
@@ -1124,7 +1081,6 @@ impl Store {
             result.rows_affected() == 1,
             "user {user_id} is not an active removable member of world {world_id} owned by user {owner_id}"
         );
-        self.publish_dev_event(world_id, DevEvent::AccessChanged);
         Ok(())
     }
 
@@ -1227,7 +1183,10 @@ impl Store {
     /// shape that consumed the old direct pointer). Resolved by joining this
     /// invocation's `parent_tool_execution_id` back to the inference that
     /// produced it. `None` for a root or deferred-compaction invocation.
-    async fn invocation_parent_inference_id(&self, invocation_id: i64) -> Result<Option<i64>> {
+    pub(crate) async fn invocation_parent_inference_id(
+        &self,
+        invocation_id: i64,
+    ) -> Result<Option<i64>> {
         sqlx::query_scalar(
             "SELECT tool_execution.inference_id FROM invocation \
              JOIN tool_execution ON tool_execution.id = invocation.parent_tool_execution_id \
@@ -3076,13 +3035,6 @@ impl Store {
             .commit()
             .await
             .with_context(|| format!("committing resolved action {action_id}"))?;
-        self.publish_dev_event(
-            action.world_id,
-            DevEvent::Changed {
-                sequence_id: Some(action.sequence_id),
-                inference_id: None,
-            },
-        );
         Ok(ResolvedAction {
             id: action_id,
             approved,
@@ -4350,23 +4302,6 @@ impl Store {
             .commit()
             .await
             .context("committing inference start")?;
-        let parent_inference_id = self
-            .invocation_parent_inference_id(input.invocation_id)
-            .await?;
-        match self.world_id_for_agent(input.agent_id).await {
-            Ok(world_id) => self.publish_dev_event(
-                world_id,
-                DevEvent::InferenceStarted {
-                    inference_id,
-                    agent_id: input.agent_id,
-                    sequence_id: input.sequence_id,
-                    parent_inference_id,
-                },
-            ),
-            Err(error) => {
-                tracing::warn!(inference_id, error = %format!("{error:#}"), "could not resolve world for live inference-started broadcast");
-            }
-        }
         Ok(inference_id)
     }
 
@@ -4384,38 +4319,6 @@ impl Store {
             .fetch_one(&self.pool)
             .await
             .with_context(|| format!("looking up world for agent {agent_id}"))
-    }
-
-    /// The world an already-started inference belongs to. A streaming
-    /// backend resolves this once before its token loop starts (not per
-    /// token) so it can call `publish_token` without a query on every delta;
-    /// it only has `inference_id` in scope, not `agent_id`.
-    pub async fn world_id_for_inference(&self, inference_id: i64) -> Result<i64> {
-        sqlx::query_scalar(
-            "SELECT agent.world_id FROM inference JOIN agent ON agent.id = inference.agent_id WHERE inference.id = ?",
-        )
-        .bind(inference_id)
-        .fetch_one(&self.pool)
-        .await
-        .with_context(|| format!("looking up world for inference {inference_id}"))
-    }
-
-    /// Publishes one streamed token to `world_id`'s Developer Mode
-    /// subscribers, if any are connected.
-    /// `offset` is the number of UTF-8 bytes of this inference's output
-    /// already emitted before `text` - the caller's running total, since
-    /// only the per-inference token loop knows it cheaply. A receiver that
-    /// missed earlier tokens (broadcast lag) can then tell its accumulated
-    /// text is short instead of silently rendering a wrong prefix.
-    pub fn publish_token(&self, world_id: i64, inference_id: i64, offset: usize, text: &str) {
-        self.publish_dev_event(
-            world_id,
-            DevEvent::Token {
-                inference_id,
-                offset,
-                text: text.to_string(),
-            },
-        );
     }
 
     /// Compute the `inference` row's completion columns from an outcome,
@@ -4470,40 +4373,6 @@ impl Store {
         Ok(())
     }
 
-    /// Publish the live completion events for `inference_id` after its
-    /// completion transaction has committed, so a receiver re-querying sees
-    /// the row consistently rather than racing an in-progress transaction.
-    async fn publish_inference_completed(&self, inference_id: i64, error: Option<String>) {
-        match sqlx::query_as::<_, (i64, Option<i64>)>(
-            "SELECT agent.world_id, inference.sequence_id \
-             FROM inference JOIN agent ON agent.id = inference.agent_id WHERE inference.id = ?",
-        )
-        .bind(inference_id)
-        .fetch_one(&self.pool)
-        .await
-        {
-            Ok((world_id, sequence_id)) => {
-                self.publish_dev_event(
-                    world_id,
-                    DevEvent::InferenceCompleted {
-                        inference_id,
-                        error,
-                    },
-                );
-                self.publish_dev_event(
-                    world_id,
-                    DevEvent::Changed {
-                        sequence_id,
-                        inference_id: Some(inference_id),
-                    },
-                );
-            }
-            Err(lookup_error) => {
-                tracing::warn!(inference_id, error = %format!("{lookup_error:#}"), "could not resolve world for live inference-completed broadcast");
-            }
-        }
-    }
-
     /// Complete an inference with no other side effect: no message, no
     /// compaction obligation. Used only by detached replay (`reconstruct_inference`'s
     /// callers via the CLI `replay` command), which re-runs a historical
@@ -4537,7 +4406,6 @@ impl Store {
             .commit()
             .await
             .context("committing inference completion")?;
-        self.publish_inference_completed(id, error).await;
         Ok(())
     }
 
@@ -4649,7 +4517,6 @@ impl Store {
             .commit()
             .await
             .context("committing chat inference completion")?;
-        self.publish_inference_completed(id, error).await;
         Ok(ChatInferenceOutcome {
             // The same recorded_content row this reply's own message
             // references, so a caller (e.g. GM narration, once it settles)
@@ -4738,7 +4605,6 @@ impl Store {
             .commit()
             .await
             .context("committing summary inference completion")?;
-        self.publish_inference_completed(id, error).await;
         Ok(())
     }
 

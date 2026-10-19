@@ -127,6 +127,7 @@ impl Drop for ActiveAgent {
 /// All stored inputs for one agent completion. The callbacks that surface its
 /// live output remain invocation-local rather than becoming persisted state.
 pub struct Turn<'a> {
+    pub events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
     pub agent_id: i64,
     /// The branch selected and validated before this invocation begins.
     pub branch: AgentBranch,
@@ -257,7 +258,12 @@ pub async fn complete_with_call_context<B: Backend>(
     let invocation_id = invocation.invocation_id;
     let result: Result<Settled> = async {
         backend
-            .before_agent(store, turn.agent_id, Some(turn.branch.branch_id()))
+            .before_agent(
+                store,
+                turn.agent_id,
+                Some(turn.branch.branch_id()),
+                &turn.events,
+            )
             .await
             .context("waiting for earlier deferred work for this agent")?;
         let definitions =
@@ -273,6 +279,7 @@ pub async fn complete_with_call_context<B: Backend>(
                 store,
                 backend,
                 context::RecordedCompletion {
+                    events: turn.events.clone(),
                     agent_id: turn.agent_id,
                     branch: turn.branch,
                     sequence_id: call.sequence_id,
@@ -298,7 +305,12 @@ pub async fn complete_with_call_context<B: Backend>(
             // reply is done.
             let Content::ToolCalls(calls) = &response.content else {
                 backend
-                    .after_agent(store, turn.agent_id, Some(turn.branch.branch_id()))
+                    .after_agent(
+                        store,
+                        turn.agent_id,
+                        Some(turn.branch.branch_id()),
+                        &turn.events,
+                    )
                     .await
                     .context("admitting any due deferred compaction")?;
                 let output_content_id = completion
@@ -505,7 +517,7 @@ async fn compact_merge_sources<B: Backend>(
                     })?;
             }
             backend
-                .before_agent(store, gm_history.agent_id, Some(branch_id))
+                .before_agent(store, gm_history.agent_id, Some(branch_id), &turn.events)
                 .await
                 .with_context(|| {
                     format!("waiting for compaction on merge source branch {branch_id}")
@@ -582,6 +594,7 @@ mod tests {
 
     fn scripted_turn<'a>(branch: AgentBranch, tools: &'a [Tool]) -> Turn<'a> {
         Turn {
+            events: tokio::sync::broadcast::channel(256).0,
             agent_id: branch.agent_id(),
             branch,
             static_messages: &[],
@@ -1304,6 +1317,7 @@ mod tests {
         let scheduler = crate::inference::InferenceScheduler::new(inner, limits).unwrap();
         let backend = scheduler.foreground();
         let turn = Turn {
+            events: tokio::sync::broadcast::channel(256).0,
             agent_id: over_history.agent_id,
             branch: store.group_branch(over_group_id).await.unwrap(),
             static_messages: &[],

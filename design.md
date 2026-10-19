@@ -1046,16 +1046,23 @@ creates no characters. Routes are POST `/world/{id}/members/{user}/ban` and
 `/reactivate`; WorldDetail renders active members and an owner-only collapsed
 Ban list. Both update Store membership and publish AccessChanged after commit.
 
-Each loaded world's `World` owns its event task, group broadcasts, opening turns,
-connection IDs per character and a coalesced set of changed characters. Worlds
-are constructed at startup and when installed, rather than on first access.
+Each world's `World` owns its action queue, Developer Mode and group broadcasts,
+opening turns, connection IDs and a coalesced set of changed characters. Worlds
+are constructed before model loading and when installed, rather than on first
+access, so live inspection does not depend on model readiness. The web layer and
+`Game` share these same world values. `Game` owns their model-backed worker tasks
+and cancels them on drop; workers hold only a weak game reference while idle.
+Persistence owns no notification channels. The code performing an operation
+publishes to its world's channel after committing the durable change. An active
+inference retains its IDs and the channel through start, token delivery and
+completion; deferred compactions retain that same channel when admitted.
 Game::connect/disconnect serialize the durable zero/one transition and connection
 set update under the same presence lock. A successful transition adds the
 character to the changed set and notifies the world task. These methods never
 wait for an ongoing model turn; changed state cannot overflow the action queue.
 The world task owns pending presence deadlines and processes due deadlines and
 changed state between actions. Every event error is logged even if its requester
-has disconnected. A world's task is cancelled when its owner is dropped;
+has disconnected;
 narration delivery reads the current set when committing recipient references.
 A connection is registered after authentication and deregistered on close,
 logout, ban or transport error. Multiple tabs share one character-presence state. Logical

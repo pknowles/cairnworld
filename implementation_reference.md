@@ -642,12 +642,13 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   Subsequent player messages expose creation or location-action tools
   according to durable character state.
 - Presence (Developer Mode plan D2; design.md's Membership and presence).
-  `Game::new` loads all stored worlds before returning. Each `World` owns its
-  worker cancellation handle and shared broadcasts, opening turns and presence.
-  Web scenario installation is serialized with `GameLoad::finish`, so worlds
-  created during model loading or after readiness get their runtime before play.
-  Dropping the world aborts its worker; an idle worker holds only a weak game
-  reference. `Game::connect`/`disconnect` hold the world's presence lock across
+  `world::World::load` constructs shared world values before model loading.
+  Every `World` owns its action queue, Developer Mode/group broadcasts, opening
+  turns and presence. `GameLoad` and `Game` share that same world map. `Game`
+  owns the model-backed worker handles and aborts them on drop; idle workers
+  hold only a weak game reference. World installation is serialized with model
+  readiness, so worlds created while loading also get their worker before play.
+  `Game::connect`/`disconnect` hold the world's presence lock across
   each durable zero/one transition and update the connection set only after a
   successful write. Changed characters are coalesced in a set and signalled by
   `Notify`, independently of the bounded action queue. The worker drains changes
@@ -663,7 +664,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `party_presence()` returns group membership and current connection presence.
   Process-restart reconciliation of stale durable presence remains planned;
   constructing an empty connection set does not implement that recovery policy.
-- Group-scoped narration. `WorldState.broadcasts`, `Game::subscribe` and
+- Group-scoped narration. `World.broadcasts`, `Game::subscribe` and
   `deliver_narration` key live delivery by group. `Store::append_group_narration`
   selects connected active PCs in that same group for durable history, so
   sharing a physical location cannot leak narration on reload. After a topology
@@ -891,27 +892,33 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   opaque hashes. Copy controls are compact accessible icons beside the exact
   text they copy.
   Step 6's live updates implement design.md's Live inspection protocol in
-  full (Developer Inspection plan slice A). `Store` owns a `dev_events:
-  Arc<Mutex<HashMap<world_id, broadcast::Sender<DevEvent>>>>` registry
-  alongside the existing per-location chat broadcasts, lazily created on
-  first subscribe. `Store::subscribe_dev_events` is unauthenticated by
-  itself - the live inspection protocol requires subscribing *before* the
-  initial access query, so a membership/mode change racing the subscribe can
-  never fall in the gap between "checked access" and "started listening".
+  full (Developer Inspection plan slice A). Each `World` owns its
+  `broadcast::Sender<DevEvent>` from construction; there is no channel map or
+  publisher in `Store`. `web::inspect_events` subscribes to this world channel
+  before its initial access query, so model loading does not block inspection
+  and a membership/mode change cannot fall between checking and listening.
   `Store::access_for(viewer_id, world_id) -> Access { active_member,
   developer_mode }` is the one indexed query behind every inspection
   authorization decision - both `inspecting` (HTTP routes) and the websocket
   build on it, so membership and mode stay authoritative from one source
   rather than a cache. `inspection::DevEvent` and
-  `RawHistoryPageResponse` are the one serialized shapes used by the store,
-  route and hydrated browser, rather than mirrored server/browser types.
+  `RawHistoryPageResponse` are shared wire types for the runtime, routes and
+  hydrated browser, rather than mirrored server/browser types.
+  `World::set_developer_mode` and `remove_member` perform the authorized write
+  and then publish its notifications. `context::Inference` retains a recorded
+  inference's IDs and world channel from start through tokens and completion;
+  finishing consumes that value. `run_recipe` wraps the backend token callback,
+  while chat/summary/replay paths publish completion after their respective
+  transactions. `InferenceScheduler` passes the same channel into deferred jobs,
+  including startup-resumed jobs. The Mistral backend only records prompt
+  evidence; it has no world lookup or live-notification responsibility.
   `DevEvent` adds `AccessChanged` (a wake-up published
   after `set_developer_mode`/`remove_member` commit, never itself an
   authorization decision), `Changed { sequence_id, inference_id }` (published
-  after `finish_inference` and `resolve_pending_action` commit), and
+  by the operation after its inference/action completion commits), and
   `ResyncRequired { skipped }`; `Token` now carries `offset` (the emitted
   UTF-8 byte count before this chunk, tracked by
-  `mistralrs_backend.rs::complete_with_recording`), letting a receiver that
+  `context::run_recipe` for every backend), letting a receiver that
   missed earlier chunks tell its accumulated text is short.
   `web.rs::inspect_events`/`dev_events_connection` retains `Store`/viewer/
   world identity and re-runs `access_for` before every private outbound

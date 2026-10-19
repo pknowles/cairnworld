@@ -15,6 +15,7 @@ mod settings;
 mod store;
 mod tools;
 mod web;
+mod world;
 
 use std::{
     io::Write,
@@ -198,13 +199,15 @@ async fn main() -> Result<()> {
                 .context("opening web database")?;
             let model = resolve_model(model.as_deref(), None, &settings)?;
             let sampling = settings.sampling(&model);
-            let game = web::GameLoad::loading();
+            let game = web::GameLoad::loading(&store).await?;
+            let worlds = game.worlds();
             let loading_game = game.clone();
             let loading_store = store.clone();
             let limits = settings.limits;
             tokio::spawn(async move {
                 tracing::info!(model = %model.path, "starting game model load");
-                let result = load_game(loading_store, model, sampling, limits, allow_cpu).await;
+                let result =
+                    load_game(loading_store, worlds, model, sampling, limits, allow_cpu).await;
                 match &result {
                     Ok(_) => tracing::info!("game model is ready"),
                     Err(error) => {
@@ -307,6 +310,7 @@ async fn backend(
 
 async fn load_game(
     store: Store,
+    worlds: world::Worlds,
     model: settings::Model,
     sampling: Sampling,
     limits: settings::Limits,
@@ -315,10 +319,17 @@ async fn load_game(
     let scheduler = InferenceScheduler::new(backend(&model, limits, allow_cpu).await?, limits)
         .context("configuring inference scheduling")?;
     scheduler
-        .resume(&store)
+        .resume(&store, &worlds)
         .await
         .context("resuming deferred compactions")?;
-    game::Game::new(store, scheduler.foreground(), limits, model.path, sampling).await
+    Ok(game::Game::new(
+        store,
+        worlds,
+        scheduler.foreground(),
+        limits,
+        model.path,
+        sampling,
+    ))
 }
 
 async fn run_chat(
@@ -340,10 +351,12 @@ async fn run_chat(
         .create_agent(world)
         .await
         .context("creating chat sandbox agent")?;
+    let worlds = world::World::load(&store).await?;
+    let events = world::World::get(&worlds, world)?.events.clone();
     let scheduler = InferenceScheduler::new(backend(&model, limits, allow_cpu).await?, limits)
         .context("configuring inference scheduling")?;
     scheduler
-        .resume(&store)
+        .resume(&store, &worlds)
         .await
         .context("resuming deferred compactions")?;
     let backend = scheduler.foreground();
@@ -376,7 +389,7 @@ async fn run_chat(
         // Do this before appending the next user row: an earlier compaction
         // must never see a newer chat message in the history it summarizes.
         backend
-            .before_agent(&store, agent, None)
+            .before_agent(&store, agent, None, &events)
             .await
             .context("finishing earlier deferred work for this chat")?;
 
@@ -393,6 +406,7 @@ async fn run_chat(
             &backend,
             &budget,
             agent::Turn {
+                events: events.clone(),
                 agent_id: agent,
                 branch: store.agent_branch(agent).await?,
                 static_messages: &static_messages,
@@ -476,6 +490,7 @@ async fn run_replay(
         &store,
         &backend,
         context::RecipeCompletion {
+            events: tokio::sync::broadcast::channel(256).0,
             agent_id: recorded.agent_id,
             sequence_id: Some(sequence.id),
             invocation_id,
@@ -490,8 +505,8 @@ async fn run_replay(
     )
     .await
     .context("replaying recorded inference")?;
-    store
-        .finish_inference(run.inference_id, run.outcome, run.duration_ms)
+    run.inference
+        .finish(&store, run.outcome, run.duration_ms)
         .await
         .context("recording replayed inference outcome")?;
     let outcome = if run.result.is_ok() {

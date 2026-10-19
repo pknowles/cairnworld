@@ -7,7 +7,7 @@ const { fixture, forward, forwardWebSocket, checkBrowser } = require("./browser_
 // a real MistralRsBackend (see web.rs), so this browser-test process has no
 // real Game loop to forward chat into without a much larger generic-backend
 // refactor outside this slice's scope. The live inspection socket below has
-// no such dependency - Store's broadcast is real regardless of which (or
+// no such dependency - the world's broadcast is real regardless of which (or
 // whether any) game model is loaded - so only it is forwarded to the actual
 // server per design.md's Live inspection protocol.
 const chatPath = `/world/${fixture.world_id}/characters/2/ws?after_message_id=${fixture.live_message_id}`;

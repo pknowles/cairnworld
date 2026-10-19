@@ -1,8 +1,10 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
+use tokio::sync::broadcast;
 
 use crate::{
+    inspection::DevEvent,
     llm::{
         Backend, ContextCapacityExceeded, Message, MessageContent, Response, Sampling,
         ToolDefinition,
@@ -12,6 +14,7 @@ use crate::{
 
 /// Everything required to record one agent inference from its visible context.
 pub struct RecordedCompletion<'a> {
+    pub events: broadcast::Sender<DevEvent>,
     pub agent_id: i64,
     /// The already-validated branch this completion reads and appends to.
     pub branch: AgentBranch,
@@ -52,6 +55,7 @@ pub async fn complete_recorded<B: Backend>(
             store,
             backend,
             RecipeCompletion {
+                events: completion.events.clone(),
                 agent_id: completion.agent_id,
                 sequence_id: completion.sequence_id,
                 invocation_id: completion.invocation_id,
@@ -112,6 +116,7 @@ pub async fn complete_recorded<B: Backend>(
                         store,
                         completion.agent_id,
                         Some(completion.branch.branch_id()),
+                        &completion.events,
                     )
                     .await
                     .context("admitting capacity recovery compaction")?;
@@ -120,6 +125,7 @@ pub async fn complete_recorded<B: Backend>(
                         store,
                         completion.agent_id,
                         Some(completion.branch.branch_id()),
+                        &completion.events,
                     )
                     .await
                     .context("waiting for capacity recovery compaction")?;
@@ -211,6 +217,7 @@ pub struct Completion {
 
 /// Everything required to record one inference from already assembled segments.
 pub struct RecipeCompletion<'a> {
+    pub events: broadcast::Sender<DevEvent>,
     pub agent_id: i64,
     pub sequence_id: Option<i64>,
     /// Every inference belongs to one invocation (design.md's `invocation` is
@@ -231,8 +238,7 @@ pub struct RecipeCompletion<'a> {
 /// plain `finish_inference` for detached replay - the three producer
 /// operations design.md's Chat schema describes, all sharing this run step.
 pub struct RunOutcome {
-    pub inference_id: i64,
-    pub agent_id: i64,
+    pub inference: Inference,
     pub outcome: InferenceOutcome,
     pub duration_ms: u64,
     /// `Ok` only when the outcome was a successful response; carries the
@@ -245,13 +251,91 @@ pub struct RunOutcome {
     pub result: Result<Response>,
 }
 
+/// The identity and live output channel of one recorded inference. Its caller
+/// retains this scope until the outcome's completion transaction has committed.
+pub struct Inference {
+    pub id: i64,
+    pub agent_id: i64,
+    sequence_id: Option<i64>,
+    events: broadcast::Sender<DevEvent>,
+}
+
+impl Inference {
+    pub async fn start(
+        store: &Store,
+        input: InferenceInput<'_>,
+        events: broadcast::Sender<DevEvent>,
+    ) -> Result<Self> {
+        let parent_inference_id = store
+            .invocation_parent_inference_id(input.invocation_id)
+            .await?;
+        let agent_id = input.agent_id;
+        let sequence_id = input.sequence_id;
+        let id = store.start_inference(input).await?;
+        let inference = Self {
+            id,
+            agent_id,
+            sequence_id,
+            events,
+        };
+        inference.publish(DevEvent::InferenceStarted {
+            inference_id: id,
+            agent_id,
+            sequence_id,
+            parent_inference_id,
+        });
+        Ok(inference)
+    }
+
+    pub fn token(&self, offset: usize, text: &str) {
+        self.publish(DevEvent::Token {
+            inference_id: self.id,
+            offset,
+            text: text.to_string(),
+        });
+    }
+
+    fn completed(self, error: Option<String>) -> i64 {
+        self.publish(DevEvent::InferenceCompleted {
+            inference_id: self.id,
+            error,
+        });
+        self.publish(DevEvent::Changed {
+            sequence_id: self.sequence_id,
+            inference_id: Some(self.id),
+        });
+        self.id
+    }
+
+    pub async fn finish(
+        self,
+        store: &Store,
+        outcome: InferenceOutcome,
+        duration_ms: u64,
+    ) -> Result<()> {
+        let error = match &outcome {
+            InferenceOutcome::Error(error) => Some(error.clone()),
+            InferenceOutcome::Response(_) => None,
+        };
+        store
+            .finish_inference(self.id, outcome, duration_ms)
+            .await?;
+        self.completed(error);
+        Ok(())
+    }
+
+    fn publish(&self, event: DevEvent) {
+        let _no_live_viewers = self.events.send(event);
+    }
+}
+
 /// Run one recipe against the backend and record its start, without deciding
 /// how to finish it - see `RunOutcome`.
 pub async fn run_recipe<B: Backend>(
     store: &Store,
     backend: &B,
     completion: RecipeCompletion<'_>,
-    on_token: impl FnMut(&str) + Send,
+    mut on_token: impl FnMut(&str) + Send,
 ) -> Result<RunOutcome> {
     let request = store
         .request_for_segments(
@@ -261,20 +345,33 @@ pub async fn run_recipe<B: Backend>(
         )
         .await
         .context("assembling inference request")?;
-    let inference_id = store
-        .start_inference(InferenceInput {
+    let inference = Inference::start(
+        store,
+        InferenceInput {
             agent_id: completion.agent_id,
             sequence_id: completion.sequence_id,
             invocation_id: completion.invocation_id,
             segments: completion.segments,
             request: &request,
             model: completion.model,
-        })
-        .await
-        .context("recording inference before execution")?;
+        },
+        completion.events,
+    )
+    .await
+    .context("recording inference before execution")?;
     let started_at = Instant::now();
+    let mut emitted_bytes = 0;
     let result = backend
-        .complete_with_recording(request, on_token, store, inference_id)
+        .complete_with_recording(
+            request,
+            |token| {
+                inference.token(emitted_bytes, token);
+                emitted_bytes += token.len();
+                on_token(token);
+            },
+            store,
+            inference.id,
+        )
         .await;
     let duration_ms = u64::try_from(started_at.elapsed().as_millis())
         .context("inference duration exceeds supported range")?;
@@ -283,8 +380,7 @@ pub async fn run_recipe<B: Backend>(
         Err(error) => InferenceOutcome::Error(format!("{error:#}")),
     };
     Ok(RunOutcome {
-        inference_id,
-        agent_id: completion.agent_id,
+        inference,
         outcome,
         duration_ms,
         result,
@@ -308,8 +404,8 @@ pub async fn complete_recipe<B: Backend>(
     let succeeded = run.result.is_ok();
     let outcome = store
         .finish_chat_inference(
-            run.inference_id,
-            run.agent_id,
+            run.inference.id,
+            run.inference.agent_id,
             run.outcome,
             run.duration_ms,
             policy,
@@ -317,14 +413,17 @@ pub async fn complete_recipe<B: Backend>(
         .await
         .with_context(|| {
             if succeeded {
-                format!("recording completed inference {}", run.inference_id)
+                format!("recording completed inference {}", run.inference.id)
             } else {
-                format!("recording failed inference {}", run.inference_id)
+                format!("recording failed inference {}", run.inference.id)
             }
         })?;
+    let inference_id = run
+        .inference
+        .completed(run.result.as_ref().err().map(|error| format!("{error:#}")));
     Ok(Completion {
         response: run.result.context("running inference")?,
-        inference_id: run.inference_id,
+        inference_id,
         output_content_id: outcome.output_content_id,
     })
 }
@@ -346,7 +445,7 @@ pub async fn complete_summary_recipe<B: Backend>(
     let succeeded = run.result.is_ok();
     store
         .finish_summary_inference(
-            run.inference_id,
+            run.inference.id,
             job,
             run.outcome,
             run.duration_ms,
@@ -358,15 +457,18 @@ pub async fn complete_summary_recipe<B: Backend>(
             if succeeded {
                 format!(
                     "recording completed compaction inference {}",
-                    run.inference_id
+                    run.inference.id
                 )
             } else {
-                format!("recording failed compaction inference {}", run.inference_id)
+                format!("recording failed compaction inference {}", run.inference.id)
             }
         })?;
+    let inference_id = run
+        .inference
+        .completed(run.result.as_ref().err().map(|error| format!("{error:#}")));
     Ok(Completion {
         response: run.result.context("running compaction inference")?,
-        inference_id: run.inference_id,
+        inference_id,
         output_content_id: None,
     })
 }
@@ -460,11 +562,22 @@ mod tests {
         let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
         let invocation_id = test_invocation(&store, agent).await;
+        let other_id = store.create_world("another world").await.unwrap();
+        let worlds = crate::world::World::load(&store).await.unwrap();
+        let world =
+            crate::world::World::get(&worlds, store.world_id_for_agent(agent).await.unwrap())
+                .unwrap();
+        let mut events = world.events.subscribe();
+        let mut other_events = crate::world::World::get(&worlds, other_id)
+            .unwrap()
+            .events
+            .subscribe();
         let mut streamed = String::new();
-        let response = complete_recorded(
+        let completion = complete_recorded(
             &store,
             &StreamingBackend,
             RecordedCompletion {
+                events: world.events.clone(),
                 agent_id: agent,
                 branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
@@ -482,11 +595,31 @@ mod tests {
             |token| streamed.push_str(token),
         )
         .await
-        .unwrap()
-        .response;
+        .unwrap();
+        let inference_id = completion.inference_id;
+        let response = completion.response;
+        assert!(
+            matches!(events.try_recv(), Ok(DevEvent::InferenceStarted { inference_id: id, agent_id, .. }) if id == inference_id && agent_id == agent)
+        );
+        assert!(
+            matches!(events.try_recv(), Ok(DevEvent::Token { inference_id: id, offset: 0, text }) if id == inference_id && text == "hello")
+        );
+        assert!(
+            matches!(events.try_recv(), Ok(DevEvent::InferenceCompleted { inference_id: id, error: None }) if id == inference_id)
+        );
+        assert!(
+            matches!(events.try_recv(), Ok(DevEvent::Changed { inference_id: Some(id), .. }) if id == inference_id)
+        );
+        assert!(
+            matches!(
+                other_events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "inference notifications must remain in their own world"
+        );
         assert_eq!(streamed, "hello");
         assert_eq!(response.content, Content::Text("hello".to_string()));
-        let recorded = store.reconstruct_inference(1).await.unwrap();
+        let recorded = store.reconstruct_inference(inference_id).await.unwrap();
         assert_eq!(recorded.request.messages.len(), 2);
         assert_eq!(recorded.outcome, RecordedOutcome::Response(response));
     }
@@ -498,10 +631,12 @@ mod tests {
         let agent = test_agent(&store).await;
         let invocation_id = test_invocation(&store, agent).await;
 
+        let (events, mut notifications) = broadcast::channel(256);
         let error = complete_recorded(
             &store,
             &FailingBackend,
             RecordedCompletion {
+                events,
                 agent_id: agent,
                 branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,
@@ -521,6 +656,13 @@ mod tests {
         .await
         .expect_err("backend failure should propagate");
         assert!(error.to_string().contains("running inference"));
+        assert!(matches!(
+            notifications.try_recv(),
+            Ok(DevEvent::InferenceStarted { .. })
+        ));
+        assert!(
+            matches!(notifications.try_recv(), Ok(DevEvent::InferenceCompleted { error: Some(error), .. }) if error.contains("connection lost"))
+        );
         let recorded = store.reconstruct_inference(1).await.unwrap();
         assert_eq!(recorded.request.messages.len(), 1);
         assert_eq!(
@@ -588,6 +730,7 @@ mod tests {
             &store,
             &backend,
             RecordedCompletion {
+                events: broadcast::channel(256).0,
                 agent_id: agent,
                 branch: store.agent_branch(agent).await.unwrap(),
                 sequence_id: None,

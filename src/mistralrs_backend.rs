@@ -278,7 +278,7 @@ impl Backend for MistralRsBackend {
     async fn complete_with_recording(
         &self,
         request: Request,
-        mut on_token: impl FnMut(&str) + Send,
+        on_token: impl FnMut(&str) + Send,
         store: &crate::store::Store,
         inference_id: i64,
     ) -> Result<Response> {
@@ -318,29 +318,7 @@ impl Backend for MistralRsBackend {
                 })
             })
         });
-        // Resolved once before streaming starts, not per token: Developer
-        // Mode's live token broadcast otherwise has no cheap way to know
-        // which world's viewers to reach from inside this streaming loop.
-        // Live broadcast is not essential to a correct inference, so a
-        // lookup failure here is logged and degrades to no live tokens for
-        // this one inference rather than failing the inference itself.
-        let dev_world_id = match store.world_id_for_inference(inference_id).await {
-            Ok(world_id) => Some(world_id),
-            Err(error) => {
-                tracing::warn!(inference_id, error = %format!("{error:#}"), "could not resolve world for live token broadcast");
-                None
-            }
-        };
-        let store = store.clone();
-        let mut emitted_bytes = 0usize;
-        self.generate(builder, move |token| {
-            if let Some(world_id) = dev_world_id {
-                store.publish_token(world_id, inference_id, emitted_bytes, token);
-            }
-            emitted_bytes += token.len();
-            on_token(token);
-        })
-        .await
+        self.generate(builder, on_token).await
     }
 }
 

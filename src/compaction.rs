@@ -22,6 +22,7 @@ pub async fn run<B: Backend>(
     backend: &B,
     job: &PendingCompaction,
     limits: Limits,
+    events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
 ) -> Result<()> {
     ensure!(
         limits.keep_tail_messages > 0,
@@ -44,7 +45,7 @@ pub async fn run<B: Backend>(
         )
         .await
         .context("starting deferred compaction invocation")?;
-    let result = run_invocation(store, backend, job, limits, invocation_id).await;
+    let result = run_invocation(store, backend, job, limits, invocation_id, events).await;
     // A failure to finish the invocation itself is a secondary bookkeeping
     // problem, logged rather than allowed to replace `result`'s own error as
     // the reason this compaction job failed.
@@ -70,6 +71,7 @@ async fn run_invocation<B: Backend>(
     job: &PendingCompaction,
     limits: Limits,
     invocation_id: i64,
+    events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
 ) -> Result<()> {
     let mut keep = limits.keep_tail_messages;
     let mut recovering_capacity = false;
@@ -99,6 +101,7 @@ async fn run_invocation<B: Backend>(
             store,
             backend,
             context::RecipeCompletion {
+                events: events.clone(),
                 agent_id: job.agent_id,
                 // Ties the summary's inference to the event that queued this job.
                 sequence_id: job.sequence_id,
@@ -268,6 +271,7 @@ mod tests {
             backend,
             context::RecipeCompletion {
                 agent_id,
+                events: tokio::sync::broadcast::channel(256).0,
                 sequence_id: None,
                 invocation_id,
                 segments: &segments,
@@ -304,7 +308,14 @@ mod tests {
             .pending_compaction_for_branch(store.agent_branch(agent_id).await?.branch_id())
             .await?
             .context("completed turn did not queue compaction")?;
-        run(store, backend, &job, limits).await
+        run(
+            store,
+            backend,
+            &job,
+            limits,
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
     }
 
     async fn agent_with_history(store: &Store) -> i64 {
@@ -430,9 +441,15 @@ mod tests {
         let limits = limits(3);
         complete_turn(&store, &backend, agent, limits, &[]).await;
         let job = store.pending_compaction(agent).await.unwrap().unwrap();
-        let error = run(&store, &backend, &job, limits)
-            .await
-            .expect_err("capacity recovery must not retry unchanged history");
+        let error = run(
+            &store,
+            &backend,
+            &job,
+            limits,
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .expect_err("capacity recovery must not retry unchanged history");
 
         assert!(
             error

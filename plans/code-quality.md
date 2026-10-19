@@ -15,21 +15,20 @@ access rules; [jscpd-rs](https://github.com/vv-bogdanov/jscpd-rs) provides the
 jscpd clone detector; [big-code-analysis](https://github.com/dekobon/big-code-analysis)
 provides bca function metrics/checks. Use these tools, not similarly named crates.
 
-Steps 1–3 are complete. Step 4 is in progress: its world execution/presence
-slice constructs world workers at startup/install, owns their lifetimes and
-deadlines, coalesces presence changes, serializes durable connection transitions,
-and replaces timing-dependent presence tests. Its real-path group test also
-corrected durable narration crossing groups at one location. The remaining
-step-4 slice moves live Developer Mode broadcasts out of Store; keep step 4 open
-until that ownership change is verified. Developer Mode, bounded-history
-corrections and GM event recording are complete.
+Steps 1-4 completed and verified, 2026-10-19. Next: step 5.
 
-World execution/presence slice verified and reviewed 2026-10-19: 112 ordinary
-Rust tests pass in parallel; game tests also pass in two 32-thread runs. Browser
-checks (including negative error-channel checks), real Qwen3.5/browser evidence
-and installation-boundary checks, formatting, server/WASM Clippy and the normal
-server build pass. The running server reports model readiness and HTTP 204 from
-`/game-status`. No lint suppressions or application unsafe code were introduced.
+World state and notification channels are constructed before model loading and
+shared by the web layer and Game. Game owns model-backed worker lifetimes;
+Store owns no live channels. Operations publish directly after their writes, and
+inference values retain their world channel through streaming, completion and
+deferred compaction. Finishing consumes the inference value.
+
+Verification: 113 ordinary Rust tests pass in parallel, including world/channel
+isolation, model-load failure, worker shutdown and actual startup-resumed
+compaction. Browser checks (including negative error-channel checks), real
+Qwen3.5/browser evidence and installation-boundary checks, formatting,
+server/WASM Clippy and the normal server build pass. No lint suppressions or
+application unsafe code were introduced.
 
 ## Findings
 
@@ -81,13 +80,13 @@ opt-in skipped; the rest is from reading the code and has not been measured.
   select between two different operations (`branch_id: Option<i64>`,
   `after: Option<cursor>`) or mark fields that only exist for one caller
   (`Completion::output_content_id` is `None` only for compaction).
-- **Lazily created world state.** `Game` holds `worlds` and `openings` maps
-  created on first access; `Store` owns the Developer Mode broadcast map,
-  mixing live pub/sub with persistence.
-- **Presence events can be dropped.** `Game::connect`/`disconnect` send with
-  `let _ = try_send` into a 64-slot queue that only drains between model turns.
-  A world task's turn error is lost when the requester has gone
-  (`let _ = reply.send(...)`).
+- **World ownership and lossless presence fixed (2026-10-19).** Worlds are
+  constructed at startup/install; connection transitions are serialized with
+  durable writes and pending changes are coalesced outside the action queue.
+  Game owns model-backed workers; World owns its live channels even while the
+  model loads or fails. Store has no broadcasts. Inference scopes and domain
+  operations publish directly after committed changes; resumed compaction uses
+  its world's channel. Worker errors are logged even after a requester leaves.
 - **Remaining wire mirrors.** `ui::DevEvent` mirrors `store::DevEvent`, and a
   `ui.rs` struct mirrors `web::RawHistoryPageResponse`.
 - **Tests reimplement production paths.** `compaction.rs` has a
@@ -184,11 +183,14 @@ rebuilt in place.
 | Option | Pros | Cons / risks |
 | --- | --- | --- |
 | Patch the channel: `send().await` or unbounded | Small | `send().await` makes connect wait behind a turn (design forbids); unbounded still turns state into a queue of stale events |
-| `World` value constructed complete for each world (at startup and on install), owning its task, event queue, group broadcasts, connections, Developer Mode broadcast and a coalesced presence-changed set plus `Notify` (recommended) | Presence cannot be dropped or overflow, since the handler reads current state (design already calls the event a wake-up); no lazy maps; Store stops owning pub/sub; the world task records every event error itself | Moderate move of `game.rs` state; a task per world at startup |
+| `World` data constructed before model loading and on install, owning its queues, broadcasts, connections and coalesced changes; `Game` owns model-backed workers (recommended) | Presence cannot be dropped or overflow, since the handler reads current state (design already calls the event a wake-up); no lazy maps; Store stops owning pub/sub; the world task records every event error itself | Moderate move of `game.rs` state; a task per world at startup |
 | Actor framework | Structured | New dependency for what tokio already provides |
 
-Recommendation: the second option. `Game` holds `HashMap<world_id, Arc<World>>`
-built complete. Ignored results that remain (a broadcast with no receivers, a
+Recommendation: the second option. The web layer and `Game` share one
+`HashMap<world_id, Arc<World>>`, constructed before model loading so inspection
+remains available while the model loads or fails. `Game` owns the workers that
+require its backend. Operation and inference scopes hold the world's channel;
+there is no persistence callback or forwarding task. Ignored results that remain (a broadcast with no receivers, a
 reply to a requester that has gone) are named explicitly and the underlying
 error is still recorded.
 

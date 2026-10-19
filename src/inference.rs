@@ -3,8 +3,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::{
+    inspection::DevEvent,
+    world::{World, Worlds},
+};
 use anyhow::{Context, Result, ensure};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 
 use crate::{
     compaction,
@@ -99,10 +103,13 @@ where
     /// Resume stored work after startup. Each job remains in SQLite until its
     /// summary and notice have committed. Incomplete inferences are marked
     /// interrupted before execution resumes.
-    pub async fn resume(&self, store: &Store) -> Result<()> {
+    pub async fn resume(&self, store: &Store, worlds: &Worlds) -> Result<()> {
         store.interrupt_open_inferences().await?;
         for job in store.pending_compactions().await? {
-            self.admit_deferred(store.clone(), job.branch_id).await;
+            let world_id = store.world_id_for_agent(job.agent_id).await?;
+            let events = World::get(worlds, world_id)?.events.clone();
+            self.admit_deferred(store.clone(), job.branch_id, events)
+                .await;
         }
         Ok(())
     }
@@ -133,7 +140,12 @@ where
         }
     }
 
-    async fn admit_deferred(&self, store: Store, branch_id: i64) {
+    async fn admit_deferred(
+        &self,
+        store: Store,
+        branch_id: i64,
+        events: broadcast::Sender<DevEvent>,
+    ) {
         let mut state = self.state.lock().expect("scheduler state poisoned");
         if !state.deferred_branches.insert(branch_id) {
             return;
@@ -149,7 +161,7 @@ where
                         format!("missing pending compaction for branch {branch_id}")
                     })?;
                 let backend = scheduler.deferred();
-                compaction::run(&store, &backend, &job, scheduler.limits).await
+                compaction::run(&store, &backend, &job, scheduler.limits, events).await
             }
             .await;
             let mut state = scheduler.state.lock().expect("scheduler state poisoned");
@@ -166,7 +178,12 @@ where
     /// the explicit branch a world_gm agent is using this turn, or an
     /// ordinary agent's single branch (design.md's `GroupHistory`: agent_id
     /// alone cannot select which of a world_gm's branches is due).
-    async fn wait_for_branch(&self, store: &Store, branch_id: i64) -> Result<()> {
+    async fn wait_for_branch(
+        &self,
+        store: &Store,
+        branch_id: i64,
+        events: &broadcast::Sender<DevEvent>,
+    ) -> Result<()> {
         if store
             .pending_compaction_for_branch(branch_id)
             .await?
@@ -174,7 +191,8 @@ where
         {
             return Ok(());
         }
-        self.admit_deferred(store.clone(), branch_id).await;
+        self.admit_deferred(store.clone(), branch_id, events.clone())
+            .await;
         loop {
             let changed = self.changed.notified();
             let inactive = {
@@ -192,7 +210,8 @@ where
                 {
                     return Ok(());
                 }
-                self.admit_deferred(store.clone(), branch_id).await;
+                self.admit_deferred(store.clone(), branch_id, events.clone())
+                    .await;
             }
             changed.await;
         }
@@ -265,6 +284,7 @@ where
         store: &Store,
         agent_id: i64,
         branch_id: Option<i64>,
+        events: &broadcast::Sender<DevEvent>,
     ) -> Result<()> {
         // A pending job was created with the previous final reply. It must
         // finish before this branch can assemble another context, otherwise
@@ -274,7 +294,9 @@ where
             Some(branch_id) => branch_id,
             None => store.branch_id_for_agent(agent_id).await?,
         };
-        self.scheduler.wait_for_branch(store, branch_id).await
+        self.scheduler
+            .wait_for_branch(store, branch_id, events)
+            .await
     }
 
     async fn after_agent(
@@ -282,6 +304,7 @@ where
         store: &Store,
         agent_id: i64,
         branch_id: Option<i64>,
+        events: &broadcast::Sender<DevEvent>,
     ) -> Result<()> {
         let branch_id = match branch_id {
             Some(branch_id) => branch_id,
@@ -293,7 +316,7 @@ where
             .is_some()
         {
             self.scheduler
-                .admit_deferred(store.clone(), branch_id)
+                .admit_deferred(store.clone(), branch_id, events.clone())
                 .await;
         }
         Ok(())
@@ -483,9 +506,50 @@ mod tests {
             store.pending_compaction(agent).await.unwrap().is_some(),
             "a reply whose output makes the next input reach the threshold must queue compaction"
         );
-        let scheduler = scheduler(1);
+        // Keep one raw reply so this stored job performs an actual summary
+        // inference, rather than merely retiring a job whose entire history fits.
+        let scheduler = InferenceScheduler::new(
+            TestBackend,
+            Limits {
+                max_concurrent_inferences: 1,
+                keep_tail_messages: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        let worlds = World::load(&store).await.unwrap();
+        let events = World::get(&worlds, world).unwrap().events.clone();
+        let mut notifications = events.subscribe();
+        scheduler.resume(&store, &worlds).await.unwrap();
         let branch_id = store.branch_id_for_agent(agent).await.unwrap();
-        scheduler.wait_for_branch(&store, branch_id).await.unwrap();
+        scheduler
+            .wait_for_branch(&store, branch_id, &events)
+            .await
+            .unwrap();
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
+        let summary_id = match notifications.try_recv().unwrap() {
+            DevEvent::InferenceStarted {
+                inference_id,
+                agent_id,
+                parent_inference_id: None,
+                ..
+            } => {
+                assert_eq!(agent_id, agent);
+                inference_id
+            }
+            event => {
+                panic!("expected a deferred root inference on this world's channel: {event:?}")
+            }
+        };
+        let cause: i64 = sqlx::query_scalar("SELECT invocation.cause_inference_id FROM inference JOIN invocation ON invocation.id = inference.invocation_id WHERE inference.id = ?")
+            .bind(summary_id).fetch_one(&store.pool()).await.unwrap();
+        assert_eq!(
+            cause, inference_id,
+            "a deferred root retains its cause separately from tool-call nesting"
+        );
+        assert!(matches!(
+            notifications.try_recv(),
+            Ok(DevEvent::InferenceCompleted { error: None, .. })
+        ));
     }
 }

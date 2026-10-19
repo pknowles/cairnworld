@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc, RwLock, Weak,
         atomic::{AtomicI64, Ordering},
@@ -10,8 +10,8 @@ use anyhow::{Context, Result, ensure};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use tokio::{
-    sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch},
-    task::AbortHandle,
+    sync::{broadcast, oneshot, watch},
+    task::JoinHandle,
     time::Instant,
 };
 
@@ -22,6 +22,7 @@ use crate::{
     settings::Limits,
     store::{PendingAction, PlayerAgent, PresenceNarration, Store},
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
+    world::{GroupBroadcasts, OpeningState, World, WorldEvent, Worlds},
 };
 
 const GM_ROLE: &str = "You are the GM for the characters in this group. Ground narration in the scene packet and address the characters as a group. Use the available tools to resolve proposed actions before narrating their outcomes.";
@@ -35,68 +36,25 @@ pub struct Game<B> {
     limits: Limits,
     model: String,
     sampling: Sampling,
-    worlds: RwLock<HashMap<i64, Arc<World>>>,
+    worlds: Worlds,
+    tasks: RwLock<HashMap<i64, JoinHandle<()>>>,
     /// Process-local, never restored after restart (design.md's Membership
     /// and presence: "Live connection IDs are process-local").
     next_connection_id: AtomicI64,
 }
 
-#[derive(Clone, Debug)]
-enum OpeningState {
-    Pending,
-    Ready,
-    Failed(String),
-}
-
-struct World {
-    sender: mpsc::Sender<WorldEvent>,
-    state: Arc<WorldState>,
-    task: AbortHandle,
-}
-
-impl Drop for World {
+impl<B> Drop for Game<B> {
     fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-struct WorldState {
-    broadcasts: Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
-    presence: Mutex<Presence>,
-    changed: Notify,
-    openings: Mutex<HashMap<i64, watch::Receiver<OpeningState>>>,
-}
-
-#[derive(Default)]
-struct Presence {
-    connections: HashMap<i64, HashSet<i64>>,
-    changed: HashSet<i64>,
-}
-
-impl World {
-    fn new<B: Backend + Send + Sync + 'static>(game: Weak<Game<B>>, world_id: i64) -> Self {
-        let (sender, receiver) = mpsc::channel(64);
-        let state = Arc::new(WorldState {
-            broadcasts: Arc::new(Mutex::new(HashMap::new())),
-            presence: Mutex::new(Presence::default()),
-            changed: Notify::new(),
-            openings: Mutex::new(HashMap::new()),
-        });
-        let task = tokio::spawn(Game::process_world(
-            game,
-            world_id,
-            receiver,
-            Arc::clone(&state),
-        ));
-        Self {
-            sender,
-            state,
-            task: task.abort_handle(),
+        for task in self
+            .tasks
+            .get_mut()
+            .expect("world tasks lock poisoned")
+            .values()
+        {
+            task.abort();
         }
     }
 }
-
-type GroupBroadcasts = Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>;
 
 struct Narration {
     group_id: i64,
@@ -121,75 +79,52 @@ struct PlayerActionTool {
     broadcasts: GroupBroadcasts,
 }
 
-enum WorldEvent {
-    PlayerMessage {
-        member: PlayerAgent,
-        text: String,
-        reply: oneshot::Sender<Result<Response>>,
-    },
-    Enter {
-        member: PlayerAgent,
-        reply: oneshot::Sender<Result<Option<Response>>>,
-    },
-    /// A previously scheduled arrival/departure deadline has elapsed. `group_id`
-    /// and `generation` let the handler recognize a deadline superseded by a
-    /// later change (design.md: "stale timer events do nothing").
-    PresenceDeadline { group_id: i64, generation: i64 },
-    /// Observe completion of earlier work without introducing timer sleeps
-    /// or bypassing production event processing in asynchronous tests.
-    #[cfg(test)]
-    Settled(oneshot::Sender<()>),
-}
-
 impl<B> Game<B>
 where
     B: Backend + Send + Sync + 'static,
 {
-    pub async fn new(
+    pub fn new(
         store: Store,
+        worlds: Worlds,
         backend: ScheduledBackend<B>,
         limits: Limits,
         model: String,
         sampling: Sampling,
-    ) -> Result<Arc<Self>> {
-        let ids = store.world_ids().await?;
-        Ok(Arc::new_cyclic(|game| Self {
+    ) -> Arc<Self> {
+        let game = Arc::new(Self {
             store,
             backend,
             limits,
             model,
             sampling,
-            worlds: RwLock::new(
-                ids.into_iter()
-                    .map(|id| (id, Arc::new(World::new(game.clone(), id))))
-                    .collect(),
-            ),
+            worlds,
+            tasks: RwLock::new(HashMap::new()),
             next_connection_id: AtomicI64::new(1),
-        }))
+        });
+        game.start_worlds();
+        game
     }
 
-    pub async fn load_worlds(self: &Arc<Self>) -> Result<()> {
-        for id in self.store.world_ids().await? {
-            self.install_world(id);
+    pub fn start_worlds(self: &Arc<Self>) {
+        for world in self.worlds.read().expect("worlds lock poisoned").values() {
+            self.start_world(Arc::clone(world));
         }
-        Ok(())
+    }
+
+    fn start_world(self: &Arc<Self>, world: Arc<World>) {
+        self.tasks
+            .write()
+            .expect("world tasks lock poisoned")
+            .entry(world.id)
+            .or_insert_with(|| tokio::spawn(Self::process_world(Arc::downgrade(self), world)));
     }
 
     pub fn install_world(self: &Arc<Self>, id: i64) {
-        self.worlds
-            .write()
-            .expect("worlds lock poisoned")
-            .entry(id)
-            .or_insert_with(|| Arc::new(World::new(Arc::downgrade(self), id)));
+        self.start_world(World::install(&self.worlds, id));
     }
 
     fn world(&self, id: i64) -> Result<Arc<World>> {
-        self.worlds
-            .read()
-            .expect("worlds lock poisoned")
-            .get(&id)
-            .cloned()
-            .with_context(|| format!("world {id} is not loaded"))
+        World::get(&self.worlds, id)
     }
 
     /// Queue a player message behind all earlier events in this world.
@@ -239,7 +174,7 @@ where
         let character_id = member.character_id;
         let world = self.world(member.world_id)?;
         let mut receiver = {
-            let mut openings = world.state.openings.lock().await;
+            let mut openings = world.openings.lock().await;
             if let Some(receiver) = openings.get(&character_id) {
                 receiver.clone()
             } else {
@@ -258,7 +193,7 @@ where
                         Err(error) => OpeningState::Failed(format!("{error:#}")),
                     };
                     let _ = sender.send(state);
-                    world.state.openings.lock().await.remove(&character_id);
+                    world.openings.lock().await.remove(&character_id);
                 });
                 receiver
             }
@@ -284,7 +219,7 @@ where
     ) -> Result<broadcast::Receiver<String>> {
         let group_id = self.store.character_group_id(member.character_id).await?;
         Ok(
-            group_broadcast(&self.world(member.world_id)?.state.broadcasts, group_id)
+            group_broadcast(&self.world(member.world_id)?.broadcasts, group_id)
                 .await
                 .subscribe(),
         )
@@ -298,14 +233,14 @@ where
     pub async fn connect(self: &Arc<Self>, member: &PlayerAgent) -> Result<i64> {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
         let world = self.world(member.world_id)?;
-        let mut presence = world.state.presence.lock().await;
+        let mut presence = world.presence.lock().await;
         if !presence.connections.contains_key(&member.character_id) {
             self.store
                 .mark_character_present(member.character_id)
                 .await
                 .context("recording character presence")?;
             presence.changed.insert(member.character_id);
-            world.state.changed.notify_one();
+            world.changed.notify_one();
         }
         presence
             .connections
@@ -325,7 +260,7 @@ where
         connection_id: i64,
     ) -> Result<()> {
         let world = self.world(member.world_id)?;
-        let mut presence = world.state.presence.lock().await;
+        let mut presence = world.presence.lock().await;
         let Some(characters) = presence.connections.get(&member.character_id) else {
             return Ok(());
         };
@@ -339,7 +274,7 @@ where
                 .context("recording character absence")?;
             presence.connections.remove(&member.character_id);
             presence.changed.insert(member.character_id);
-            world.state.changed.notify_one();
+            world.changed.notify_one();
         } else {
             presence
                 .connections
@@ -350,12 +285,9 @@ where
         Ok(())
     }
 
-    async fn process_world(
-        game: Weak<Self>,
-        world_id: i64,
-        mut events: mpsc::Receiver<WorldEvent>,
-        state: Arc<WorldState>,
-    ) {
+    async fn process_world(game: Weak<Self>, state: Arc<World>) {
+        let world_id = state.id;
+        let mut events = state.queued.lock().await;
         let mut deadlines: HashMap<i64, (Instant, i64)> = HashMap::new();
         loop {
             let next_deadline = deadlines
@@ -608,6 +540,7 @@ where
                 &self.backend,
                 &budget,
                 agent::Turn {
+                    events: self.world(world_id)?.events.clone(),
                     agent_id: gm_history.agent_id,
                     branch,
                     static_messages: &[role],
@@ -714,6 +647,7 @@ where
                 &self.backend,
                 &budget,
                 agent::Turn {
+                    events: self.world(member.world_id)?.events.clone(),
                     agent_id: member.agent_id,
                     branch: self.store.agent_branch(member.agent_id).await?,
                     static_messages: &[prompt],
@@ -823,6 +757,7 @@ where
                 &self.backend,
                 &budget,
                 agent::Turn {
+                    events: self.world(member.world_id)?.events.clone(),
                     agent_id: member.agent_id,
                     branch,
                     static_messages: &[prompt],
@@ -1206,6 +1141,7 @@ where
             &self.backend,
             &budget,
             agent::Turn {
+                events: self.world(member.world_id)?.events.clone(),
                 agent_id: gm_history.agent_id,
                 branch,
                 static_messages: &[role],
@@ -1299,6 +1235,12 @@ where
                         )
                         .await
                         .with_context(|| format!("approving action {action_id}"))?;
+                    game.world(approval_pending.world_id)?.publish(
+                        crate::inspection::DevEvent::Changed {
+                            sequence_id: Some(approval_pending.sequence_id),
+                            inference_id: None,
+                        },
+                    );
                     if !resolved.approved {
                         return Ok(ToolOutcome::Rejected(format!(
                             "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
@@ -1354,6 +1296,11 @@ where
                         )
                         .await
                         .with_context(|| format!("rejecting action {action_id}"))?;
+                    game.world(pending.world_id)?
+                        .publish(crate::inspection::DevEvent::Changed {
+                            sequence_id: Some(pending.sequence_id),
+                            inference_id: None,
+                        });
                     if resolved.approved {
                         return Ok(ToolOutcome::Rejected(format!(
                             "Tool arguments were rejected: action {action_id} was already approved, it cannot now be rejected"
@@ -1455,6 +1402,7 @@ where
             &self.backend,
             &budget,
             agent::Turn {
+                events: self.world(pending.world_id)?.events.clone(),
                 agent_id: pending.gm_agent_id,
                 branch,
                 static_messages: &[role],
@@ -1506,10 +1454,7 @@ where
     }
 }
 
-async fn group_broadcast(
-    broadcasts: &Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
-    group_id: i64,
-) -> broadcast::Sender<String> {
+async fn group_broadcast(broadcasts: &GroupBroadcasts, group_id: i64) -> broadcast::Sender<String> {
     let mut broadcasts = broadcasts.lock().await;
     broadcasts
         .entry(group_id)
@@ -1891,13 +1836,12 @@ mod tests {
         let scheduler = InferenceScheduler::new(backend, limits).unwrap();
         let game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             scheduler.foreground(),
             limits,
             model,
             sampling,
-        )
-        .await
-        .unwrap();
+        );
         (game, store, db, installed.member)
     }
 
@@ -1972,6 +1916,7 @@ mod tests {
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
         let game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             backend.foreground(),
             Limits::default(),
             "scripted".into(),
@@ -1979,9 +1924,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
         let mut broadcasts = game.subscribe(&installed.member).await.unwrap();
         let (actions_before, pending_before) = store.action_counts().await.unwrap();
         game.player_message(installed.member.clone(), "I take the flour sack.")
@@ -2305,6 +2248,7 @@ mod tests {
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
         let game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             backend.foreground(),
             Limits::default(),
             "scripted".into(),
@@ -2312,9 +2256,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
         let (actions_before, pending_before) = store.action_counts().await.unwrap();
         game.player_message(installed.member.clone(), "I take the flour sack.")
             .await
@@ -2442,6 +2384,7 @@ mod tests {
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
         let game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             backend.foreground(),
             Limits::default(),
             "scripted".into(),
@@ -2449,9 +2392,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
 
         let (actions_before, pending_before) = store.action_counts().await.unwrap();
         game.player_message(installed.member.clone(), "I look around, then we split up.")
@@ -2630,6 +2571,7 @@ mod tests {
         let split_backend = InferenceScheduler::new(split_backend, Limits::default()).unwrap();
         let split_game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             split_backend.foreground(),
             Limits::default(),
             "scripted".into(),
@@ -2637,9 +2579,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
         split_game
             .player_message(installed.member.clone(), "I look, then we split up.")
             .await
@@ -2685,6 +2625,7 @@ mod tests {
         let merge_backend = InferenceScheduler::new(merge_backend, Limits::default()).unwrap();
         let merge_game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             merge_backend.foreground(),
             Limits::default(),
             "scripted".into(),
@@ -2692,9 +2633,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
         merge_game
             .player_message(installed.member.clone(), "I look at Toma, then we regroup.")
             .await
@@ -2883,15 +2822,14 @@ mod tests {
         let limits = Limits::default();
         let real_game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             InferenceScheduler::new(real_backend, Limits::default())
                 .unwrap()
                 .foreground(),
             limits,
             model_path,
             sampling,
-        )
-        .await
-        .unwrap();
+        );
         real_game
             .arbitrate(
                 pending.clone(),
@@ -3007,6 +2945,7 @@ mod tests {
         let backend = InferenceScheduler::new(backend, Limits::default()).unwrap();
         let game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             backend.foreground(),
             Limits::default(),
             "scripted".into(),
@@ -3014,9 +2953,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
         game.player_message(installed.member.clone(), "I look around, then leave alone.")
             .await
             .unwrap();
@@ -3156,6 +3093,7 @@ mod tests {
         let backend = InferenceScheduler::new(backend, Limits::default()).unwrap();
         let game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             backend.foreground(),
             Limits::default(),
             "scripted".into(),
@@ -3163,9 +3101,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
         game.player_message(
             installed.member.clone(),
             "I look, then someone tries to split us twice.",
@@ -3400,7 +3336,9 @@ mod tests {
         let (game, _store, _db, member) = blank_opening_game(backend).await;
         let world = Arc::downgrade(&game.world(member.world_id).unwrap());
         assert_eq!(game.worlds.read().unwrap().len(), 1);
+        let closed = game.world(member.world_id).unwrap().sender.clone();
         drop(game);
+        closed.closed().await;
         assert!(
             world.upgrade().is_none(),
             "idle world tasks must not retain their owner"
@@ -3531,6 +3469,7 @@ mod tests {
         let scheduler = InferenceScheduler::new(backend, limits).unwrap();
         let game = Game::new(
             store.clone(),
+            World::load(&store).await.unwrap(),
             scheduler.foreground(),
             limits,
             "scripted".into(),
@@ -3538,9 +3477,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
+        );
         (game, store, db, installed.member, companion)
     }
 

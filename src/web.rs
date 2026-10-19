@@ -102,6 +102,7 @@ struct App {
 /// both the terminal and the browser instead of looking like a hung server.
 #[derive(Clone)]
 pub struct GameLoad {
+    worlds: crate::world::Worlds,
     state: Arc<RwLock<GameLoadState>>,
     changed: Arc<Notify>,
 }
@@ -119,21 +120,21 @@ pub enum GameAvailability {
 }
 
 impl GameLoad {
-    pub fn loading() -> Self {
-        Self {
+    pub async fn loading(store: &Store) -> Result<Self> {
+        Ok(Self {
+            worlds: crate::world::World::load(store).await?,
             state: Arc::new(RwLock::new(GameLoadState::Loading)),
             changed: Arc::new(Notify::new()),
-        }
+        })
     }
 
     pub async fn finish(&self, result: Result<Arc<Game<MistralRsBackend>>>) {
         let mut current = self.state.write().await;
-        let result = match result {
-            Ok(game) => game.load_worlds().await.map(|()| game),
-            Err(error) => Err(error),
-        };
         let state = match result {
-            Ok(game) => GameLoadState::Ready(game),
+            Ok(game) => {
+                game.start_worlds();
+                GameLoadState::Ready(game)
+            }
             Err(error) => GameLoadState::Failed(format!("{error:#}")),
         };
         *current = state;
@@ -146,6 +147,14 @@ impl GameLoad {
             GameLoadState::Ready(game) => GameAvailability::Ready(Arc::clone(game)),
             GameLoadState::Failed(error) => GameAvailability::Failed(error.clone()),
         }
+    }
+
+    pub fn worlds(&self) -> crate::world::Worlds {
+        Arc::clone(&self.worlds)
+    }
+
+    fn world(&self, id: i64) -> Result<Arc<crate::world::World>> {
+        crate::world::World::get(&self.worlds, id)
     }
 
     pub async fn wait_until_ready(&self) -> GameAvailability {
@@ -434,6 +443,7 @@ async fn create_bread_thief_world(
     // loading is included before play becomes available.
     let state = app.game.state.write().await;
     let installed = app.store.install_scenario(&user, &scenario).await?;
+    crate::world::World::install(&app.game.worlds, installed.world_id);
     if let GameLoadState::Ready(game) = &*state {
         game.install_world(installed.world_id);
     }
@@ -496,8 +506,9 @@ async fn set_developer_mode(
     Form(form): Form<DeveloperModeForm>,
 ) -> Result<Redirect, WebError> {
     let owner = session_user(&app.store, &session).await?;
-    app.store
-        .set_developer_mode(owner.id, world_id, form.enabled)
+    let world = app.game.world(world_id)?;
+    world
+        .set_developer_mode(&app.store, owner.id, form.enabled)
         .await?;
     Ok(Redirect::to(&format!("/world/{world_id}")))
 }
@@ -738,7 +749,7 @@ async fn inspect_events(
     websocket: WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebError> {
     let viewer = session_user(&app.store, &session).await?;
-    let events = app.store.subscribe_dev_events(world_id);
+    let events = app.game.world(world_id)?.events.subscribe();
     let access = app.store.access_for(viewer.id, world_id).await?;
     Ok(websocket.on_upgrade(move |socket| {
         dev_events_connection(socket, events, app.store, viewer.id, world_id, access)
@@ -753,7 +764,7 @@ async fn inspect_events(
 /// plain `socket.send` - never a transaction or lock held across the send.
 async fn dev_events_connection(
     mut socket: WebSocket,
-    mut events: tokio::sync::broadcast::Receiver<crate::store::DevEvent>,
+    mut events: tokio::sync::broadcast::Receiver<crate::inspection::DevEvent>,
     store: Store,
     viewer_id: i64,
     world_id: i64,
@@ -771,7 +782,7 @@ async fn dev_events_connection(
         // after the mode toggle itself, now that access is current again.
         let recheck = async |socket: &mut WebSocket,
                              developer_mode: &mut bool,
-                             extra: Option<crate::store::DevEvent>,
+                             extra: Option<crate::inspection::DevEvent>,
                              context: &str|
                -> Result<bool> {
             let access = store
@@ -791,7 +802,7 @@ async fn dev_events_connection(
             if mode_changed {
                 send_dev_event(
                     socket,
-                    crate::store::DevEvent::DeveloperModeChanged {
+                    crate::inspection::DevEvent::DeveloperModeChanged {
                         enabled: *developer_mode,
                     },
                 )
@@ -812,8 +823,8 @@ async fn dev_events_connection(
                 // actually authorizes forwarding it.
                 let extra = (!matches!(
                     event,
-                    crate::store::DevEvent::DeveloperModeChanged { .. }
-                        | crate::store::DevEvent::AccessChanged
+                    crate::inspection::DevEvent::DeveloperModeChanged { .. }
+                        | crate::inspection::DevEvent::AccessChanged
                 ))
                 .then_some(event);
                 recheck(&mut socket, &mut developer_mode, extra, "after an event").await
@@ -822,7 +833,7 @@ async fn dev_events_connection(
                 recheck(
                     &mut socket,
                     &mut developer_mode,
-                    Some(crate::store::DevEvent::ResyncRequired { skipped }),
+                    Some(crate::inspection::DevEvent::ResyncRequired { skipped }),
                     "after broadcast lag",
                 )
                 .await
@@ -840,7 +851,7 @@ async fn dev_events_connection(
     }
 }
 
-async fn send_dev_event(socket: &mut WebSocket, event: crate::store::DevEvent) -> Result<()> {
+async fn send_dev_event(socket: &mut WebSocket, event: crate::inspection::DevEvent) -> Result<()> {
     let text = serde_json::to_string(&event).context("encoding live inspection event")?;
     socket
         .send(WebSocketMessage::Text(text.into()))
@@ -866,7 +877,8 @@ async fn remove_member(
     Path((world_id, user_id)): Path<(i64, i64)>,
 ) -> Result<Redirect, WebError> {
     let owner = session_user(&app.store, &session).await?;
-    app.store.remove_member(owner.id, world_id, user_id).await?;
+    let world = app.game.world(world_id)?;
+    world.remove_member(&app.store, owner.id, user_id).await?;
     Ok(Redirect::to(&format!("/world/{world_id}")))
 }
 
@@ -1576,7 +1588,7 @@ mod tests {
             }))
         }
 
-        let (app, store, _db) = test_app().await;
+        let (app, store, _db, game_load) = test_app_with_game().await;
         let owner = store
             .find_or_create_user("browser@example.test", "Browser owner")
             .await
@@ -1588,6 +1600,7 @@ mod tests {
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
         let world_id = installed.world_id;
+        crate::world::World::install(&game_load.worlds, world_id);
         store
             .set_developer_mode(owner.id, world_id, true)
             .await
@@ -1600,6 +1613,7 @@ mod tests {
             .await
             .unwrap()
             .world_id;
+        crate::world::World::install(&game_load.worlds, modal_world_id);
         // A second, non-owner active member of the shared world: real
         // membership/access revocation (a live ban) has an owner and a
         // removable target, and only the owner may call set_developer_mode
@@ -1721,13 +1735,12 @@ mod tests {
         let scheduler = crate::inference::InferenceScheduler::new(backend, browser_limits).unwrap();
         let game = Game::new(
             store.clone(),
+            game_load.worlds(),
             scheduler.foreground(),
             browser_limits,
             "browser-test".into(),
             Sampling::default(),
-        )
-        .await
-        .unwrap();
+        );
         let creation = store
             .begin_sequence(world_id, "browser completed creation")
             .await
@@ -1804,9 +1817,14 @@ mod tests {
             #[serde(default)]
             content: Option<String>,
         }
+        let live_inferences = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let started_inferences = Arc::clone(&live_inferences);
+        let events = game_load.world(world_id).unwrap().events.clone();
         let live_store = store.clone();
         let start_live_inference = move |Json(step): Json<LiveInferenceStep>| {
             let store = live_store.clone();
+            let events = events.clone();
+            let live_inferences = Arc::clone(&started_inferences);
             async move {
                 let segments = store
                     .live_segments(store.agent_branch(step.agent_id).await.unwrap())
@@ -1826,43 +1844,50 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let inference_id = store
-                    .start_inference(InferenceInput {
+                let inference = crate::context::Inference::start(
+                    &store,
+                    InferenceInput {
                         agent_id: step.agent_id,
                         sequence_id: Some(step.sequence_id),
                         invocation_id,
                         segments: &segments,
                         request: &request,
                         model: "browser-test",
-                    })
-                    .await
-                    .unwrap();
-                Json(inference_id)
+                    },
+                    events,
+                )
+                .await
+                .unwrap();
+                let id = inference.id;
+                live_inferences.lock().await.insert(id, inference);
+                Json(id)
             }
         };
-        let live_store = store.clone();
+        let streaming_inferences = Arc::clone(&live_inferences);
         let token_live_inference = move |Json(step): Json<LiveInferenceStep>| {
-            let store = live_store.clone();
+            let live_inferences = Arc::clone(&streaming_inferences);
             async move {
-                let world_id = store
-                    .world_id_for_inference(step.inference_id.unwrap())
+                live_inferences
+                    .lock()
                     .await
-                    .unwrap();
-                store.publish_token(
-                    world_id,
-                    step.inference_id.unwrap(),
-                    step.offset.unwrap(),
-                    &step.token.unwrap(),
-                );
+                    .get(&step.inference_id.unwrap())
+                    .unwrap()
+                    .token(step.offset.unwrap(), &step.token.unwrap());
             }
         };
         let live_store = store.clone();
         let finish_live_inference = move |Json(step): Json<LiveInferenceStep>| {
             let store = live_store.clone();
+            let live_inferences = Arc::clone(&live_inferences);
             async move {
-                store
-                    .finish_inference(
-                        step.inference_id.unwrap(),
+                let inference = live_inferences
+                    .lock()
+                    .await
+                    .remove(&step.inference_id.unwrap())
+                    .unwrap();
+                inference
+                    .finish(
+                        &store,
                         InferenceOutcome::Response(Response {
                             content: Content::Text(
                                 step.content.unwrap_or_else(|| "Live reply.".to_string()),
@@ -2016,8 +2041,7 @@ mod tests {
     async fn real_model_browser_opens_exact_inference_evidence() {
         use crate::{inference::InferenceScheduler, settings::Settings};
 
-        let game_load = GameLoad::loading();
-        let (app, store, _db) = test_app_with_game(game_load.clone()).await;
+        let (app, store, _db, game_load) = test_app_with_game().await;
         let owner = store
             .find_or_create_user("real-browser@example.test", "Real browser")
             .await
@@ -2028,6 +2052,7 @@ mod tests {
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        crate::world::World::install(&game_load.worlds, installed.world_id);
         store
             .set_developer_mode(owner.id, installed.world_id, true)
             .await
@@ -2052,15 +2077,14 @@ mod tests {
         let observed_prompts = backend.observe_prompts();
         let game = Game::new(
             store.clone(),
+            game_load.worlds(),
             InferenceScheduler::new(backend, settings.limits)
                 .unwrap()
                 .foreground(),
             settings.limits,
             model_path,
             sampling,
-        )
-        .await
-        .unwrap();
+        );
         // Exercise both installation boundaries through the authenticated
         // route: after Game's snapshot but before readiness, and after ready.
         let creation_cookie = session_cookie(&store, owner.id).await;
@@ -2282,10 +2306,60 @@ mod tests {
     /// the same public constructor `discover_async` itself builds on, since
     /// route tests never exercise the OAuth handlers.
     async fn test_app() -> (Router, Store, crate::store::TestDatabase) {
-        test_app_with_game(GameLoad::loading()).await
+        let (app, store, db, _) = test_app_with_game().await;
+        (app, store, db)
     }
 
-    async fn test_app_with_game(game: GameLoad) -> (Router, Store, crate::store::TestDatabase) {
+    #[tokio::test]
+    async fn model_failure_leaves_world_inspection_notifications_available() {
+        let (app, store, _db, game) = test_app_with_game().await;
+        let owner = store
+            .find_or_create_user("owner@example.test", "Owner")
+            .await
+            .unwrap();
+        let cookie = session_cookie(&store, owner.id).await;
+        assert_eq!(
+            request(&app, "POST", "/worlds", Some(&cookie)).await,
+            StatusCode::SEE_OTHER
+        );
+        let world_id = store.owned_worlds(owner.id).await.unwrap()[0].id;
+        let mut events = game.world(world_id).unwrap().events.subscribe();
+        game.finish(Err(anyhow::anyhow!("model startup failed")))
+            .await;
+        assert!(matches!(
+            game.availability().await,
+            GameAvailability::Failed(_)
+        ));
+
+        assert_eq!(
+            form_request(
+                &app,
+                "POST",
+                &format!("/world/{world_id}/developer-mode"),
+                Some(&cookie),
+                Some("enabled=true")
+            )
+            .await,
+            StatusCode::SEE_OTHER
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(crate::inspection::DevEvent::DeveloperModeChanged { enabled: true })
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(crate::inspection::DevEvent::AccessChanged)
+        ));
+        assert!(
+            store
+                .access_for(owner.id, world_id)
+                .await
+                .unwrap()
+                .developer_mode
+        );
+    }
+
+    async fn test_app_with_game() -> (Router, Store, crate::store::TestDatabase, GameLoad) {
         use openidconnect::{
             AuthUrl, EmptyAdditionalProviderMetadata, JsonWebKeySetUrl, ResponseTypes,
             core::{CoreJwsSigningAlgorithm, CoreResponseType, CoreSubjectIdentifierType},
@@ -2293,6 +2367,7 @@ mod tests {
 
         let db = crate::store::TestDatabase::new("web-test");
         let store = Store::open(db.path()).await.unwrap();
+        let game = GameLoad::loading(&store).await.unwrap();
         let sessions = session_store(store.pool()).await.unwrap();
         let metadata = CoreProviderMetadata::new(
             IssuerUrl::new("https://accounts.example.test".into()).unwrap(),
@@ -2317,12 +2392,12 @@ mod tests {
             App {
                 store: store.clone(),
                 google,
-                game,
+                game: game.clone(),
             },
             sessions,
             true,
         );
-        (app, store, db)
+        (app, store, db, game)
     }
 
     /// A `Cookie` header selecting a real, saved session for `user_id`, so
@@ -2374,6 +2449,7 @@ mod tests {
     /// enough identities to exercise every authorization row in the
     /// Developer Mode test matrix.
     async fn authorization_fixture(
+        app: &Router,
         store: &Store,
     ) -> (
         i64,
@@ -2386,13 +2462,12 @@ mod tests {
             .find_or_create_user("owner@example.test", "Owner")
             .await
             .unwrap();
-        let scenario = Scenario::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
-        ))
-        .unwrap();
-        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
-        let world_id = installed.world_id;
+        let cookie = session_cookie(store, owner.id).await;
+        assert_eq!(
+            request(app, "POST", "/worlds", Some(&cookie)).await,
+            StatusCode::SEE_OTHER
+        );
+        let world_id = store.owned_worlds(owner.id).await.unwrap()[0].id;
         let active_player = store
             .find_or_create_user("player@example.test", "Player")
             .await
@@ -2429,7 +2504,7 @@ mod tests {
     async fn inspect_routes_reject_every_unauthorized_case_at_the_http_boundary() {
         let (app, store, _db) = test_app().await;
         let (world_id, owner, active_player, removed_player, other_world) =
-            authorization_fixture(&store).await;
+            authorization_fixture(&app, &store).await;
 
         let inspect_paths = [
             format!("/world/{world_id}/inspect/sequences"),
