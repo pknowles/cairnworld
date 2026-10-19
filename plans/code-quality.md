@@ -1,307 +1,111 @@
-# Code quality and correctness by construction
+# Focused code quality
 
-## Outcome and authority
+Scope reviewed 2026-10-19. Remaining implementation is pending.
 
-Invalid states are unrepresentable rather than checked for, and a reproducible
-command fails on warnings, formatting, forbidden dependencies, duplication and
-complexity. Authority: [coding_standards.md](../coding_standards.md) (RAII and
-complete-at-initialization, no optional values, fail fast, single definition,
-group by feature, reference rather than copy, performance) and the user's
-request for Clippy, archtest, jscpd-rs and bca checks. Player latency:
-[Scheduling](../user_declarations.md#scheduling).
+## Goal and authority
 
-Tool identities: [ArchTest](https://github.com/tdymel/arch_test) checks module
-access rules; [jscpd-rs](https://github.com/vv-bogdanov/jscpd-rs) provides the
-jscpd clone detector; [big-code-analysis](https://github.com/dekobon/big-code-analysis)
-provides bca function metrics/checks. Use these tools, not similarly named crates.
+Fix demonstrated incorrect behavior, remove a specific duplicated operation, and
+make statically shaped SQL compile-time checked. Keep the existing warning and
+unsafe-code gates. Authority: [coding standards](../coding_standards.md),
+[user declarations](../user_declarations.md), and the explicit acceptance of
+checked SQL in [user excerpts](../user_exerpts.md#2026-09-25-merged-gm-history-order-and-checked-sql).
 
-Steps 1-4, reviewed simplifications and world isolation completed and verified,
-2026-10-19. Next: the remaining presence review fixes below, then step 5's
-feature-module migration and checked SQL.
+The previously completed lint, history ownership and world-isolation work is
+indexed in [implementation reference](../implementation_reference.md).
+This plan does not require replacing every Store method, Option, or runtime check.
+In content.rs, text_in interns prompt text while content_in records per-event
+content and reasoning. They are different operations, not duplicate query twins.
 
-World-isolation correction before step 5: resolve topology proposals against the
-recorded invoking Game Master's world before preparing any merge sources; carry
-validated group identities through preparation and private transaction writes.
-Verify foreign splits, wholly foreign and mixed-world merges leave all targeted
-groups and compaction state unchanged, while valid and stale same-world batches
-retain their behavior. Reuse the normal game/tool path, run the full Rust and
-browser checks, and complete the AGENTS.md pre-commit checklist plus both
-standards reviews. Per-operation checks and separate world databases were
-considered; world-scoped resolution removes the unchecked-ID boundary with less
-duplication and no storage restructuring.
+## Evidence and priority
 
-World-isolation verification: 115 ordinary Rust tests, browser checks, real
-Qwen3.5 merged-history and browser evidence, server build and server/WASM lint
-checks pass. Self-review followed AGENTS.md and both standards documents.
-
-Remaining review fixes before step 5: reconcile lost connections and restore
-presence deadlines at startup ([presence plan](multiplayer-presence.md), and
-retain the last narrated membership set when an empty group's deadline fires.
-Verify restart and empty-period return transitions through the normal game path.
-
-Backend loading runs outside the readiness lock; Game construction and readiness publication run
-inside it. Each existing world starts once; later installations pass their World
-directly to worker startup. Queue completion covers both installation boundaries.
-
-Runtime history selection and deferred compaction carry AgentBranch instead of
-redundant agent identifiers and optional branch selectors. The branch_for_agent
-query accepts the caller's connection; its _tx twin is gone. Historical branches
-and transaction-time group activity checks are preserved. Replay uses the exact
-recorded branch, including a world GM's group history.
-
-Browser verification exposed early clicks reaching server-rendered controls
-before hydration. The Developer Mode warning and form use native dialog commands
-instead of hydrated open/close handlers. Waiting to enable
-the button would add lifecycle state; retaining JavaScript would keep this
-unnecessary hydration dependency. The browser check opens/cancels with JavaScript
-assets held, then releases assets before confirmation and checks all errors.
-The inference browser check waits for the server's CanAct signal (enabled
-Send), since the text input deliberately permits typing before that signal.
-
-World state and notification channels are constructed before model loading and
-shared by the web layer and Game. Game owns model-backed worker lifetimes;
-Store owns no live channels. Operations publish directly after their writes, and
-inference values retain their world channel through streaming, completion and
-deferred compaction. Finishing consumes the inference value.
-
-Verification: 115 ordinary Rust tests pass in parallel, including world/channel
-isolation, model-load failure, worker shutdown and actual startup-resumed
-compaction. Browser checks (including negative error-channel checks), real
-Qwen3.5/browser evidence and installation-boundary checks, formatting,
-server/WASM Clippy and the normal server build pass. No lint suppressions or
-application unsafe code were introduced. Real CLI replay reproduces the old GM
-failure and verifies the fix retains the request hash and branch without changing
-chat or compaction state. Self-review followed the AGENTS.md checklist and both
-standards documents.
-
-## Findings
-
-Review of `8f32f75`, 2026-09-24. Clippy is clean and 102 Rust tests pass with 9
-opt-in skipped; the rest is from reading the code and has not been measured.
-
-- **Gates fixed (2026-09-25; package coverage 2026-10-19).** `scripts/check-quality.sh` runs formatting plus
-  server and hydrated-WASM Clippy with warnings denied; Cargo package lint
-  settings deny warnings and forbid unsafe code across all application targets,
-  including build.rs and tests. The gate exposed and the commit corrected
-  the inspection pane's over-parameterized fetch helper rather than suppressing
-  its warning.
-- **Real-path compaction tests (2026-09-26).** Compaction tests now start with
-  `context::complete_recipe`, which records the normal reply and queues any
-  due obligation through `finish_chat_inference`, before resolving it through
-  `compaction::run`. The test-only completion trigger and raw-SQL enqueue
-  helper are gone. Store tests likewise create ordinary inferences through the
-  public sequence, invocation, start and finish operations; the generic
-  test-only inference writer is gone. Tool-call test setup likewise uses those
-  public operations and `create_tool_executions`, outside `Store`. The
-  summary tests queue and finish real compaction work through
-  `finish_summary_inference`, rather than inserting a summary row. The one
-  deliberate corruption used by a negative reconstruction test is local to
-  that test; every `Store` test helper now only reads state.
-- **Store is one type for all persistence.** `src/store.rs` is ~5,500 lines of
-  production code with ~97 public methods spanning membership, presence,
-  groups, inference records, compaction jobs and inspection, grouped by
-  technical layer rather than feature.
-- **Duplicate functions caused by the one-connection pool.** `branch_for_agent`
-  / `branch_for_agent_tx`, `world_gm_agent_id_tx`, `text_in`, `content_in`
-  exist because a `&self.pool` query inside an open transaction deadlocks.
-- **Duplicate SQL.** The "owner's first character's starting group" query is
-  copied four times (`store.rs` ~1085, ~1680, ~3181, ~3194).
-- **SQL is unchecked.** design.md's dependency list says sqlx provides
-  compile-time-checked SQL; all ~232 queries are runtime strings.
-- **Single SQLite connection** (`store.rs` `max_connections(1)`) despite WAL:
-  game turns, presence writes, logins and Developer Mode paging all queue
-  behind each other.
-- **Static prompt round trip per inference.** `context::segments` serializes
-  and writes the role prompt and tool definitions, and `request_for_segments`
-  reads them back and re-parses the tool JSON, on every turn.
-- **References stored as JSON.** `inference.segments`,
-  `summary.covered_ranges` and `pending_compaction.static_segments` hold text,
-  summary and branch ids with no foreign keys, so reconstruction re-validates
-  ownership at read time.
-- **Re-checked authority.** Seven inspection reads start with
-  `self.inspecting(viewer, world)`; history readers re-validate branch
-  ownership; ~100 `Option<` uses in Store's production code, several of which
-  select between two different operations (`branch_id: Option<i64>`,
-  `after: Option<cursor>`) or mark fields that only exist for one caller
-  (`Completion::output_content_id` is `None` only for compaction).
-- **World ownership and lossless presence fixed (2026-10-19).** Worlds are
-  constructed at startup/install; connection transitions are serialized with
-  durable writes and pending changes are coalesced outside the action queue.
-  Game owns model-backed workers; World owns its live channels even while the
-  model loads or fails. Store has no broadcasts. Inference scopes and domain
-  operations publish directly after committed changes; resumed compaction uses
-  its world's channel. Worker errors are logged even after a requester leaves.
-- **Remaining wire mirrors.** `ui::DevEvent` mirrors `store::DevEvent`, and a
-  `ui.rs` struct mirrors `web::RawHistoryPageResponse`.
-- **Tests reimplement production paths.** `compaction.rs` has a
-  `#[cfg(test)]` `CompletedTurn`/`after_turn` trigger that production never
-  runs; ~17 `#[cfg(test)]` Store helpers write raw SQL (e.g.
-  `enqueue_compaction_for_test`).
-- **Hand-rolled inference admission.** `inference.rs` implements a
-  priority-aware admission loop over `Mutex` + `Notify`.
-
-Tracked elsewhere: one sequential task per world blocks other groups during a
-model turn until [playable rules](playable-rules.md) adds durable suspension.
-
-## Design refactors
-
-Each item: problem, alternatives, recommendation. The recommendations share one
-principle: validate or construct once, hold the result in a value whose type
-proves it, and let the schema or compiler reject what used to be checked.
-
-### Validated handles instead of repeated checks and `Option` parameters
-
-| Option | Pros | Cons / risks |
+| Item | Verified evidence | Decision |
 | --- | --- | --- |
-| Keep per-method checks | No churn | Every new reader must remember the check; `Option` parameters keep two operations in one signature |
-| Authorization only in web handlers | One place | Store/game callers (CLI, MCP, tests) get no protection; checks drift from the queries |
-| Validated handle types (recommended) | Holding the value proves the check passed; signatures state which operation; fewer queries | One-time migration of call sites |
+| Presence and chat delivery | Restart/empty-period failures were reproduced during branch review. Further real game-path probes reproduce lost presence state after split/merge, missed passive-viewer wake-ups, and partial recipient delivery on an injected write failure. | Complete [presence and chat delivery](multiplayer-presence.md) first. |
+| Repeated starting-group selection | In src/store.rs, accept_invitation and create_player_character repeat the same owner/membership/character/group lookup. export_scenario repeats that ownership join for starting location and group name. These are four occurrences of the same selection rule, not four identical complete SQL statements. | Consolidate that operation only; preserve selection behavior. |
+| Unchecked SQL | Cargo uses sqlx, but statically shaped queries in Store are runtime query/query_as/query_scalar calls. design.md explicitly requires checked macros. | Fulfil the accepted requirement incrementally. This is an unmet build-time guarantee, not a claim that a particular current query is broken. |
 
-Recommendation: values with private fields and only validating constructors,
-e.g. `WorldInspection` (from the viewer's access check; inspection reads are
-its methods), `AgentBranch` (from the bounded-history corrections), and a group GM
-handle. Replace `Option` parameters that select an operation with separate
-constructors, and `Option` fields present for one caller with separate result
-types. Triage every remaining `Option` in production code: keep it only where
-absence is real data (e.g. nullable `sequence.finished_at`).
+## Ordered increments
 
-### Persistence grouped by feature, one function per operation
+### Presence correctness and chat delivery
 
-| Option | Pros | Cons / risks |
+Finish and verify the linked plan before the following cleanup. It covers real
+runtime defects; file size and quality-tool scores are not its motivation.
+
+### One definition of starting-group selection
+
+- Introduce one feature-local query taking the caller's SqliteConnection and a
+  world ID. Both invitation acceptance and character creation use it inside
+  their existing transactions.
+- Export resolves that same selected group once, then obtains its group/location
+  names together. Do not replace the current rule with a persisted starting-group
+  policy or change which owner's character is selected as part of this cleanup.
+- Preserve missing-owner/group errors and their caller context. Keep writes in
+  existing transactions; avoid pool acquisition from inside a transaction.
+- Verify invitation acceptance, additional characters, multiple owner characters,
+  scenario export, rollback and visibility of uncommitted membership data.
+  Compare existing results before/after; any ambiguous selection policy discovered
+  during this work must be resolved explicitly, not silently changed.
+
+| Solution | Benefit | Cost / risk |
 | --- | --- | --- |
-| Split `impl Store` across feature files | Mechanical, low risk | Still one type with every operation; `_tx` twins remain |
-| Feature modules own their queries as functions over `&mut SqliteConnection` (recommended) | One function works inside or outside a transaction, so no `_tx` twins; persistence lives with its feature; Store shrinks to the pool | Larger move; call sites pass a connection or transaction explicitly |
-| Repository per table | Familiar | Groups by type, which the standards reject |
+| Keep four ownership joins | No churn | Selection semantics and fixes can diverge. |
+| Shared connection-based lookup; recommended | One selection rule; usable within the existing transactions; little code movement | Callers must pass their actual connection. Export must retain the same selected group. |
+| Database view | One SQL definition usable from multiple projections | Additional schema object and checked-query metadata for a small duplication. No demonstrated benefit over the function here. |
 
-Recommendation: the second option. Store keeps pool ownership and transaction
-start; groups, presence, membership, inspection, compaction jobs and inference
-records move next to their features. The four copies of the starting-group
-query become one function.
+### Incremental checked SQL
 
-### Compile-time checked SQL
+- Use sqlx query!/query_as! and the matching locked sqlx-cli version for fixed-shape
+  queries. The project currently locks sqlx 0.8.6. Normal Cargo installation is
+  sufficient when this increment starts; no system installations are part of it.
+- Prepare an isolated schema database under target using the real migrations.
+  Commit standard .sqlx offline metadata and verify an offline build.
+- Start with the shared lookup above and its callers. Continue in coherent
+  feature batches: membership/scenario operations, group/presence operations,
+  recording/history, then inspection. No separate whole-tree file move is needed.
+- Keep genuinely dynamic QueryBuilder operations parameterized and test their
+  supported shapes. Do not claim those have become compile-time checked.
+- Add cargo sqlx prepare --check to the quality workflow once checked queries
+  exist. Prepare/check against an isolated schema, never the running user database.
+- Prove the guarantee with a temporary invalid column/type in a checked query:
+  compilation must fail. Restore it before committing. A fresh offline build and
+  schema-metadata check must pass.
+- Do not drop reconstruction, authorization, ordering, or range checks just
+  because a query compiles: checked SQL does not establish those invariants.
 
-| Option | Pros | Cons / risks |
+| Solution | Benefit | Cost / risk |
 | --- | --- | --- |
-| `sqlx::query!`/`query_as!` with committed offline `.sqlx` data (recommended) | Schema/query/type mismatches fail the build; in-place schema edits are caught everywhere | Needs sqlx-cli and `cargo sqlx prepare` after schema changes; SQLite nullability inference needs `as "col!"` overrides on some joins |
-| Keep runtime strings and change design.md | No work | Errors surface at runtime, only on paths tests reach |
-| Query builder / ORM | Typed composition | Large dependency and rewrite; more of our code, not less |
+| Runtime queries plus existing tests | No metadata maintenance | Does not meet the accepted compile-time guarantee; untouched paths can contain schema/type mistakes. |
+| Checked macros in feature batches; recommended | Build-time schema/type validation while retaining visible SQL | Offline metadata must be refreshed; SQLite nullability overrides need justification. |
+| New ORM or query framework | Could change query construction | Broad dependency/API rewrite with no demonstrated need. |
 
-Recommendation: the first option, converting each module as it moves (previous
-item). `cargo sqlx prepare --check` joins the check script. This makes the code
-match design.md's existing dependency choice (user-confirmed 2026-09-25).
+## Proposals removed from unconditional implementation
 
-### Connection model
+These are assessment results, not deferred mandatory tasks. Reconsideration needs
+specific new evidence and an explicit decision.
 
-| Option | Pros | Cons / risks |
+| Proposal | Real benefit | Why it is not required work now / risk |
 | --- | --- | --- |
-| Keep one connection | Simple, fully serialized | All reads wait behind writes; forces `_tx` twins |
-| Larger single pool | WAL concurrent reads | A deferred transaction that later writes can fail with `SQLITE_BUSY` instead of waiting |
-| Read pool (N, read-only) plus write pool (1, `BEGIN IMMEDIATE` via `begin_with`) (recommended) | Concurrent reads; writes serialized in-process, never busy; a write needs a write transaction by type | Two pools to configure; reads inside a write use its transaction (already enforced by the connection-parameter functions above) |
-
-Recommendation: the third option, after the feature-module change removes the
-twins. Measure Developer Mode paging concurrent with a game turn before and after.
-
-### Static recipe constructed once
-
-| Option | Pros | Cons / risks |
-| --- | --- | --- |
-| Keep the per-turn write/read round trip | The request is built only from stored records | A write, a read and a JSON parse per turn |
-| Build the request in memory, record separately | No round trip | Two paths that can diverge from what was recorded |
-| Intern the role prompt and tool definitions once when the agent's recipe is constructed (recommended) | The recipe value holds the committed ids and their immutable text/parsed tools, so the request is built from the record by construction; no per-turn I/O | Recipe construction moves to agent/role setup |
-
-Recommendation: the third option. Database reads remain only for reconstructing
-past inferences. The existing request-reconstruction device test must still pass.
-
-### Relational inference segments
-
-| Option | Pros | Cons / risks |
-| --- | --- | --- |
-| Keep JSON columns plus read-time checks | No schema change | Integrity depends on every reader; not queryable |
-| Child tables (`inference_segment`, `summary_range`, `compaction_static_segment`) with foreign keys, message ranges keyed by `(branch_id, agent_id)` (recommended) | Dangling or foreign references are unwritable; reconstruction drops its checks; queries such as "which inferences included this message" become possible | Schema and reader/writer rewrite; more rows per inference |
-
-Recommendation: the second option, while the pre-user schema can still be
-rebuilt in place.
-
-### Worlds as owned objects; presence as state
-
-| Option | Pros | Cons / risks |
-| --- | --- | --- |
-| Patch the channel: `send().await` or unbounded | Small | `send().await` makes connect wait behind a turn (design forbids); unbounded still turns state into a queue of stale events |
-| `World` data constructed before model loading and on install, owning its queues, broadcasts, connections and coalesced changes; `Game` owns model-backed workers (recommended) | Presence cannot be dropped or overflow, since the handler reads current state (design already calls the event a wake-up); no lazy maps; Store stops owning pub/sub; the world task records every event error itself | Moderate move of `game.rs` state; a task per world at startup |
-| Actor framework | Structured | New dependency for what tokio already provides |
-
-Recommendation: the second option. The web layer and `Game` share one
-`HashMap<world_id, Arc<World>>`, constructed before model loading so inspection
-remains available while the model loads or fails. `Game` owns the workers that
-require its backend. Operation and inference scopes hold the world's channel;
-there is no persistence callback or forwarding task. Ignored results that remain (a broadcast with no receivers, a
-reply to a requester that has gone) are named explicitly and the underlying
-error is still recorded.
-
-### Wire types and tests on the real path
-
-No alternatives needed: move `DevEvent` and the raw history page response into
-`src/inspection.rs` and delete the mirrors. Delete compaction's test-only
-trigger and drive those cases through `complete_recipe`/`finish_chat_inference`
-with the existing scripted backend. Keep `#[cfg(test)]` Store helpers only for
-read-only assertions; seed state through production operations.
-
-### Inference admission
-
-| Option | Pros | Cons / risks |
-| --- | --- | --- |
-| Keep the current loop | Works; small | Our code for a scheduling primitive |
-| tokio `Semaphore` plus a foreground-waiting gate | Standard primitive | Priority still needs custom code |
-| mistral.rs native scheduling/priority | Declared preference ("less code for us to maintain") | Unknown whether our fork supports priority |
-
-Recommendation: check mistral.rs's scheduler for priority support first; if it
-has none, keep the current loop. Lowest priority.
-
-## Ordered changes
-
-1. One mechanical `cargo fmt` commit over the tree. Add scripts/check-quality.sh
-   running `cargo fmt --check`, server Clippy with `--all-targets -- -D warnings`
-   and Clippy for the no-default-features hydrate WASM library with
-   `-D warnings`. Set `deny(warnings)` and `forbid(unsafe_code)` on crate roots.
-   Keep dependency build-script diagnostics distinct; add no allow attributes.
-2. Move the remaining wire mirrors into `src/inspection.rs`.
-3. Put tests on the real path (compaction trigger, `#[cfg(test)]` writers).
-4. `World` objects and presence as state.
-5. Persistence by feature with connection-parameter functions, checked SQL and
-   validated handles, one feature module per commit. Remove the `_tx` twins and
-   the duplicated queries as each module moves.
-6. Read/write connection pools.
-7. Relational inference segments and constructed-once static recipes (both
-   change recipe storage; one slice).
-8. Put request_builder and original-version prompt rendering in
-   src/model_prompt.rs, taking immutable Request/artifact values. Backend and
-   reconstruction call that same module; store/prompt.rs persists/loads
-   evidence and no longer imports mistralrs_backend.
-9. Add architecture.json with MayNotAccess rules: UI/shared wire types may not
-   import Store/Game/runtime; llm/content/wire data may not import web/MCP;
-   persistence may not import web/MCP/Game; game operations may not import
-   web/MCP. Run cargo archtest from the shared library root. Prove the rules
-   reject a forbidden import in a temporary fixture.
-10. Add .jscpd.json scanning src and scripts (5-line/50-token fragments, 5%
-    maximum duplicate-line ratio) with reports under target/quality.
-    Consolidate identical operations into their feature's existing function.
-11. Add bca.toml with function cyclomatic and cognitive complexity limits of 15.
-    Split complex functions by their real responsibilities. No suppressions or
-    accepted-violation baseline; if a metric demands a worse design, report the
-    case before changing its threshold. The thresholds are proposals.
-12. Pin tool versions in the documented install commands, record reports
-    before/after, update README with commands and scopes. The script exits
-    nonzero on missing tools and violations.
-13. Investigate mistral.rs admission priority.
+| Move all persistence into free functions and new feature files | Could improve cohesion | Moving code alone fixes no defect. Extract an operation when it removes actual duplication or establishes ownership; Store already owns real pool data. |
+| Replace every optional value with handles or enums | Can eliminate invalid combinations | Missing cursors and unfinished timestamps are real data. Existing AgentBranch and TopologyChanges already protect identified immutable ownership boundaries. No blanket migration. |
+| Cache inspection authorization | Could save reads | Access can be revoked while a socket is open. web::dev_events_connection deliberately checks SQLite before each private frame. A request-local handle must not become connection-long authority. Retain this behavior. |
+| Separate read/write pools | Could reduce contention | No measured queueing/latency evidence here. design.md specifies one pool. Two pools do not prevent contention with other processes or session writers. Pool size does not solve uncommitted-data visibility or replace passing a transaction's connection. |
+| Construct permanent agent recipes | Could avoid repeated text/tool SQL and JSON work | The extra work is real: context::segments interns pieces and request_for_segments reads them back. Its latency impact is unmeasured. player_prompt includes changing scene data; selected tools also change with readiness. If investigated, compare invocation-local prepared pieces with the current path; a permanent cache is not justified. |
+| Normalize every JSON reference into new tables | Foreign keys could enforce existence and ownership | Schema/reader/writer rewrite; foreign keys alone cannot prove range order, coverage or DAG semantics. Existing request ownership checks reject foreign references. No supported-writer corruption reproduced here. |
+| Move prompt formatting to another file | Removes a dependency direction | Generation and reconstruction already share request_builder. No duplicated formatter or incorrect output demonstrated; file movement is not a prerequisite. |
+| Replace inference admission | Might reduce maintained code if a backend offers identical priority semantics | Existing tests cover capacity, priority and cancellation. No verified simpler equivalent or scheduling failure identified in this review. |
+| Mandatory ArchTest, jscpd-rs and bca gates | May identify specific structural problems | No useful baseline, measured false-positive rate or justified 5%/15 thresholds. Runtime modules are in main.rs while lib.rs contains UI/shared wire types: actual analysis coverage must be proved before relying on a gate. Existing Rust gates stay mandatory. |
 
 ## Verification and completion
 
-Each step is its own commit with focused tests for moved/refactored operations,
-the full Rust suite and the browser suite. Removed runtime checks are replaced
-by a test proving the schema or type rejects the invalid state. Measure the
-per-inference database work and concurrent Developer Mode paging before step 5
-and after steps 6 and 7. Prompt/model-facing changes (step 7's recipe, step 8's
-formatter) additionally require a real configured-model chat and prompt review.
-Update design.md (after user sign-off where marked) and implementation_reference.md,
-re-read coding_standards.md and prompt_standards.md and complete the
-[AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist).
+Every increment follows the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
+[coding standards](../coding_standards.md) and [prompt standards](../prompt_standards.md).
+Review before implementation and before committing.
+
+Use production operations for fixtures and appropriate end-to-end checks; preserve
+all existing coverage. Run the full Rust suite and quality script at commit
+checkpoints. For changed prompt/context assembly, inspect captured model input
+and exercise the real configured-model chat path, including related use cases.
+New LLM behavior tests require the user review specified in the coding standards.
+
+Update implementation_reference.md only for implemented behavior. Do not mark
+this plan complete until the required increments pass verification and self-review.

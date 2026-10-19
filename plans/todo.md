@@ -6,12 +6,12 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Code quality](code-quality.md): finish the presence recovery and empty-group
-  review fixes, then step 5 onward's correctness-by-construction
-  refactors (validated handles, persistence by feature with checked SQL,
-  read/write pools, relational
-  segments, constructed-once recipes), then architecture/duplication/complexity
-  gates. Developer Mode was completed first by the user's 2026-09-27 direction.
+- [Presence correctness and chat delivery](multiplayer-presence.md): restart and
+  empty-period recovery, presence continuity through split/merge, transactional
+  narration delivery and wake-ups for already-open passive viewers.
+- [Focused code quality](code-quality.md): consolidate the repeated starting-group
+  lookup, then implement checked SQL in feature batches. Broader redesigns and
+  additional metrics gates require evidence; they are not prerequisites.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and

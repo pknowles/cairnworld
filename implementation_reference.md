@@ -663,6 +663,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `party_presence()` returns group membership and current connection presence.
   Process-restart reconciliation of stale durable presence remains planned;
   constructing an empty connection set does not implement that recovery policy.
+  Pending recovery, topology and chat-delivery corrections are specified in
+  [the presence plan](plans/multiplayer-presence.md).
 - Group-scoped narration. `World.broadcasts`, `Game::subscribe` and
   `deliver_narration` key live delivery by group. `Store::append_group_narration`
   selects connected active PCs in that same group for durable history, so
