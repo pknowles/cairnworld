@@ -2,3 +2,6 @@
 # Leptos reads this while it compiles its hydration helper. Keeping it Cargo-wide
 # makes ordinary `cargo run` and `cargo-leptos` emit and request one WASM name.
 LEPTOS_OUTPUT_NAME = { value = "cairnworld", force = true }
+# SQLx prepare overrides this while checking the isolated schema. Ordinary
+# builds need only the committed query metadata, without a local database.
+SQLX_OFFLINE = "true"

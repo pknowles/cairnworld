@@ -1648,13 +1648,14 @@ impl Store {
         connection: &mut SqliteConnection,
         world_id: i64,
     ) -> Result<Option<i64>> {
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "SELECT character_group.group_id FROM player_character \
              JOIN character_group ON character_group.character_id = player_character.character_id \
              JOIN world_member ON world_member.id = player_character.member_id \
              JOIN world_owner ON world_owner.world_id = world_member.world_id AND world_owner.user_id = world_member.user_id \
              WHERE world_member.world_id = ? ORDER BY player_character.member_id LIMIT 1",
-        ).bind(world_id).fetch_optional(connection).await.context("selecting owner starting group")
+            world_id,
+        ).fetch_optional(connection).await.context("selecting owner starting group")
     }
 
     /// Load exactly the player-visible state for the member's current location.
@@ -3410,14 +3411,15 @@ impl Store {
                 .await
                 .context("loading scenario start location")?
                 .context("scenario world has no owner Adventurer location")?;
-            sqlx::query_as(
-                "SELECT \"group\".name, location.name FROM \"group\" \
+            let start = sqlx::query!(
+                "SELECT \"group\".name AS group_name, location.name AS location_name FROM \"group\" \
                  JOIN location ON location.id = \"group\".location_id WHERE \"group\".id = ?",
+                group_id,
             )
-            .bind(group_id)
             .fetch_one(&mut *connection)
             .await
-            .context("loading scenario starting group and location")?
+            .context("loading scenario starting group and location")?;
+            (start.group_name, start.location_name)
         };
         let connections: Vec<ScenarioConnection> = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
             "SELECT from_location.name, to_location.name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \

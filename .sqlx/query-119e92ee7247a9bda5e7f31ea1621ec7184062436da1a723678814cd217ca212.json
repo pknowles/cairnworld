@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT \"group\".name AS group_name, location.name AS location_name FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "group_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "119e92ee7247a9bda5e7f31ea1621ec7184062436da1a723678814cd217ca212"
+}

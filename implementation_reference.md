@@ -207,6 +207,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 
 ## Persistence and recording (design.md: Persistence and recording)
 
+- `owner_starting_group` and the scenario start-name query use SQLx checked
+  macros and committed `.sqlx` metadata. `.cargo/config.toml` defaults builds
+  to offline checking; `scripts/check-quality.sh` validates metadata against
+  migrations in `target/sqlx-schema.sqlite` using SQLx CLI 0.8.6. Remaining
+  runtime queries are being converted by feature, retaining semantic checks.
 - `src/store.rs` and `migrations/` - SQLite store, WAL mode,
   identity-only sandbox worlds and chat-history agents; OAuth email identities
   with non-unique display names; durable world-owner, membership,

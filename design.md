@@ -156,11 +156,18 @@ continue through available capacity.
 
 `sqlx` with sqlite, WAL mode. Not a full ORM (Diesel's DSL and codegen are
 more framework than this project needs), but not raw strings either: sqlx's
-`query!`/`query_as!` macros check every SQL statement and its result types
+`query!`/`query_as!` macros check fixed-shape application SQL and its result types
 against a real dev database at compile time, mapping rows into plain rust
 structs. Type safety where it matters, SQL stays visible, async-native so it
 composes directly with axum and the world tasks, and migrations are built in
 (`sqlx migrate`). One `SqlitePool` owned by the application.
+
+Normal builds use committed `.sqlx` metadata with `SQLX_OFFLINE` enabled by
+default. The quality check migrates an isolated `target/sqlx-schema.sqlite` and
+validates that metadata with the matching SQLx Cargo CLI. It never prepares
+queries against the running game database.
+Genuinely dynamic query shapes retain bound parameters and tests for their
+supported forms.
 
 ## One record for chat history and Developer Mode
 

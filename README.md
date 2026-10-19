@@ -123,7 +123,23 @@ scripts/check-quality.sh
 ```
 
 It checks formatting and treats warnings as errors for both the server and the
-hydrated WASM library.
+hydrated WASM library, and checks SQL against migrations using the matching
+SQLx Cargo tool:
+
+```sh
+cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features sqlite --target-dir target
+```
+
+Ordinary builds use committed `.sqlx` metadata and need no schema database.
+The quality script uses only `target/sqlx-schema.sqlite`. After changing a
+checked query or migration, regenerate metadata against that isolated schema:
+
+```sh
+export DATABASE_URL=sqlite://target/sqlx-schema.sqlite
+cargo sqlx database setup --source migrations
+cargo sqlx prepare -- --all-targets
+```
+
 Cargo's package lint settings also deny warnings and forbid unsafe code in
 every application target, including the build script and tests. Do not suppress
 lints with `allow` or `expect` attributes. Third-party dependencies retain their
