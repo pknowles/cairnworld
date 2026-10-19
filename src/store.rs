@@ -751,6 +751,13 @@ impl TryFrom<PendingCompactionRow> for PendingCompaction {
 }
 
 impl Store {
+    pub async fn world_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar("SELECT id FROM world ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .context("loading worlds")
+    }
+
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path
@@ -1700,8 +1707,8 @@ impl Store {
         })
     }
 
-    /// Resolve the active player's character location without exposing an
-    /// internal database id in the model-facing scene packet.
+    /// Read the active player's location for narration-isolation assertions.
+    #[cfg(test)]
     pub async fn player_location_id(&self, member: &PlayerAgent) -> Result<i64> {
         sqlx::query_scalar(
             "SELECT \"group\".location_id FROM world_member AS member \
@@ -1787,16 +1794,6 @@ impl Store {
             .fetch_optional(&self.pool)
             .await
             .with_context(|| format!("checking group {group_id} is active"))
-    }
-
-    /// The location a group is currently at.
-    pub async fn group_location_id(&self, group_id: i64) -> Result<i64> {
-        sqlx::query_scalar("SELECT location_id FROM \"group\" WHERE id = ?")
-            .bind(group_id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("looking up location for group {group_id}"))?
-            .with_context(|| format!("group {group_id} does not exist"))
     }
 
     /// A group's world_gm identity and its own branch (design.md's
@@ -2521,16 +2518,16 @@ impl Store {
         Ok(entries)
     }
 
-    /// Persist a resolved location narration in every active player-agent
-    /// history currently at that location, all referencing the one
+    /// Persist a resolved group narration in every connected player-agent
+    /// history currently in that group, all referencing the one
     /// `recorded_content` row the narrating GM's own reply already wrote -
     /// not a fresh copy of the text per recipient. Call this only after the
     /// triggering player agent has settled, so its tool-call/result sequence
     /// stays intact.
-    pub async fn append_location_narration(
+    pub async fn append_group_narration(
         &self,
         world_id: i64,
-        location_id: i64,
+        group_id: i64,
         content_id: i64,
     ) -> Result<()> {
         // Recipients are connected PCs in the interacting group (design.md's
@@ -2545,14 +2542,14 @@ impl Store {
              JOIN \"group\" ON \"group\".id = character_group.group_id \
              JOIN character_presence ON character_presence.character_id = player_character.character_id \
              WHERE world_member.world_id = ? AND world_member.access = 'active' \
-             AND \"group\".location_id = ? AND character_presence.absent_since IS NULL \
+             AND \"group\".id = ? AND character_presence.absent_since IS NULL \
              ORDER BY player_character.agent_id",
         )
         .bind(world_id)
-        .bind(location_id)
+        .bind(group_id)
         .fetch_all(&self.pool)
         .await
-        .context("finding connected player agents at narrated location")?;
+        .context("finding connected player agents in narrated group")?;
         let source_inference_id: Option<i64> =
             sqlx::query_scalar("SELECT id FROM inference WHERE output = ?")
                 .bind(content_id)
@@ -2574,7 +2571,7 @@ impl Store {
                 None,
             )
             .await
-            .with_context(|| format!("storing location narration for player agent {agent_id}"))?;
+            .with_context(|| format!("storing group narration for player agent {agent_id}"))?;
             transaction.commit().await.with_context(|| {
                 format!("committing location narration for player agent {agent_id}")
             })?;
@@ -7011,7 +7008,14 @@ mod tests {
         transaction.commit().await.unwrap();
 
         store
-            .append_location_narration(installed.world_id, location_id, content_id)
+            .append_group_narration(
+                installed.world_id,
+                store
+                    .character_group_id(installed.member.character_id)
+                    .await
+                    .unwrap(),
+                content_id,
+            )
             .await
             .unwrap();
 

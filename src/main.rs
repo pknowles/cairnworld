@@ -318,13 +318,7 @@ async fn load_game(
         .resume(&store)
         .await
         .context("resuming deferred compactions")?;
-    Ok(Arc::new(game::Game::new(
-        store,
-        scheduler.foreground(),
-        limits,
-        model.path,
-        sampling,
-    )))
+    game::Game::new(store, scheduler.foreground(), limits, model.path, sampling).await
 }
 
 async fn run_chat(

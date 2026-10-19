@@ -409,7 +409,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   removed rather than kept unused, per coding_standards.md). `insert_message`
   and the new `insert_message_with_content` (store.rs) are the two ways a
   message row is written - the latter takes an already-resolved content id
-  directly rather than re-interning, used by `append_location_narration` so
+  directly rather than re-interning, used by `append_group_narration` so
   every present character's delivered copy shares the GM inference output row
   and carries that output's `source_inference_id` back to its producing Turn
   (verified by `narration_delivered_to_several_recipients_shares_one_content_row`
@@ -642,54 +642,41 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   Subsequent player messages expose creation or location-action tools
   according to durable character state.
 - Presence (Developer Mode plan D2; design.md's Membership and presence).
-  `WorldEvents` owns a short-lock-protected `connections: HashMap<character_id,
-  HashSet<connection_id>>`. `Game::connect`/`disconnect` update it and, on a
-  durable zero/one transition (`character_presence`), post a
-  `WorldEvent::PresenceChanged` to the world's serialized queue without
-  waiting for it to be processed. `handle_presence_changed` reads current
-  group/presence state (never the event's own payload, since later changes
-  may have queued behind it): arrival into a group already announced as
-  occupied narrates immediately; any other change (a departure, or first
-  arrival after an empty period) schedules a `presence_narration.due_at`
-  deadline `limits.presence_departure_seconds` out and spawns a
-  `tokio::time::sleep` posting `WorldEvent::PresenceDeadline{group_id,
-  generation}` back to the same queue. `handle_presence_deadline` re-checks
-  the row's current generation and does nothing if stale (superseded by a
-  later reschedule or an already-settled announcement) - this is how
-  returning before the deadline cancels a pending departure without ever
-  narrating it. At the deadline, an empty group retains the difference
-  without an inference; only creation-ready characters participate, otherwise
-  `narrate_presence_transition` runs an
-  ordinary no-tools GM turn (its own `sequence`/`begin_sequence`) naming who
-  arrived/left, delivers it through the existing `append_location_narration`,
-  and persists the new announced set together with that narration.
-  `append_location_narration`'s own recipient query now requires an active
-  `character_presence` row with no `absent_since` (connected), not just
-  active membership - narration recipients are connected PCs in the group,
-  matching the accepted policy; NPC narration delivery does not exist.
-  `party_presence()` (a plain read-only player tool) and `Store::party_presence`
-  return every character in the caller's group with its name and online state.
-  Process restart is not yet handled: connection sets are always empty on a
-  fresh process, but stale `character_presence`/`presence_narration` rows
-  from a prior process are not reconciled (design.md's "at restart, clear all
-  connection sets and timestamp formerly connected characters as absent" -
-  plan step 4, not yet implemented). Nor does prompt context yet record
-  whether a narration was actually delivered to a given character (plan step
-  5's last sentence).
-- Group-scoped live narration (Developer Mode plan D3). `WorldEvents.broadcasts`
-  and `Game::subscribe`/`deliver_narration`/`narrate_presence_transition` key
-  the live `GroupBroadcasts` channel by `group_id` (`Store::character_group_id`),
-  not `location_id` - two groups sharing one location no longer cross-leak
-  live narration to each other's connected viewers, matching the durable
-  recipient filtering `append_location_narration` already enforces. Durable
-  storage still resolves `location_id` separately (`Narration` carries both
-  fields) since `append_location_narration`'s own recipient query is keyed by
-  location plus group plus connectedness. `gm_scene` also now returns the
-  interacting group's own `description`/`gm_notes` (`GmScene.group_description`/
-  `group_gm_notes`), distinct from the physical location's - previously the
-  GM only ever saw location-level notes, never the group's own. Not yet
-  implemented: an existing browser socket does not resubscribe when its
-  character's group changes.
+  `Game::new` loads all stored worlds before returning. Each `World` owns its
+  worker cancellation handle and shared broadcasts, opening turns and presence.
+  Web scenario installation is serialized with `GameLoad::finish`, so worlds
+  created during model loading or after readiness get their runtime before play.
+  Dropping the world aborts its worker; an idle worker holds only a weak game
+  reference. `Game::connect`/`disconnect` hold the world's presence lock across
+  each durable zero/one transition and update the connection set only after a
+  successful write. Changed characters are coalesced in a set and signalled by
+  `Notify`, independently of the bounded action queue. The worker drains changes
+  and due deadlines between actions; it owns pending timers instead of spawning
+  detached timer tasks. Zero-delay deadlines are processed before later actions.
+  Event errors are logged with world/character or group identity even when a
+  requesting connection has gone. Arrival into an occupied group narrates
+  immediately; departures and empty-period arrivals share a deadline. A deadline
+  with an unchanged online set clears the transition without inference.
+  `handle_presence_deadline` validates the generation before acting. Presence
+  narration uses an ordinary recorded GM turn and delivers one content reference
+  to connected active PCs in the group. Only creation-ready PCs participate.
+  `party_presence()` returns group membership and current connection presence.
+  Process-restart reconciliation of stale durable presence remains planned;
+  constructing an empty connection set does not implement that recovery policy.
+- Group-scoped narration. `WorldState.broadcasts`, `Game::subscribe` and
+  `deliver_narration` key live delivery by group. `Store::append_group_narration`
+  selects connected active PCs in that same group for durable history, so
+  sharing a physical location cannot leak narration on reload. After a topology
+  tool batch, the GM's settled reply is delivered to the triggering character's
+  resulting group. The isolation test performs real split/action/GM tool rounds
+  and checks both live delivery and reloaded histories; it no longer inserts
+  group state or sends test narration directly. Presence tests observe an
+  event-queue completion barrier instead of fixed sleeps, with explicit deadline
+  delivery for departure-window cases. Regression tests also cover more presence
+  transitions than a full action queue can hold during inference, failed presence
+  writes, and release of idle world ownership. `gm_scene` includes group-local
+  description and notes. Existing browser sockets do not yet resubscribe when
+  their character's group changes.
 - `split_group`/`merge_groups` (Developer Mode plan D4). Two GM tool calls,
   never applied at the point they execute (design.md's "Tool boundary"):
   `agent::complete_with_call_context`'s batch loop collects

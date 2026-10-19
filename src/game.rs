@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, RwLock, Weak,
         atomic::{AtomicI64, Ordering},
     },
 };
@@ -9,7 +9,11 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
+use tokio::{
+    sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch},
+    task::AbortHandle,
+    time::Instant,
+};
 
 use crate::{
     agent::{self, Budget, CallContext},
@@ -31,8 +35,7 @@ pub struct Game<B> {
     limits: Limits,
     model: String,
     sampling: Sampling,
-    worlds: Mutex<HashMap<i64, WorldEvents>>,
-    openings: Mutex<HashMap<i64, watch::Receiver<OpeningState>>>,
+    worlds: RwLock<HashMap<i64, Arc<World>>>,
     /// Process-local, never restored after restart (design.md's Membership
     /// and presence: "Live connection IDs are process-local").
     next_connection_id: AtomicI64,
@@ -45,21 +48,57 @@ enum OpeningState {
     Failed(String),
 }
 
-#[derive(Clone)]
-struct WorldEvents {
+struct World {
     sender: mpsc::Sender<WorldEvent>,
+    state: Arc<WorldState>,
+    task: AbortHandle,
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct WorldState {
     broadcasts: Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
-    /// The short-lock-protected set of live connection IDs per character
-    /// (design.md's Membership and presence). A separate lock from
-    /// `broadcasts`/`sender` so connect/disconnect never wait on an ongoing
-    /// model turn or narration delivery.
-    connections: Arc<Mutex<HashMap<i64, HashSet<i64>>>>,
+    presence: Mutex<Presence>,
+    changed: Notify,
+    openings: Mutex<HashMap<i64, watch::Receiver<OpeningState>>>,
+}
+
+#[derive(Default)]
+struct Presence {
+    connections: HashMap<i64, HashSet<i64>>,
+    changed: HashSet<i64>,
+}
+
+impl World {
+    fn new<B: Backend + Send + Sync + 'static>(game: Weak<Game<B>>, world_id: i64) -> Self {
+        let (sender, receiver) = mpsc::channel(64);
+        let state = Arc::new(WorldState {
+            broadcasts: Arc::new(Mutex::new(HashMap::new())),
+            presence: Mutex::new(Presence::default()),
+            changed: Notify::new(),
+            openings: Mutex::new(HashMap::new()),
+        });
+        let task = tokio::spawn(Game::process_world(
+            game,
+            world_id,
+            receiver,
+            Arc::clone(&state),
+        ));
+        Self {
+            sender,
+            state,
+            task: task.abort_handle(),
+        }
+    }
 }
 
 type GroupBroadcasts = Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>;
 
 struct Narration {
-    location_id: i64,
     group_id: i64,
     text: String,
     /// The recorded_content row the GM's own settled reply message already
@@ -77,7 +116,6 @@ struct PlayerActionTool {
     sequence_id: i64,
     definition: ToolDefinition,
     validate: fn(&str) -> Result<()>,
-    location_id: i64,
     budget: Budget,
     call: CallContext,
     broadcasts: GroupBroadcasts,
@@ -93,38 +131,65 @@ enum WorldEvent {
         member: PlayerAgent,
         reply: oneshot::Sender<Result<Option<Response>>>,
     },
-    /// A character's connected/disconnected transition. This is only a
-    /// wake-up carrying the identity that changed; the handler reads current
-    /// presence/group state when it actually acts, not this event's own
-    /// payload, since further changes may have queued behind it.
-    PresenceChanged { character_id: i64 },
     /// A previously scheduled arrival/departure deadline has elapsed. `group_id`
     /// and `generation` let the handler recognize a deadline superseded by a
     /// later change (design.md: "stale timer events do nothing").
     PresenceDeadline { group_id: i64, generation: i64 },
+    /// Observe completion of earlier work without introducing timer sleeps
+    /// or bypassing production event processing in asynchronous tests.
+    #[cfg(test)]
+    Settled(oneshot::Sender<()>),
 }
 
 impl<B> Game<B>
 where
     B: Backend + Send + Sync + 'static,
 {
-    pub fn new(
+    pub async fn new(
         store: Store,
         backend: ScheduledBackend<B>,
         limits: Limits,
         model: String,
         sampling: Sampling,
-    ) -> Self {
-        Self {
+    ) -> Result<Arc<Self>> {
+        let ids = store.world_ids().await?;
+        Ok(Arc::new_cyclic(|game| Self {
             store,
             backend,
             limits,
             model,
             sampling,
-            worlds: Mutex::new(HashMap::new()),
-            openings: Mutex::new(HashMap::new()),
+            worlds: RwLock::new(
+                ids.into_iter()
+                    .map(|id| (id, Arc::new(World::new(game.clone(), id))))
+                    .collect(),
+            ),
             next_connection_id: AtomicI64::new(1),
+        }))
+    }
+
+    pub async fn load_worlds(self: &Arc<Self>) -> Result<()> {
+        for id in self.store.world_ids().await? {
+            self.install_world(id);
         }
+        Ok(())
+    }
+
+    pub fn install_world(self: &Arc<Self>, id: i64) {
+        self.worlds
+            .write()
+            .expect("worlds lock poisoned")
+            .entry(id)
+            .or_insert_with(|| Arc::new(World::new(Arc::downgrade(self), id)));
+    }
+
+    fn world(&self, id: i64) -> Result<Arc<World>> {
+        self.worlds
+            .read()
+            .expect("worlds lock poisoned")
+            .get(&id)
+            .cloned()
+            .with_context(|| format!("world {id} is not loaded"))
     }
 
     /// Queue a player message behind all earlier events in this world.
@@ -133,7 +198,7 @@ where
         member: PlayerAgent,
         text: &str,
     ) -> Result<Response> {
-        let world = self.world_events(member.world_id).await;
+        let world = self.world(member.world_id)?;
         let (reply, receive) = oneshot::channel();
         world
             .sender
@@ -151,7 +216,7 @@ where
 
     /// Queue opening a world behind all earlier events in that world.
     pub async fn enter(self: &Arc<Self>, member: PlayerAgent) -> Result<Option<Response>> {
-        let world = self.world_events(member.world_id).await;
+        let world = self.world(member.world_id)?;
         let (reply, receive) = oneshot::channel();
         world
             .sender
@@ -172,14 +237,16 @@ where
             return Ok(());
         }
         let character_id = member.character_id;
+        let world = self.world(member.world_id)?;
         let mut receiver = {
-            let mut openings = self.openings.lock().await;
+            let mut openings = world.state.openings.lock().await;
             if let Some(receiver) = openings.get(&character_id) {
                 receiver.clone()
             } else {
                 let (sender, receiver) = watch::channel(OpeningState::Pending);
                 openings.insert(character_id, receiver.clone());
                 let game = Arc::clone(self);
+                let world = Arc::clone(&world);
                 tokio::spawn(async move {
                     tracing::info!(
                         world_id = member.world_id,
@@ -191,7 +258,7 @@ where
                         Err(error) => OpeningState::Failed(format!("{error:#}")),
                     };
                     let _ = sender.send(state);
-                    game.openings.lock().await.remove(&character_id);
+                    world.state.openings.lock().await.remove(&character_id);
                 });
                 receiver
             }
@@ -216,38 +283,35 @@ where
         member: &PlayerAgent,
     ) -> Result<broadcast::Receiver<String>> {
         let group_id = self.store.character_group_id(member.character_id).await?;
-        Ok(group_broadcast(
-            &self.world_events(member.world_id).await.broadcasts,
-            group_id,
+        Ok(
+            group_broadcast(&self.world(member.world_id)?.state.broadcasts, group_id)
+                .await
+                .subscribe(),
         )
-        .await
-        .subscribe())
     }
 
     /// Register one live connection for a character, returning its id for the
     /// matching `disconnect` call. A durable zero/one transition (design.md's
     /// Membership and presence) persists `character_presence` and wakes the
-    /// world's serialized queue with a `PresenceChanged` event; this never
-    /// waits for that queue to actually process it.
+    /// world's coalesced changed-character set; this never waits for an
+    /// ongoing model turn or space in the action queue.
     pub async fn connect(self: &Arc<Self>, member: &PlayerAgent) -> Result<i64> {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        let world = self.world_events(member.world_id).await;
-        let became_present = {
-            let mut connections = world.connections.lock().await;
-            let characters = connections.entry(member.character_id).or_default();
-            let was_empty = characters.is_empty();
-            characters.insert(connection_id);
-            was_empty
-        };
-        if became_present {
+        let world = self.world(member.world_id)?;
+        let mut presence = world.state.presence.lock().await;
+        if !presence.connections.contains_key(&member.character_id) {
             self.store
                 .mark_character_present(member.character_id)
                 .await
                 .context("recording character presence")?;
-            let _ = world.sender.try_send(WorldEvent::PresenceChanged {
-                character_id: member.character_id,
-            });
+            presence.changed.insert(member.character_id);
+            world.state.changed.notify_one();
         }
+        presence
+            .connections
+            .entry(member.character_id)
+            .or_default()
+            .insert(connection_id);
         Ok(connection_id)
     }
 
@@ -260,90 +324,119 @@ where
         member: &PlayerAgent,
         connection_id: i64,
     ) -> Result<()> {
-        let world = self.world_events(member.world_id).await;
-        let became_absent = {
-            let mut connections = world.connections.lock().await;
-            let Some(characters) = connections.get_mut(&member.character_id) else {
-                return Ok(());
-            };
-            characters.remove(&connection_id);
-            let now_empty = characters.is_empty();
-            if now_empty {
-                connections.remove(&member.character_id);
-            }
-            now_empty
+        let world = self.world(member.world_id)?;
+        let mut presence = world.state.presence.lock().await;
+        let Some(characters) = presence.connections.get(&member.character_id) else {
+            return Ok(());
         };
-        if became_absent {
+        if !characters.contains(&connection_id) {
+            return Ok(());
+        }
+        if characters.len() == 1 {
             self.store
                 .mark_character_absent(member.character_id)
                 .await
                 .context("recording character absence")?;
-            let _ = world.sender.try_send(WorldEvent::PresenceChanged {
-                character_id: member.character_id,
-            });
+            presence.connections.remove(&member.character_id);
+            presence.changed.insert(member.character_id);
+            world.state.changed.notify_one();
+        } else {
+            presence
+                .connections
+                .get_mut(&member.character_id)
+                .expect("connection exists")
+                .remove(&connection_id);
         }
         Ok(())
     }
 
-    async fn world_events(self: &Arc<Self>, world_id: i64) -> WorldEvents {
-        let mut worlds = self.worlds.lock().await;
-        if let Some(world) = worlds.get(&world_id) {
-            return world.clone();
-        }
-        let (sender, receiver) = mpsc::channel(64);
-        let world = WorldEvents {
-            sender,
-            broadcasts: Arc::new(Mutex::new(HashMap::new())),
-            connections: Arc::new(Mutex::new(HashMap::new())),
-        };
-        worlds.insert(world_id, world.clone());
-        drop(worlds);
-        let game = Arc::clone(self);
-        let broadcasts = Arc::clone(&world.broadcasts);
-        let sender = world.sender.clone();
-        tokio::spawn(async move { game.process_world(receiver, sender, broadcasts).await });
-        world
-    }
-
     async fn process_world(
-        self: Arc<Self>,
+        game: Weak<Self>,
+        world_id: i64,
         mut events: mpsc::Receiver<WorldEvent>,
-        events_sender: mpsc::Sender<WorldEvent>,
-        broadcasts: Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
+        state: Arc<WorldState>,
     ) {
-        while let Some(event) = events.recv().await {
+        let mut deadlines: HashMap<i64, (Instant, i64)> = HashMap::new();
+        loop {
+            let next_deadline = deadlines
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(id, (at, generation))| (*id, *at, *generation));
+            let deadline = async {
+                match next_deadline {
+                    Some((group_id, at, generation)) => {
+                        if at > Instant::now() {
+                            tokio::time::sleep_until(at).await;
+                        }
+                        WorldEvent::PresenceDeadline {
+                            group_id,
+                            generation,
+                        }
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let event = tokio::select! {
+                biased;
+                _ = state.changed.notified() => {
+                    let Some(game) = game.upgrade() else { break };
+                    let changed = std::mem::take(&mut state.presence.lock().await.changed);
+                    for character_id in changed {
+                        match game.handle_presence_changed(character_id, &state.broadcasts).await {
+                            Ok(Some((group_id, at, generation))) => { deadlines.insert(group_id, (at, generation)); }
+                            Ok(None) => {}
+                            Err(error) => tracing::error!(world_id, character_id, error = %format!("{error:#}"), "handling presence change"),
+                        }
+                    }
+                    continue;
+                }
+                event = deadline => event,
+                event = events.recv() => match event { Some(event) => event, None => break },
+            };
+            let Some(game) = game.upgrade() else { break };
             match event {
                 WorldEvent::PlayerMessage {
                     member,
                     text,
                     reply,
                 } => {
-                    let _ = reply.send(
-                        self.resolve_player_message(member, &text, &broadcasts)
-                            .await,
-                    );
+                    let character_id = member.character_id;
+                    let result = game
+                        .resolve_player_message(member, &text, &state.broadcasts)
+                        .await;
+                    if let Err(error) = &result {
+                        tracing::error!(world_id, character_id, error = %format!("{error:#}"), "processing player message");
+                    }
+                    let _requester_disconnected = reply.send(result);
                 }
                 WorldEvent::Enter { member, reply } => {
-                    let _ = reply.send(self.resolve_enter(member, &broadcasts).await);
-                }
-                WorldEvent::PresenceChanged { character_id } => {
-                    if let Err(error) = self
-                        .handle_presence_changed(character_id, &events_sender, &broadcasts)
-                        .await
-                    {
-                        tracing::error!(character_id, error = %format!("{error:#}"), "handling presence change");
+                    let character_id = member.character_id;
+                    let result = game.resolve_enter(member, &state.broadcasts).await;
+                    if let Err(error) = &result {
+                        tracing::error!(world_id, character_id, error = %format!("{error:#}"), "processing world entry");
                     }
+                    let _requester_disconnected = reply.send(result);
                 }
                 WorldEvent::PresenceDeadline {
                     group_id,
                     generation,
                 } => {
-                    if let Err(error) = self
-                        .handle_presence_deadline(group_id, generation, &broadcasts)
+                    if deadlines
+                        .get(&group_id)
+                        .is_some_and(|(_, current)| *current == generation)
+                    {
+                        deadlines.remove(&group_id);
+                    }
+                    if let Err(error) = game
+                        .handle_presence_deadline(group_id, generation, &state.broadcasts)
                         .await
                     {
-                        tracing::error!(group_id, generation, error = %format!("{error:#}"), "handling presence deadline");
+                        tracing::error!(world_id, group_id, generation, error = %format!("{error:#}"), "handling presence deadline");
                     }
+                }
+                #[cfg(test)]
+                WorldEvent::Settled(reply) => {
+                    let _test_finished = reply.send(());
                 }
             }
         }
@@ -371,9 +464,8 @@ where
     async fn handle_presence_changed(
         self: &Arc<Self>,
         character_id: i64,
-        events_sender: &mpsc::Sender<WorldEvent>,
         broadcasts: &GroupBroadcasts,
-    ) -> Result<()> {
+    ) -> Result<Option<(i64, Instant, i64)>> {
         let group_id = self.store.character_group_id(character_id).await?;
         let all_online = self.store.group_online_character_ids(group_id).await?;
         let online = self.ready_online_characters(&all_online).await?;
@@ -382,7 +474,7 @@ where
             // A departure or empty-period arrival is already pending for
             // this group; subsequent changes within that window share the
             // existing deadline rather than rescheduling it.
-            return Ok(());
+            return Ok(None);
         }
         let group_already_occupied = !narration.last_announced_character_ids.is_empty();
         if group_already_occupied && online.len() > narration.last_announced_character_ids.len() {
@@ -390,7 +482,8 @@ where
             // occupied: narrate immediately, no delay.
             return self
                 .narrate_presence_transition(group_id, &narration, &online, broadcasts)
-                .await;
+                .await
+                .map(|()| None);
         }
         if online.len() != narration.last_announced_character_ids.len()
             || online != narration.last_announced_character_ids
@@ -407,18 +500,13 @@ where
                     narration.generation,
                 )
                 .await?;
-            let sender = events_sender.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(after_seconds)).await;
-                let _ = sender
-                    .send(WorldEvent::PresenceDeadline {
-                        group_id,
-                        generation,
-                    })
-                    .await;
-            });
+            return Ok(Some((
+                group_id,
+                Instant::now() + std::time::Duration::from_secs(after_seconds),
+                generation,
+            )));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Act on a scheduled deadline if it is still current. A stale deadline
@@ -459,7 +547,7 @@ where
         broadcasts: &GroupBroadcasts,
     ) -> Result<()> {
         let ready_online = self.ready_online_characters(online).await?;
-        if ready_online.is_empty() {
+        if ready_online.is_empty() || ready_online == narration.last_announced_character_ids {
             self.store
                 .announce_presence(group_id, &ready_online, narration.generation)
                 .await?;
@@ -467,7 +555,6 @@ where
         }
         let online = ready_online;
         let world_id = self.store.world_id_for_group(group_id).await?;
-        let location_id = self.store.group_location_id(group_id).await?;
         let gm_history = self.store.group_gm_history(group_id).await?;
         let arrived_ids: Vec<i64> = online
             .iter()
@@ -539,7 +626,7 @@ where
                 anyhow::bail!("group GM did not settle while narrating presence");
             };
             self.store
-                .append_location_narration(world_id, location_id, settled.output_content_id)
+                .append_group_narration(world_id, group_id, settled.output_content_id)
                 .await
                 .context("storing presence narration")?;
             let _ = group_broadcast(broadcasts, group_id).await.send(text);
@@ -602,15 +689,9 @@ where
             let budget = Budget::new(self.limits);
             let call = CallContext::root(Some(sequence.id));
             let tools = if ready {
-                let location_id = self
-                    .store
-                    .player_location_id(&member)
-                    .await
-                    .context("resolving player location")?;
                 self.action_tools(
                     member.clone(),
                     sequence.id,
-                    location_id,
                     budget.clone(),
                     call.clone(),
                     Arc::clone(broadcasts),
@@ -965,7 +1046,6 @@ where
         self: &Arc<Self>,
         member: PlayerAgent,
         sequence_id: i64,
-        location_id: i64,
         budget: Budget,
         call: CallContext,
         broadcasts: GroupBroadcasts,
@@ -1006,7 +1086,6 @@ where
                         .expect("character action schema should serialize"),
                 },
                 validate: validate_character_action,
-                location_id,
                 budget: budget.clone(),
                 call: call.clone(),
                 broadcasts: Arc::clone(&broadcasts),
@@ -1021,7 +1100,6 @@ where
                         .expect("character action schema should serialize"),
                 },
                 validate: validate_character_action,
-                location_id,
                 budget: budget.clone(),
                 call: call.clone(),
                 broadcasts: Arc::clone(&broadcasts),
@@ -1036,7 +1114,6 @@ where
                         .expect("take action schema should serialize"),
                 },
                 validate: validate_take_action,
-                location_id,
                 budget,
                 call,
                 broadcasts,
@@ -1050,7 +1127,6 @@ where
             sequence_id,
             definition,
             validate,
-            location_id,
             budget,
             call,
             broadcasts,
@@ -1081,7 +1157,7 @@ where
                     )
                     .await
                     .with_context(|| format!("submitting {tool_name} to location GM"))?;
-                let narration = game.arbitrate(pending, location_id, budget, call).await?;
+                let narration = game.arbitrate(pending, budget, call).await?;
                 let delivery_game = Arc::clone(&game);
                 Ok(ToolOutcome::CompletedAfter {
                     content: "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
@@ -1104,7 +1180,6 @@ where
         budget: Budget,
         call: CallContext,
     ) -> Result<Narration> {
-        let location_id = self.store.player_location_id(member).await?;
         let group_id = self.store.character_group_id(member.character_id).await?;
         let gm_history = self.store.player_group_history(member).await?;
         let branch = self.store.group_branch(group_id).await?;
@@ -1149,7 +1224,6 @@ where
             anyhow::bail!("group GM did not settle while opening play");
         };
         Ok(Narration {
-            location_id,
             group_id,
             text: narration,
             content_id: settled.output_content_id,
@@ -1159,7 +1233,6 @@ where
     async fn arbitrate(
         self: &Arc<Self>,
         pending: PendingAction,
-        location_id: i64,
         budget: Budget,
         call: CallContext,
     ) -> Result<Narration> {
@@ -1408,8 +1481,7 @@ where
             "GM narrated action {action_id} without approving or rejecting it"
         );
         Ok(Narration {
-            location_id,
-            group_id,
+            group_id: self.store.character_group_id(pending.character_id).await?,
             text: narration,
             content_id: settled.output_content_id,
         })
@@ -1422,7 +1494,7 @@ where
         broadcasts: &GroupBroadcasts,
     ) -> Result<()> {
         self.store
-            .append_location_narration(member.world_id, narration.location_id, narration.content_id)
+            .append_group_narration(member.world_id, narration.group_id, narration.content_id)
             .await
             .context("storing GM narration before the player agent follows up")?;
         // A player may disconnect while the GM resolves. The narration remains
@@ -1569,7 +1641,7 @@ mod tests {
     };
 
     struct ScriptedBackend {
-        responses: Mutex<VecDeque<Response>>,
+        responses: Arc<Mutex<VecDeque<Response>>>,
         requests: Arc<Mutex<Vec<crate::llm::Request>>>,
     }
 
@@ -1580,7 +1652,7 @@ mod tests {
             let requests = Arc::new(Mutex::new(vec![]));
             (
                 Self {
-                    responses: Mutex::new(responses.into_iter().collect()),
+                    responses: Arc::new(Mutex::new(responses.into_iter().collect())),
                     requests: Arc::clone(&requests),
                 },
                 requests,
@@ -1817,13 +1889,15 @@ mod tests {
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
         let scheduler = InferenceScheduler::new(backend, limits).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             scheduler.foreground(),
             limits,
             model,
             sampling,
-        ));
+        )
+        .await
+        .unwrap();
         (game, store, db, installed.member)
     }
 
@@ -1896,7 +1970,7 @@ mod tests {
             response(Content::Text(String::new())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             backend.foreground(),
             Limits::default(),
@@ -1905,7 +1979,9 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
         let mut broadcasts = game.subscribe(&installed.member).await.unwrap();
         let (actions_before, pending_before) = store.action_counts().await.unwrap();
         game.player_message(installed.member.clone(), "I take the flour sack.")
@@ -2227,7 +2303,7 @@ mod tests {
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             backend.foreground(),
             Limits::default(),
@@ -2236,7 +2312,9 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
         let (actions_before, pending_before) = store.action_counts().await.unwrap();
         game.player_message(installed.member.clone(), "I take the flour sack.")
             .await
@@ -2362,7 +2440,7 @@ mod tests {
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             backend.foreground(),
             Limits::default(),
@@ -2371,7 +2449,9 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
 
         let (actions_before, pending_before) = store.action_counts().await.unwrap();
         game.player_message(installed.member.clone(), "I look around, then we split up.")
@@ -2548,7 +2628,7 @@ mod tests {
             response(Content::Text("What do you do next?".into())),
         ]);
         let split_backend = InferenceScheduler::new(split_backend, Limits::default()).unwrap();
-        let split_game = Arc::new(Game::new(
+        let split_game = Game::new(
             store.clone(),
             split_backend.foreground(),
             Limits::default(),
@@ -2557,7 +2637,9 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
         split_game
             .player_message(installed.member.clone(), "I look, then we split up.")
             .await
@@ -2601,7 +2683,7 @@ mod tests {
             response(Content::Text("What do you do next?".into())),
         ]);
         let merge_backend = InferenceScheduler::new(merge_backend, Limits::default()).unwrap();
-        let merge_game = Arc::new(Game::new(
+        let merge_game = Game::new(
             store.clone(),
             merge_backend.foreground(),
             Limits::default(),
@@ -2610,7 +2692,9 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
         merge_game
             .player_message(installed.member.clone(), "I look at Toma, then we regroup.")
             .await
@@ -2795,10 +2879,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let location_id = store.player_location_id(&member).await.unwrap();
         let (real_backend, model_path, sampling, _limits) = device_test_game().await;
         let limits = Limits::default();
-        let real_game = Arc::new(Game::new(
+        let real_game = Game::new(
             store.clone(),
             InferenceScheduler::new(real_backend, Limits::default())
                 .unwrap()
@@ -2806,11 +2889,12 @@ mod tests {
             limits,
             model_path,
             sampling,
-        ));
+        )
+        .await
+        .unwrap();
         real_game
             .arbitrate(
                 pending.clone(),
-                location_id,
                 Budget::new(limits),
                 CallContext::root(Some(sequence.id)),
             )
@@ -2921,7 +3005,7 @@ mod tests {
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(backend, Limits::default()).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             backend.foreground(),
             Limits::default(),
@@ -2930,7 +3014,9 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
         game.player_message(installed.member.clone(), "I look around, then leave alone.")
             .await
             .unwrap();
@@ -3068,7 +3154,7 @@ mod tests {
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(backend, Limits::default()).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             backend.foreground(),
             Limits::default(),
@@ -3077,7 +3163,9 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
         game.player_message(
             installed.member.clone(),
             "I look, then someone tries to split us twice.",
@@ -3293,8 +3381,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_presence_write_does_not_register_a_connection() {
+        let (backend, _) = ScriptedBackend::recording([]);
+        let (game, _store, _db, mut member) = blank_opening_game(backend).await;
+        member.character_id = i64::MAX;
+        for _ in 0..2 {
+            assert!(
+                game.connect(&member).await.is_err(),
+                "a failed durable transition must not make a later connection appear registered"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worlds_are_loaded_at_construction_and_released_with_the_game() {
+        let (backend, _) = ScriptedBackend::recording([]);
+        let (game, _store, _db, member) = blank_opening_game(backend).await;
+        let world = Arc::downgrade(&game.world(member.world_id).unwrap());
+        assert_eq!(game.worlds.read().unwrap().len(), 1);
+        drop(game);
+        assert!(
+            world.upgrade().is_none(),
+            "idle world tasks must not retain their owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_survives_a_full_action_queue_during_inference() {
+        let (backend, started, release, requests) = DelayedBackend::new();
+        let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
+        let pending_game = Arc::clone(&game);
+        let member = first.clone();
+        let turn = tokio::spawn(async move {
+            pending_game
+                .player_message(member, "Describe the scene.")
+                .await
+        });
+        started.notified().await;
+
+        let world = game.world(first.world_id).unwrap();
+        let mut completions = Vec::new();
+        while world.sender.capacity() > 0 {
+            let (reply, receive) = oneshot::channel();
+            world.sender.try_send(WorldEvent::Settled(reply)).unwrap();
+            completions.push(receive);
+        }
+        // More transitions than the action queue can hold, while its consumer
+        // is held inside a real game inference. Transport changes must finish.
+        for _ in 0..70 {
+            let connection = game.connect(&first).await.unwrap();
+            game.disconnect(&first, connection).await.unwrap();
+        }
+        let _first_connection = game.connect(&first).await.unwrap();
+        let _second_connection = game.connect(&second).await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        release.notify_one();
+        turn.await.unwrap().unwrap();
+        started.notified().await;
+        release.notify_one();
+        for completed in completions {
+            completed.await.unwrap();
+        }
+        let_presence_handlers_run(&game, &first).await;
+        let group_id = store.character_group_id(first.character_id).await.unwrap();
+        let announced = store.presence_narration(group_id).await.unwrap();
+        assert_eq!(
+            announced.last_announced_character_ids,
+            [first.character_id, second.character_id]
+        );
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "the blocked turn and one consolidated arrival narration"
+        );
+    }
+
     async fn two_player_bread_thief_game<B>(
         backend: B,
+    ) -> (
+        Arc<Game<B>>,
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        PlayerAgent,
+    )
+    where
+        B: Backend + Send + Sync + 'static,
+    {
+        two_player_bread_thief_game_with_deadline(backend, 0).await
+    }
+
+    async fn two_player_bread_thief_game_with_deadline<B>(
+        backend: B,
+        presence_departure_seconds: u64,
     ) -> (
         Arc<Game<B>>,
         Store,
@@ -3343,15 +3524,12 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // A short real deadline: presence timer tests wait on it in real
-        // wall-clock time rather than paused virtual time, which fights the
-        // SQLite connection pool's own internal timeout.
         let limits = Limits {
-            presence_departure_seconds: 0,
+            presence_departure_seconds,
             ..Limits::default()
         };
         let scheduler = InferenceScheduler::new(backend, limits).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             scheduler.foreground(),
             limits,
@@ -3360,15 +3538,50 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
-        ));
+        )
+        .await
+        .unwrap();
         (game, store, db, installed.member, companion)
     }
 
-    /// Yield repeatedly so a spawned handler (process_world's PresenceChanged/
-    /// PresenceDeadline dispatch, or a zero-second deadline's sleep) gets to
-    /// run before the test observes its effect.
-    async fn let_presence_handlers_run() {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    async fn let_presence_handlers_run<B: Backend + Send + Sync + 'static>(
+        game: &Game<B>,
+        member: &PlayerAgent,
+    ) {
+        let (reply, completed) = oneshot::channel();
+        game.world(member.world_id)
+            .unwrap()
+            .sender
+            .send(WorldEvent::Settled(reply))
+            .await
+            .unwrap();
+        completed.await.unwrap();
+    }
+
+    /// Deliver a scheduled deadline deterministically through the same world
+    /// queue as production, without sleeping through a departure window.
+    async fn deliver_presence_deadline<B: Backend + Send + Sync + 'static>(
+        game: &Game<B>,
+        store: &Store,
+        member: &PlayerAgent,
+    ) {
+        let_presence_handlers_run(game, member).await;
+        let group_id = store.character_group_id(member.character_id).await.unwrap();
+        let narration = store.presence_narration(group_id).await.unwrap();
+        assert!(
+            narration.due_at.is_some(),
+            "the transition must schedule a deadline"
+        );
+        game.world(member.world_id)
+            .unwrap()
+            .sender
+            .send(WorldEvent::PresenceDeadline {
+                group_id,
+                generation: narration.generation,
+            })
+            .await
+            .unwrap();
+        let_presence_handlers_run(game, member).await;
     }
 
     #[tokio::test]
@@ -3381,7 +3594,7 @@ mod tests {
         // arrival after an empty period," which is delayed behind the
         // departure deadline (here, zero seconds), not immediate.
         let _first_connection = game.connect(&first).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         assert_eq!(recorded_requests.lock().unwrap().len(), 1);
     }
 
@@ -3394,7 +3607,7 @@ mod tests {
         let (game, _store, _db, first, second) = two_player_bread_thief_game(backend).await;
 
         let _first_connection = game.connect(&first).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         assert_eq!(
             recorded_requests.lock().unwrap().len(),
             1,
@@ -3402,7 +3615,7 @@ mod tests {
         );
 
         let _second_connection = game.connect(&second).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         assert_eq!(
             recorded_requests.lock().unwrap().len(),
             2,
@@ -3419,9 +3632,9 @@ mod tests {
         ]);
         let (game, _store, _db, first, second) = two_player_bread_thief_game(backend).await;
         let first_connection = game.connect(&first).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         let _second_connection = game.connect(&second).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         assert_eq!(
             recorded_requests.lock().unwrap().len(),
             2,
@@ -3429,7 +3642,7 @@ mod tests {
         );
 
         game.disconnect(&first, first_connection).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         assert_eq!(
             recorded_requests.lock().unwrap().len(),
             3,
@@ -3443,22 +3656,21 @@ mod tests {
             response(Content::Text("Someone arrives.".into())),
             response(Content::Text("Someone else arrives.".into())),
         ]);
-        let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
-        // A real, observable window: the zero-second default used by other
-        // presence tests here would resolve before this test could ever
-        // reconnect within it.
+        let (game, store, _db, first, second) =
+            two_player_bread_thief_game_with_deadline(backend, 60).await;
+        // Keep the departure window open until both transport changes have completed.
         let group_id = store.character_group_id(first.character_id).await.unwrap();
         let first_connection = game.connect(&first).await.unwrap();
-        let_presence_handlers_run().await;
+        deliver_presence_deadline(&game, &store, &first).await;
         let _second_connection = game.connect(&second).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         assert_eq!(recorded_requests.lock().unwrap().len(), 2);
 
         game.disconnect(&first, first_connection).await.unwrap();
-        // The departure's deadline has been scheduled; reconnect immediately,
-        // before its (here, zero-second) sleep has had a chance to run.
+        let_presence_handlers_run(&game, &first).await;
+        // Reconnect inside the scheduled departure window, then deliver its deadline.
         let _first_connection_again = game.connect(&first).await.unwrap();
-        let_presence_handlers_run().await;
+        deliver_presence_deadline(&game, &store, &first).await;
         assert_eq!(
             recorded_requests.lock().unwrap().len(),
             2,
@@ -3477,16 +3689,17 @@ mod tests {
             response(Content::Text("Someone arrives.".into())),
             response(Content::Text("Someone else arrives.".into())),
         ]);
-        let (game, _store, _db, first, second) = two_player_bread_thief_game(backend).await;
+        let (game, store, _db, first, second) =
+            two_player_bread_thief_game_with_deadline(backend, 60).await;
         let first_connection = game.connect(&first).await.unwrap();
-        let_presence_handlers_run().await;
+        deliver_presence_deadline(&game, &store, &first).await;
         let second_connection = game.connect(&second).await.unwrap();
-        let_presence_handlers_run().await;
+        let_presence_handlers_run(&game, &first).await;
         assert_eq!(recorded_requests.lock().unwrap().len(), 2);
 
         game.disconnect(&first, first_connection).await.unwrap();
         game.disconnect(&second, second_connection).await.unwrap();
-        let_presence_handlers_run().await;
+        deliver_presence_deadline(&game, &store, &first).await;
         assert_eq!(
             recorded_requests.lock().unwrap().len(),
             2,
@@ -3532,62 +3745,121 @@ mod tests {
 
     #[tokio::test]
     async fn live_narration_does_not_cross_groups_sharing_one_location() {
-        let (backend, _recorded_requests) = ScriptedBackend::recording([]);
+        let (backend, _) = ScriptedBackend::recording([]);
+        let script = Arc::clone(&backend.responses);
         let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
-        // No public API creates a second group yet (that is Developer Mode
-        // plan D4's split_group); this directly inserts one sharing the
-        // Adventurer's own location, matching the exact shape
-        // install_scenario/split_group would produce, to exercise the
-        // narration/broadcast isolation this fix adds ahead of D4 existing.
-        let location_id = store.player_location_id(&second).await.unwrap();
-        let world_gm = store
-            .group_gm_history(store.character_group_id(second.character_id).await.unwrap())
+        let group_id = store.character_group_id(first.character_id).await.unwrap();
+        let companions: Vec<i64> = store
+            .party_presence(first.character_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|member| member.character_id)
+            .filter(|id| *id != second.character_id)
+            .collect();
+        let split = serde_json::json!({
+            "group_id": group_id,
+            "partitions": [
+                {"character_ids": companions, "name": "first group", "description": "outside"},
+                {"character_ids": [second.character_id], "name": "second group", "description": "inside"}
+            ]
+        }).to_string();
+        script.lock().unwrap().extend([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "look-1".into(),
+                name: "look".into(),
+                arguments: r#"{"description":"the room"}"#.into(),
+            }])),
+            response(Content::ToolCalls(vec![
+                ToolCall {
+                    id: "approve-1".into(),
+                    name: "approve_action".into(),
+                    arguments: r#"{"action_id":1}"#.into(),
+                },
+                ToolCall {
+                    id: "split-1".into(),
+                    name: "split_group".into(),
+                    arguments: split,
+                },
+            ])),
+            response(Content::Text("The group splits up.".into())),
+            response(Content::Text(String::new())),
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "look-2".into(),
+                name: "look".into(),
+                arguments: r#"{"description":"the room"}"#.into(),
+            }])),
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "approve-2".into(),
+                name: "approve_action".into(),
+                arguments: r#"{"action_id":2}"#.into(),
+            }])),
+            response(Content::Text(
+                "Only the first group should see this.".into(),
+            )),
+            response(Content::Text(String::new())),
+        ]);
+        store
+            .mark_character_present(first.character_id)
             .await
             .unwrap();
-        let other_group_id: i64 = sqlx::query_scalar(
-            "INSERT INTO history_branch (agent_id) VALUES (?) RETURNING (SELECT id FROM history_branch WHERE agent_id = ? ORDER BY id DESC LIMIT 1)",
-        )
-        .bind(world_gm.agent_id)
-        .bind(world_gm.agent_id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
-        let other_group_id: i64 = sqlx::query_scalar(
-            "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id) \
-             VALUES (?, 'other', ?, '', ?) RETURNING id",
-        )
-        .bind(second.world_id)
-        .bind(location_id)
-        .bind(other_group_id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
-        sqlx::query("UPDATE character_group SET group_id = ? WHERE character_id = ?")
-            .bind(other_group_id)
-            .bind(second.character_id)
-            .execute(&store.pool())
+        store
+            .mark_character_present(second.character_id)
             .await
             .unwrap();
-
-        let mut first_receiver = game.subscribe(&first).await.unwrap();
-        let mut second_receiver = game.subscribe(&second).await.unwrap();
-        let first_group_id = store.character_group_id(first.character_id).await.unwrap();
-        assert_ne!(
-            first_group_id, other_group_id,
-            "the two characters must actually be in different groups for this test"
-        );
-
-        let broadcasts = game.world_events(first.world_id).await.broadcasts;
-        let _ = group_broadcast(&broadcasts, first_group_id)
+        game.player_message(first.clone(), "Look around and split up.")
             .await
-            .send("only the first group should see this".to_string());
-        assert_eq!(
-            first_receiver.recv().await.unwrap(),
-            "only the first group should see this"
+            .unwrap();
+        assert!(
+            store
+                .player_chat(&first)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.text == "The group splits up."),
+            "the GM's settled reply belongs to the triggering character's resulting group"
         );
         assert!(
-            second_receiver.try_recv().is_err(),
-            "a broadcast to one group must not reach a live viewer in a different group at the same location"
+            !store
+                .player_chat(&second)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.text == "The group splits up."),
+            "the final reply must not leak into the other resulting group"
+        );
+        assert_ne!(
+            store.character_group_id(first.character_id).await.unwrap(),
+            store.character_group_id(second.character_id).await.unwrap()
+        );
+        assert_eq!(
+            store.player_location_id(&first).await.unwrap(),
+            store.player_location_id(&second).await.unwrap()
+        );
+        let mut first_receiver = game.subscribe(&first).await.unwrap();
+        let mut second_receiver = game.subscribe(&second).await.unwrap();
+        game.player_message(first.clone(), "Look around again.")
+            .await
+            .unwrap();
+        assert_eq!(
+            first_receiver.recv().await.unwrap(),
+            "Only the first group should see this."
+        );
+        assert!(
+            matches!(
+                second_receiver.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "narration must not reach another group sharing the same location"
+        );
+        assert!(
+            !store
+                .player_chat(&second)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.text == "Only the first group should see this."),
+            "reloaded history must preserve the same isolation as live narration"
         );
     }
 

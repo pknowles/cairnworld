@@ -6,7 +6,7 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Code quality](code-quality.md) (steps 2 onward): correctness-by-construction
+- [Code quality](code-quality.md) (step 4 onward): correctness-by-construction
   refactors (validated handles, persistence by feature with checked SQL,
   read/write pools, `World` objects with lossless presence, relational
   segments, constructed-once recipes), then architecture/duplication/complexity

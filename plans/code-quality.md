@@ -15,9 +15,21 @@ access rules; [jscpd-rs](https://github.com/vv-bogdanov/jscpd-rs) provides the
 jscpd clone detector; [big-code-analysis](https://github.com/dekobon/big-code-analysis)
 provides bca function metrics/checks. Use these tools, not similarly named crates.
 
-Steps 1–3 are complete. Step 4 follows the completed Developer Mode work, by
-the user's 2026-09-27 priority decision. Its required bounded-history
-corrections and GM event recording are already complete.
+Steps 1–3 are complete. Step 4 is in progress: its world execution/presence
+slice constructs world workers at startup/install, owns their lifetimes and
+deadlines, coalesces presence changes, serializes durable connection transitions,
+and replaces timing-dependent presence tests. Its real-path group test also
+corrected durable narration crossing groups at one location. The remaining
+step-4 slice moves live Developer Mode broadcasts out of Store; keep step 4 open
+until that ownership change is verified. Developer Mode, bounded-history
+corrections and GM event recording are complete.
+
+World execution/presence slice verified and reviewed 2026-10-19: 112 ordinary
+Rust tests pass in parallel; game tests also pass in two 32-thread runs. Browser
+checks (including negative error-channel checks), real Qwen3.5/browser evidence
+and installation-boundary checks, formatting, server/WASM Clippy and the normal
+server build pass. The running server reports model readiness and HTTP 204 from
+`/game-status`. No lint suppressions or application unsafe code were introduced.
 
 ## Findings
 

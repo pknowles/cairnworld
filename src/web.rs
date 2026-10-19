@@ -127,11 +127,16 @@ impl GameLoad {
     }
 
     pub async fn finish(&self, result: Result<Arc<Game<MistralRsBackend>>>) {
+        let mut current = self.state.write().await;
+        let result = match result {
+            Ok(game) => game.load_worlds().await.map(|()| game),
+            Err(error) => Err(error),
+        };
         let state = match result {
             Ok(game) => GameLoadState::Ready(game),
             Err(error) => GameLoadState::Failed(format!("{error:#}")),
         };
-        *self.state.write().await = state;
+        *current = state;
         self.changed.notify_waiters();
     }
 
@@ -425,7 +430,13 @@ async fn create_bread_thief_world(
         "/scenarios/bread_thief.json"
     ))
     .context("reading checked-in Bread Thief scenario")?;
+    // Serialize installation with model readiness so a world created during
+    // loading is included before play becomes available.
+    let state = app.game.state.write().await;
     let installed = app.store.install_scenario(&user, &scenario).await?;
+    if let GameLoadState::Ready(game) = &*state {
+        game.install_world(installed.world_id);
+    }
     Ok(Redirect::to(&format!("/world/{}", installed.world_id)))
 }
 
@@ -1708,13 +1719,15 @@ mod tests {
                 .unwrap();
         let (backend, captured_requests) = ScriptedBackend::new(responses);
         let scheduler = crate::inference::InferenceScheduler::new(backend, browser_limits).unwrap();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             scheduler.foreground(),
             browser_limits,
             "browser-test".into(),
             Sampling::default(),
-        ));
+        )
+        .await
+        .unwrap();
         let creation = store
             .begin_sequence(world_id, "browser completed creation")
             .await
@@ -2037,7 +2050,7 @@ mod tests {
         .await
         .unwrap();
         let observed_prompts = backend.observe_prompts();
-        let game = Arc::new(Game::new(
+        let game = Game::new(
             store.clone(),
             InferenceScheduler::new(backend, settings.limits)
                 .unwrap()
@@ -2045,8 +2058,38 @@ mod tests {
             settings.limits,
             model_path,
             sampling,
-        ));
-        game_load.finish(Ok(Arc::clone(&game))).await;
+        )
+        .await
+        .unwrap();
+        // Exercise both installation boundaries through the authenticated
+        // route: after Game's snapshot but before readiness, and after ready.
+        let creation_cookie = session_cookie(&store, owner.id).await;
+        for already_ready in [false, true] {
+            assert_eq!(
+                request(&app, "POST", "/worlds", Some(&creation_cookie)).await,
+                StatusCode::SEE_OTHER
+            );
+            if !already_ready {
+                game_load.finish(Ok(Arc::clone(&game))).await;
+            }
+            let world_id = store
+                .owned_worlds(owner.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|world| world.id)
+                .max()
+                .unwrap();
+            let character_id = store.world_members(world_id).await.unwrap()[0].characters[0].id;
+            let member = store
+                .active_player_character(owner.id, world_id, character_id)
+                .await
+                .unwrap()
+                .unwrap();
+            game.subscribe(&member)
+                .await
+                .expect("installed worlds must be loaded before play");
+        }
         game.wait_for_opening(installed.member.clone())
             .await
             .unwrap();

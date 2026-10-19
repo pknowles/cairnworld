@@ -995,8 +995,8 @@ No local proxy changes a user's authorization merely by supplying another ID.
 | --- | --- |
 | import_scenario(path) | Parse/validate Scenario and create a fresh owned development world; return world/character IDs. |
 | export_scenario(world_id,path) | Authorized existing export of reusable state, excluding private histories. |
-| enter(world_id,character_id) | Game::enter via WorldEvents; return sequence and stored entry cursor. |
-| chat(world_id,character_id,text) | Game::player_message via WorldEvents; return sequence/result or suspension. |
+| enter(world_id,character_id) | Game::enter via the world task; return sequence and stored entry cursor. |
+| chat(world_id,character_id,text) | Game::player_message via the world task; return sequence/result or suspension. |
 | history(world_id,agent_id,head,cursor) | The same bounded raw-history query as inspection. |
 | inspect_turn / inspect_inference / objects | The same typed Developer Mode queries and authorization. |
 | replay(world_id,inference_id,replacements) | Reconstruct originals; explicit text/segment replacements create a fresh recorded sandbox inference, never mutate the source history or execute returned game tools. |
@@ -1046,10 +1046,16 @@ creates no characters. Routes are POST `/world/{id}/members/{user}/ban` and
 `/reactivate`; WorldDetail renders active members and an owner-only collapsed
 Ban list. Both update Store membership and publish AccessChanged after commit.
 
-The existing world's `WorldEvents` owns a short-lock-protected set of
-connection IDs per character. Game::connect/disconnect update this set and the
-durable zero/one transition, then post a generation-tagged PresenceChanged event
-to the existing world queue. These methods never wait for an ongoing model turn;
+Each loaded world's `World` owns its event task, group broadcasts, opening turns,
+connection IDs per character and a coalesced set of changed characters. Worlds
+are constructed at startup and when installed, rather than on first access.
+Game::connect/disconnect serialize the durable zero/one transition and connection
+set update under the same presence lock. A successful transition adds the
+character to the changed set and notifies the world task. These methods never
+wait for an ongoing model turn; changed state cannot overflow the action queue.
+The world task owns pending presence deadlines and processes due deadlines and
+changed state between actions. Every event error is logged even if its requester
+has disconnected. A world's task is cancelled when its owner is dropped;
 narration delivery reads the current set when committing recipient references.
 A connection is registered after authentication and deregistered on close,
 logout, ban or transport error. Multiple tabs share one character-presence state. Logical
@@ -1069,13 +1075,14 @@ deadline changes the final set and removes a cancelled departure. At deadline,
 if anyone remains online, narrate the difference and persist the new announced
 set with the narration; if nobody remains, retain the difference without running
 an inference. First arrival after an empty period sets a new 60-second deadline
-and narrates the consolidated old-to-new state then. One `sleep_until` per pending
-deadline posts a generation-tagged event; stale timer events do nothing.
+and narrates the consolidated old-to-new state then. The world task retains
+pending deadlines and waits for the earliest one, then handles its
+generation-tagged event; stale timer events do nothing.
 
 At restart, clear all connection sets and timestamp formerly connected characters
 as absent at recovery. Retain pending/announced transitions; when a real connection
 returns, apply the same empty-group transition above. Split partitions the
-announced set; merge unions it. Timer validation and group changes are serialized in WorldEvents; each timer
+announced set; merge unions it. Timer validation and group changes are serialized in the world task; each timer
 rechecks the current presence generation and group, so stale events cannot narrate
 membership from a retired group. `party_presence()` resolves the caller's group and returns character IDs,
 names and online state from this data. It does not mutate group membership.
@@ -1158,7 +1165,7 @@ pending reply eligibility and out-of-combat time. GM cannot set can_act directly
 The proposed initiative order and out-of-combat time window are Product decisions.
 World time is the maximum character time. Each character advances by approved
 elapsed seconds; time advancement queues hourly distant-NPC opportunities only
-for elapsed whole hours, in stable character order, through WorldEvents.
+for elapsed whole hours, in stable character order, through the world task.
 
 ## Player replies and coordinated travel
 
