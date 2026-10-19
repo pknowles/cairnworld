@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT history_branch.id FROM history_branch JOIN agent ON agent.id = history_branch.agent_id WHERE history_branch.id = ? AND history_branch.agent_id = ? AND agent.world_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3d280819329974c772017828192586f4aced72a2f8601ae9a5f32655d25071b6"
+}

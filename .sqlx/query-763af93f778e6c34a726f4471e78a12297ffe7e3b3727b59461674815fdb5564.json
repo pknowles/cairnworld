@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tool_execution.inference_id FROM invocation JOIN tool_execution ON tool_execution.id = invocation.parent_tool_execution_id WHERE invocation.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "inference_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "763af93f778e6c34a726f4471e78a12297ffe7e3b3727b59461674815fdb5564"
+}

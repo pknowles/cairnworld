@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pending_compaction WHERE branch_id = ? AND position = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b1a0ba3864823327457b93ad6fe4cc8a1da40b9de7ed75e56d848e130a360694"
+}

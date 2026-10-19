@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH RECURSIVE reach(branch_id, cut) AS ( SELECT ?, ? UNION SELECT p.parent_branch_id, p.through_position FROM history_parent p JOIN reach r ON p.branch_id = r.branch_id ) SELECT branch_id AS \"branch_id!: i64\", MAX(cut) AS \"cut!: i64\" FROM reach GROUP BY branch_id ORDER BY branch_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "branch_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cut!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "01d56336e0754dd87502b62360b5119fb070578cd53ed7260ade5b1867494db3"
+}

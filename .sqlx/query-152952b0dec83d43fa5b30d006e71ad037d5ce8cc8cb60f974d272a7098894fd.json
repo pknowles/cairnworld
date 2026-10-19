@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT summary.id, summary.covered_ranges FROM history_entry JOIN summary ON summary.history_entry_id = history_entry.id WHERE history_entry.branch_id = ? AND history_entry.position = ( SELECT MAX(he.position) FROM history_entry he JOIN summary s ON s.history_entry_id = he.id WHERE he.branch_id = ? AND he.position <= ? )",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "covered_ranges",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "152952b0dec83d43fa5b30d006e71ad037d5ce8cc8cb60f974d272a7098894fd"
+}

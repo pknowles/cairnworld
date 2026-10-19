@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT body FROM recorded_content WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "body",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c62719db8e4d8cc9597318f5214d2e2992b6cea5f1a4244efb7f23d481702ec7"
+}

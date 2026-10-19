@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT agent.world_id, history_branch.agent_id, pending_compaction.branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments FROM pending_compaction JOIN history_branch ON history_branch.id = pending_compaction.branch_id JOIN agent ON agent.id = history_branch.agent_id WHERE pending_compaction.branch_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "world_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "branch_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "position",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sequence_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cause_inference_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "next_input_tokens",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sampling",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "model",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "static_segments",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b8a93dbafd4e7fe0701728f929d71722e468e175a369eb58760a699514df1bd3"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO message (id, role, origin, content, source_inference_id, source_tool_execution_id, trigger_sequence_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "f45a0d6d7da7407dd7165c1313a5c1c2b6e86f6679f89b6fba10f24a50e66839"
+}

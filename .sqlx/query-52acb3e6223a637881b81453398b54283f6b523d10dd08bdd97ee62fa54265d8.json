@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO sequence (world_id, trigger) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "52acb3e6223a637881b81453398b54283f6b523d10dd08bdd97ee62fa54265d8"
+}

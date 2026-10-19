@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT \"group\".world_id, world_gm.agent_id, \"group\".branch_id FROM \"group\" JOIN world_gm ON world_gm.world_id = \"group\".world_id WHERE \"group\".id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "world_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "branch_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5476e5f0b95470bad946a02cb9fc0fc5f3e5344b7e20a7f25dc2df71f8590832"
+}

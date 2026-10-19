@@ -19,13 +19,14 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         text: &str,
     ) -> Result<i64> {
-        sqlx::query("INSERT INTO text (content) VALUES (?) ON CONFLICT(content) DO NOTHING")
-            .bind(text)
-            .execute(&mut **transaction)
-            .await
-            .context("retaining original text")?;
-        sqlx::query_scalar("SELECT id FROM text WHERE content = ?")
-            .bind(text)
+        sqlx::query!(
+            "INSERT INTO text (content) VALUES (?) ON CONFLICT(content) DO NOTHING",
+            text,
+        )
+        .execute(&mut **transaction)
+        .await
+        .context("retaining original text")?;
+        sqlx::query_scalar!("SELECT id FROM text WHERE content = ?", text,)
             .fetch_one(&mut **transaction)
             .await
             .context("resolving retained text")
@@ -45,8 +46,7 @@ impl Store {
             reasoning: reasoning.to_string(),
         })
         .context("encoding recorded content")?;
-        let result = sqlx::query("INSERT INTO recorded_content (body) VALUES (?)")
-            .bind(body)
+        let result = sqlx::query!("INSERT INTO recorded_content (body) VALUES (?)", body,)
             .execute(&mut **transaction)
             .await
             .context("storing recorded content")?;
@@ -54,12 +54,12 @@ impl Store {
     }
 
     async fn content_body(&self, id: i64) -> Result<ContentBody> {
-        let body: String = sqlx::query_scalar("SELECT body FROM recorded_content WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("loading recorded content {id}"))?
-            .with_context(|| format!("recorded content {id} does not exist"))?;
+        let body: String =
+            sqlx::query_scalar!("SELECT body FROM recorded_content WHERE id = ?", id,)
+                .fetch_optional(&self.pool)
+                .await
+                .with_context(|| format!("loading recorded content {id}"))?
+                .with_context(|| format!("recorded content {id} does not exist"))?;
         serde_json::from_str(&body).with_context(|| format!("decoding recorded content {id}"))
     }
 

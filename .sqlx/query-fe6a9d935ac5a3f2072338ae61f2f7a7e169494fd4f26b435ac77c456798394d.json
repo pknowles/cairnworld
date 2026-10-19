@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(position) AS \"first_position?: i64\", MAX(position) AS \"last_position?: i64\" FROM history_entry WHERE branch_id = ? AND kind = 'message' AND position <= ? AND position > ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "first_position?: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      },
+      {
+        "name": "last_position?: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "fe6a9d935ac5a3f2072338ae61f2f7a7e169494fd4f26b435ac77c456798394d"
+}

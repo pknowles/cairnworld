@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT history_entry.position FROM message JOIN history_entry ON history_entry.id = message.id WHERE history_entry.branch_id = ? AND history_entry.position > ? ORDER BY history_entry.position DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "position",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a8b346287f2a4887e33650246a34d1afe6b6ee655963a7b85f44332cb0a6e054"
+}

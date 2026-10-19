@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE inference SET output = ?, error = ?, input_tokens = ?, output_tokens = ?, duration_ms = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "cf80e32c84a10bc22c330af3d1d4de127f520ccf0b7c8c294c2f8233f3ad3909"
+}

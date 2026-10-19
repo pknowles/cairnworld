@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO summary (history_entry_id, covered_ranges, inference_id, reason, retained_messages) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "8e8e04c25e93b750a26367ce2839bf3af630b091df4876a1e7b806508e251355"
+}

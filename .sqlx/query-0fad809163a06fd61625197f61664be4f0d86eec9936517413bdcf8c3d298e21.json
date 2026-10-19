@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM history_entry WHERE branch_id = ? AND position BETWEEN ? AND ? AND kind = 'message'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0fad809163a06fd61625197f61664be4f0d86eec9936517413bdcf8c3d298e21"
+}

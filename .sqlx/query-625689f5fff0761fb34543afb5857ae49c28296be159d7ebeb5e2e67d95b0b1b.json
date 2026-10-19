@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO recorded_content (body) VALUES (?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "625689f5fff0761fb34543afb5857ae49c28296be159d7ebeb5e2e67d95b0b1b"
+}

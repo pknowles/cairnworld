@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world_id FROM agent WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "world_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b4633d94a294bd60d2df75e5c071ac5cee8d25485d9ec36e066ae676095d0152"
+}

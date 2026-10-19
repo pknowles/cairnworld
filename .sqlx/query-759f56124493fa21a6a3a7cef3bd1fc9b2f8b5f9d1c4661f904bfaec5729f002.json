@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO inference (history_entry_id, agent_id, sequence_id, invocation_id, ordinal, segments, sampling, input_hash, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "759f56124493fa21a6a3a7cef3bd1fc9b2f8b5f9d1c4661f904bfaec5729f002"
+}

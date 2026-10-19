@@ -125,11 +125,11 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         branch_id: i64,
     ) -> Result<i64> {
-        let position: i64 = sqlx::query_scalar(
+        let position: i64 = sqlx::query_scalar!(
             "UPDATE history_branch SET next_position = next_position + 1 \
              WHERE id = ? RETURNING next_position - 1",
+            branch_id,
         )
-        .bind(branch_id)
         .fetch_optional(&mut **transaction)
         .await
         .with_context(|| format!("allocating history position on branch {branch_id}"))?
@@ -147,14 +147,16 @@ impl Store {
         position: i64,
         kind: EntryKind,
     ) -> Result<i64> {
-        let result =
-            sqlx::query("INSERT INTO history_entry (branch_id, position, kind) VALUES (?, ?, ?)")
-                .bind(branch_id)
-                .bind(position)
-                .bind(kind.as_str())
-                .execute(&mut **transaction)
-                .await
-                .with_context(|| format!("inserting history entry on branch {branch_id}"))?;
+        let kind = kind.as_str();
+        let result = sqlx::query!(
+            "INSERT INTO history_entry (branch_id, position, kind) VALUES (?, ?, ?)",
+            branch_id,
+            position,
+            kind,
+        )
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("inserting history entry on branch {branch_id}"))?;
         Ok(result.last_insert_rowid())
     }
 
@@ -181,17 +183,20 @@ impl Store {
     /// order, and the recursion always terminates without a visited-set of
     /// its own.
     async fn reach(&self, branch: AgentBranch, cut: i64) -> Result<Vec<(i64, i64)>> {
-        let rows = sqlx::query_as::<_, (i64, i64)>(
+        // The seed is two Rust integers; parent keys/cuts are NOT NULL. Every
+        // aggregate group therefore contains at least one non-null cut.
+        let rows = sqlx::query!(
             "WITH RECURSIVE reach(branch_id, cut) AS ( \
                  SELECT ?, ? \
                  UNION \
                  SELECT p.parent_branch_id, p.through_position \
                  FROM history_parent p JOIN reach r ON p.branch_id = r.branch_id \
              ) \
-             SELECT branch_id, MAX(cut) FROM reach GROUP BY branch_id ORDER BY branch_id",
+             SELECT branch_id AS \"branch_id!: i64\", MAX(cut) AS \"cut!: i64\" FROM reach GROUP BY branch_id ORDER BY branch_id",
+            branch.branch_id,
+            cut,
         )
-        .bind(branch.branch_id)
-        .bind(cut)
+        .map(|row| (row.branch_id, row.cut))
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("computing reach of branch {}", branch.branch_id))?;
@@ -217,7 +222,8 @@ impl Store {
         let limit_plus_one = limit + 1;
         let reach = serde_json::to_string(&self.reach(cursor.branch, cursor.cut).await?)
             .context("serializing raw history reach")?;
-        let rows = sqlx::query_as::<_, HistoryEntryRow>(
+        let rows = sqlx::query_as!(
+            HistoryEntryRow,
             "WITH bounded AS ( \
                  SELECT json_extract(value, '$[0]') AS branch_id, \
                         json_extract(value, '$[1]') AS cut \
@@ -231,12 +237,12 @@ impl Store {
                       OR (history_entry.branch_id = ? AND history_entry.position >= ?)) \
              ORDER BY history_entry.branch_id, history_entry.position \
              LIMIT ?",
+            reach,
+            cursor.next_branch_id,
+            cursor.next_branch_id,
+            cursor.next_position,
+            limit_plus_one,
         )
-        .bind(reach)
-        .bind(cursor.next_branch_id)
-        .bind(cursor.next_branch_id)
-        .bind(cursor.next_position)
-        .bind(limit_plus_one)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading raw history page from branch {}", cursor.branch.branch_id))?;
@@ -274,7 +280,7 @@ impl Store {
         let mut segments = Vec::new();
         let cut = self.current_cut(branch.branch_id).await?;
         for (branch_id, cut) in self.reach(branch, cut).await? {
-            let summary: Option<(i64, String)> = sqlx::query_as(
+            let summary: Option<(i64, String)> = sqlx::query!(
                 "SELECT summary.id, summary.covered_ranges \
                  FROM history_entry \
                  JOIN summary ON summary.history_entry_id = history_entry.id \
@@ -283,10 +289,11 @@ impl Store {
                      JOIN summary s ON s.history_entry_id = he.id \
                      WHERE he.branch_id = ? AND he.position <= ? \
                  )",
+                branch_id,
+                branch_id,
+                cut,
             )
-            .bind(branch_id)
-            .bind(branch_id)
-            .bind(cut)
+            .map(|row| (row.id, row.covered_ranges))
             .fetch_optional(&self.pool)
             .await
             .with_context(|| format!("loading latest summary for branch {branch_id}"))?;
@@ -309,14 +316,16 @@ impl Store {
                 }
                 None => None,
             };
-            let range: (Option<i64>, Option<i64>) = sqlx::query_as(
-                "SELECT MIN(position), MAX(position) FROM history_entry \
+            let covered_through = covered_through.unwrap_or(-1);
+            let range: (Option<i64>, Option<i64>) = sqlx::query!(
+                "SELECT MIN(position) AS \"first_position?: i64\", MAX(position) AS \"last_position?: i64\" FROM history_entry \
                  WHERE branch_id = ? AND kind = 'message' AND position <= ? \
                  AND position > ?",
+                branch_id,
+                cut,
+                covered_through,
             )
-            .bind(branch_id)
-            .bind(cut)
-            .bind(covered_through.unwrap_or(-1))
+            .map(|row| (row.first_position, row.last_position))
             .fetch_one(&self.pool)
             .await
             .with_context(|| format!("finding uncovered message range for branch {branch_id}"))?;
@@ -334,24 +343,26 @@ impl Store {
     }
 
     async fn current_cut(&self, branch_id: i64) -> Result<i64> {
-        let next_position: i64 =
-            sqlx::query_scalar("SELECT next_position FROM history_branch WHERE id = ?")
-                .bind(branch_id)
-                .fetch_optional(&self.pool)
-                .await
-                .with_context(|| format!("loading history branch {branch_id}"))?
-                .with_context(|| format!("history branch {branch_id} does not exist"))?;
+        let next_position: i64 = sqlx::query_scalar!(
+            "SELECT next_position FROM history_branch WHERE id = ?",
+            branch_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading history branch {branch_id}"))?
+        .with_context(|| format!("history branch {branch_id} does not exist"))?;
         Ok(next_position - 1)
     }
 
     /// Resolve an ordinary agent's one writable branch. This is not a browser
     /// boundary: both its world and branch come from durable relationships.
     pub async fn agent_branch(&self, agent_id: i64) -> Result<AgentBranch> {
-        let row: Option<(i64, i64)> = sqlx::query_as(
+        let row: Option<(i64, i64)> = sqlx::query!(
             "SELECT agent.world_id, agent_history.branch_id FROM agent \
              JOIN agent_history ON agent_history.agent_id = agent.id WHERE agent.id = ?",
+            agent_id,
         )
-        .bind(agent_id)
+        .map(|row| (row.world_id, row.branch_id))
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading history branch for agent {agent_id}"))?;
@@ -367,12 +378,13 @@ impl Store {
     /// Resolve a group's current GM branch. A world GM has several branches,
     /// so the group relationship is the only valid selector.
     pub async fn group_branch(&self, group_id: i64) -> Result<AgentBranch> {
-        let row: Option<(i64, i64, i64)> = sqlx::query_as(
+        let row: Option<(i64, i64, i64)> = sqlx::query!(
             "SELECT \"group\".world_id, world_gm.agent_id, \"group\".branch_id \
              FROM \"group\" JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE \"group\".id = ?",
+            group_id,
         )
-        .bind(group_id)
+        .map(|row| (row.world_id, row.agent_id, row.branch_id))
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading GM history for group {group_id}"))?;
@@ -388,12 +400,13 @@ impl Store {
     /// Resolve an exact stored branch, including a retired group's history.
     /// Browser-selected identifiers must use `branch_for_viewer` instead.
     pub async fn history_branch(&self, branch_id: i64) -> Result<AgentBranch> {
-        let (world_id, agent_id, branch_id) = sqlx::query_as::<_, (i64, i64, i64)>(
+        let (world_id, agent_id, branch_id) = sqlx::query!(
             "SELECT agent.world_id, history_branch.agent_id, history_branch.id AS branch_id \
              FROM history_branch JOIN agent ON agent.id = history_branch.agent_id \
              WHERE history_branch.id = ?",
+            branch_id,
         )
-        .bind(branch_id)
+        .map(|row| (row.world_id, row.agent_id, row.branch_id))
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading history branch {branch_id}"))?
@@ -415,14 +428,14 @@ impl Store {
         branch_id: i64,
     ) -> Result<AgentBranch> {
         self.inspecting(viewer_id, world_id).await?;
-        let exists: Option<i64> = sqlx::query_scalar(
+        let exists: Option<i64> = sqlx::query_scalar!(
             "SELECT history_branch.id FROM history_branch \
              JOIN agent ON agent.id = history_branch.agent_id \
              WHERE history_branch.id = ? AND history_branch.agent_id = ? AND agent.world_id = ?",
+            branch_id,
+            agent_id,
+            world_id,
         )
-        .bind(branch_id)
-        .bind(agent_id)
-        .bind(world_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("validating history branch {branch_id}"))?;
@@ -459,12 +472,12 @@ impl Store {
         entry_id: i64,
     ) -> Result<RawCursor> {
         let cut = self.current_cut(branch.branch_id).await?;
-        let position: i64 = sqlx::query_scalar(
+        let position: i64 = sqlx::query_scalar!(
             "SELECT position FROM history_entry WHERE id = ? AND branch_id = ? AND position <= ?",
+            entry_id,
+            branch.branch_id,
+            cut,
         )
-        .bind(entry_id)
-        .bind(branch.branch_id)
-        .bind(cut)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("locating history entry {entry_id}"))?
@@ -515,12 +528,14 @@ pub(super) async fn branch_for_agent(
     connection: &mut SqliteConnection,
     agent_id: i64,
 ) -> Result<i64> {
-    sqlx::query_scalar("SELECT branch_id FROM agent_history WHERE agent_id = ?")
-        .bind(agent_id)
-        .fetch_optional(connection)
-        .await
-        .with_context(|| format!("loading history branch for agent {agent_id}"))?
-        .with_context(|| format!("agent {agent_id} has no history branch"))
+    sqlx::query_scalar!(
+        "SELECT branch_id FROM agent_history WHERE agent_id = ?",
+        agent_id,
+    )
+    .fetch_optional(connection)
+    .await
+    .with_context(|| format!("loading history branch for agent {agent_id}"))?
+    .with_context(|| format!("agent {agent_id} has no history branch"))
 }
 
 #[cfg(test)]

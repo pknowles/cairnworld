@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH bounded AS ( SELECT json_extract(value, '$[0]') AS branch_id, json_extract(value, '$[1]') AS cut FROM json_each(?) ) SELECT history_entry.id, history_entry.branch_id, history_entry.position, history_entry.kind FROM history_entry JOIN bounded ON bounded.branch_id = history_entry.branch_id AND history_entry.position <= bounded.cut WHERE (history_entry.branch_id > ? OR (history_entry.branch_id = ? AND history_entry.position >= ?)) ORDER BY history_entry.branch_id, history_entry.position LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "branch_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "position",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "kind",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9c9a3dfbbb4022f79d6d6913d19bcccd28bb6fe1dfefb44e1448d4adac27fc6b"
+}

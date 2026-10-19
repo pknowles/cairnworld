@@ -55,9 +55,15 @@ impl Store {
             .await
             .context("starting model prompt evidence record")?;
         let format_id = Self::text_in(&mut transaction, &evidence.format).await?;
-        sqlx::query("INSERT INTO inference_prompt (inference_id, format_id, rendered_at, prompt_hash, tokens_hash, max_output_tokens) VALUES (?, ?, ?, ?, ?, ?)")
-            .bind(inference_id).bind(format_id).bind(evidence.rendered_at)
-            .bind(evidence.prompt_hash).bind(evidence.tokens_hash).bind(evidence.max_output_tokens)
+        sqlx::query!(
+            "INSERT INTO inference_prompt (inference_id, format_id, rendered_at, prompt_hash, tokens_hash, max_output_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+            inference_id,
+            format_id,
+            evidence.rendered_at,
+            evidence.prompt_hash,
+            evidence.tokens_hash,
+            evidence.max_output_tokens,
+        )
             .execute(&mut *transaction).await.with_context(|| format!("recording model prompt evidence for inference {inference_id}"))?;
         transaction
             .commit()
@@ -70,28 +76,24 @@ impl Store {
         &self,
         inference_id: i64,
     ) -> Result<Option<PromptEvidenceView>> {
-        sqlx::query_as::<_, (i64, String, String, String, i64)>(
+        sqlx::query!(
             "SELECT format_id, rendered_at, prompt_hash, tokens_hash, max_output_tokens \
              FROM inference_prompt WHERE inference_id = ?",
+            inference_id,
         )
-        .bind(inference_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading prompt evidence for inference {inference_id}"))?
-        .map(
-            |(format_id, rendered_at, prompt_hash, tokens_hash, max_output_tokens)| -> Result<
-                PromptEvidenceView,
-            > {
-                Ok(PromptEvidenceView {
-                    format_id,
-                    rendered_at,
-                    prompt_hash,
-                    tokens_hash,
-                    max_output_tokens: usize::try_from(max_output_tokens)
-                        .context("negative recorded prompt output limit")?,
-                })
-            },
-        )
+        .map(|row| -> Result<PromptEvidenceView> {
+            Ok(PromptEvidenceView {
+                format_id: row.format_id,
+                rendered_at: row.rendered_at,
+                prompt_hash: row.prompt_hash,
+                tokens_hash: row.tokens_hash,
+                max_output_tokens: usize::try_from(row.max_output_tokens)
+                    .context("negative recorded prompt output limit")?,
+            })
+        })
         .transpose()
     }
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO text (content) VALUES (?) ON CONFLICT(content) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1386009de3284306dff5b6bef2ea948410801a24b8e69bccf1fd59430d71a001"
+}

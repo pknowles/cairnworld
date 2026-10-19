@@ -672,7 +672,7 @@ struct SummaryRow {
     history_entry_id: i64,
     agent_id: i64,
     covered_ranges: String,
-    content: String,
+    content: Option<String>,
     inference_id: i64,
     reason: String,
     retained_messages: i64,
@@ -700,7 +700,9 @@ impl TryFrom<SummaryRow> for Summary {
             agent_id: row.agent_id,
             covered_ranges: serde_json::from_str(&row.covered_ranges)
                 .context("decoding summary covered ranges")?,
-            content: row.content,
+            content: row
+                .content
+                .with_context(|| format!("summary {} has no text content", row.id))?,
             inference_id: row.inference_id,
             reason: row.reason,
             retained_messages: row.retained_messages,
@@ -1119,12 +1121,14 @@ impl Store {
     /// Start one externally visible event. All work it triggers carries this
     /// id, including recursive agent calls and their tool executions.
     pub async fn begin_sequence(&self, world_id: i64, trigger: &str) -> Result<Sequence> {
-        let result = sqlx::query("INSERT INTO sequence (world_id, trigger) VALUES (?, ?)")
-            .bind(world_id)
-            .bind(trigger)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("starting {trigger} sequence in world {world_id}"))?;
+        let result = sqlx::query!(
+            "INSERT INTO sequence (world_id, trigger) VALUES (?, ?)",
+            world_id,
+            trigger,
+        )
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("starting {trigger} sequence in world {world_id}"))?;
         Ok(Sequence {
             id: result.last_insert_rowid(),
             world_id,
@@ -1138,12 +1142,12 @@ impl Store {
     /// compaction is shown as caused deferred work rather than extending the
     /// foreground reply's wall time").
     pub async fn finish_sequence(&self, sequence_id: i64, error: Option<&str>) -> Result<()> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ? \
              WHERE id = ? AND finished_at IS NULL",
+            error,
+            sequence_id,
         )
-        .bind(error)
-        .bind(sequence_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("finishing sequence {sequence_id}"))?;
@@ -1167,15 +1171,16 @@ impl Store {
         cause_inference_id: Option<i64>,
     ) -> Result<i64> {
         let agent_id = branch.agent_id();
-        let result = sqlx::query(
+        let branch_id = branch.branch_id();
+        let result = sqlx::query!(
             "INSERT INTO invocation (sequence_id, agent_id, branch_id, parent_tool_execution_id, cause_inference_id) \
              VALUES (?, ?, ?, ?, ?)",
+            sequence_id,
+            agent_id,
+            branch_id,
+            parent_tool_execution_id,
+            cause_inference_id,
         )
-        .bind(sequence_id)
-        .bind(agent_id)
-        .bind(branch.branch_id())
-        .bind(parent_tool_execution_id)
-        .bind(cause_inference_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("starting invocation for agent {agent_id}"))?;
@@ -1188,12 +1193,12 @@ impl Store {
     /// exit"). `outcome` is a short label ("settled", "error", "interrupted"),
     /// not a duplicate of the failing inference's own recorded error.
     pub async fn finish_invocation(&self, invocation_id: i64, outcome: &str) -> Result<()> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE invocation SET finished_at = CURRENT_TIMESTAMP, outcome = ? \
              WHERE id = ? AND finished_at IS NULL",
+            outcome,
+            invocation_id,
         )
-        .bind(outcome)
-        .bind(invocation_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("finishing invocation {invocation_id}"))?;
@@ -1213,12 +1218,12 @@ impl Store {
         &self,
         invocation_id: i64,
     ) -> Result<Option<i64>> {
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "SELECT tool_execution.inference_id FROM invocation \
              JOIN tool_execution ON tool_execution.id = invocation.parent_tool_execution_id \
              WHERE invocation.id = ?",
+            invocation_id,
         )
-        .bind(invocation_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("resolving parent inference for invocation {invocation_id}"))
@@ -3904,12 +3909,12 @@ impl Store {
         // The branch the triggering inference's own history_entry lives on -
         // not a fresh agent_history lookup, which a world_gm agent (one
         // branch per group) has no single row for.
-        let branch_id: i64 = sqlx::query_scalar(
+        let branch_id: i64 = sqlx::query_scalar!(
             "SELECT history_entry.branch_id FROM inference \
              JOIN history_entry ON history_entry.id = inference.history_entry_id \
              WHERE inference.id = ?",
+            source_inference_id,
         )
-        .bind(source_inference_id)
         .fetch_optional(&mut *transaction)
         .await
         .context("loading tool result's source inference branch")?
@@ -3924,13 +3929,13 @@ impl Store {
             MessageOrigin::Conversation,
         )
         .await?;
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE tool_execution SET status = ?, result_content_id = ?, finished_at = CURRENT_TIMESTAMP \
              WHERE id = ? AND finished_at IS NULL",
+            status,
+            content_id,
+            tool_execution_id,
         )
-        .bind(status)
-        .bind(content_id)
-        .bind(tool_execution_id)
         .execute(&mut *transaction)
         .await
         .with_context(|| format!("completing tool_execution {tool_execution_id}"))?;
@@ -3991,17 +3996,18 @@ impl Store {
         let (history_entry_id, _position) =
             Self::append_history_entry(transaction, branch_id, EntryKind::Message).await?;
         let role = serde_json::to_string(&role).context("serializing message role")?;
-        sqlx::query(
+        let origin = origin.as_str();
+        sqlx::query!(
             "INSERT INTO message (id, role, origin, content, source_inference_id, source_tool_execution_id, trigger_sequence_id) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            history_entry_id,
+            role,
+            origin,
+            content,
+            source_inference_id,
+            source_tool_execution_id,
+            trigger_sequence_id,
         )
-        .bind(history_entry_id)
-        .bind(role)
-        .bind(origin.as_str())
-        .bind(content)
-        .bind(source_inference_id)
-        .bind(source_tool_execution_id)
-        .bind(trigger_sequence_id)
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("appending message {history_entry_id} on branch {branch_id}"))?;
@@ -4011,7 +4017,8 @@ impl Store {
     /// History branches retain their ownership after a group is retired.
     /// Decode that identity once for both ordinary and GM compaction jobs.
     pub async fn pending_compactions(&self) -> Result<Vec<PendingCompaction>> {
-        let rows = sqlx::query_as::<_, PendingCompactionRow>(
+        let rows = sqlx::query_as!(
+            PendingCompactionRow,
             "SELECT agent.world_id, history_branch.agent_id, \
                     pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
                     next_input_tokens, sampling, model, static_segments \
@@ -4042,7 +4049,8 @@ impl Store {
         &self,
         branch_id: i64,
     ) -> Result<Option<PendingCompaction>> {
-        sqlx::query_as::<_, PendingCompactionRow>(
+        sqlx::query_as!(
+            PendingCompactionRow,
             "SELECT agent.world_id, history_branch.agent_id, \
                     pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
                     next_input_tokens, sampling, model, static_segments \
@@ -4050,8 +4058,8 @@ impl Store {
              JOIN history_branch ON history_branch.id = pending_compaction.branch_id \
              JOIN agent ON agent.id = history_branch.agent_id \
              WHERE pending_compaction.branch_id = ?",
+            branch_id,
         )
-        .bind(branch_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading pending compaction for branch {branch_id}"))?
@@ -4072,27 +4080,33 @@ impl Store {
     ) -> Result<()> {
         let branch_id = branch.branch_id();
         let agent_id = branch.agent_id();
-        let position: i64 =
-            sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
-                .bind(branch_id)
-                .fetch_one(&self.pool)
-                .await
-                .with_context(|| format!("finding history to compact for agent {agent_id}"))?;
+        let position: i64 = sqlx::query_scalar!(
+            "SELECT next_position - 1 FROM history_branch WHERE id = ?",
+            branch_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("finding history to compact for agent {agent_id}"))?;
         ensure!(
             position >= 0,
             "model request for agent {agent_id} exceeded fixed context capacity before any history existed to compact"
         );
-        sqlx::query(
+        let sampling_json = serde_json::to_string(policy.sampling)
+            .context("serializing capacity compaction sampling")?;
+        let static_segments_json = serde_json::to_string(policy.static_segments)
+            .context("serializing capacity compaction static context")?;
+        let requested_tokens = i64::try_from(requested_tokens)
+            .context("capacity-rejected input token count is too large")?;
+        sqlx::query!(
             "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments) VALUES (?, ?, ?, NULL, ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
+            branch_id,
+            position,
+            policy.sequence_id,
+            requested_tokens,
+            sampling_json,
+            policy.model,
+            static_segments_json,
         )
-        .bind(branch_id)
-        .bind(position)
-        .bind(policy.sequence_id)
-        .bind(i64::try_from(requested_tokens).context("capacity-rejected input token count is too large")?)
-        .bind(serde_json::to_string(policy.sampling).context("serializing capacity compaction sampling")?)
-        .bind(policy.model)
-        .bind(serde_json::to_string(policy.static_segments)
-            .context("serializing capacity compaction static context")?)
         .execute(&self.pool)
         .await
         .with_context(|| format!("enqueueing capacity recovery compaction for agent {agent_id}"))?;
@@ -4116,8 +4130,7 @@ impl Store {
     }
 
     async fn text(&self, id: i64) -> Result<String> {
-        sqlx::query_scalar("SELECT content FROM text WHERE id = ?")
-            .bind(id)
+        sqlx::query_scalar!("SELECT content FROM text WHERE id = ?", id,)
             .fetch_optional(&self.pool)
             .await
             .context("loading prompt text")?
@@ -4140,14 +4153,15 @@ impl Store {
     /// that works for a world_gm agent, which may own several branches at
     /// once (design.md's `GroupHistory`).
     pub async fn latest_summary_for_branch(&self, branch_id: i64) -> Result<Option<Summary>> {
-        let row = sqlx::query_as::<_, SummaryRow>(
+        let row = sqlx::query_as!(
+            SummaryRow,
             "SELECT summary.id, summary.history_entry_id, summary.agent_id, summary.covered_ranges, \
-                    json_extract(summary.body, '$.content.value') AS content, summary.inference_id, summary.reason, summary.retained_messages \
+                    json_extract(summary.body, '$.content.value') AS \"content?: _\", summary.inference_id, summary.reason, summary.retained_messages \
              FROM summary_content AS summary \
              JOIN history_entry ON history_entry.id = summary.history_entry_id \
              WHERE history_entry.branch_id = ? ORDER BY history_entry.position DESC LIMIT 1",
+            branch_id,
         )
-        .bind(branch_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading latest summary for branch {branch_id}"))?;
@@ -4176,13 +4190,13 @@ impl Store {
                     .last()
                     .map_or(-1, |range| range.last_position)
             });
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "SELECT COUNT(*) FROM message \
              JOIN history_entry ON history_entry.id = message.id \
              WHERE history_entry.branch_id = ? AND history_entry.position > ?",
+            branch_id,
+            covered,
         )
-        .bind(branch_id)
-        .bind(covered)
         .fetch_one(&self.pool)
         .await
         .with_context(|| format!("counting uncovered messages for branch {branch_id}"))
@@ -4208,19 +4222,21 @@ impl Store {
                     .last()
                     .map_or(-1, |range| range.last_position)
             });
-        let rows = sqlx::query_as::<_, (i64,)>(
+        let keep_tail_messages = i64::try_from(keep_tail_messages)
+            .context("raw tail message limit exceeds SQLite range")?;
+        let rows = sqlx::query_scalar!(
             "SELECT history_entry.position FROM message \
              JOIN history_entry ON history_entry.id = message.id \
              WHERE history_entry.branch_id = ? AND history_entry.position > ? \
              ORDER BY history_entry.position DESC LIMIT ?",
+            branch_id,
+            covered,
+            keep_tail_messages,
         )
-        .bind(branch_id)
-        .bind(covered)
-        .bind(keep_tail_messages as i64)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading raw tail for branch {branch_id}"))?;
-        Ok(rows.last().map_or(covered, |(position,)| position - 1))
+        Ok(rows.last().map_or(covered, |position| position - 1))
     }
 
     /// Every `Segment::Messages` range's branch must belong to `agent_id` - a
@@ -4308,12 +4324,13 @@ impl Store {
                     tools.extend(definitions);
                 }
                 Segment::Summary { summary } => {
-                    let row = sqlx::query_as::<_, SummaryRow>(
+                    let row = sqlx::query_as!(
+                        SummaryRow,
                         "SELECT summary.id, summary.history_entry_id, summary.agent_id, summary.covered_ranges, \
-                                json_extract(summary.body, '$.content.value') AS content, summary.inference_id, summary.reason, summary.retained_messages \
+                                json_extract(summary.body, '$.content.value') AS \"content?: _\", summary.inference_id, summary.reason, summary.retained_messages \
                          FROM summary_content AS summary WHERE summary.id = ?",
+                        summary,
                     )
-                    .bind(summary)
                     .fetch_optional(&self.pool)
                     .await
                     .context("loading summary")?
@@ -4359,15 +4376,16 @@ impl Store {
                     // messages occupies a position in range without being a
                     // message row. Only every message-kind entry in range
                     // missing its message row is real corruption.
-                    let rows = sqlx::query_as::<_, MessageRow>(
+                    let rows = sqlx::query_as!(
+                        MessageRow,
                         "SELECT message.id, message.role, message.origin, message.content FROM message \
                          JOIN history_entry ON history_entry.id = message.id \
                          WHERE history_entry.branch_id = ? AND history_entry.position BETWEEN ? AND ? \
                          ORDER BY history_entry.position",
+                        range.branch_id,
+                        range.first_position,
+                        range.last_position,
                     )
-                    .bind(range.branch_id)
-                    .bind(range.first_position)
-                    .bind(range.last_position)
                     .fetch_all(&self.pool)
                     .await
                     .with_context(|| {
@@ -4376,13 +4394,13 @@ impl Store {
                             range.first_position, range.last_position, range.branch_id
                         )
                     })?;
-                    let expected: i64 = sqlx::query_scalar(
+                    let expected: i64 = sqlx::query_scalar!(
                         "SELECT COUNT(*) FROM history_entry \
                          WHERE branch_id = ? AND position BETWEEN ? AND ? AND kind = 'message'",
+                        range.branch_id,
+                        range.first_position,
+                        range.last_position,
                     )
-                    .bind(range.branch_id)
-                    .bind(range.first_position)
-                    .bind(range.last_position)
                     .fetch_one(&self.pool)
                     .await
                     .with_context(|| {
@@ -4446,13 +4464,21 @@ impl Store {
     /// sequences, invocations, inferences and tools interrupted; it never
     /// invents completed game effects").
     pub async fn interrupt_open_inferences(&self) -> Result<()> {
-        sqlx::query("UPDATE inference SET error = 'Inference interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL")
+        sqlx::query!(
+            "UPDATE inference SET error = 'Inference interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+        )
             .execute(&self.pool).await.context("marking interrupted inferences at startup")?;
-        sqlx::query("UPDATE tool_execution SET status = 'unexecuted', error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL")
+        sqlx::query!(
+            "UPDATE tool_execution SET status = 'unexecuted', error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+        )
             .execute(&self.pool).await.context("marking interrupted tool executions at startup")?;
-        sqlx::query("UPDATE invocation SET outcome = 'interrupted', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL")
+        sqlx::query!(
+            "UPDATE invocation SET outcome = 'interrupted', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+        )
             .execute(&self.pool).await.context("marking interrupted invocations at startup")?;
-        sqlx::query("UPDATE sequence SET error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL")
+        sqlx::query!(
+            "UPDATE sequence SET error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+        )
             .execute(&self.pool).await.context("marking interrupted sequences at startup")?;
         Ok(())
     }
@@ -4475,11 +4501,11 @@ impl Store {
         for ordinal in 0..calls {
             let ordinal =
                 i64::try_from(ordinal).context("tool call ordinal exceeds SQLite range")?;
-            let result = sqlx::query(
+            let result = sqlx::query!(
                 "INSERT INTO tool_execution (inference_id, ordinal, status) VALUES (?, ?, 'running')",
+                inference_id,
+                ordinal,
             )
-            .bind(inference_id)
-            .bind(ordinal)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("creating tool_execution {ordinal} for inference {inference_id}"))?;
@@ -4507,14 +4533,14 @@ impl Store {
             matches!(status, "completed" | "rejected" | "failed" | "unexecuted"),
             "invalid tool_execution status `{status}`"
         );
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE tool_execution SET status = ?, result_content_id = ?, error = ?, finished_at = CURRENT_TIMESTAMP \
              WHERE id = ? AND finished_at IS NULL",
+            status,
+            result_content_id,
+            error,
+            tool_execution_id,
         )
-        .bind(status)
-        .bind(result_content_id)
-        .bind(error)
-        .bind(tool_execution_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("completing tool_execution {tool_execution_id}"))?;
@@ -4531,11 +4557,11 @@ impl Store {
     /// is still in progress (design.md: "Unexecuted siblings retain an
     /// explicit status").
     pub async fn mark_unexecuted_tool_executions(&self, inference_id: i64) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE tool_execution SET status = 'unexecuted', finished_at = CURRENT_TIMESTAMP \
              WHERE inference_id = ? AND status = 'running'",
+            inference_id,
         )
-        .bind(inference_id)
         .execute(&self.pool)
         .await
         .with_context(|| {
@@ -4562,12 +4588,14 @@ impl Store {
         // (migrations/0001_recording.sql's invocation.branch_id: "the branch
         // it started on; each inference within it records its own actual
         // branch").
-        let branch_id: i64 = sqlx::query_scalar("SELECT branch_id FROM invocation WHERE id = ?")
-            .bind(input.invocation_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .context("loading invocation branch")?
-            .with_context(|| format!("invocation {} does not exist", input.invocation_id))?;
+        let branch_id: i64 = sqlx::query_scalar!(
+            "SELECT branch_id FROM invocation WHERE id = ?",
+            input.invocation_id,
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("loading invocation branch")?
+        .with_context(|| format!("invocation {} does not exist", input.invocation_id))?;
         let (history_entry_id, _position) =
             Self::append_history_entry(&mut transaction, branch_id, EntryKind::Inference).await?;
         // Successive inferences within one invocation are ordered by ordinal
@@ -4576,18 +4604,27 @@ impl Store {
         // point update on invocation.next_inference_ordinal (matching
         // allocate_position's UPDATE...RETURNING pattern) rather than a
         // COUNT(*) that rescans every prior inference in the invocation.
-        let ordinal: i64 = sqlx::query_scalar(
+        let ordinal: i64 = sqlx::query_scalar!(
             "UPDATE invocation SET next_inference_ordinal = next_inference_ordinal + 1 \
              WHERE id = ? RETURNING next_inference_ordinal - 1",
+            input.invocation_id,
         )
-        .bind(input.invocation_id)
         .fetch_optional(&mut *transaction)
         .await
         .context("allocating inference ordinal")?
         .with_context(|| format!("invocation {} does not exist", input.invocation_id))?;
-        let result = sqlx::query("INSERT INTO inference (history_entry_id, agent_id, sequence_id, invocation_id, ordinal, segments, sampling, input_hash, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(history_entry_id).bind(input.agent_id).bind(input.sequence_id).bind(input.invocation_id).bind(ordinal)
-            .bind(segments).bind(sampling).bind(input_hash).bind(input.model)
+        let result = sqlx::query!(
+            "INSERT INTO inference (history_entry_id, agent_id, sequence_id, invocation_id, ordinal, segments, sampling, input_hash, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            history_entry_id,
+            input.agent_id,
+            input.sequence_id,
+            input.invocation_id,
+            ordinal,
+            segments,
+            sampling,
+            input_hash,
+            input.model,
+        )
             .execute(&mut *transaction).await.context("recording inference start")?;
         let inference_id = result.last_insert_rowid();
         transaction
@@ -4598,8 +4635,7 @@ impl Store {
     }
 
     pub async fn world_id_for_agent(&self, agent_id: i64) -> Result<i64> {
-        sqlx::query_scalar("SELECT world_id FROM agent WHERE id = ?")
-            .bind(agent_id)
+        sqlx::query_scalar!("SELECT world_id FROM agent WHERE id = ?", agent_id,)
             .fetch_one(&self.pool)
             .await
             .with_context(|| format!("looking up world for agent {agent_id}"))
@@ -4647,8 +4683,15 @@ impl Store {
         output_tokens: Option<i64>,
         duration_ms: i64,
     ) -> Result<()> {
-        let result = sqlx::query("UPDATE inference SET output = ?, error = ?, input_tokens = ?, output_tokens = ?, duration_ms = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND finished_at IS NULL")
-            .bind(output).bind(error).bind(input_tokens).bind(output_tokens).bind(duration_ms).bind(id)
+        let result = sqlx::query!(
+            "UPDATE inference SET output = ?, error = ?, input_tokens = ?, output_tokens = ?, duration_ms = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND finished_at IS NULL",
+            output,
+            error,
+            input_tokens,
+            output_tokens,
+            duration_ms,
+            id,
+        )
             .execute(&mut **transaction).await.with_context(|| format!("completing inference {id}"))?;
         ensure!(
             result.rows_affected() == 1,
@@ -4750,12 +4793,12 @@ impl Store {
         // The branch this exact inference's own history_entry already lives
         // on - not a fresh agent_history lookup, which a world_gm agent (one
         // branch per group) has no single row for.
-        let branch_id: i64 = sqlx::query_scalar(
+        let branch_id: i64 = sqlx::query_scalar!(
             "SELECT history_entry.branch_id FROM inference \
              JOIN history_entry ON history_entry.id = inference.history_entry_id \
              WHERE inference.id = ?",
+            id,
         )
-        .bind(id)
         .fetch_optional(&mut *transaction)
         .await
         .context("loading inference's own branch")?
@@ -4780,18 +4823,23 @@ impl Store {
             if let Some(next_input_tokens) = next_input_tokens
                 && next_input_tokens >= policy.compact_before_next_input_tokens
             {
-                sqlx::query(
+                let sampling_json = serde_json::to_string(policy.sampling)
+                    .context("serializing compaction sampling")?;
+                let static_segments_json = serde_json::to_string(policy.static_segments)
+                    .context("serializing static compaction context")?;
+                let next_input_tokens = i64::try_from(next_input_tokens)
+                    .context("next-input token count is too large")?;
+                sqlx::query!(
                     "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments) VALUES (?, (SELECT position FROM history_entry WHERE id = ?), ?, ?, ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
+                    branch_id,
+                    message_id,
+                    policy.sequence_id,
+                    id,
+                    next_input_tokens,
+                    sampling_json,
+                    policy.model,
+                    static_segments_json,
                 )
-                .bind(branch_id)
-                .bind(message_id)
-                .bind(policy.sequence_id)
-                .bind(id)
-                .bind(i64::try_from(next_input_tokens).context("next-input token count is too large")?)
-                .bind(serde_json::to_string(policy.sampling).context("serializing compaction sampling")?)
-                .bind(policy.model)
-                .bind(serde_json::to_string(policy.static_segments)
-                    .context("serializing static compaction context")?)
                 .execute(&mut *transaction)
                 .await
                 .with_context(|| format!("enqueueing compaction for agent {agent_id}"))?;
@@ -4833,6 +4881,7 @@ impl Store {
         covered_ranges: Option<&[PositionRange]>,
         (reason, retained_messages): (&str, i64),
     ) -> Result<()> {
+        let branch_id = job.branch.branch_id();
         let duration_ms =
             i64::try_from(duration_ms).context("inference duration exceeds SQLite range")?;
         let is_error = matches!(outcome, InferenceOutcome::Error(_));
@@ -4861,30 +4910,33 @@ impl Store {
                     EntryKind::Summary,
                 )
                 .await?;
-                sqlx::query(
+                let covered_ranges_json = serde_json::to_string(covered_ranges)
+                    .context("encoding summary covered ranges")?;
+                sqlx::query!(
                     "INSERT INTO summary (history_entry_id, covered_ranges, inference_id, reason, retained_messages) VALUES (?, ?, ?, ?, ?)",
+                    summary_entry_id,
+                    covered_ranges_json,
+                    id,
+                    reason,
+                    retained_messages,
                 )
-                .bind(summary_entry_id)
-                .bind(serde_json::to_string(covered_ranges).context("encoding summary covered ranges")?)
-                .bind(id)
-                .bind(reason)
-                .bind(retained_messages)
                 .execute(&mut *transaction)
                 .await
                 .context("storing summary activation")?;
             }
-            let result =
-                sqlx::query("DELETE FROM pending_compaction WHERE branch_id = ? AND position = ?")
-                    .bind(job.branch.branch_id())
-                    .bind(job.position)
-                    .execute(&mut *transaction)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "retiring compaction job for branch {}",
-                            job.branch.branch_id()
-                        )
-                    })?;
+            let result = sqlx::query!(
+                "DELETE FROM pending_compaction WHERE branch_id = ? AND position = ?",
+                branch_id,
+                job.position,
+            )
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| {
+                format!(
+                    "retiring compaction job for branch {}",
+                    job.branch.branch_id()
+                )
+            })?;
             ensure!(
                 result.rows_affected() == 1,
                 "compaction job for branch {} changed before it could complete",
@@ -4901,24 +4953,26 @@ impl Store {
     /// Retire a compaction obligation with no history outside its retained
     /// tail. No compaction occurred, so it creates no history event.
     pub async fn abandon_pending_compaction(&self, job: &PendingCompaction) -> Result<()> {
+        let branch_id = job.branch.branch_id();
         let mut transaction = self.pool.begin().await.with_context(|| {
             format!(
                 "starting compaction abandonment for branch {}",
                 job.branch.branch_id()
             )
         })?;
-        let result =
-            sqlx::query("DELETE FROM pending_compaction WHERE branch_id = ? AND position = ?")
-                .bind(job.branch.branch_id())
-                .bind(job.position)
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| {
-                    format!(
-                        "retiring compaction job for branch {}",
-                        job.branch.branch_id()
-                    )
-                })?;
+        let result = sqlx::query!(
+            "DELETE FROM pending_compaction WHERE branch_id = ? AND position = ?",
+            branch_id,
+            job.position,
+        )
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| {
+            format!(
+                "retiring compaction job for branch {}",
+                job.branch.branch_id()
+            )
+        })?;
         ensure!(
             result.rows_affected() == 1,
             "compaction job for branch {} changed before it could complete",
@@ -8529,6 +8583,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("references summary"));
+
+        // A missing JSON field is SQL NULL, not an empty conversation summary.
+        sqlx::query(
+            "UPDATE recorded_content SET body = json_remove(body, '$.content.value') \
+             WHERE id = (SELECT inference.output FROM summary JOIN inference \
+                         ON inference.id = summary.inference_id WHERE summary.id = ?)",
+        )
+        .bind(summary)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let latest_error = store
+            .latest_summary_for_branch(branch_id)
+            .await
+            .unwrap_err();
+        assert!(format!("{latest_error:#}").contains("has no text content"));
+        let request_error = store
+            .request_for_segments(agent, &summary_only_recipe, Sampling::default())
+            .await
+            .unwrap_err();
+        assert!(format!("{request_error:#}").contains("has no text content"));
+
+        // JSON has no declared SQL type: retain SQLx's runtime type check too.
+        sqlx::query(
+            "UPDATE recorded_content SET body = json_set(body, '$.content.value', 42) \
+             WHERE id = (SELECT inference.output FROM summary JOIN inference \
+                         ON inference.id = summary.inference_id WHERE summary.id = ?)",
+        )
+        .bind(summary)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        store
+            .latest_summary_for_branch(branch_id)
+            .await
+            .unwrap_err();
+        store
+            .request_for_segments(agent, &summary_only_recipe, Sampling::default())
+            .await
+            .unwrap_err();
     }
 
     #[tokio::test]

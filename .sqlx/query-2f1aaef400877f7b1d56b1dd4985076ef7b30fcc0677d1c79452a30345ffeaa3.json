@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT branch_id FROM agent_history WHERE agent_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "branch_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2f1aaef400877f7b1d56b1dd4985076ef7b30fcc0677d1c79452a30345ffeaa3"
+}

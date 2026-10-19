@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE invocation SET next_inference_ordinal = next_inference_ordinal + 1 WHERE id = ? RETURNING next_inference_ordinal - 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "next_inference_ordinal - 1",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1486fb2c5763b5ec13beac9f5fab2a10eeb4875429752e818e6d087f56224911"
+}

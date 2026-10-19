@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE invocation SET outcome = 'interrupted', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "cfa444f01b9ad987acb127d35ae9d7b58c98c742812c038cbd839ca67989030e"
+}

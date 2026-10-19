@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE inference SET error = 'Inference interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "7167a02a5b798a2657f67df4cddb6a66daf353f236f41ba733a339f36b6fc546"
+}

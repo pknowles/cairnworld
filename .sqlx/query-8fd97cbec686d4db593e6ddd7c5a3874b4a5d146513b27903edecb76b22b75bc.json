@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sequence SET error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "8fd97cbec686d4db593e6ddd7c5a3874b4a5d146513b27903edecb76b22b75bc"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO invocation (sequence_id, agent_id, branch_id, parent_tool_execution_id, cause_inference_id) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "e099aeef80b05550b20e0a33f9317af6df63f081745a158d12671daa0f9b1f18"
+}

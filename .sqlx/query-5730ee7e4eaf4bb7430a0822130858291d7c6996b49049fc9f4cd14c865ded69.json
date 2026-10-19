@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT branch_id FROM invocation WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "branch_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5730ee7e4eaf4bb7430a0822130858291d7c6996b49049fc9f4cd14c865ded69"
+}

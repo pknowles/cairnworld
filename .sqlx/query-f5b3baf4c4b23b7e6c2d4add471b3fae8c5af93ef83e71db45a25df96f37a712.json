@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO inference_prompt (inference_id, format_id, rendered_at, prompt_hash, tokens_hash, max_output_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "f5b3baf4c4b23b7e6c2d4add471b3fae8c5af93ef83e71db45a25df96f37a712"
+}

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT summary.id, summary.history_entry_id, summary.agent_id, summary.covered_ranges, json_extract(summary.body, '$.content.value') AS \"content?: _\", summary.inference_id, summary.reason, summary.retained_messages FROM summary_content AS summary WHERE summary.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "history_entry_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "covered_ranges",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "content?: _",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "inference_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reason",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "retained_messages",
+        "ordinal": 7,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "546260c76539b2542e1dfff20155e922d87d07899ebac050474ca4c394e7ea2f"
+}
