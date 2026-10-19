@@ -39,6 +39,12 @@ after the rules/creation/group constructors, not a second initialization model.
    acceptance writes the approved background and private object notes. Hook
    creation rolls into Storyteller approval/modifiers, and choose_name into
    approve-or-suggest-alternatives. Reuse the existing creation-state validator.
+   Once creation is complete and the player confirms readiness, obtain the
+   Storyteller's exact entry location and group: an existing group or a new group
+   for a lone entrant. Validate world/location/group references and apply the
+   placement before invoking that group's GM entrance narration. Replace the
+   development setup's arbitrary existing-group placement at this point; browser
+   reconnection preserves an existing character's group.
 5. Add encounter-guidance, SpawnItem and SpawnNPC approval calls; use the same
    validated constructors, recording and current-observation notes. Add death
    icons and request_replacement through the player agent: check actual death,
@@ -55,6 +61,9 @@ Restart after an answer and after a summary without duplicating completed steps.
 Two players negotiate distinct backgrounds, including a counterproposal; private
 plot details never enter their public offer context. Test failed creation,
 refused spawn/replacement and successful replacement with independent histories.
+Exercise entry into an existing group and entry alone at another location;
+verify the destination GM narrates only after placement and reconnecting does
+not repeat Storyteller placement; ordinary presence narration still applies.
 
 Use imported scenarios for deterministic constructor tests and actual generated
 worlds for model quality. Update implementation_reference.md. Re-read

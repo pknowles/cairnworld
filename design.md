@@ -382,8 +382,11 @@ Authority: GM interaction, Game state / Group, Character actions / Travel,
 and Developer Mode's GM history DAG. `world_gm(world_id PRIMARY KEY, agent_id
 UNIQUE)` owns the world's GM agent. `character_group(character_id PRIMARY KEY,
 group_id, description)` replaces character_location. `character_group` is
-created with every character, including a blank Adventurer at the world's
-starting location. `group(id, world_id, location_id, description, branch_id,
+created with every character. In the development setup, a new Adventurer enters
+an existing group at its location; no particular group is required. With the
+Storyteller, completion of character creation and the player's readiness lead to
+the entry placement described under Storyteller world creation below.
+`group(id, world_id, location_id, description, branch_id,
 gm_notes, storyteller_notes, retired_at)` owns one GM history branch. A null
 retired_at denotes an active group with a writable head; a retired group keeps
 its final head for inspection but cannot receive new gameplay entries. Each active
@@ -1194,6 +1197,8 @@ fiction rather than substituting for mechanical state.
 | Look/investigate/open/ask | GM can answer, request a save/time cost, or reject with a reason. No automatic repeated save. |
 | Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
 | Say/lie | GM supplies hearers from the current group. Append speech to recipient histories by source reference; invoke addressed NPCs in stable character-ID order. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
+| DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
+| InterventionCheck/Approve | GM requests responses from named characters for an explicit action ID before approval. Responses can precede execution; Approve accepts the named action and applies it immediately. Whether intervention automatically prevents approval remains subject to playtesting. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Give/take/drop/place | One holder change after arbitration/consent; no duplicate item on repeated approval. |
 | Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
@@ -1212,13 +1217,18 @@ World time is the maximum character time. Each character advances by approved
 elapsed seconds; time advancement queues hourly distant-NPC opportunities only
 for elapsed whole hours, in stable character order, through the world task.
 
+Local interactions also give each present NPC an opportunity to respond or act,
+including before an action completes when intervention is requested. NPCs have
+an explicit DoNothing response to avoid unnecessary exchanges. GM routing and
+the response fan-out require playtesting for relevance and latency.
+
 ## Player replies and coordinated travel
 
 Authority: Take/Request, Accept, Travel and Agent syntax's recursion tree.
 The action that needs a human response persists
 `pending_reply(action_id, character_id, deadline, status, response_content_id)`;
 its deadline and intended character are explicit. The corresponding
-`pending_action` also holds a typed continuation `Transfer|Travel`, original
+`pending_action` also holds a typed continuation `Transfer|Travel|Intervention`, original
 invocation/call IDs and the ordered remaining tool-call ordinals. It retains
 budget consumption. It never serializes a Rust future or re-executes earlier tools.
 
@@ -1285,6 +1295,12 @@ players; observed facts are never silently rewritten. Death/replacement checks
 real rules state and Storyteller approval; a replacement creates a fresh PC
 and agent_history under the existing membership and enters a group through the
 normal join flow. The dead character and history remain inspectable.
+
+After character creation is complete and the player confirms readiness, the
+Storyteller chooses the exact entry location and group. The character may join
+an existing group or enter alone in a new group. Rust validates and applies that
+placement before the destination group's GM narrates the entrance. Reopening an
+existing character's browser session does not choose a new entry placement.
 
 ## Campaign completion
 

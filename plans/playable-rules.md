@@ -38,7 +38,7 @@ stubbed with unconditional approval here.
    Render the resulting action/dice via existing history entries. Test concurrent
    attempts to take one item, full inventory, bulky/petty items and repeated
    approval: exactly one holder and no second mutation.
-3. Add the concrete pending_reply rows and Transfer/Travel continuation variants.
+3. Add the concrete pending_reply rows and Transfer/Travel/Intervention continuation variants.
    agent.rs returns Suspended while preserving invocation/call IDs, tool ordinals
    and budgets. Game::process_world releases the current event and accepts the
    requested character's reply through ordinary chat. Add accept/decline tools
@@ -51,9 +51,16 @@ stubbed with unconditional approval here.
    references to their histories and invoke addressed NPC agents. Add lie with
    the declared WIL/suspicion outcomes and BePersuaded as an NPC-owned save tool.
    Add authorized per-object note-edit tools and feed current notes into each
-   GM/NPC invocation. Reuse look for investigation/open/ask and its refusal-with-
-   alternatives flow. Test heard/unheard/private conversation and persuasion
-   without a GM recursion cycle; inspect actual supplied context, not prose alone.
+   GM/NPC invocation. Give present NPCs response opportunities for local
+   interactions, with explicit DoNothing when no response or intervention is
+   appropriate. Add GM InterventionCheck with explicit action and character IDs
+   using the same pending reply flow before Approve executes the action.
+   Playtest GM routing, fan-out latency and whether intervention must prevent
+   approval; do not assume the declaration's tentative auto-denial policy.
+   Reuse look for investigation/open/ask and its refusal-with-
+   alternatives flow. Test heard/unheard/private conversation, persuasion,
+   intervention before execution and explicit no-response outcomes without a GM
+   recursion cycle; inspect actual supplied context, not prose alone.
 5. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
    from the bundled core rules. Add attack, retreat, take_damage, begin_combat,
    end_combat and wait. Store combat/participant order, turn flags and time in
