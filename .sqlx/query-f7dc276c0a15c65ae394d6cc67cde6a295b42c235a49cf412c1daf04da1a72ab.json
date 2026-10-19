@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.id AS character_id, character.name, character_presence.character_id IS NOT NULL AND character_presence.absent_since IS NULL AS \"online!: bool\" FROM character_group JOIN character ON character.id = character_group.character_id LEFT JOIN character_presence ON character_presence.character_id = character_group.character_id WHERE character_group.group_id = ? ORDER BY character.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "online!: bool",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f7dc276c0a15c65ae394d6cc67cde6a295b42c235a49cf412c1daf04da1a72ab"
+}

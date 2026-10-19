@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT next_position - 1 FROM history_branch WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "next_position - 1",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "38e7a9cf2c3cba5c3ba022bba394acd2e33c9bd6b08389296b306c87549f0b3b"
+}

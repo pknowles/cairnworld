@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pending_action WHERE world_id = ? AND id = ? AND gm_agent_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b076932582ace09a914da48879301cc9ebd79b2f420010a09222ff6a0f046f4e"
+}

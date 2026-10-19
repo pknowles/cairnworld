@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE presence_narration SET due_at = datetime(CURRENT_TIMESTAMP, ? || ' seconds'), waiting_for_return = 0, generation = generation + 1 WHERE group_id = ? AND generation = ? RETURNING generation",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9ca1644b489d9b46a54551946f68e2c33263a05e088af87aa246b085d0333d26"
+}

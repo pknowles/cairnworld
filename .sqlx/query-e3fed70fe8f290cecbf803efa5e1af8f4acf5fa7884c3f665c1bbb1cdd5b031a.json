@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 FROM world_member AS member JOIN player_character ON player_character.member_id = member.id WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND player_character.agent_id = ? AND member.access = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e3fed70fe8f290cecbf803efa5e1af8f4acf5fa7884c3f665c1bbb1cdd5b031a"
+}

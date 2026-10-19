@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT item.name, item.description FROM item_location JOIN item ON item.id = item_location.item_id WHERE item_location.location_id = ? ORDER BY item.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "803a385dbc80e83d0410ee71e4dfd159bb846d388047a6224e5eb819e9f2fb2e"
+}

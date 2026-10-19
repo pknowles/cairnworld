@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT location_id, retired_at FROM \"group\" WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "location_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "retired_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "f2a6ffb981790b16e26cf9290e243a141f13b58d07078a8569d43a2d5a72874d"
+}

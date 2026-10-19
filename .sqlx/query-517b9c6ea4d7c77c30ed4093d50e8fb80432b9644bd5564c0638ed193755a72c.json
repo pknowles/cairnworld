@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world_id FROM \"group\" WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "world_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "517b9c6ea4d7c77c30ed4093d50e8fb80432b9644bd5564c0638ed193755a72c"
+}

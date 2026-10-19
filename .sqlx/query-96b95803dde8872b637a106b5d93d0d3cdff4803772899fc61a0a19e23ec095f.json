@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT group_id FROM character_group WHERE character_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "group_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "96b95803dde8872b637a106b5d93d0d3cdff4803772899fc61a0a19e23ec095f"
+}

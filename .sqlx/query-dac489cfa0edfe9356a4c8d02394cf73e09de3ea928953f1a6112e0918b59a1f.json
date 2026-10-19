@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world SET next_action_id = next_action_id + 1 WHERE id = ? RETURNING next_action_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "next_action_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dac489cfa0edfe9356a4c8d02394cf73e09de3ea928953f1a6112e0918b59a1f"
+}

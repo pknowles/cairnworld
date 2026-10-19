@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.id, character.sheet FROM world_member AS member JOIN player_character ON player_character.member_id = member.id JOIN character ON character.id = player_character.character_id WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sheet",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "83d9a358e2abdbd03c055a032bc5a2b5e30d6236ece12d733e6867b6f1a47be9"
+}

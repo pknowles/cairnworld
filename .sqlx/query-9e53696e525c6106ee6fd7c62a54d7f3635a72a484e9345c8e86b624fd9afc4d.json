@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE presence_narration SET waiting_for_return = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "9e53696e525c6106ee6fd7c62a54d7f3635a72a484e9345c8e86b624fd9afc4d"
+}

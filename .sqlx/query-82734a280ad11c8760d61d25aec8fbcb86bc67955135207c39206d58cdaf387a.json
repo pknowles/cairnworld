@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 FROM agent_history JOIN history_entry ON history_entry.branch_id = agent_history.branch_id JOIN message ON message.id = history_entry.id WHERE agent_history.agent_id = ? AND message.role = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "82734a280ad11c8760d61d25aec8fbcb86bc67955135207c39206d58cdaf387a"
+}

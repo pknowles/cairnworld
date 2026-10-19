@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO presence_narration (group_id) VALUES (?) ON CONFLICT (group_id) DO UPDATE SET group_id = group_id RETURNING group_id, last_announced_character_ids, due_at, generation, waiting_for_return AS \"waiting_for_return: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "group_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_announced_character_ids",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "due_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "generation",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "waiting_for_return: bool",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "ea8b506b9885b4b7085a32f210728085c03eed30b23f85afd60e36a9f31a2c37"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO character_presence (character_id, last_connected_at, absent_since, generation) VALUES (?, CURRENT_TIMESTAMP, NULL, 1) ON CONFLICT (character_id) DO UPDATE SET last_connected_at = CURRENT_TIMESTAMP, absent_since = NULL, generation = generation + 1 RETURNING generation",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fd29cd079eb966ef8b7597375434156cab16ac27f3b03a28de44b51f9d47cdf5"
+}

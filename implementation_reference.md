@@ -207,8 +207,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 
 ## Persistence and recording (design.md: Persistence and recording)
 
-- World/user/membership queries, character construction, scenario import and
-  static export queries use SQLx checked macros and committed `.sqlx` metadata.
+- World/user/membership queries, character construction, scenario import,
+  static export, group topology, presence and player-action queries use SQLx
+  checked macros and committed `.sqlx` metadata.
   Existing JSON columns use SQLx's `Json` encoding. `.cargo/config.toml` defaults builds
   to offline checking; `scripts/check-quality.sh` validates metadata against
   migrations in `target/sqlx-schema.sqlite` using SQLx CLI 0.8.6. Remaining

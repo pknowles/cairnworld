@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args FROM pending_action WHERE world_id = ? AND id = ? AND gm_agent_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "world_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sequence_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "requesting_tool_execution_id",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "character_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "gm_agent_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "gm_branch_id",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "tool",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "args",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b19e1640a3ddbcfef72d3ddd72cd12aa71cbd37d55c4840bc6d71d88d03cd3b8"
+}

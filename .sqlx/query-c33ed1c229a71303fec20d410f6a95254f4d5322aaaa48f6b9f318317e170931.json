@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO history_parent (branch_id, agent_id, ordinal, parent_branch_id, through_position) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c33ed1c229a71303fec20d410f6a95254f4d5322aaaa48f6b9f318317e170931"
+}

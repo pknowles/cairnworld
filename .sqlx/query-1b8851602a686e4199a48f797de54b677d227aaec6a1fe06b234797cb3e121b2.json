@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT message.id, message.role, message.content, message.trigger_sequence_id, inference.sequence_id AS inference_sequence_id FROM world_member AS member JOIN player_character ON player_character.member_id = member.id JOIN agent_history ON agent_history.agent_id = player_character.agent_id JOIN history_entry ON history_entry.branch_id = agent_history.branch_id JOIN message ON message.id = history_entry.id LEFT JOIN inference ON inference.id = message.source_inference_id WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND player_character.agent_id = ? AND member.access = 'active' AND message.id > ? AND message.origin = 'conversation' ORDER BY history_entry.position",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "role",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "content",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "trigger_sequence_id",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "inference_sequence_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "1b8851602a686e4199a48f797de54b677d227aaec6a1fe06b234797cb3e121b2"
+}

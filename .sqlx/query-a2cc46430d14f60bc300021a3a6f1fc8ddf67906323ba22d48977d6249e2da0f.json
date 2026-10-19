@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT \"group\".branch_id FROM \"group\" JOIN history_branch ON history_branch.id = \"group\".branch_id WHERE \"group\".id = ? AND \"group\".world_id = ? AND history_branch.agent_id = ? AND retired_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "branch_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a2cc46430d14f60bc300021a3a6f1fc8ddf67906323ba22d48977d6249e2da0f"
+}

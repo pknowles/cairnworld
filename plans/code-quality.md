@@ -31,8 +31,8 @@ content and reasoning. They are different operations, not duplicate query twins.
   sufficient when this increment starts; no system installations are part of it.
 - Prepare an isolated schema database under target using the real migrations.
   Commit standard .sqlx offline metadata and verify an offline build.
-- Continue the remaining feature batches in order: group/presence operations,
-  recording/history, then inspection. Membership/scenario coverage is indexed in
+- Continue the remaining feature batches in order: recording/history, then
+  inspection. Membership/scenario and group/presence coverage is indexed in
   implementation_reference.md. No separate whole-tree file move is needed.
 - Keep genuinely dynamic QueryBuilder operations parameterized and test their
   supported shapes. Do not claim those have become compile-time checked.

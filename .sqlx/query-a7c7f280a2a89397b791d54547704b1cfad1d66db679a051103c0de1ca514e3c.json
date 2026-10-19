@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.sheet FROM character_group JOIN player_character ON player_character.character_id = character_group.character_id JOIN character ON character.id = player_character.character_id WHERE character_group.group_id = ? ORDER BY character.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "background",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "motive",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "ambition",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "sheet",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a7c7f280a2a89397b791d54547704b1cfad1d66db679a051103c0de1ca514e3c"
+}

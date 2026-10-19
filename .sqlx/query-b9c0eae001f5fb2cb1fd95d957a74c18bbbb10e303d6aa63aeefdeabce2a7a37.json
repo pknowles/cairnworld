@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT player_character.agent_id FROM world_member JOIN player_character ON player_character.member_id = world_member.id JOIN character_group ON character_group.character_id = player_character.character_id JOIN \"group\" ON \"group\".id = character_group.group_id JOIN character_presence ON character_presence.character_id = player_character.character_id WHERE world_member.world_id = ? AND world_member.access = 'active' AND \"group\".id = ? AND character_presence.absent_since IS NULL ORDER BY player_character.agent_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b9c0eae001f5fb2cb1fd95d957a74c18bbbb10e303d6aa63aeefdeabce2a7a37"
+}

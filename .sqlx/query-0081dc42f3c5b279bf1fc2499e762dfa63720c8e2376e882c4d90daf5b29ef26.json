@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world_gm.world_id, world_gm.agent_id, history_entry.branch_id FROM inference JOIN world_gm ON world_gm.agent_id = inference.agent_id JOIN history_entry ON history_entry.id = inference.history_entry_id WHERE inference.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "world_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "branch_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0081dc42f3c5b279bf1fc2499e762dfa63720c8e2376e882c4d90daf5b29ef26"
+}

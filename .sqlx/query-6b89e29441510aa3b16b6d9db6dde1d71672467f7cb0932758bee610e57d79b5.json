@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.id AS character_id, character.name AS character_name, character.description AS character_description, character.sheet, location.id AS location_id, location.name AS location_name, location.description AS location_description FROM world_member AS member JOIN player_character ON player_character.member_id = member.id JOIN character ON character.id = player_character.character_id JOIN character_group ON character_group.character_id = character.id JOIN \"group\" ON \"group\".id = character_group.group_id JOIN location ON location.id = \"group\".location_id WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "character_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "character_description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "sheet",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "location_name",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_description",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6b89e29441510aa3b16b6d9db6dde1d71672467f7cb0932758bee610e57d79b5"
+}

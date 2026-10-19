@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT group_id, last_announced_character_ids, due_at, generation, waiting_for_return AS \"waiting_for_return: bool\" FROM presence_narration WHERE group_id IN (SELECT value FROM json_each(?))",
+  "describe": {
+    "columns": [
+      {
+        "name": "group_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_announced_character_ids",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "due_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "generation",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "waiting_for_return: bool",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4e537c4d6750c6ab19cae612742f07f7c109931fd4e43aa8b773c9cc7b2f6894"
+}

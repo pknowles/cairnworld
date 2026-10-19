@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO item_character (item_id, character_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "969d05e741a7556aaa13f53aaeab7173fdda4add1d1eb7e772f5dc7e19ffa7a9"
+}

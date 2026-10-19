@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.name FROM character JOIN json_each(?) AS requested ON requested.value = character.id ORDER BY character.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f1dc83644f7e9f98c1de00ae2ac317eabdb4b5afcfa45819f2e1539431c80708"
+}

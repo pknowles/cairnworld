@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE character_presence SET absent_since = CURRENT_TIMESTAMP, generation = generation + 1 WHERE character_id = ? RETURNING generation",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d28ec309bd31138b30149fd8354c7b23a91f2553e865a8d1e4e8bb1eec2e9176"
+}

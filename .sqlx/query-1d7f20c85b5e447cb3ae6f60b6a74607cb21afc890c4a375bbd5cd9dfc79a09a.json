@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE presence_narration SET last_announced_character_ids = CASE WHEN ? THEN last_announced_character_ids ELSE ? END, waiting_for_return = ?, due_at = NULL, generation = generation + 1 WHERE group_id = ? AND generation = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "1d7f20c85b5e447cb3ae6f60b6a74607cb21afc890c4a375bbd5cd9dfc79a09a"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world_gm.agent_id, \"group\".branch_id FROM world_member AS member JOIN player_character ON player_character.member_id = member.id JOIN character_group ON character_group.character_id = player_character.character_id JOIN \"group\" ON \"group\".id = character_group.group_id JOIN world_gm ON world_gm.world_id = \"group\".world_id WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "branch_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e36e4fa3680e595d66efa42df5d7303423d04b99e70260083c331d4b4e4fdeb0"
+}

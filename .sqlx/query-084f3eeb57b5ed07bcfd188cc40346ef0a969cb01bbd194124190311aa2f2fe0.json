@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character_id FROM character_group WHERE group_id = ? ORDER BY character_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "084f3eeb57b5ed07bcfd188cc40346ef0a969cb01bbd194124190311aa2f2fe0"
+}

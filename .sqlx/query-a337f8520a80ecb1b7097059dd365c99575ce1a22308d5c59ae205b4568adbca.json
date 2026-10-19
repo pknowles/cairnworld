@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action.approved AS \"approved: bool\", action.result_content_id FROM action JOIN sequence ON sequence.id = action.sequence_id JOIN tool_execution AS approving_tool_execution ON approving_tool_execution.id = action.approving_tool_execution_id JOIN inference AS approving_inference ON approving_inference.id = approving_tool_execution.inference_id WHERE sequence.world_id = ? AND action.pending_action_id = ? AND approving_inference.agent_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "approved: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "result_content_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a337f8520a80ecb1b7097059dd365c99575ce1a22308d5c59ae205b4568adbca"
+}

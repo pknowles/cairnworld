@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_action (world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "994e6caa01339e310c7ec11d5c6585e9e26c9a574b7cad4296d932d567ae9d59"
+}

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT presence_narration.group_id, presence_narration.generation, max(0, unixepoch(due_at) - unixepoch('now')) AS \"after_seconds?: i64\" FROM presence_narration JOIN \"group\" ON \"group\".id = presence_narration.group_id WHERE \"group\".world_id = ? AND \"group\".retired_at IS NULL AND due_at IS NOT NULL ORDER BY due_at, presence_narration.group_id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "group_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "generation",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "after_seconds?: i64",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "0bdf8eed5495f83441f55c14e5fd5c457618b609b96089488c89313f9b314d9d"
+}

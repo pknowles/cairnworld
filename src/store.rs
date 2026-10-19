@@ -782,7 +782,7 @@ impl TryFrom<PendingCompactionRow> for PendingCompaction {
 
 impl Store {
     pub async fn world_ids(&self) -> Result<Vec<i64>> {
-        sqlx::query_scalar("SELECT id FROM world ORDER BY id")
+        sqlx::query_scalar!("SELECT id FROM world ORDER BY id",)
             .fetch_all(&self.pool)
             .await
             .context("loading worlds")
@@ -1707,8 +1707,8 @@ impl Store {
     /// retain a scene after its access has been removed.
     pub async fn player_scene(&self, member: &PlayerAgent) -> Result<PlayerScene> {
         let (character_id, character_name, character_description, sheet, location_id, location_name, location_description):
-            (i64, String, String, String, i64, String, String) = sqlx::query_as(
-            "SELECT character.id, character.name, character.description, character.sheet, location.id, location.name, location.description \
+            (i64, String, String, String, i64, String, String) = sqlx::query!(
+                "SELECT character.id AS character_id, character.name AS character_name, character.description AS character_description, character.sheet, location.id AS location_id, location.name AS location_name, location.description AS location_description \
              FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
@@ -1716,11 +1716,11 @@ impl Store {
              JOIN \"group\" ON \"group\".id = character_group.group_id \
              JOIN location ON location.id = \"group\".location_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
-        )
-        .bind(member.member_id)
-        .bind(member.world_id)
-        .bind(member.user_id)
-        .bind(member.character_id)
+                member.member_id,
+                member.world_id,
+                member.user_id,
+                member.character_id,
+            ).map(|row| (row.character_id, row.character_name, row.character_description, row.sheet, row.location_id, row.location_name, row.location_description,))
         .fetch_optional(&self.pool)
         .await
         .context("loading player scene")?
@@ -1742,17 +1742,17 @@ impl Store {
     /// Read the active player's location for narration-isolation assertions.
     #[cfg(test)]
     pub async fn player_location_id(&self, member: &PlayerAgent) -> Result<i64> {
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "SELECT \"group\".location_id FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character_group ON character_group.character_id = player_character.character_id \
              JOIN \"group\" ON \"group\".id = character_group.group_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
+            member.member_id,
+            member.world_id,
+            member.user_id,
+            member.character_id,
         )
-        .bind(member.member_id)
-        .bind(member.world_id)
-        .bind(member.user_id)
-        .bind(member.character_id)
         .fetch_optional(&self.pool)
         .await
         .context("loading member location")?
@@ -1764,14 +1764,14 @@ impl Store {
     /// itself as superseded (design.md's Membership and presence). Returns
     /// the new generation.
     pub async fn mark_character_present(&self, character_id: i64) -> Result<i64> {
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "INSERT INTO character_presence (character_id, last_connected_at, absent_since, generation) \
              VALUES (?, CURRENT_TIMESTAMP, NULL, 1) \
              ON CONFLICT (character_id) DO UPDATE SET \
                  last_connected_at = CURRENT_TIMESTAMP, absent_since = NULL, generation = generation + 1 \
              RETURNING generation",
+            character_id,
         )
-        .bind(character_id)
         .fetch_one(&self.pool)
         .await
         .with_context(|| format!("recording presence for character {character_id}"))
@@ -1780,11 +1780,11 @@ impl Store {
     /// Record a character's one-to-zero connected transition. Returns the new
     /// generation.
     pub async fn mark_character_absent(&self, character_id: i64) -> Result<i64> {
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "UPDATE character_presence SET absent_since = CURRENT_TIMESTAMP, generation = generation + 1 \
              WHERE character_id = ? RETURNING generation",
+            character_id,
         )
-        .bind(character_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("recording absence for character {character_id}"))?
@@ -1794,18 +1794,19 @@ impl Store {
     /// The group a character currently belongs to. Every active character
     /// (player or NPC) has exactly one.
     pub async fn character_group_id(&self, character_id: i64) -> Result<i64> {
-        sqlx::query_scalar("SELECT group_id FROM character_group WHERE character_id = ?")
-            .bind(character_id)
-            .fetch_optional(&self.pool)
-            .await
-            .with_context(|| format!("loading group for character {character_id}"))?
-            .with_context(|| format!("character {character_id} has no group"))
+        sqlx::query_scalar!(
+            "SELECT group_id FROM character_group WHERE character_id = ?",
+            character_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading group for character {character_id}"))?
+        .with_context(|| format!("character {character_id} has no group"))
     }
 
     /// The world a group belongs to.
     pub async fn world_id_for_group(&self, group_id: i64) -> Result<i64> {
-        sqlx::query_scalar("SELECT world_id FROM \"group\" WHERE id = ?")
-            .bind(group_id)
+        sqlx::query_scalar!("SELECT world_id FROM \"group\" WHERE id = ?", group_id,)
             .fetch_optional(&self.pool)
             .await
             .with_context(|| format!("looking up world for group {group_id}"))?
@@ -1816,20 +1817,17 @@ impl Store {
     /// `GroupHistory { agent_id, branch_id }` - agent_id alone cannot select
     /// a GM history once a world_gm plays several groups).
     pub async fn group_gm_history(&self, group_id: i64) -> Result<GroupHistory> {
-        let (agent_id, branch_id): (i64, i64) = sqlx::query_as(
+        sqlx::query_as!(
+            GroupHistory,
             "SELECT world_gm.agent_id, \"group\".branch_id FROM \"group\" \
              JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE \"group\".id = ?",
+            group_id,
         )
-        .bind(group_id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("looking up GM for group {group_id}"))?
-        .with_context(|| format!("group {group_id} does not exist"))?;
-        Ok(GroupHistory {
-            agent_id,
-            branch_id,
-        })
+        .with_context(|| format!("group {group_id} does not exist"))
     }
 
     /// Every branch this agent owns, with its ordered bounded parents and
@@ -1906,13 +1904,14 @@ impl Store {
             .acquire()
             .await
             .context("acquiring group-resolution connection")?;
-        let (world_id, agent_id, branch_id): (i64, i64, i64) = sqlx::query_as(
+        let (world_id, agent_id, branch_id): (i64, i64, i64) = sqlx::query!(
             "SELECT world_gm.world_id, world_gm.agent_id, history_entry.branch_id FROM inference \
              JOIN world_gm ON world_gm.agent_id = inference.agent_id \
              JOIN history_entry ON history_entry.id = inference.history_entry_id \
              WHERE inference.id = ?",
+            inference_id,
         )
-        .bind(inference_id)
+        .map(|row| (row.world_id, row.agent_id, row.branch_id))
         .fetch_optional(&mut *connection)
         .await
         .context("resolving topology invocation authority")?
@@ -1928,15 +1927,15 @@ impl Store {
             let mut groups = Vec::with_capacity(ids.len());
             let resolution = async {
                 for &id in ids {
-                    let branch_id: Option<i64> = sqlx::query_scalar(
+                    let branch_id: Option<i64> = sqlx::query_scalar!(
                         "SELECT \"group\".branch_id FROM \"group\" \
                          JOIN history_branch ON history_branch.id = \"group\".branch_id \
                          WHERE \"group\".id = ? AND \"group\".world_id = ? \
                          AND history_branch.agent_id = ? AND retired_at IS NULL",
+                        id,
+                        world_id,
+                        agent_id,
                     )
-                    .bind(id)
-                    .bind(world_id)
-                    .bind(agent_id)
                     .fetch_optional(&mut *connection)
                     .await
                     .with_context(|| format!("resolving group {id} in world {world_id}"))?;
@@ -2060,13 +2059,13 @@ impl Store {
                 MessageOrigin::Conversation,
             )
             .await?;
-            let updated = sqlx::query(
+            let updated = sqlx::query!(
                 "UPDATE tool_execution SET status = ?, result_content_id = ?, finished_at = CURRENT_TIMESTAMP \
                  WHERE id = ? AND finished_at IS NULL",
+                status,
+                content_id,
+                tool_execution_id,
             )
-            .bind(status)
-            .bind(content_id)
-            .bind(tool_execution_id)
             .execute(&mut *transaction)
             .await
             .with_context(|| format!("completing topology change tool_execution {tool_execution_id}"))?;
@@ -2094,36 +2093,37 @@ impl Store {
         description: &str,
         parents: &[(i64, i64)],
     ) -> Result<(i64, i64)> {
-        let branch_id = sqlx::query_scalar::<_, i64>(
+        let branch_id = sqlx::query_scalar!(
             "INSERT INTO history_branch (agent_id) VALUES (?) RETURNING id",
+            world_gm_agent_id,
         )
-        .bind(world_gm_agent_id)
         .fetch_one(&mut **transaction)
         .await
         .context("creating history branch for new group")?;
         for (ordinal, (parent_branch_id, through_position)) in parents.iter().enumerate() {
-            sqlx::query(
+            let ordinal = i64::try_from(ordinal).expect("parent ordinal fits in i64");
+            sqlx::query!(
                 "INSERT INTO history_parent (branch_id, agent_id, ordinal, parent_branch_id, through_position) \
                  VALUES (?, ?, ?, ?, ?)",
+                branch_id,
+                world_gm_agent_id,
+                ordinal,
+                parent_branch_id,
+                through_position,
             )
-            .bind(branch_id)
-            .bind(world_gm_agent_id)
-            .bind(i64::try_from(ordinal).expect("parent ordinal fits in i64"))
-            .bind(parent_branch_id)
-            .bind(through_position)
             .execute(&mut **transaction)
             .await
             .context("linking new group's branch to its parent")?;
         }
-        let group_id = sqlx::query_scalar::<_, i64>(
+        let group_id = sqlx::query_scalar!(
             "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id) \
              VALUES (?, ?, ?, ?, ?) RETURNING id",
+            world_id,
+            name,
+            location_id,
+            description,
+            branch_id,
         )
-        .bind(world_id)
-        .bind(name)
-        .bind(location_id)
-        .bind(description)
-        .bind(branch_id)
         .fetch_one(&mut **transaction)
         .await
         .context("creating new group")?;
@@ -2146,21 +2146,23 @@ impl Store {
         let group_id = group.id;
         let world_id = group.branch.world_id();
         let branch_id = group.branch.branch_id();
-        let (location_id, retired_at): (i64, Option<String>) =
-            sqlx::query_as("SELECT location_id, retired_at FROM \"group\" WHERE id = ?")
-                .bind(group_id)
-                .fetch_one(&mut **transaction)
-                .await
-                .with_context(|| format!("loading group {group_id} for split"))?;
+        let (location_id, retired_at): (i64, Option<String>) = sqlx::query!(
+            "SELECT location_id, retired_at FROM \"group\" WHERE id = ?",
+            group_id,
+        )
+        .map(|row| (row.location_id, row.retired_at))
+        .fetch_one(&mut **transaction)
+        .await
+        .with_context(|| format!("loading group {group_id} for split"))?;
         if retired_at.is_some() {
             return Ok(Err(format!(
                 "Tool arguments were rejected: group {group_id} is already retired"
             )));
         }
-        let current: Vec<i64> = sqlx::query_scalar(
+        let current: Vec<i64> = sqlx::query_scalar!(
             "SELECT character_id FROM character_group WHERE group_id = ? ORDER BY character_id",
+            group_id,
         )
-        .bind(group_id)
         .fetch_all(&mut **transaction)
         .await
         .with_context(|| format!("loading group {group_id}'s current membership"))?;
@@ -2186,12 +2188,13 @@ impl Store {
                 "Tool arguments were rejected: continue_with_character_id {continue_with} is not a member of group {group_id}"
             )));
         }
-        let through_position: i64 =
-            sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
-                .bind(branch_id)
-                .fetch_one(&mut **transaction)
-                .await
-                .context("loading source branch's settled position")?;
+        let through_position: i64 = sqlx::query_scalar!(
+            "SELECT next_position - 1 FROM history_branch WHERE id = ?",
+            branch_id,
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .context("loading source branch's settled position")?;
         let world_gm_agent_id = group.branch.agent_id();
         let mut result_group_ids = Vec::new();
         for partition in &partitions {
@@ -2206,10 +2209,12 @@ impl Store {
             )
             .await?;
             for character_id in &partition.character_ids {
-                sqlx::query("UPDATE character_group SET group_id = ?, description = ? WHERE character_id = ?")
-                    .bind(new_group_id)
-                    .bind(&partition.description)
-                    .bind(character_id)
+                sqlx::query!(
+                    "UPDATE character_group SET group_id = ?, description = ? WHERE character_id = ?",
+                    new_group_id,
+                    partition.description,
+                    character_id,
+                )
                     .execute(&mut **transaction)
                     .await
                     .with_context(|| format!("moving character {character_id} into split group {new_group_id}"))?;
@@ -2223,11 +2228,13 @@ impl Store {
             presence_seconds,
         )
         .await?;
-        sqlx::query("UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP WHERE id = ?")
-            .bind(group_id)
-            .execute(&mut **transaction)
-            .await
-            .with_context(|| format!("retiring split group {group_id}"))?;
+        sqlx::query!(
+            "UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP WHERE id = ?",
+            group_id,
+        )
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("retiring split group {group_id}"))?;
         Ok(Ok(format!(
             "Group {group_id} split into groups {}.",
             result_group_ids
@@ -2263,12 +2270,14 @@ impl Store {
         for group in &groups {
             let group_id = group.id;
             let branch_id = group.branch.branch_id();
-            let (group_location_id, retired_at): (i64, Option<String>) =
-                sqlx::query_as("SELECT location_id, retired_at FROM \"group\" WHERE id = ?")
-                    .bind(group_id)
-                    .fetch_one(&mut **transaction)
-                    .await
-                    .with_context(|| format!("loading group {group_id} for merge"))?;
+            let (group_location_id, retired_at): (i64, Option<String>) = sqlx::query!(
+                "SELECT location_id, retired_at FROM \"group\" WHERE id = ?",
+                group_id,
+            )
+            .map(|row| (row.location_id, row.retired_at))
+            .fetch_one(&mut **transaction)
+            .await
+            .with_context(|| format!("loading group {group_id} for merge"))?;
             if retired_at.is_some() {
                 return Ok(Err(format!(
                     "Tool arguments were rejected: group {group_id} is already retired"
@@ -2280,12 +2289,13 @@ impl Store {
                         .to_string(),
                 ));
             }
-            let through_position: i64 =
-                sqlx::query_scalar("SELECT next_position - 1 FROM history_branch WHERE id = ?")
-                    .bind(branch_id)
-                    .fetch_one(&mut **transaction)
-                    .await
-                    .context("loading source branch's settled position")?;
+            let through_position: i64 = sqlx::query_scalar!(
+                "SELECT next_position - 1 FROM history_branch WHERE id = ?",
+                branch_id,
+            )
+            .fetch_one(&mut **transaction)
+            .await
+            .context("loading source branch's settled position")?;
             parents.push((branch_id, through_position));
         }
         let location_id = location_id.expect("at least two group ids were validated above");
@@ -2301,19 +2311,23 @@ impl Store {
         .await?;
         for group in &groups {
             let group_id = group.id;
-            sqlx::query("UPDATE character_group SET group_id = ? WHERE group_id = ?")
-                .bind(new_group_id)
-                .bind(group_id)
-                .execute(&mut **transaction)
-                .await
-                .with_context(|| {
-                    format!("moving group {group_id}'s characters into merged group {new_group_id}")
-                })?;
-            sqlx::query("UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP WHERE id = ?")
-                .bind(group_id)
-                .execute(&mut **transaction)
-                .await
-                .with_context(|| format!("retiring merged group {group_id}"))?;
+            sqlx::query!(
+                "UPDATE character_group SET group_id = ? WHERE group_id = ?",
+                new_group_id,
+                group_id,
+            )
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| {
+                format!("moving group {group_id}'s characters into merged group {new_group_id}")
+            })?;
+            sqlx::query!(
+                "UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP WHERE id = ?",
+                group_id,
+            )
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| format!("retiring merged group {group_id}"))?;
         }
         Self::transfer_presence(
             transaction,
@@ -2341,18 +2355,27 @@ impl Store {
         presence_seconds: u64,
     ) -> Result<()> {
         let sources = serde_json::to_string(sources)?;
-        let announced: Vec<i64> = sqlx::query_scalar(
-            "SELECT DISTINCT announced.value FROM presence_narration, json_each(last_announced_character_ids) AS announced \
-             WHERE group_id IN (SELECT value FROM json_each(?)) ORDER BY announced.value",
-        ).bind(&sources).fetch_all(&mut **transaction).await.context("loading source announced membership")?;
-        let deadline: Option<String> = sqlx::query_scalar(
-            "SELECT min(due_at) FROM presence_narration WHERE group_id IN (SELECT value FROM json_each(?))",
-        ).bind(&sources).fetch_one(&mut **transaction).await.context("loading source presence deadline")?;
+        let states = sqlx::query_as!(PresenceNarrationRow,
+            "SELECT group_id, last_announced_character_ids, due_at, generation, waiting_for_return AS \"waiting_for_return: bool\" \
+             FROM presence_narration WHERE group_id IN (SELECT value FROM json_each(?))",
+            sources,
+        ).fetch_all(&mut **transaction).await.context("loading source presence state")?
+            .into_iter().map(TryInto::try_into).collect::<Result<Vec<PresenceNarration>>>()?;
+        let mut announced: Vec<i64> = states
+            .iter()
+            .flat_map(|state| state.last_announced_character_ids.iter().copied())
+            .collect();
+        announced.sort_unstable();
+        announced.dedup();
+        let deadline = states
+            .iter()
+            .filter_map(|state| state.due_at.as_ref())
+            .min();
         for group_id in targets {
-            let members: Vec<i64> = sqlx::query_scalar(
+            let members: Vec<i64> = sqlx::query_scalar!(
                 "SELECT character_id FROM character_group WHERE group_id = ? ORDER BY character_id",
+                group_id,
             )
-            .bind(group_id)
             .fetch_all(&mut **transaction)
             .await
             .context("loading resulting group membership")?;
@@ -2362,16 +2385,27 @@ impl Store {
                 .copied()
                 .filter(|id| members.contains(id))
                 .collect();
-            sqlx::query(
+            let announced_json = Json(&announced);
+            let waiting_for_return = online.is_empty();
+            let needs_window = !waiting_for_return && online != announced;
+            let presence_seconds = i64::try_from(presence_seconds)?;
+            sqlx::query!(
                 "INSERT INTO presence_narration (group_id, last_announced_character_ids, due_at, waiting_for_return) \
                  VALUES (?, ?, CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN datetime(CURRENT_TIMESTAMP, ? || ' seconds') END, ?)",
-            ).bind(group_id).bind(serde_json::to_string(&announced)?)
-                .bind(&deadline).bind(&deadline).bind(!online.is_empty() && online != announced)
-                .bind(i64::try_from(presence_seconds)?).bind(online.is_empty())
+                group_id,
+                announced_json,
+                deadline,
+                deadline,
+                needs_window,
+                presence_seconds,
+                waiting_for_return,
+            )
                 .execute(&mut **transaction).await.context("transferring group presence")?;
         }
-        sqlx::query("UPDATE presence_narration SET due_at = NULL, generation = generation + 1 WHERE group_id IN (SELECT value FROM json_each(?))")
-            .bind(sources).execute(&mut **transaction).await.context("invalidating retired presence deadlines")?;
+        sqlx::query!(
+            "UPDATE presence_narration SET due_at = NULL, generation = generation + 1 WHERE group_id IN (SELECT value FROM json_each(?))",
+            sources,
+        ).execute(&mut **transaction).await.context("invalidating retired presence deadlines")?;
         Ok(())
     }
 
@@ -2384,12 +2418,12 @@ impl Store {
             return Ok(Vec::new());
         }
         let ids = serde_json::to_string(character_ids).context("serializing character ids")?;
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "SELECT character.name FROM character \
              JOIN json_each(?) AS requested ON requested.value = character.id \
              ORDER BY character.id",
+            ids,
         )
-        .bind(ids)
         .fetch_all(&self.pool)
         .await
         .context("loading character names")
@@ -2401,26 +2435,19 @@ impl Store {
     /// not mutate group membership.
     pub async fn party_presence(&self, character_id: i64) -> Result<Vec<PartyMember>> {
         let group_id = self.character_group_id(character_id).await?;
-        let rows: Vec<(i64, String, bool)> = sqlx::query_as(
-            "SELECT character.id, character.name, \
-                    character_presence.character_id IS NOT NULL AND character_presence.absent_since IS NULL AS online \
+        // IS NULL predicates also yield a boolean when the presence row is absent.
+        sqlx::query_as!(PartyMember,
+            "SELECT character.id AS character_id, character.name, \
+                    character_presence.character_id IS NOT NULL AND character_presence.absent_since IS NULL AS \"online!: bool\" \
              FROM character_group \
              JOIN character ON character.id = character_group.character_id \
              LEFT JOIN character_presence ON character_presence.character_id = character_group.character_id \
              WHERE character_group.group_id = ? ORDER BY character.id",
+            group_id,
         )
-        .bind(group_id)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("loading party presence for group {group_id}"))?;
-        Ok(rows
-            .into_iter()
-            .map(|(character_id, name, online)| PartyMember {
-                character_id,
-                name,
-                online,
-            })
-            .collect())
+        .with_context(|| format!("loading party presence for group {group_id}"))
     }
 
     /// Creation-ready, connected characters participate in arrival/departure
@@ -2438,24 +2465,26 @@ impl Store {
         connection: &mut SqliteConnection,
         group_id: i64,
     ) -> Result<Vec<i64>> {
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "SELECT character_group.character_id FROM character_group \
              JOIN character_presence USING (character_id) JOIN character ON character.id = character_group.character_id \
              WHERE group_id = ? AND absent_since IS NULL AND json_type(sheet, '$.ready') = 'true' \
              ORDER BY character_group.character_id",
-        ).bind(group_id).fetch_all(connection).await.with_context(|| format!("loading ready online characters for group {group_id}"))
+            group_id,
+        ).fetch_all(connection).await.with_context(|| format!("loading ready online characters for group {group_id}"))
     }
 
     /// The current announced set and any outstanding transition deadline for
     /// a group, creating the row (empty announced set, no deadline) if this
     /// is its first presence event.
     pub async fn presence_narration(&self, group_id: i64) -> Result<PresenceNarration> {
-        sqlx::query_as::<_, PresenceNarrationRow>(
+        sqlx::query_as!(
+            PresenceNarrationRow,
             "INSERT INTO presence_narration (group_id) VALUES (?) \
              ON CONFLICT (group_id) DO UPDATE SET group_id = group_id \
-             RETURNING group_id, last_announced_character_ids, due_at, generation, waiting_for_return",
+             RETURNING group_id, last_announced_character_ids, due_at, generation, waiting_for_return AS \"waiting_for_return: bool\"",
+            group_id,
         )
-        .bind(group_id)
         .fetch_one(&self.pool)
         .await
         .with_context(|| format!("loading presence narration state for group {group_id}"))?
@@ -2491,16 +2520,17 @@ impl Store {
         generation: i64,
     ) -> Result<()> {
         let ids = serde_json::to_string(character_ids).context("serializing announced set")?;
-        let updated = sqlx::query(
+        let waiting_for_return = character_ids.is_empty();
+        let updated = sqlx::query!(
             "UPDATE presence_narration SET last_announced_character_ids = CASE WHEN ? THEN last_announced_character_ids ELSE ? END, \
              waiting_for_return = ?, due_at = NULL, generation = generation + 1 \
              WHERE group_id = ? AND generation = ?",
+            waiting_for_return,
+            ids,
+            waiting_for_return,
+            group_id,
+            generation,
         )
-        .bind(character_ids.is_empty())
-        .bind(ids)
-        .bind(character_ids.is_empty())
-        .bind(group_id)
-        .bind(generation)
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("announcing presence for group {group_id}"))?
@@ -2520,9 +2550,11 @@ impl Store {
             .begin()
             .await
             .context("starting presence recovery")?;
-        sqlx::query("UPDATE character_presence SET absent_since = CURRENT_TIMESTAMP, generation = generation + 1 WHERE absent_since IS NULL")
+        sqlx::query!(
+            "UPDATE character_presence SET absent_since = CURRENT_TIMESTAMP, generation = generation + 1 WHERE absent_since IS NULL",
+        )
             .execute(&mut *transaction).await.context("releasing lost process connections")?;
-        sqlx::query("UPDATE presence_narration SET waiting_for_return = 1")
+        sqlx::query!("UPDATE presence_narration SET waiting_for_return = 1",)
             .execute(&mut *transaction)
             .await
             .context("restoring empty-period presence state")?;
@@ -2533,17 +2565,31 @@ impl Store {
     }
 
     pub async fn next_presence_deadline(&self, world_id: i64) -> Result<Option<(i64, i64, i64)>> {
-        sqlx::query_as(
+        let deadline = sqlx::query!(
             "SELECT presence_narration.group_id, presence_narration.generation, \
-             max(0, unixepoch(due_at) - unixepoch('now')) FROM presence_narration \
+             max(0, unixepoch(due_at) - unixepoch('now')) AS \"after_seconds?: i64\" FROM presence_narration \
              JOIN \"group\" ON \"group\".id = presence_narration.group_id \
              WHERE \"group\".world_id = ? AND \"group\".retired_at IS NULL AND due_at IS NOT NULL \
              ORDER BY due_at, presence_narration.group_id LIMIT 1",
+            world_id,
         )
-        .bind(world_id)
         .fetch_optional(&self.pool)
         .await
-        .context("selecting durable presence deadline")
+        .context("selecting durable presence deadline")?;
+        deadline
+            .map(|row| {
+                Ok((
+                    row.group_id,
+                    row.generation,
+                    row.after_seconds.with_context(|| {
+                        format!(
+                            "group {} has an invalid presence deadline timestamp",
+                            row.group_id
+                        )
+                    })?,
+                ))
+            })
+            .transpose()
     }
 
     pub async fn chat_failure(
@@ -2551,8 +2597,8 @@ impl Store {
         member: &PlayerAgent,
         sequence_id: i64,
     ) -> Result<Option<String>> {
-        sqlx::query_scalar(
-            "SELECT sequence.error FROM sequence \
+        sqlx::query_scalar!(
+            "SELECT sequence.error AS \"error!\" FROM sequence \
              JOIN world_member ON world_member.world_id = sequence.world_id \
              JOIN player_character ON player_character.member_id = world_member.id \
              JOIN character_group ON character_group.character_id = player_character.character_id \
@@ -2562,7 +2608,12 @@ impl Store {
              AND player_character.agent_id = ? AND player_character.character_id = ? \
              AND EXISTS (SELECT 1 FROM invocation WHERE invocation.sequence_id = sequence.id \
                          AND (invocation.agent_id = player_character.agent_id OR invocation.branch_id = \"group\".branch_id))",
-        ).bind(sequence_id).bind(member.world_id).bind(member.user_id).bind(member.agent_id).bind(member.character_id)
+            sequence_id,
+            member.world_id,
+            member.user_id,
+            member.agent_id,
+            member.character_id,
+        )
             .fetch_optional(&self.pool).await.context("authorizing recorded chat failure")
     }
 
@@ -2573,12 +2624,15 @@ impl Store {
         group_id: i64,
         generation: i64,
     ) -> Result<Option<PresenceNarration>> {
-        sqlx::query_as::<_, PresenceNarrationRow>(
+        sqlx::query_as!(
+            PresenceNarrationRow,
             "UPDATE presence_narration SET due_at = NULL, generation = generation + 1 \
              WHERE group_id = ? AND generation = ? AND due_at IS NOT NULL \
              AND EXISTS (SELECT 1 FROM \"group\" WHERE id = group_id AND retired_at IS NULL) \
-             RETURNING group_id, last_announced_character_ids, due_at, generation, waiting_for_return",
-        ).bind(group_id).bind(generation).fetch_optional(&self.pool).await
+             RETURNING group_id, last_announced_character_ids, due_at, generation, waiting_for_return AS \"waiting_for_return: bool\"",
+            group_id,
+            generation,
+        ).fetch_optional(&self.pool).await
             .context("consuming presence deadline")?.map(TryInto::try_into).transpose()
     }
 
@@ -2593,14 +2647,14 @@ impl Store {
         after_seconds: i64,
         generation: i64,
     ) -> Result<i64> {
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "UPDATE presence_narration \
              SET due_at = datetime(CURRENT_TIMESTAMP, ? || ' seconds'), waiting_for_return = 0, generation = generation + 1 \
              WHERE group_id = ? AND generation = ? RETURNING generation",
+            after_seconds,
+            group_id,
+            generation,
         )
-        .bind(after_seconds)
-        .bind(group_id)
-        .bind(generation)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("scheduling presence deadline for group {group_id}"))?
@@ -2609,8 +2663,7 @@ impl Store {
 
     /// The display name of one character, for attributing an action to the GM.
     pub async fn character_name(&self, character_id: i64) -> Result<String> {
-        sqlx::query_scalar("SELECT name FROM character WHERE id = ?")
-            .bind(character_id)
+        sqlx::query_scalar!("SELECT name FROM character WHERE id = ?", character_id,)
             .fetch_optional(&self.pool)
             .await
             .context("loading character name")?
@@ -2623,26 +2676,22 @@ impl Store {
     /// plays several groups (design.md's `GroupHistory { agent_id, branch_id
     /// }`), so this also returns the group's own branch.
     pub async fn player_group_history(&self, member: &PlayerAgent) -> Result<GroupHistory> {
-        let (agent_id, branch_id): (i64, i64) = sqlx::query_as(
+        sqlx::query_as!(GroupHistory,
             "SELECT world_gm.agent_id, \"group\".branch_id FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character_group ON character_group.character_id = player_character.character_id \
              JOIN \"group\" ON \"group\".id = character_group.group_id \
              JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? AND player_character.character_id = ? AND member.access = 'active'",
+            member.member_id,
+            member.world_id,
+            member.user_id,
+            member.character_id,
         )
-        .bind(member.member_id)
-        .bind(member.world_id)
-        .bind(member.user_id)
-        .bind(member.character_id)
         .fetch_optional(&self.pool)
         .await
         .context("loading member group GM")?
-        .with_context(|| format!("member {} has no active group GM", member.member_id))?;
-        Ok(GroupHistory {
-            agent_id,
-            branch_id,
-        })
+        .with_context(|| format!("member {} has no active group GM", member.member_id))
     }
 
     /// Load the text-only portion of one active membership's player-agent
@@ -2656,14 +2705,16 @@ impl Store {
     /// intentionally based on durable history rather than player chat: a
     /// normal empty assistant completion has no player-chat entry.
     pub async fn player_agent_has_assistant_reply(&self, agent_id: i64) -> Result<bool> {
-        let reply: Option<i64> = sqlx::query_scalar(
+        let assistant_json =
+            serde_json::to_string(&Role::Assistant).context("encoding assistant role")?;
+        let reply: Option<i64> = sqlx::query_scalar!(
             "SELECT 1 FROM agent_history \
              JOIN history_entry ON history_entry.branch_id = agent_history.branch_id \
              JOIN message ON message.id = history_entry.id \
              WHERE agent_history.agent_id = ? AND message.role = ? LIMIT 1",
+            agent_id,
+            assistant_json,
         )
-        .bind(agent_id)
-        .bind(serde_json::to_string(&Role::Assistant).context("encoding assistant role")?)
         .fetch_optional(&self.pool)
         .await
         .context("checking player agent assistant history")?;
@@ -2679,17 +2730,17 @@ impl Store {
         member: &PlayerAgent,
         after_message_id: Option<i64>,
     ) -> Result<Vec<PlayerChatEntry>> {
-        let active: Option<i64> = sqlx::query_scalar(
+        let active: Option<i64> = sqlx::query_scalar!(
             "SELECT 1 FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
              AND player_character.character_id = ? AND player_character.agent_id = ? AND member.access = 'active'",
+            member.member_id,
+            member.world_id,
+            member.user_id,
+            member.character_id,
+            member.agent_id,
         )
-        .bind(member.member_id)
-        .bind(member.world_id)
-        .bind(member.user_id)
-        .bind(member.character_id)
-        .bind(member.agent_id)
         .fetch_optional(&self.pool)
         .await
         .context("checking active player chat membership")?;
@@ -2699,7 +2750,9 @@ impl Store {
             member.member_id,
             member.world_id
         );
-        let rows = sqlx::query_as::<_, PlayerChatRow>(
+        let after_message_id = after_message_id.unwrap_or_default();
+        let rows = sqlx::query_as!(
+            PlayerChatRow,
             "SELECT message.id, message.role, message.content, message.trigger_sequence_id, inference.sequence_id AS inference_sequence_id \
              FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
@@ -2711,13 +2764,13 @@ impl Store {
              AND player_character.character_id = ? AND player_character.agent_id = ? AND member.access = 'active' AND message.id > ? \
              AND message.origin = 'conversation' \
              ORDER BY history_entry.position",
+            member.member_id,
+            member.world_id,
+            member.user_id,
+            member.character_id,
+            member.agent_id,
+            after_message_id,
         )
-        .bind(member.member_id)
-        .bind(member.world_id)
-        .bind(member.user_id)
-        .bind(member.character_id)
-        .bind(member.agent_id)
-        .bind(after_message_id.unwrap_or_default())
         .fetch_all(&self.pool)
         .await
         .context("loading player chat history")?;
@@ -2803,7 +2856,7 @@ impl Store {
         // connected PCs in the interacting group; offline PCs do not receive
         // it"). NPCs have no player-agent history to append to here; their
         // own narration delivery is not yet implemented.
-        let agents: Vec<i64> = sqlx::query_scalar(
+        let agents: Vec<i64> = sqlx::query_scalar!(
             "SELECT player_character.agent_id FROM world_member \
              JOIN player_character ON player_character.member_id = world_member.id \
              JOIN character_group ON character_group.character_id = player_character.character_id \
@@ -2812,15 +2865,14 @@ impl Store {
              WHERE world_member.world_id = ? AND world_member.access = 'active' \
              AND \"group\".id = ? AND character_presence.absent_since IS NULL \
              ORDER BY player_character.agent_id",
+            world_id,
+            group_id,
         )
-        .bind(world_id)
-        .bind(group_id)
         .fetch_all(&mut **transaction)
         .await
         .context("finding connected player agents in narrated group")?;
         let source_inference_id: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM inference WHERE output = ?")
-                .bind(content_id)
+            sqlx::query_scalar!("SELECT id FROM inference WHERE output = ?", content_id,)
                 .fetch_optional(&mut **transaction)
                 .await
                 .context("resolving GM narration's producing inference")?;
@@ -2854,14 +2906,14 @@ impl Store {
             String,
             String,
             String,
-        ) = sqlx::query_as(
-            "SELECT \"group\".id, location.id, location.name, location.description, location.gm_notes, \
-                    \"group\".description, \"group\".gm_notes \
+        ) = sqlx::query!(
+            "SELECT \"group\".id AS group_id, location.id AS location_id, location.name AS location_name, location.description AS location_description, location.gm_notes, \
+                    \"group\".description AS group_description, \"group\".gm_notes AS group_gm_notes \
              FROM \"group\" JOIN location ON location.id = \"group\".location_id \
              WHERE \"group\".branch_id = ? AND \"group\".world_id = ?",
-        )
-        .bind(branch_id)
-        .bind(world_id)
+            branch_id,
+            world_id,
+        ).map(|row| (row.group_id, row.location_id, row.location_name, row.location_description, row.gm_notes, row.group_description, row.group_gm_notes,))
         .fetch_optional(&self.pool)
         .await
         .context("loading group GM scene")?
@@ -2880,49 +2932,53 @@ impl Store {
     }
 
     async fn location_items(pool: &SqlitePool, location_id: i64) -> Result<Vec<SceneItem>> {
-        sqlx::query_as(
+        sqlx::query_as!(
+            SceneItem,
             "SELECT item.name, item.description FROM item_location \
              JOIN item ON item.id = item_location.item_id \
              WHERE item_location.location_id = ? ORDER BY item.id",
+            location_id,
         )
-        .bind(location_id)
         .fetch_all(pool)
         .await
         .context("loading location items")
     }
 
     async fn character_items(pool: &SqlitePool, character_id: i64) -> Result<Vec<SceneItem>> {
-        sqlx::query_as(
+        sqlx::query_as!(
+            SceneItem,
             "SELECT item.name, item.description FROM item_character \
              JOIN item ON item.id = item_character.item_id \
              WHERE item_character.character_id = ? ORDER BY item.id",
+            character_id,
         )
-        .bind(character_id)
         .fetch_all(pool)
         .await
         .context("loading character inventory")
     }
 
     async fn location_npcs(pool: &SqlitePool, location_id: i64) -> Result<Vec<SceneNpc>> {
-        sqlx::query_as(
+        sqlx::query_as!(
+            SceneNpc,
             "SELECT character.name, character.description FROM character_group \
              JOIN \"group\" ON \"group\".id = character_group.group_id \
              JOIN character ON character.id = character_group.character_id \
              WHERE \"group\".location_id = ? AND character.role = 'npc' ORDER BY character.id",
+            location_id,
         )
-        .bind(location_id)
         .fetch_all(pool)
         .await
         .context("loading location NPCs")
     }
 
     async fn group_gm_npcs(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmSceneNpc>> {
-        let rows: Vec<GmSceneNpcRow> = sqlx::query_as(
+        let rows: Vec<GmSceneNpcRow> = sqlx::query_as!(
+            GmSceneNpcRow,
             "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.gm_notes \
              FROM character_group JOIN character ON character.id = character_group.character_id \
              WHERE character_group.group_id = ? AND character.role = 'npc' ORDER BY character.id",
+            group_id,
         )
-        .bind(group_id)
         .fetch_all(pool)
         .await
         .context("loading group GM NPCs")?;
@@ -2942,14 +2998,15 @@ impl Store {
     }
 
     async fn group_gm_players(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmScenePlayer>> {
-        let rows: Vec<GmScenePlayerRow> = sqlx::query_as(
+        let rows: Vec<GmScenePlayerRow> = sqlx::query_as!(
+            GmScenePlayerRow,
             "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.sheet \
              FROM character_group \
              JOIN player_character ON player_character.character_id = character_group.character_id \
              JOIN character ON character.id = player_character.character_id \
              WHERE character_group.group_id = ? ORDER BY character.id",
+            group_id,
         )
-        .bind(group_id)
         .fetch_all(pool)
         .await
         .context("loading group player characters for GM")?;
@@ -3133,7 +3190,7 @@ impl Store {
                 member.member_id
             )
         })?;
-        let (character_id, gm_agent_id, gm_branch_id): (i64, i64, i64) = sqlx::query_as(
+        let (character_id, gm_agent_id, gm_branch_id): (i64, i64, i64) = sqlx::query!(
             "SELECT character.id, world_gm.agent_id, \"group\".branch_id \
              FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
@@ -3143,50 +3200,51 @@ impl Store {
              JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
                AND member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ?",
-        )
-        .bind(member.member_id)
-        .bind(member.world_id)
-        .bind(member.user_id)
-        .bind(member.character_id)
-        .bind(member.agent_id)
+            member.member_id,
+            member.world_id,
+            member.user_id,
+            member.character_id,
+            member.agent_id,
+        ).map(|row| (row.id, row.agent_id, row.branch_id,))
         .fetch_optional(&mut *transaction)
         .await
         .context("resolving action character and group GM")?
         .context("active membership has no playable character and group GM")?;
-        let sequence_matches: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM sequence WHERE id = ? AND world_id = ?")
-                .bind(sequence_id)
-                .bind(member.world_id)
-                .fetch_optional(&mut *transaction)
-                .await
-                .context("checking action sequence world")?;
+        let sequence_matches: Option<i64> = sqlx::query_scalar!(
+            "SELECT id FROM sequence WHERE id = ? AND world_id = ?",
+            sequence_id,
+            member.world_id,
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("checking action sequence world")?;
         ensure!(
             sequence_matches.is_some(),
             "sequence {sequence_id} is not in world {}",
             member.world_id
         );
-        let action_id: i64 = sqlx::query_scalar(
+        let action_id: i64 = sqlx::query_scalar!(
             "UPDATE world SET next_action_id = next_action_id + 1 WHERE id = ? \
              RETURNING next_action_id",
+            member.world_id,
         )
-        .bind(member.world_id)
         .fetch_one(&mut *transaction)
         .await
         .with_context(|| format!("allocating action id in world {}", member.world_id))?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO pending_action \
              (world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            member.world_id,
+            action_id,
+            sequence_id,
+            requesting_tool_execution_id,
+            character_id,
+            gm_agent_id,
+            gm_branch_id,
+            tool,
+            args,
         )
-        .bind(member.world_id)
-        .bind(action_id)
-        .bind(sequence_id)
-        .bind(requesting_tool_execution_id)
-        .bind(character_id)
-        .bind(gm_agent_id)
-        .bind(gm_branch_id)
-        .bind(tool)
-        .bind(args)
         .execute(&mut *transaction)
         .await
         .with_context(|| format!("storing pending {tool} action {action_id}"))?;
@@ -3232,13 +3290,14 @@ impl Store {
             self.pool.begin().await.with_context(|| {
                 format!("resolving action {action_id} through GM {gm_agent_id}")
             })?;
-        let pending: Option<PendingAction> = sqlx::query_as::<_, PendingActionRow>(
+        let pending: Option<PendingAction> = sqlx::query_as!(
+            PendingActionRow,
             "SELECT world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args \
              FROM pending_action WHERE world_id = ? AND id = ? AND gm_agent_id = ?",
+            world_id,
+            action_id,
+            gm_agent_id,
         )
-        .bind(world_id)
-        .bind(action_id)
-        .bind(gm_agent_id)
         .fetch_optional(&mut *transaction)
         .await
         .context("loading pending action for group GM")?
@@ -3250,8 +3309,8 @@ impl Store {
             // Only the decision and result reference are needed here, so
             // this reads the settled `action` row directly rather than
             // re-deriving tool/args/character_id through the original call.
-            let resolved: Option<(bool, i64)> = sqlx::query_as(
-                "SELECT action.approved, action.result_content_id \
+            let resolved: Option<(bool, i64)> = sqlx::query!(
+                "SELECT action.approved AS \"approved: bool\", action.result_content_id \
                  FROM action \
                  JOIN sequence ON sequence.id = action.sequence_id \
                  JOIN tool_execution AS approving_tool_execution \
@@ -3260,10 +3319,11 @@ impl Store {
                      ON approving_inference.id = approving_tool_execution.inference_id \
                  WHERE sequence.world_id = ? AND action.pending_action_id = ? \
                    AND approving_inference.agent_id = ?",
+                world_id,
+                action_id,
+                gm_agent_id,
             )
-            .bind(world_id)
-            .bind(action_id)
-            .bind(gm_agent_id)
+            .map(|row| (row.approved, row.result_content_id))
             .fetch_optional(&mut *transaction)
             .await
             .context("checking for an already-resolved action")?;
@@ -3289,26 +3349,26 @@ impl Store {
         };
         let result_content_id =
             Self::content_in(&mut transaction, &MessageContent::Text(result_text), "").await?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO action \
              (sequence_id, requesting_tool_execution_id, approving_tool_execution_id, result_content_id, approved, pending_action_id) \
              VALUES (?, ?, ?, ?, ?, ?)",
+            action.sequence_id,
+            action.requesting_tool_execution_id,
+            approving_tool_execution_id,
+            result_content_id,
+            approved,
+            action.id,
         )
-        .bind(action.sequence_id)
-        .bind(action.requesting_tool_execution_id)
-        .bind(approving_tool_execution_id)
-        .bind(result_content_id)
-        .bind(approved)
-        .bind(action.id)
         .execute(&mut *transaction)
         .await
         .with_context(|| format!("recording resolved action {action_id}"))?;
-        let deleted = sqlx::query(
+        let deleted = sqlx::query!(
             "DELETE FROM pending_action WHERE world_id = ? AND id = ? AND gm_agent_id = ?",
+            world_id,
+            action_id,
+            gm_agent_id,
         )
-        .bind(world_id)
-        .bind(action_id)
-        .bind(gm_agent_id)
         .execute(&mut *transaction)
         .await
         .context("retiring resolved pending action")?
@@ -3344,17 +3404,17 @@ impl Store {
                     !arguments.item.trim().is_empty(),
                     "stored take action has an empty item name"
                 );
-                let item_ids: Vec<i64> = sqlx::query_scalar(
+                let item_ids: Vec<i64> = sqlx::query_scalar!(
                     "SELECT item.id FROM item \
                      JOIN item_location ON item_location.item_id = item.id \
                      JOIN character_group ON character_group.character_id = ? \
                      JOIN \"group\" ON \"group\".id = character_group.group_id \
                         AND \"group\".location_id = item_location.location_id \
                      WHERE item.world_id = ? AND item.name = ?",
+                    action.character_id,
+                    action.world_id,
+                    arguments.item,
                 )
-                .bind(action.character_id)
-                .bind(action.world_id)
-                .bind(&arguments.item)
                 .fetch_all(&mut **transaction)
                 .await
                 .context("finding requested item at acting character's location")?;
@@ -3364,19 +3424,20 @@ impl Store {
                     arguments.item
                 );
                 let item_id = item_ids[0];
-                let removed = sqlx::query("DELETE FROM item_location WHERE item_id = ?")
-                    .bind(item_id)
+                let removed = sqlx::query!("DELETE FROM item_location WHERE item_id = ?", item_id,)
                     .execute(&mut **transaction)
                     .await
                     .context("removing item from its location")?
                     .rows_affected();
                 ensure!(removed == 1, "item {item_id} changed before transfer");
-                sqlx::query("INSERT INTO item_character (item_id, character_id) VALUES (?, ?)")
-                    .bind(item_id)
-                    .bind(action.character_id)
-                    .execute(&mut **transaction)
-                    .await
-                    .context("transferring item to acting character")?;
+                sqlx::query!(
+                    "INSERT INTO item_character (item_id, character_id) VALUES (?, ?)",
+                    item_id,
+                    action.character_id,
+                )
+                .execute(&mut **transaction)
+                .await
+                .context("transferring item to acting character")?;
                 Ok(format!("approved: {} transferred", arguments.item))
             }
             tool => anyhow::bail!("approved action has unsupported tool `{tool}`"),
@@ -3384,13 +3445,14 @@ impl Store {
     }
 
     pub async fn has_pending_action(&self, world_id: i64, action_id: i64) -> Result<bool> {
-        let found: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM pending_action WHERE world_id = ? AND id = ?")
-                .bind(world_id)
-                .bind(action_id)
-                .fetch_optional(&self.pool)
-                .await
-                .context("checking whether action remains pending")?;
+        let found: Option<i64> = sqlx::query_scalar!(
+            "SELECT id FROM pending_action WHERE world_id = ? AND id = ?",
+            world_id,
+            action_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("checking whether action remains pending")?;
         Ok(found.is_some())
     }
 
@@ -3607,18 +3669,18 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         member: &PlayerAgent,
     ) -> Result<(i64, String)> {
-        sqlx::query_as(
+        sqlx::query!(
             "SELECT character.id, character.sheet FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
              AND member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ?",
-        )
-        .bind(member.member_id)
-        .bind(member.world_id)
-        .bind(member.user_id)
-        .bind(member.character_id)
-        .bind(member.agent_id)
+            member.member_id,
+            member.world_id,
+            member.user_id,
+            member.character_id,
+            member.agent_id,
+        ).map(|row| (row.id, row.sheet,))
         .fetch_optional(&mut **transaction)
         .await
         .context("resolving active Adventurer sheet")?
@@ -3641,14 +3703,14 @@ impl Store {
         approving_tool_execution_id: Option<i64>,
         result_content_id: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO action (sequence_id, requesting_tool_execution_id, approving_tool_execution_id, result_content_id, approved) \
              VALUES (?, ?, ?, ?, TRUE)",
+            sequence_id,
+            requesting_tool_execution_id,
+            approving_tool_execution_id,
+            result_content_id,
         )
-        .bind(sequence_id)
-        .bind(requesting_tool_execution_id)
-        .bind(approving_tool_execution_id)
-        .bind(result_content_id)
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("recording action for sequence {sequence_id}"))?;
@@ -3660,12 +3722,15 @@ impl Store {
         character_id: i64,
         sheet: &serde_json::Value,
     ) -> Result<()> {
-        sqlx::query("UPDATE character SET sheet = ? WHERE id = ?")
-            .bind(serde_json::to_string(sheet).context("encoding Adventurer sheet")?)
-            .bind(character_id)
-            .execute(&mut **transaction)
-            .await
-            .with_context(|| format!("storing Adventurer sheet for character {character_id}"))?;
+        let sheet_json = serde_json::to_string(sheet).context("encoding Adventurer sheet")?;
+        sqlx::query!(
+            "UPDATE character SET sheet = ? WHERE id = ?",
+            sheet_json,
+            character_id,
+        )
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("storing Adventurer sheet for character {character_id}"))?;
         Ok(())
     }
 

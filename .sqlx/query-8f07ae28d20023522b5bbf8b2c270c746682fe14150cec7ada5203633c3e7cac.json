@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT item.id FROM item JOIN item_location ON item_location.item_id = item.id JOIN character_group ON character_group.character_id = ? JOIN \"group\" ON \"group\".id = character_group.group_id AND \"group\".location_id = item_location.location_id WHERE item.world_id = ? AND item.name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8f07ae28d20023522b5bbf8b2c270c746682fe14150cec7ada5203633c3e7cac"
+}

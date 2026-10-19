@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO presence_narration (group_id, last_announced_character_ids, due_at, waiting_for_return) VALUES (?, ?, CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN datetime(CURRENT_TIMESTAMP, ? || ' seconds') END, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "a1d048363fa66052ab77c67bf36e8e7749cdb02b62fdd8fdcfbc523a4835aa81"
+}
