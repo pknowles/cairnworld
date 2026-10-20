@@ -15,6 +15,15 @@ use crate::{
 pub type Worlds = Arc<RwLock<HashMap<i64, Arc<World>>>>;
 pub type ChatChanges = broadcast::Sender<ChatChange>;
 
+/// Completes once shutdown has begun. Returns no borrow of the flag, so it can
+/// be raced in a `select!` inside a spawned task. A flag whose owner is gone
+/// was never set, so it never completes.
+pub async fn stopped(stopping: &mut watch::Receiver<bool>) {
+    if stopping.wait_for(|stopping| *stopping).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatChange {
     Entries,

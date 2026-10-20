@@ -26,7 +26,7 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use time::Duration;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, RwLock, watch};
 use tower_http::services::ServeDir;
 use tower_sessions::{Expiry, Session, SessionManagerLayer, cookie::SameSite};
 use tower_sessions_sqlx_store::{SqliteStore, sqlx::SqlitePool};
@@ -105,6 +105,10 @@ pub struct GameLoad {
     worlds: crate::world::Worlds,
     state: Arc<RwLock<GameLoadState>>,
     changed: Arc<Notify>,
+    /// Tells long-lived browser streams to close when shutdown begins, so
+    /// idle websockets cannot hold HTTP graceful shutdown open. The Game
+    /// closes game-input admission separately in `Game::shutdown`.
+    stopping: Arc<watch::Sender<bool>>,
 }
 
 enum GameLoadState {
@@ -125,7 +129,23 @@ impl GameLoad {
             worlds: crate::world::World::load(store).await?,
             state: Arc::new(RwLock::new(GameLoadState::Loading)),
             changed: Arc::new(Notify::new()),
+            stopping: Arc::new(watch::channel(false).0),
         })
+    }
+
+    pub fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
+    }
+
+    /// Routine shutdown: close browser streams, then let the game finish all
+    /// accepted work. A game that is still loading or failed to load has
+    /// accepted none.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.stopping.send_replace(true);
+        match self.availability().await {
+            GameAvailability::Ready(game) => game.shutdown().await,
+            GameAvailability::Loading | GameAvailability::Failed(_) => Ok(()),
+        }
     }
 
     pub async fn finish(&self, build: impl FnOnce() -> Result<Arc<Game<MistralRsBackend>>>) {
@@ -268,6 +288,7 @@ pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Resu
         "web configuration is ready; binding listener"
     );
     let secure_cookies = config.google_redirect_url.starts_with("https://");
+    let shutdown_game = game.clone();
     let app = router(
         App {
             store,
@@ -281,9 +302,57 @@ pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Resu
         .await
         .with_context(|| format!("binding web server at {bind}"))?;
     tracing::info!(address = %listener.local_addr()?, "web server is listening");
+    // The signal future completes only once accepted work has drained, so
+    // HTTP stays up (refusing new game input) until then and the caller
+    // releases the database and model only after serving has finished.
     axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move {
+            shutdown_requested().await;
+            if let Err(error) = shutdown_game.shutdown().await {
+                tracing::error!(error = %format!("{error:#}"), "shutting down the game");
+            }
+        })
         .await
         .context("serving web application")
+}
+
+/// Wait for the first supported termination request, then arm a second one as
+/// an explicit force-stop. A forced exit is a crash: the next startup closes
+/// whatever it interrupted.
+async fn shutdown_requested() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("installing SIGTERM handler");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.expect("waiting for Ctrl+C"),
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        let mut break_key = windows::ctrl_break().expect("installing Ctrl+Break handler");
+        let mut close = windows::ctrl_close().expect("installing console close handler");
+        let mut logoff = windows::ctrl_logoff().expect("installing logoff handler");
+        let mut shutdown = windows::ctrl_shutdown().expect("installing system shutdown handler");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.expect("waiting for Ctrl+C"),
+            _ = break_key.recv() => {}
+            _ = close.recv() => {}
+            _ = logoff.recv() => {}
+            _ = shutdown.recv() => {}
+        }
+    }
+    tracing::info!(
+        "shutdown requested: finishing accepted turns; press Ctrl+C again to force a crash-style stop"
+    );
+    tokio::spawn(async {
+        tokio::signal::ctrl_c().await.expect("waiting for Ctrl+C");
+        tracing::warn!("forced stop; interrupted turns will be closed at the next startup");
+        std::process::exit(130);
+    });
 }
 
 async fn session_store(pool: SqlitePool) -> Result<SqliteStore> {
@@ -748,8 +817,11 @@ async fn inspect_events(
     let viewer = session_user(&app.store, &session).await?;
     let events = app.game.world(world_id)?.events.subscribe();
     let access = app.store.access_for(viewer.id, world_id).await?;
+    let stopping = app.game.stopping();
     Ok(websocket.on_upgrade(move |socket| {
-        dev_events_connection(socket, events, app.store, viewer.id, world_id, access)
+        dev_events_connection(
+            socket, events, stopping, app.store, viewer.id, world_id, access,
+        )
     }))
 }
 
@@ -762,6 +834,7 @@ async fn inspect_events(
 async fn dev_events_connection(
     mut socket: WebSocket,
     mut events: tokio::sync::broadcast::Receiver<crate::inspection::DevEvent>,
+    mut stopping: watch::Receiver<bool>,
     store: Store,
     viewer_id: i64,
     world_id: i64,
@@ -813,7 +886,11 @@ async fn dev_events_connection(
             }
             Ok(true)
         };
-        let result = match events.recv().await {
+        let result = match tokio::select! {
+            received = events.recv() => received,
+            // The viewer reconnects when the server is back.
+            _ = crate::world::stopped(&mut stopping) => return,
+        } {
             Ok(event) => {
                 // A dropped AccessChanged cannot authorize later private
                 // frames: this recheck, not the received event, is what
@@ -971,7 +1048,9 @@ async fn game_socket(
         GameAvailability::Ready(game) => game,
         GameAvailability::Failed(error) => return Err(WebError::unavailable(error)),
     };
-    Ok(websocket.on_upgrade(move |socket| play(socket, game, member, cursor.after_message_id)))
+    let stopping = app.game.stopping();
+    Ok(websocket
+        .on_upgrade(move |socket| play(socket, game, stopping, member, cursor.after_message_id)))
 }
 
 #[derive(Deserialize)]
@@ -1019,10 +1098,11 @@ async fn session_user(
 async fn play(
     socket: WebSocket,
     game: Arc<Game<MistralRsBackend>>,
+    stopping: watch::Receiver<bool>,
     member: PlayerAgent,
     after_message_id: Option<i64>,
 ) {
-    if let Err(error) = play_connection(socket, game, member, after_message_id).await {
+    if let Err(error) = play_connection(socket, game, stopping, member, after_message_id).await {
         tracing::error!(error = %format!("{error:#}"), "player chat websocket ended with an error");
     }
 }
@@ -1030,6 +1110,7 @@ async fn play(
 async fn play_connection<B: Backend + Send + Sync + 'static>(
     mut socket: WebSocket,
     game: Arc<Game<B>>,
+    stopping: watch::Receiver<bool>,
     member: PlayerAgent,
     after_message_id: Option<i64>,
 ) -> Result<()> {
@@ -1045,7 +1126,7 @@ async fn play_connection<B: Backend + Send + Sync + 'static>(
     // single disconnect call below - matching agent.rs's InvocationGuard
     // pattern for a guaranteed exit action without async work in Drop.
     let connection_id = game.connect(&member).await?;
-    let result = play_connected(&mut socket, &game, &member, after_message_id).await;
+    let result = play_connected(&mut socket, &game, stopping, &member, after_message_id).await;
     game.disconnect(&member, connection_id)
         .await
         .context("releasing player chat connection")?;
@@ -1055,6 +1136,7 @@ async fn play_connection<B: Backend + Send + Sync + 'static>(
 async fn play_connected<B: Backend + Send + Sync + 'static>(
     socket: &mut WebSocket,
     game: &Arc<Game<B>>,
+    mut stopping: watch::Receiver<bool>,
     member: &PlayerAgent,
     after_message_id: Option<i64>,
 ) -> Result<()> {
@@ -1116,6 +1198,13 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
     );
     loop {
         tokio::select! {
+            // Checked between messages: a turn this connection already
+            // submitted finishes and is sent before the stop is noticed. An
+            // accepted turn never depends on this connection staying open.
+            _ = crate::world::stopped(&mut stopping) => {
+                send_event(socket, &ServerEvent::Stopping).await?;
+                return Ok(());
+            }
             incoming = socket.recv() => {
                 let Some(incoming) = incoming else {
                     return Ok(());
@@ -1847,15 +1936,18 @@ mod tests {
             }
         };
         let chat_game = Arc::clone(&game);
+        let chat_stopping = Arc::new(watch::channel(false).0);
+        let stop_chat = Arc::clone(&chat_stopping);
         let chat_members = chat_viewers.clone();
         let chat_socket = move |Path(index): Path<usize>,
                                 Query(cursor): Query<ChatCursor>,
                                 socket: WebSocketUpgrade| {
             let game = Arc::clone(&chat_game);
             let member = chat_members[index].clone();
+            let stopping = chat_stopping.subscribe();
             async move {
                 socket.on_upgrade(move |socket| async move {
-                    play_connection(socket, game, member, cursor.after_message_id)
+                    play_connection(socket, game, stopping, member, cursor.after_message_id)
                         .await
                         .unwrap();
                 })
@@ -2112,6 +2204,13 @@ mod tests {
                     async { StatusCode::NO_CONTENT }
                 }),
             )
+            .route(
+                "/browser/stop",
+                post(move || {
+                    stop_chat.send_replace(true);
+                    async { StatusCode::NO_CONTENT }
+                }),
+            )
             .route("/browser/render", post(render_browser_page))
             .route(
                 "/browser/loading",
@@ -2155,6 +2254,8 @@ mod tests {
             "check_developer_mode.cjs",
             "check_world_detail.cjs",
             "check_presence_chat.cjs",
+            // Last: it stops the fixture's chat sockets for good.
+            "check_shutdown_chat.cjs",
         ] {
             let output = tokio::process::Command::new("node")
                 .arg(format!("scripts/{script}"))

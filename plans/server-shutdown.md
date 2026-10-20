@@ -1,6 +1,8 @@
 # Graceful server shutdown and crash cleanup
 
-Implementation pending. Shared prerequisite before NPC interaction.
+Routine-shutdown lifecycle implemented (see implementation_reference.md). Crash
+cleanup pending: its model-facing interruption results need the user's
+use-case review first. Shared prerequisite before NPC interaction.
 
 ## Outcome and authority
 

@@ -33,6 +33,9 @@ struct State {
     // cannot tell two groups' pending jobs apart.
     deferred_branches: HashSet<i64>,
     failures: HashMap<i64, String>,
+    /// Set by shutdown: obligations created from now on stay pending in
+    /// SQLite for the next startup rather than starting a new job.
+    stopping: bool,
 }
 
 /// Admission policy around one model. Mistral.rs still owns batching of its
@@ -274,6 +277,35 @@ impl<B> Drop for Admission<B> {
     }
 }
 
+impl<B> ScheduledBackend<B> {
+    pub fn stop_independent_work(&self) {
+        self.scheduler
+            .state
+            .lock()
+            .expect("scheduler state poisoned")
+            .stopping = true;
+    }
+
+    /// Wait for every admitted deferred job, which finishes its stored obligation.
+    pub async fn finish_deferred_jobs(&self) {
+        loop {
+            let changed = self.scheduler.changed.notified();
+            {
+                let state = self
+                    .scheduler
+                    .state
+                    .lock()
+                    .expect("scheduler state poisoned");
+                if state.deferred_branches.is_empty() {
+                    return;
+                }
+                tracing::info!(branches = ?state.deferred_branches, "shutting down: waiting for deferred jobs");
+            }
+            changed.await;
+        }
+    }
+}
+
 impl<B> Backend for ScheduledBackend<B>
 where
     B: Backend + Send + Sync + 'static,
@@ -300,10 +332,16 @@ where
         events: &broadcast::Sender<DevEvent>,
     ) -> Result<()> {
         let branch_id = branch.branch_id();
-        if store
-            .pending_compaction_for_branch(branch_id)
-            .await?
-            .is_some()
+        if !self
+            .scheduler
+            .state
+            .lock()
+            .expect("scheduler state poisoned")
+            .stopping
+            && store
+                .pending_compaction_for_branch(branch_id)
+                .await?
+                .is_some()
         {
             self.scheduler
                 .admit_deferred(store.clone(), branch_id, events.clone())
@@ -433,8 +471,9 @@ mod tests {
         drop(deferred.await.unwrap());
     }
 
-    #[tokio::test]
-    async fn same_agent_waits_until_its_persisted_job_finishes() {
+    /// A reply whose output makes the next input reach the threshold queues a
+    /// durable compaction obligation for the returned agent.
+    async fn store_with_pending_compaction() -> (Store, crate::store::TestDatabase, i64, i64, i64) {
         let db = crate::store::TestDatabase::new("inference-test");
         let store = Store::open(db.path()).await.unwrap();
         let world = store.create_world("test").await.unwrap();
@@ -496,6 +535,12 @@ mod tests {
             store.pending_compaction(agent).await.unwrap().is_some(),
             "a reply whose output makes the next input reach the threshold must queue compaction"
         );
+        (store, db, world, agent, inference_id)
+    }
+
+    #[tokio::test]
+    async fn same_agent_waits_until_its_persisted_job_finishes() {
+        let (store, _db, world, agent, inference_id) = store_with_pending_compaction().await;
         // Keep one raw reply so this stored job performs an actual summary
         // inference, rather than merely retiring a job whose entire history fits.
         let scheduler = InferenceScheduler::new(
@@ -541,5 +586,32 @@ mod tests {
             notifications.try_recv(),
             Ok(DevEvent::InferenceCompleted { error: None, .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_leaves_new_compaction_pending_and_waits_for_admitted_jobs() {
+        let (store, _db, world, agent, _) = store_with_pending_compaction().await;
+        let scheduler = scheduler(1);
+        let worlds = World::load(&store).await.unwrap();
+        let events = World::get(&worlds, world).unwrap().events.clone();
+        let branch = store.agent_branch(agent).await.unwrap();
+        let backend = scheduler.foreground();
+
+        backend.stop_independent_work();
+        backend.after_agent(&store, branch, &events).await.unwrap();
+        assert!(
+            scheduler.state.lock().unwrap().deferred_branches.is_empty(),
+            "a job created after shutdown began must wait for the next startup"
+        );
+        assert!(store.pending_compaction(agent).await.unwrap().is_some());
+
+        // A foreground turn that already needs the job still admits it, and
+        // shutdown does not complete until that job has.
+        scheduler
+            .admit_deferred(store.clone(), branch.branch_id(), events)
+            .await;
+        backend.finish_deferred_jobs().await;
+        assert!(scheduler.state.lock().unwrap().deferred_branches.is_empty());
+        assert!(store.pending_compaction(agent).await.unwrap().is_none());
     }
 }

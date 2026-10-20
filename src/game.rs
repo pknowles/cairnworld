@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     sync::{
-        Arc, RwLock, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicI64, Ordering},
     },
 };
@@ -11,7 +11,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use tokio::{
     sync::{broadcast, oneshot, watch},
-    task::JoinHandle,
+    task::JoinSet,
 };
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
     settings::Limits,
     store::{PendingAction, PlayerAgent, PresenceNarration, Store},
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
-    world::{ChatChange, OpeningState, World, WorldEvent, Worlds},
+    world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
 };
 
 const GM_ROLE: &str = "You are the GM for the characters in this group. Ground narration in the scene packet and address the characters as a group. Use the available tools to resolve proposed actions before narrating their outcomes.";
@@ -36,23 +36,18 @@ pub struct Game<B> {
     model: String,
     sampling: Sampling,
     worlds: Worlds,
-    tasks: RwLock<Vec<JoinHandle<()>>>,
+    /// One worker per world, each returning its world id. Dropping the set
+    /// aborts them: the last resort for abnormal teardown, since `shutdown`
+    /// joins them first.
+    tasks: Mutex<JoinSet<i64>>,
+    /// Becomes true once and stays true. World workers close their input
+    /// queue on seeing it, which is the single admission boundary for
+    /// browser input (and future MCP callers): a request is either already
+    /// queued, and so drained, or rejected as stopping.
+    stopping: watch::Sender<bool>,
     /// Process-local, never restored after restart (design.md's Membership
     /// and presence: "Live connection IDs are process-local").
     next_connection_id: AtomicI64,
-}
-
-impl<B> Drop for Game<B> {
-    fn drop(&mut self) {
-        for task in self
-            .tasks
-            .get_mut()
-            .expect("world tasks lock poisoned")
-            .iter()
-        {
-            task.abort();
-        }
-    }
 }
 
 struct Narration {
@@ -95,7 +90,8 @@ where
             model,
             sampling,
             worlds,
-            tasks: RwLock::new(Vec::new()),
+            tasks: Mutex::new(JoinSet::new()),
+            stopping: watch::channel(false).0,
             next_connection_id: AtomicI64::new(1),
         });
         for world in game.worlds.read().expect("worlds lock poisoned").values() {
@@ -106,12 +102,40 @@ where
 
     pub fn start_world(self: &Arc<Self>, world: Arc<World>) {
         self.tasks
-            .write()
+            .lock()
             .expect("world tasks lock poisoned")
-            .push(tokio::spawn(Self::process_world(
+            .spawn(Self::process_world(
                 Arc::downgrade(self),
                 world,
-            )));
+                self.stopping.subscribe(),
+            ));
+    }
+
+    /// Routine shutdown (design.md's Server shutdown and crashes): close
+    /// admission, then wait for every accepted turn - queued, active, nested
+    /// calls and delivery - and every admitted deferred job. Independent
+    /// automatic work (presence narration, new compactions) is not started;
+    /// its durable obligations stay pending for the next startup. There is no
+    /// timeout: forcing the process to stop is a crash, handled at startup.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.stopping.send_replace(true);
+        self.backend.stop_independent_work();
+        let mut workers =
+            std::mem::take(&mut *self.tasks.lock().expect("world tasks lock poisoned"));
+        let mut waiting = Vec::new();
+        for world in self.worlds.read().expect("worlds lock poisoned").values() {
+            waiting.push(world.id);
+        }
+        waiting.sort_unstable();
+        tracing::info!(worlds = ?waiting, "shutting down: finishing accepted turns");
+        while let Some(stopped) = workers.join_next().await {
+            let world_id = stopped.context("world worker panicked while shutting down")?;
+            waiting.retain(|id| *id != world_id);
+            tracing::info!(world_id, remaining = ?waiting, "world finished its accepted turns");
+        }
+        tracing::info!("shutting down: finishing admitted deferred jobs");
+        self.backend.finish_deferred_jobs().await;
+        Ok(())
     }
 
     fn world(&self, id: i64) -> Result<Arc<World>> {
@@ -126,15 +150,16 @@ where
     ) -> Result<Response> {
         let world = self.world(member.world_id)?;
         let (reply, receive) = oneshot::channel();
-        world
-            .sender
-            .send(WorldEvent::PlayerMessage {
+        self.admit(
+            &world,
+            WorldEvent::PlayerMessage {
                 member,
                 text: text.to_string(),
                 reply,
-            })
-            .await
-            .context("queueing player message")?;
+            },
+        )
+        .await
+        .context("queueing player message")?;
         receive
             .await
             .context("world stopped processing player message")?
@@ -144,14 +169,28 @@ where
     pub async fn enter(self: &Arc<Self>, member: PlayerAgent) -> Result<Option<Response>> {
         let world = self.world(member.world_id)?;
         let (reply, receive) = oneshot::channel();
-        world
-            .sender
-            .send(WorldEvent::Enter { member, reply })
+        self.admit(&world, WorldEvent::Enter { member, reply })
             .await
             .context("queueing world entry")?;
         receive
             .await
             .context("world stopped processing world entry")?
+    }
+
+    /// The one admission point for external game input. Shutdown refuses new
+    /// input at once; the world's queue then closes, so input that raced the
+    /// refusal is either queued ahead of the close and finished, or refused.
+    async fn admit(&self, world: &World, event: WorldEvent) -> Result<()> {
+        ensure!(
+            !*self.stopping.borrow(),
+            "world {} is no longer accepting input because the server is stopping",
+            world.id
+        );
+        world
+            .sender
+            .send(event)
+            .await
+            .with_context(|| format!("world {} is not accepting input", world.id))
     }
 
     /// Wait for the one server-owned opening turn for a blank Adventurer.
@@ -279,18 +318,32 @@ where
         Ok(())
     }
 
-    async fn process_world(game: Weak<Self>, state: Arc<World>) {
+    async fn process_world(
+        game: Weak<Self>,
+        state: Arc<World>,
+        mut stopping: watch::Receiver<bool>,
+    ) -> i64 {
         let world_id = state.id;
         let mut events = state.queued.lock().await;
-        let Some(active) = game.upgrade() else { return };
+        let Some(active) = game.upgrade() else {
+            return world_id;
+        };
         let store = active.store.clone();
         drop(active);
+        // Once stopping, only already-queued input is handled: presence
+        // narration is independent automatic work, and its durable schedule
+        // stays pending for the next startup.
+        let mut draining = false;
         loop {
-            let next = match store.next_presence_deadline(world_id).await {
-                Ok(next) => next,
-                Err(error) => {
-                    tracing::error!(world_id, error = %format!("{error:#}"), "reading presence schedule");
-                    break;
+            let next = if draining {
+                None
+            } else {
+                match store.next_presence_deadline(world_id).await {
+                    Ok(next) => next,
+                    Err(error) => {
+                        tracing::error!(world_id, error = %format!("{error:#}"), "reading presence schedule");
+                        break;
+                    }
                 }
             };
             let deadline = async {
@@ -310,7 +363,12 @@ where
             };
             let event = tokio::select! {
                 biased;
-                _ = state.changed.notified() => {
+                _ = world::stopped(&mut stopping), if !draining => {
+                    events.close();
+                    draining = true;
+                    continue;
+                }
+                _ = state.changed.notified(), if !draining => {
                     let Some(game) = game.upgrade() else { break };
                     let changed = std::mem::take(&mut state.presence.lock().await.changed);
                     let mut groups = HashSet::new();
@@ -328,7 +386,7 @@ where
                     }
                     continue;
                 }
-                event = deadline => event,
+                event = deadline, if !draining => event,
                 event = events.recv() => match event { Some(event) => event, None => break },
             };
             let Some(game) = game.upgrade() else { break };
@@ -371,6 +429,7 @@ where
         // when its worker stops so queued/future callers fail instead of hanging.
         events.close();
         while events.try_recv().is_ok() {}
+        world_id
     }
 
     /// React to a character's connect/disconnect: on first arrival into an
@@ -3313,6 +3372,93 @@ mod tests {
             requests.load(Ordering::SeqCst),
             2,
             "the blocked turn and one consolidated arrival narration"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_active_and_queued_turns_and_refuses_later_input() {
+        let (backend, started, release, requests) = DelayedBackend::new();
+        let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
+        let active_game = Arc::clone(&game);
+        let active_member = first.clone();
+        let active = tokio::spawn(async move {
+            active_game
+                .player_message(active_member, "Describe the scene.")
+                .await
+        });
+        started.notified().await;
+        let queued_game = Arc::clone(&game);
+        let queued_member = second.clone();
+        let queued = tokio::spawn(async move {
+            queued_game
+                .player_message(queued_member, "Look around.")
+                .await
+        });
+        let world = game.world(first.world_id).unwrap();
+        while world.sender.capacity() == world.sender.max_capacity() {
+            tokio::task::yield_now().await;
+        }
+
+        let stopping_game = Arc::clone(&game);
+        let shutdown = tokio::spawn(async move { stopping_game.shutdown().await });
+        let mut stopping = game.stopping.subscribe();
+        world::stopped(&mut stopping).await;
+        let refused = game
+            .player_message(first.clone(), "Too late.")
+            .await
+            .expect_err("input after shutdown began must be refused");
+        assert!(
+            format!("{refused:#}").contains("server is stopping"),
+            "the refusal must say why: {refused:#}"
+        );
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must wait for the accepted turns"
+        );
+
+        release.notify_one();
+        started.notified().await;
+        release.notify_one();
+        active.await.unwrap().unwrap();
+        queued.await.unwrap().unwrap();
+        shutdown.await.unwrap().unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "each accepted turn ran once"
+        );
+        let chat = store.player_chat(&first).await.unwrap();
+        assert!(
+            !chat.iter().any(|entry| entry.text == "Too late."),
+            "a refused message must not enter the chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_start_presence_narration() {
+        let (backend, started, release, requests) = DelayedBackend::new();
+        let (game, _store, _db, first, second) = two_player_bread_thief_game(backend).await;
+        let active_game = Arc::clone(&game);
+        let active_member = first.clone();
+        let active = tokio::spawn(async move {
+            active_game
+                .player_message(active_member, "Describe the scene.")
+                .await
+        });
+        started.notified().await;
+        // Arrival narration is due, but the worker is busy with the active turn.
+        let _first_connection = game.connect(&first).await.unwrap();
+        let _second_connection = game.connect(&second).await.unwrap();
+
+        let stopping_game = Arc::clone(&game);
+        let shutdown = tokio::spawn(async move { stopping_game.shutdown().await });
+        release.notify_one();
+        active.await.unwrap().unwrap();
+        shutdown.await.unwrap().unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "only the accepted turn may use the model while stopping"
         );
     }
 

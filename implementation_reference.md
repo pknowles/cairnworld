@@ -600,8 +600,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `world::World::load` constructs shared world values before model loading.
   Every `World` owns its action queue, Developer Mode/chat channels, opening
   turns and presence. `GameLoad` and `Game` share that same world map. `Game`
-  owns the model-backed worker handles and aborts them on drop; idle workers
-  hold only a weak game reference. World installation is serialized with model
+  owns the model-backed workers in a `JoinSet` (dropping it aborts them, the
+  last-resort teardown); idle workers hold only a weak game reference. World installation is serialized with model
   readiness: `GameLoad::finish` constructs Game after backend loading, and later
   installations pass their World directly to `Game::start_world`. Queue-completion
   checks cover workers installed before and after readiness.
@@ -612,6 +612,17 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   by current group and processes deadlines between actions. It queries the earliest
   durable active-group deadline on each wake, with no duplicate timer map or
   detached timer tasks. Already-due deadlines run before later actions.
+  Routine shutdown (design.md's Server shutdown and crashes): `web::serve`
+  waits for Ctrl+C (SIGTERM on Unix), then `GameLoad::shutdown` tells browser
+  streams to close (`ServerEvent::Stopping`; developer-event sockets just close)
+  and runs `Game::shutdown` inside Axum's graceful-shutdown future, so HTTP stays
+  up until accepted work has drained. `Game::shutdown` refuses new input in
+  `Game::admit` (the one admission point for `player_message`/`enter`), makes each
+  world worker close its queue and finish what is queued (workers skip presence
+  work once stopping, leaving its durable schedule for startup), joins the
+  workers, then waits for admitted deferred compactions
+  (`ScheduledBackend::stop_independent_work`/`finish_deferred_jobs`; a new
+  obligation stays pending in SQLite). A second Ctrl+C exits at once.
   Event errors are logged with world/character or group identity even when a
   requesting connection has gone. Arrival into an occupied group narrates
   immediately; departures and empty-period arrivals share a deadline. A deadline

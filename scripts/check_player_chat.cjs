@@ -83,7 +83,10 @@ sockets.on("connection", (socket) => {
         entries.push({ role: "assistant", text });
         socket.send(JSON.stringify({ type: "entry", role: "assistant", text }));
         socket.send(JSON.stringify({ type: "can_act", value: true }));
-        if (messages === 2) closeReady.then(() => socket.close());
+        if (messages === 2) closeReady.then(() => {
+          socket.send(JSON.stringify({ type: "stopping" }));
+          socket.close();
+        });
       };
       if (messages === 1) replyReady.then(reply);
       else reply();
@@ -165,6 +168,7 @@ checkBrowser(server, async (tab, port) => {
     await ready(tab, "A bell rings.");
     assert.equal(messages, 2);
     await release(port, "/close-reply");
+    await tab.locator("#chat").getByText("The server is stopping. Reload this page once it is running again.").waitFor();
     await tab.locator("#chat-status").getByText("Connection lost. Reload to reconnect.").waitFor();
     assert.equal(await tab.locator('input[name="text"]').isDisabled(), true);
 }).catch((error) => {

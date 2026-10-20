@@ -52,6 +52,8 @@ pub enum ServerEvent {
     Error {
         message: String,
     },
+    /// The server is shutting down and is about to close this connection.
+    Stopping,
 }
 
 /// Work the server is currently performing for a connected player.
@@ -2497,6 +2499,10 @@ fn connect_player_chat(
                 }
             }
             Ok(ServerEvent::Error { message }) => add_notice(on_message_entries, message),
+            Ok(ServerEvent::Stopping) => add_notice(
+                on_message_entries,
+                "The server is stopping. Reload this page once it is running again.".into(),
+            ),
             Err(error) => add_notice(
                 on_message_entries,
                 format!("Chat server sent an invalid message: {error}"),
