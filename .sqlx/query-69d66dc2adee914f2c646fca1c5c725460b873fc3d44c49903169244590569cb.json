@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action.approved AS \"approved: bool\", json_extract(recorded_content.body, '$.content.value') AS \"result!: String\" FROM action JOIN recorded_content ON recorded_content.id = action.result_content_id WHERE action.requesting_tool_execution_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "approved: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "result!: String",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "69d66dc2adee914f2c646fca1c5c725460b873fc3d44c49903169244590569cb"
+}

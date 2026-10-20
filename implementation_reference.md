@@ -162,6 +162,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   ordered at the sequence's trigger message in their own or current group's GM
   history; the live path (`send_chat_failure`) sends it only when the reload
   cursor has already passed that trigger.
+  `resolve_pending_action` returns an `ActionOutcome` (Applied, Rejected, or
+  Failed: approved but not applicable, e.g. a missing item, recorded unapproved
+  with a `failed: ` result). `approve_action` reports it to the GM; the acting
+  player's call receives a Failed reason in place of its usual result and the
+  turn continues. System errors still propagate and fail the turn.
 - `src/inference.rs` - admits foreground work ahead of deferred compaction,
   capped by `max_concurrent_inferences`; mistral.rs batches admitted sequences.
   At execution-host startup it marks unfinished inferences interrupted, without

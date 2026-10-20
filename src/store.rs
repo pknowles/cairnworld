@@ -351,11 +351,46 @@ pub struct PendingAction {
 /// `resolve_pending_action` itself erroring on a mismatch, so a conflicting
 /// second resolve becomes an ordinary tool rejection at the call site, not a
 /// generic infrastructure error.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedAction {
     pub id: i64,
-    pub approved: bool,
+    pub outcome: ActionOutcome,
     pub result_content_id: i64,
+}
+
+/// How a resolved action ended. Stored as `action.approved` plus its result
+/// text: an approved action that could not be applied is recorded unapproved,
+/// since its mutation did not run, with a `failed: ` result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActionOutcome {
+    /// Approved and applied; the recorded result.
+    Applied(String),
+    /// The GM rejected it; the recorded result.
+    Rejected(String),
+    /// The GM approved it but applying it failed; the reason.
+    Failed(String),
+}
+
+impl ActionOutcome {
+    const FAILED_PREFIX: &'static str = "failed: ";
+
+    fn from_record(approved: bool, text: String) -> Self {
+        if approved {
+            Self::Applied(text)
+        } else if let Some(reason) = text.strip_prefix(Self::FAILED_PREFIX) {
+            Self::Failed(reason.to_string())
+        } else {
+            Self::Rejected(text)
+        }
+    }
+
+    fn record(&self) -> (bool, String) {
+        match self {
+            Self::Applied(text) => (true, text.clone()),
+            Self::Rejected(text) => (false, text.clone()),
+            Self::Failed(reason) => (false, format!("{}{reason}", Self::FAILED_PREFIX)),
+        }
+    }
 }
 
 /// Player-visible state at the member's current location. It is derived from
@@ -3442,21 +3477,29 @@ impl Store {
                     "action {action_id} is not pending for group GM {gm_agent_id} in world {world_id}"
                 )
             })?;
+            let MessageContent::Text(text) =
+                Self::content_in_transaction(&mut transaction, result_content_id).await?
+            else {
+                anyhow::bail!("recorded result of action {action_id} is not text");
+            };
             transaction.commit().await.with_context(|| {
                 format!("committing idempotent re-resolve of action {action_id}")
             })?;
             return Ok(ResolvedAction {
                 id: action_id,
-                approved,
+                outcome: ActionOutcome::from_record(approved, text),
                 result_content_id,
             });
         };
-        let approved = result == "approved";
-        let result_text = if approved {
-            Self::execute_approved_action(&mut transaction, &action).await?
+        let outcome = if result == "approved" {
+            match Self::execute_approved_action(&mut transaction, &action).await? {
+                Ok(text) => ActionOutcome::Applied(text),
+                Err(reason) => ActionOutcome::Failed(reason),
+            }
         } else {
-            result.to_string()
+            ActionOutcome::Rejected(result.to_string())
         };
+        let (approved, result_text) = outcome.record();
         let result_content_id =
             Self::content_in(&mut transaction, &MessageContent::Text(result_text), "").await?;
         sqlx::query!(
@@ -3493,20 +3536,47 @@ impl Store {
             .with_context(|| format!("committing resolved action {action_id}"))?;
         Ok(ResolvedAction {
             id: action_id,
-            approved,
+            outcome,
             result_content_id,
         })
+    }
+
+    /// Why an action requested by this tool call was approved but could not be
+    /// applied, if that is how it ended; the caller reports it as its result.
+    pub async fn failed_action_reason(
+        &self,
+        requesting_tool_execution_id: i64,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query!(
+            "SELECT action.approved AS \"approved: bool\", \
+                    json_extract(recorded_content.body, '$.content.value') AS \"result!: String\" \
+             FROM action JOIN recorded_content ON recorded_content.id = action.result_content_id \
+             WHERE action.requesting_tool_execution_id = ?",
+            requesting_tool_execution_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("looking up the outcome of a requested action")?;
+        Ok(row.and_then(
+            |row| match ActionOutcome::from_record(row.approved, row.result) {
+                ActionOutcome::Failed(reason) => Some(reason),
+                ActionOutcome::Applied(_) | ActionOutcome::Rejected(_) => None,
+            },
+        ))
     }
 
     /// Apply the compact set of stateful actions from their stored pending
     /// rows. The GM never supplies an item or character id: the action's
     /// validated arguments and its membership-owned actor are the only input.
+    /// `Ok(Err(reason))` is an action that cannot happen in the current world
+    /// (a game-state outcome reported to the GM and the caller); `Err` is a
+    /// system failure.
     async fn execute_approved_action(
         transaction: &mut Transaction<'_, Sqlite>,
         action: &PendingAction,
-    ) -> Result<String> {
+    ) -> Result<std::result::Result<String, String>> {
         match action.tool.as_str() {
-            "look" | "say" => Ok("approved".to_string()),
+            "look" | "say" => Ok(Ok("approved".to_string())),
             "take" => {
                 let arguments: TakeItemArguments = serde_json::from_str(&action.args)
                     .context("parsing stored take action arguments")?;
@@ -3528,12 +3598,12 @@ impl Store {
                 .fetch_all(&mut **transaction)
                 .await
                 .context("finding requested item at acting character's location")?;
-                ensure!(
-                    item_ids.len() == 1,
-                    "item `{}` is not uniquely available at the acting character's location",
-                    arguments.item
-                );
-                let item_id = item_ids[0];
+                let [item_id] = item_ids[..] else {
+                    return Ok(Err(format!(
+                        "item `{}` is not uniquely available at the acting character's location",
+                        arguments.item
+                    )));
+                };
                 let removed = sqlx::query!("DELETE FROM item_location WHERE item_id = ?", item_id,)
                     .execute(&mut **transaction)
                     .await
@@ -3548,7 +3618,7 @@ impl Store {
                 .execute(&mut **transaction)
                 .await
                 .context("transferring item to acting character")?;
-                Ok(format!("approved: {} transferred", arguments.item))
+                Ok(Ok(format!("approved: {} transferred", arguments.item)))
             }
             tool => anyhow::bail!("approved action has unsupported tool `{tool}`"),
         }
@@ -6905,7 +6975,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved.id, action.id);
-        assert!(resolved.approved);
+        assert!(matches!(resolved.outcome, ActionOutcome::Applied(_)));
         let recorded_result: String = sqlx::query_scalar(
             "SELECT json_extract(recorded_content.body, '$.content.value') \
              FROM action JOIN recorded_content ON recorded_content.id = action.result_content_id \
@@ -6969,6 +7039,89 @@ mod tests {
         assert_eq!(
             next_action_id, 1,
             "a rejected request consumes no action id"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approved_take_of_a_missing_item_is_a_recorded_failure_that_repeats_faithfully() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("taker@example.test", "Taker")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let sequence = store
+            .begin_sequence(installed.world_id, "player message")
+            .await
+            .unwrap();
+        let branch = store.agent_branch(installed.member.agent_id).await.unwrap();
+        let requesting = record_tool_call_for_test(
+            &store,
+            branch,
+            Some(sequence.id),
+            "call-1",
+            "take",
+            r#"{"item":"moon cheese"}"#,
+        )
+        .await;
+        let action = store
+            .create_pending_action(
+                &installed.member,
+                sequence.id,
+                requesting,
+                "take",
+                r#"{"item":"moon cheese"}"#,
+            )
+            .await
+            .unwrap();
+        let approving = record_tool_call_for_test(
+            &store,
+            store.history_branch(action.gm_branch_id).await.unwrap(),
+            Some(sequence.id),
+            "approve-1",
+            "approve_action",
+            "{}",
+        )
+        .await;
+
+        let resolve = |decision: &'static str| {
+            store.resolve_pending_action(
+                action.gm_agent_id,
+                installed.world_id,
+                action.id,
+                approving,
+                decision,
+            )
+        };
+        let first = resolve("approved").await.unwrap();
+        assert!(
+            matches!(&first.outcome, ActionOutcome::Failed(reason) if reason.contains("moon cheese")),
+            "{first:?}"
+        );
+        assert_eq!(
+            resolve("rejected: changed my mind").await.unwrap().outcome,
+            first.outcome,
+            "a later decision cannot rewrite the recorded failure"
+        );
+        assert_eq!(
+            store
+                .failed_action_reason(requesting)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("item `moon cheese` is not uniquely available at the acting character's location")
+        );
+        assert!(
+            !store
+                .has_pending_action(installed.world_id, action.id)
+                .await
+                .unwrap()
         );
     }
 
@@ -7071,7 +7224,7 @@ mod tests {
             .await
             .expect("a repeated resolve must return the recorded outcome, not error");
         assert_eq!(resolved_again.id, action.id);
-        assert!(resolved_again.approved);
+        assert!(matches!(resolved_again.outcome, ActionOutcome::Applied(_)));
         let holders_after_retry: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM item_character JOIN item ON item.id = item_character.item_id \
              WHERE item.world_id = ? AND item.name = 'flour sack'",
@@ -7170,7 +7323,7 @@ mod tests {
             .await
             .expect("a conflicting resolve returns the original decision, it does not error");
         assert!(
-            resolved.approved,
+            matches!(resolved.outcome, ActionOutcome::Applied(_)),
             "the store must report the original approval, not the newly-requested rejection"
         );
         let holders: i64 = sqlx::query_scalar(

@@ -108,9 +108,10 @@ the reload cursor. Revisit (2) only if a sequence needs several structured error
 
 Done: closing every unanswered call in history, on failure and at startup; the
 player-chat error entry (`Store::player_chat_error`, `Role::System` entries in
-`player_chat_after`). Pending: the GM approval report and caller error. Proposed,
-not yet agreed: record a refused budget as a failed inference entry. A sequence
-with no stored trigger message has no place to show an error beyond Developer Mode.
+`player_chat_after`); the GM approval report and caller error (`ActionOutcome`).
+A sequence with no stored trigger message has no place to show an error beyond
+Developer Mode. Remaining for this plan: verify a real forced process stop and
+restart, which needs the server not to be running.
 
 ## Implementation and verification
 

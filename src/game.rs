@@ -19,7 +19,7 @@ use crate::{
     inference::ScheduledBackend,
     llm::{Backend, Content, Message, Response, Role, Sampling, ToolDefinition},
     settings::Limits,
-    store::{PendingAction, PlayerAgent, PresenceNarration, Store},
+    store::{ActionOutcome, PendingAction, PlayerAgent, PresenceNarration, Store},
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
 };
@@ -1107,10 +1107,22 @@ where
                     )
                     .await
                     .with_context(|| format!("submitting {tool_name} to location GM"))?;
+                let requesting_tool_execution_id = pending.requesting_tool_execution_id;
                 let narration = game.arbitrate(pending, budget, call).await?;
+                // An approved action that could not happen is this call's
+                // result in place of the usual one; the GM's narration is
+                // still delivered and the agent continues.
+                let content = match game
+                    .store
+                    .failed_action_reason(requesting_tool_execution_id)
+                    .await?
+                {
+                    Some(reason) => format!("The action could not be applied: {reason}"),
+                    None => "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
+                };
                 let delivery_game = Arc::clone(&game);
                 Ok(ToolOutcome::CompletedAfter {
-                    content: "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
+                    content,
                     after_result: Box::pin(async move {
                         delivery_game.deliver_narration(&member, &narration).await
                     }),
@@ -1254,14 +1266,19 @@ where
                             inference_id: None,
                         },
                     );
-                    if !resolved.approved {
-                        return Ok(ToolOutcome::Rejected(format!(
+                    // The result is a report for the GM's later judgements; the
+                    // acting player's own call receives its own result.
+                    match resolved.outcome {
+                        ActionOutcome::Applied(result) => Ok(ToolOutcome::Completed(format!(
+                            "Action {action_id} approved. Outcome: {result}"
+                        ))),
+                        ActionOutcome::Failed(reason) => Ok(ToolOutcome::Completed(format!(
+                            "Action {action_id} approved, but it could not be applied: {reason}"
+                        ))),
+                        ActionOutcome::Rejected(_) => Ok(ToolOutcome::Rejected(format!(
                             "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
-                        )));
+                        ))),
                     }
-                    Ok(ToolOutcome::Completed(format!(
-                        "Action {action_id} approved."
-                    )))
                 }) as ToolFuture
             },
         );
@@ -1314,15 +1331,17 @@ where
                             sequence_id: Some(pending.sequence_id),
                             inference_id: None,
                         });
-                    if resolved.approved {
-                        return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: action {action_id} was already approved, it cannot now be rejected"
-                        )));
+                    match resolved.outcome {
+                        ActionOutcome::Rejected(_) => Ok(ToolOutcome::Completed(format!(
+                            "Action {action_id} rejected: {}",
+                            rejection.reason
+                        ))),
+                        ActionOutcome::Applied(_) | ActionOutcome::Failed(_) => {
+                            Ok(ToolOutcome::Rejected(format!(
+                                "Tool arguments were rejected: action {action_id} was already approved, it cannot now be rejected"
+                            )))
+                        }
                     }
-                    Ok(ToolOutcome::Completed(format!(
-                        "Action {action_id} rejected: {}",
-                        rejection.reason
-                    )))
                 }) as ToolFuture
             },
         );
@@ -3544,6 +3563,87 @@ mod tests {
         );
     }
 
+    /// The GM's approval result reports what happened to the approved action,
+    /// including a failure to apply it; the acting player's own call receives
+    /// that failure in place of its usual result, and the turn carries on.
+    #[tokio::test]
+    async fn an_approved_take_that_cannot_happen_is_reported_to_the_gm_and_the_player() {
+        let (backend, requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "take-1".into(),
+                name: "take".into(),
+                arguments: r#"{"item":"moon cheese"}"#.into(),
+            }])),
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "approve-1".into(),
+                name: "approve_action".into(),
+                arguments: r#"{"action_id":1}"#.into(),
+            }])),
+            response(Content::Text("The shelf is bare.".into())),
+            response(Content::Text(String::new())),
+        ]);
+        let (game, store, _db, member) = blank_opening_game(backend).await;
+        let _connection = game.connect(&member).await.unwrap();
+        let creation = store
+            .begin_sequence(member.world_id, "creation test")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .ready_to_begin(&member, creation.id, None)
+            .await
+            .unwrap();
+
+        game.player_message(member.clone(), "I take the moon cheese.")
+            .await
+            .expect("an action that cannot happen is not a system failure");
+
+        let tool_results = |request: &crate::llm::Request| -> Vec<String> {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| match &message.content {
+                    MessageContent::ToolResult { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (gm_report, player_result) = {
+            let requests = requests.lock().unwrap();
+            (tool_results(&requests[2]), tool_results(&requests[3]))
+        };
+        assert!(
+            matches!(gm_report.as_slice(), [report]
+                if report.contains("approved, but it could not be applied")
+                    && report.contains("moon cheese")),
+            "the GM must be told what happened to the action it approved: {gm_report:?}"
+        );
+        assert!(
+            matches!(player_result.as_slice(), [result]
+                if result.contains("The action could not be applied")
+                    && result.contains("moon cheese")),
+            "the caller receives the failure in place of its usual result: {player_result:?}"
+        );
+        let sequence_error: Option<String> =
+            sqlx::query_scalar("SELECT error FROM sequence ORDER BY id DESC LIMIT 1")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        assert_eq!(sequence_error, None);
+        let (held,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM item_character")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        assert_eq!(held, 0, "nothing moves for an action that cannot happen");
+    }
+
     #[tokio::test]
     async fn shutdown_does_not_start_presence_narration() {
         let (backend, started, release, requests) = DelayedBackend::new();
@@ -4851,6 +4951,50 @@ mod tests {
             reply.contains(&hp.to_string()),
             "the model should report the recorded roll {hp}: {reply}"
         );
+    }
+
+    /// A real GM judging a take, with the approval result now reporting the
+    /// action's outcome: the turn completes and the item moves.
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn real_model_gm_approves_a_take_and_the_item_moves() {
+        let (backend, model_path, configured, _limits) = device_test_game().await;
+        let sampling = Sampling {
+            temperature: 0.0,
+            ..configured
+        };
+        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
+        let _connection = game.connect(&member).await.unwrap();
+        let creation = store
+            .begin_sequence(member.world_id, "test completed creation")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .ready_to_begin(&member, creation.id, None)
+            .await
+            .unwrap();
+
+        for attempt in 1..=3 {
+            game.player_message(member.clone(), "I pick up the flour sack.")
+                .await
+                .unwrap_or_else(|error| panic!("turn {attempt} failed: {error:#}"));
+            let (held,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM item_character")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+            if held == 1 {
+                return;
+            }
+        }
+        panic!("the flour sack never moved across three prompts");
     }
 
     #[tokio::test]
