@@ -590,3 +590,25 @@ has such a trigger and error:
 > 1 sounds good. lets record this discussion and decision in the plan too
 
 Selected: derive from existing records, no table. See plans/archive/server-shutdown.md.
+
+## 2026-10-21 NPC speech selection and GM approval
+
+After considering sequential delivery without special overlap mechanics, the
+user retained GM batch approval and simultaneous responses:
+
+> I see - so we already have some batching for the GM's approval planned. I like
+> this. You know what, lets keep the simltaneous response then. I think we need
+> GM approval for speaking as who hears it and whether characters can speak is
+> very fundamental. This is the point of the GM; there is no getting around it.
+
+> I'd like eagerness to be small, to encourage occadional race conditions :).
+> Maybe 1-3 only. Not 100.
+
+The user also clarified that replacing GM-voiced NPC dialogue with NPC-agent
+responses is implementation work, not a policy question:
+
+> 4 isn't really a question.
+
+The revised declaration permits the GM to describe overlap with a prefix.
+Selected tied replies share their pre-response history and may be delivered in
+any order. Keep mandatory GM approval; no automatic overlap marker is required.

@@ -458,12 +458,12 @@ The response - Say or the reply to InteventionCheck - should be one of:
   will do/say it unless another NPC has a higher value)
 
 Ties are broken at random, unless the action is simply saying something in which
-case all things said with highest eagerness can be said at once into the chat. I
-was thinking of including a marker or message that the characters actually talk
-over each other simultaneously (Simultaneous response may even be appropriate in
-combat as per Cairn rules but I haven't thought it through). However, for the
-first cut I'd like to avoid the complexity. We can just process all responses
-sequentially.
+case all things said with highest eagerness can be said at once into the chat.
+The GM may batch approve and include a lead-in prefix that the characters
+actually talk over each other simultaneously. The key part is characters will
+not have heard each others responses before theirs. Simultaneous response may
+even be appropriate in combat as per Cairn rules but I haven't thought it
+through.
 
 When an NPC does choose to respond, e.g. say something, the process repeats to
 allow a conversation to happen as part of a chat-turn. Many things could happen:

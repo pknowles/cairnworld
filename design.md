@@ -1281,10 +1281,13 @@ Once the caller's chat-turn has unwound, hearing NPCs other than the speaker get
 response opportunities. Their character facts and heard history supply context;
 GM/Storyteller-only notes remain private. NPCs return DoNothing or an explicit
 action proposal with eagerness. A proposal records intent, never executes an
-action. Select the highest eagerness; ties between speech-only proposals commit
-as one simultaneous batch with an overlap marker visible only to its hearers.
-Otherwise choose one tied proposal randomly and record the selection. Proposed
-range: integer eagerness 0–100, compared only within that round.
+action. Eagerness is an integer 1–3: low, moderate or strong desire to act now.
+Select the highest eagerness; ties between speech-only proposals are presented
+together for GM approval. Their words were composed against the same history,
+without hearing one another's replies. Deliver the approved words in any order
+before another response round. The GM may describe overlap through the existing
+prefix; no automatic overlap marker is required. Otherwise choose one tied
+proposal randomly and record the selection.
 Unselected proposals are superseded, not failed or executed tools. After a
 committed event, NPCs reconsider against the new history instead of executing
 stale replies. All-DoNothing ends the round; unchanged history does not trigger
@@ -1298,10 +1301,15 @@ private resolved character actor lets PC and selected NPC requests share action
 admission without pretending NPCs are players.
 
 For simultaneous speech, a fresh GM invocation receives the selected proposals
-and uses resolve_speech_batch with an explicit approval/rejection for each.
+and uses resolve_speech_batch with an explicit approval/rejection and hearing
+adjustments (include/exclude/prefix) for each. GM approval is required for NPC
+speech just as for player speech: speaking ability and hearers are GM decisions.
 Validate every admission before committing all approved utterances atomically
 through the same speech helper as ordinary Say. A repeated resolution returns
 its recorded outcome. GM narration does not duplicate the characters' words.
+When NPC response rounds are introduced, the GM narrates consequences while
+NPC agents supply their own dialogue. This replaces the current GM-voiced NPC
+replies and requires real-model prompt verification.
 
 Use concrete durable response rounds in the existing world event loop. A round
 records its source tool execution(s), group/history cut, phase, candidate

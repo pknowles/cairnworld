@@ -66,18 +66,26 @@ use-case/edge-case/validation review and obtain the user's review.
   Derive words/arguments from original recorded outputs, not copied transcripts.
 - An NPC decision receives its own character facts and heard history and produces
   DoNothing or a proposed implemented character action plus integer eagerness
-  0–100. Proposal generation performs no world action and cannot call an active
+  1–3 (low, moderate or strong desire to act now). DoNothing has no eagerness.
+  Proposal generation performs no world action and cannot call an active
   GM recursively. Keep GM/Storyteller-only information out of NPC context.
   Use one terminal decision per opportunity: DoNothing/propose record a decision,
   while only the selected proposal reaches the ordinary character action executor.
 - Collect against one scene/history version. Highest eagerness wins; if all tied
-  winners are speech, commit them as one simultaneous batch with an overlap marker
-  appropriate to each hearer's actual audience. Otherwise record one random tied
+  winners are speech, submit them together for GM approval and commit the approved
+  utterances as one batch, delivering their messages in any order. Their proposals
+  were generated from the same history without hearing one another; finish this
+  selected set before starting another response round. The GM may describe
+  overlap through prefix, but no automatic marker is required. Otherwise record
+  one random tied
   winner. Supersede losing proposals; never replay them after the winner changes
   the situation. Every affected NPC reconsiders the new heard event, excluding
-  self-only speech. All-DoNothing finishes the round without another inference.
+  self-only speech. Selected tied speech is not cancelled merely because another
+  utterance in that selected set commits. All-DoNothing finishes the round
+  without another inference.
   Finish the simultaneous batch's speech permission/audience checks before any
-  utterance commits; do not deliver one winner and label later replies simultaneous.
+  utterance commits. A separate external event or topology change still requires
+  the usual pre-execution revalidation.
 - Follow-up actions are fresh chat-turns after the originating call stack unwinds.
   Link their sequence to the exact triggering Say/InterventionCheck and selected
   proposal execution in Developer Mode. Distinguish causal follow-ups from nested
@@ -167,9 +175,10 @@ Speech publication creates the approved action result, speech rows, recipient
 messages/links and scene revision in one transaction. Reuse each action result's
 content reference in every recipient history. Tool receipts remain distinct from
 public speech; existing readers must not show a receipt as a second utterance.
-Snapshot the audience once. Include each speaker's own history, all other actual
-hearers, and the trusted group GM history; the GM history is not an extra player
-audience. Ordinary PC/NPC contexts never inherit another character's private
+Snapshot the audience once. Include each speaker's own history and all other
+actual hearers. The trusted GM has the words in its arbitration request and the
+delivery outcome in its approval result, not an extra speech-message copy.
+Ordinary PC/NPC contexts never inherit another character's private
 history or the GM's complete history. GM overrides are group-local in this
 increment; direct interaction with another group first uses the existing merge
 path. Reject out-of-group IDs rather than silently filtering them.
@@ -195,18 +204,16 @@ an invocation or execution exists, not partially initialized runtime objects.
 ## Action and decision interfaces
 
 CharacterActor exists (slice 1): action submission works on the acting character,
-and a player's membership is verified once into one (Store::player_actor). It
-holds the world and character; add the agent branch when NPC execution needs it.
-
-Use a private CharacterActor containing character_id and its resolved AgentBranch.
-Store constructors resolve either a validated PlayerAgent or an npc_agent
-relationship; callers cannot supply the GM or group. Recheck current ownership,
+and Store::player_actor validates player membership to produce it. Its private
+fields hold the world and character. Add NPC construction using the npc_agent
+relationship and recorded selection; resolve its current AgentBranch when needed
+for inference. Callers cannot supply the GM or group. Recheck current ownership,
 active membership for a PC, source execution's actor/world, and current group at
 action submission and commitment. Selected NPC requests additionally prove the
 candidate/round selection and revision. Do not expose this constructor through
 the browser or through arbitrary model-supplied actor IDs.
 
-Refactor create_pending_action's player-only lookup into that shared boundary.
+Reuse create_pending_action's existing character boundary.
 Retain the existing pending action, GM arbitration and execute_approved_action
 operations for ordinary actions. Decode a selected NPC proposal into the same
 typed CharacterActionRequest that player tools construct. Its original
@@ -217,7 +224,9 @@ the source execution is propose_action, instead of labelling it as an executed
 world action named "propose_action".
 
 The decision tools are do_nothing with an empty object schema and propose_action
-with {action: typed supported character action, eagerness: integer 0..100}.
+with {action: typed supported character action, eagerness: integer 1..3}.
+Enforce the range in argument validation as well as the schema. Describe the
+NPC's own desire to act; it does not know the other NPCs' proposed eagerness.
 Initially offer Say/Whisper; add Take only in the intervention slice. Exactly one
 tool call is required. Free text, unknown tools, multiple calls or invalid
 arguments finish the recorded invocation with a visible protocol error. Reuse
@@ -234,7 +243,9 @@ available for inspection.
 For a selected speech cohort, start one fresh GM invocation with the explicit
 round ID, selected proposal execution IDs, actors, exact words and current scene.
 Expose resolve_speech_batch(round_id, decisions), where decisions contains one
-Approved(audience override) or Rejected(reason) for every selected proposal ID.
+Approved(Hearing: include/exclude/prefix) or Rejected(reason) for every selected proposal ID.
+GM approval is mandatory, including for apparently ordinary NPC speech. There
+is no automatic approval path; who can speak and who hears are GM decisions.
 Reject missing, duplicate, foreign or unselected IDs. Its one transaction applies
 the whole admitted speech batch through the same helper used by player Say;
 denied proposals publish no words. This tool's result applies immediately and
@@ -245,6 +256,20 @@ Repeated batch resolution returns the original recorded outcome. Keep the round
 executing until its entire GM invocation finishes, even after speech commits;
 follow-up rounds remain ineligible until that source sequence succeeds. A later
 GM failure preserves speech but fails the discussion and stops automatic replies.
+
+Extend the existing speech-write transaction to accept the admitted utterances
+and create one speech_batch row for that set; ordinary Say supplies a set of one.
+Validate all proposals and hearing adjustments before writing any utterance.
+Reuse current per-utterance attribution, prefix and recipient delivery, including
+delivery after all tool results in a call batch. Batch identity groups the
+approvals; it does not require concurrent database writes, inference or special
+presentation. Per-hearer prefixes must not reveal words or speakers they did
+not hear.
+
+In this slice replace the GM's current NPC dialogue with NPC-owned responses.
+The GM continues to approve speech and narrate consequences; it does not compose
+NPC replies on their behalf. This is required prompt/context work, not a pending
+policy question. Verify the actual assembled prompts and real-model dialogue.
 
 The implementation should expose these transaction boundaries as ordinary
 Store/Game operations, rather than a generic scheduling interface:
@@ -287,7 +312,11 @@ any of its words commit. Already completed effects are never rolled back because
 a later model completion or notification fails.
 
 Add checkpoint/restore over the existing Budget's limits and spent counter;
-keep spending rules in one implementation. At source-sequence completion save
+keep spending rules in one implementation. Retain the existing per-trigger
+limits (currently 64 total inferences by default); no larger NPC-only allowance
+is introduced. More frequent ties may consume that budget faster, which is a
+playtesting observation rather than grounds to silently increase it.
+At source-sequence completion save
 the counter and make its rounds eligible in the same transaction. Each finite
 step restores and shares that Budget across nested calls, then saves it with
 step completion. A new sequence never grants another allowance. During planned
@@ -404,16 +433,36 @@ Use existing browser and configured-model game paths; do not make MCP a gate.
 Before writing model-behavior tests, review these cases and validation approaches
 with the user as required by the coding standards:
 
-| Case | Required outcome / evidence |
-| --- | --- |
-| Two PCs and two NPCs hear Say | Exact attributed words once per hearer, live and after reload; NPCs speak through their own recorded agents. |
-| Whisper and GM audience override | Excluded histories, prompt captures and browser transcripts contain no private speech or revealing marker. |
-| DoNothing and competing proposals | No action during proposal collection; one highest selection, superseded losers reconsider after new speech, and all-DoNothing ends work. |
-| Equal-eagerness speech and non-speech | Speech-only ties share one simultaneous batch; other ties execute one recorded random winner without asserting a particular identity. |
-| Interrupt during inference, Never mind, two players/tabs | Acknowledged pause prevents future NPC actions; input stays usable; only the caller's hold clears; no replayed speech or restored allowance. |
-| Player input or group change during a round | Revalidate before execution; no stale response acts in a retired/wrong group and no already-heard message is erased. |
-| Tentative Take with intervention | GM sees the selected NPC intent before decision; rejection leaves the item; follow-up dialogue runs after the original stack unwinds. |
-| Failure, budget exhaustion, disconnect and restart | Original errors remain visible; no retry loop, duplicate action, renewed budget or abandoned pause freezes play. |
+Slice 2 validation methods:
+
+- A: scripted model output through production Store/Game paths checks selection,
+  delivery, authorization and state changes deterministically.
+- B: real-model conversations and captured production prompts check NPC-owned
+  dialogue, knowledge boundaries and natural stopping. No prescribed wording.
+- C: stored decisions, recipient histories and Developer Mode causal links prove
+  which original events/inferences/actions produced the result and detect replay.
+
+| Case | Expected outcome | Verification |
+| --- | --- | --- |
+| U1: Say addresses one NPC | All actual NPC hearers get an opportunity; an addressed NPC may choose DoNothing. A selected NPC speaks through its own agent and GM approval. | A/B; C links response to its speaker and source. |
+| U2: Different eagerness | Highest wins; losing proposals are superseded and their actors reconsider newly heard speech. | A contrasts 1/2/3; C checks only the winner acted. |
+| U3: Tied speech | Highest ties composed from the same history reach one GM approval invocation; approved words arrive once in any order before another response round. Prefix is optional and respects each utterance's audience. | A/C check shared input cut, approvals and deliveries; B checks intelligible dialogue. |
+| U4: All DoNothing | No GM approval or follow-up inference after collection completes. | A counts model work; C shows a settled round without actions. |
+| U5: NPC conversation | Fresh follow-up turns share one budget; NPCs own dialogue and the GM owns approval/consequences. Evaluate natural stopping over repeated conversations. | B inspects actual prompts and play; A/C verify budget sharing and causal order. |
+| U6: Private speech | Only actual hearers other than a self-only speaker get opportunities. Excluded histories, prompts, narration and prefixes reveal no private words or unseen participants. | A includes connected bystanders and revealing GM narration; B/C inspect captured inputs and delivered histories. |
+| E1: Human input mid-round | Input runs between finite steps and supersedes stale unexecuted work; committed words stay. | A controls inference boundaries; C confirms no stale action. |
+| E2: Split, merge, departure or access loss | Revalidate selection, actor authority and recipients before execution; no actor acts in a retired/wrong group. | A exercises actual mutations; C checks resulting action ownership and deliveries. |
+| E3: No NPC hearer or self-only speech | No opportunity or inference is created. In a tied set, hearing another speaker still allows a later opportunity. | A/C inspect work and heard source references. |
+| E4: Malformed decision | Free text, multiple calls, noninteger eagerness, 0, 4 or 400 fail visibly and leave valid answered tool history, without a correction loop. 1 and 3 are valid boundary values. | A checks errors and subsequent chat assembly; C checks original output and closed executions. |
+| E5: Budget exhausted | Discussion fails visibly without a new allowance or silently dropped reply. | A exhausts the shared limit across NPCs; C checks persisted usage and failure. |
+| E6: GM rejects one or all tied proposals | Only approved speech is published; no losing proposal becomes a fallback. Zero approvals ends work unless another actual event intervenes. | A tests partial/all rejection; C checks action outcomes and recipient histories. |
+| E7: Bad/repeated batch resolution | Missing, duplicate, foreign or unselected IDs and invalid hearing adjustments are refused before publication. A repeated successful resolution returns its recorded outcome without another delivery. | A exercises the real approval transaction; C checks unchanged words, recipients and row counts. |
+| E8: Clean shutdown or crash | Clean shutdown finishes/saves the active step; waiting work resumes once. A crash fails its active discussion, retains effects and closes unanswered history without replay. | A plus actual process stop/restart; C compares original effects, IDs and budget. |
+| E9: Another group | It is not paused, superseded or given private speech by this discussion. Its accepted input uses the ordinary serialized world worker between finite steps, not concurrent world mutation. | A submits input in both groups; C checks isolation and ordering. |
+
+Later slices retain their own verification: Interrupt/Never mind and multiple
+holds (slice 3), then tentative Take/intervention and random non-speech ties
+(slice 4). These are not extra capabilities to implement in slice 2.
 
 Check deterministic selection, authorization and transaction outcomes through the
 real Store/Game paths. Inspect captured model input and Developer Mode causal links,
