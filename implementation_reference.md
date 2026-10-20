@@ -566,9 +566,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - Cargo's development profile keeps Cairnworld debuggable while compiling its
   dependencies optimized without debug information. This keeps unchanged local
   runs fast and avoids duplicating dependency symbols in every test binary.
-- `store::TestDatabase` gives each test a uniquely named on-disk SQLite
-  database (a process-wide counter, not a timestamp, since `cargo test` is
-  multi-threaded) and removes its `.sqlite`/`-wal`/`-shm` files on drop.
+- `store::TestDatabase` gives each test an on-disk SQLite database in a
+  per-process directory under `target/tmp/test-databases` (unique by process id
+  and start time, so a reused process id cannot meet a stale file). Drop removes
+  the files where Windows allows; the next run deletes directories over a day old.
 
 ## Web play (design.md: Web server and UI; Auth)
 

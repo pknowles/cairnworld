@@ -438,6 +438,8 @@ where
                 WorldEvent::Settled(reply) => {
                     let _test_finished = reply.send(());
                 }
+                #[cfg(test)]
+                WorldEvent::Panic => panic!("injected world worker panic"),
             }
         }
         // World retains the receiver storage. Explicitly close and drain it
@@ -3446,6 +3448,56 @@ mod tests {
         assert!(
             !chat.iter().any(|entry| entry.text == "Too late."),
             "a refused message must not enter the chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_world_does_not_abort_other_worlds_draining_during_shutdown() {
+        let (backend, started, release, _requests) = DelayedBackend::new();
+        let (game, store, _db, failing, _) = two_player_bread_thief_game(backend).await;
+        let owner = store
+            .find_or_create_user("other@example.test", "Other")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let other = store.install_scenario(&owner, &scenario).await.unwrap();
+        game.start_world(World::install(&game.worlds, other.world_id));
+
+        let draining_game = Arc::clone(&game);
+        let draining_member = other.member.clone();
+        let draining = tokio::spawn(async move {
+            draining_game
+                .player_message(draining_member, "Hello.")
+                .await
+        });
+        started.notified().await;
+        game.world(failing.world_id)
+            .unwrap()
+            .sender
+            .send(WorldEvent::Panic)
+            .await
+            .unwrap();
+
+        let stopping_game = Arc::clone(&game);
+        let shutdown = tokio::spawn(async move { stopping_game.shutdown().await });
+        let mut stopping = game.stopping.subscribe();
+        world::stopped(&mut stopping).await;
+        release.notify_one();
+        draining
+            .await
+            .unwrap()
+            .expect("the healthy world must finish its accepted turn");
+        let error = shutdown
+            .await
+            .unwrap()
+            .expect_err("a worker failure must be reported");
+        assert!(
+            format!("{error:#}").contains("world worker failed"),
+            "{error:#}"
         );
     }
 

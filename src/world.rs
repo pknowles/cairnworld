@@ -141,4 +141,8 @@ pub enum WorldEvent {
     },
     #[cfg(test)]
     Settled(oneshot::Sender<()>),
+    /// Kills this world's worker, to test that one world's failure is reported
+    /// without disturbing the others.
+    #[cfg(test)]
+    Panic,
 }

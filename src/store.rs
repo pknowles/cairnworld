@@ -81,9 +81,13 @@ fn inference_input_hash(request: &Request) -> Result<String> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
-/// A test database at a unique path that deletes its files on drop, including
-/// after a panic. `cargo test` runs every test in one process on many threads,
-/// so a wall-clock timestamp is not a unique name; a process-wide counter is.
+/// A test database at a unique path, removed on drop where the platform allows.
+/// Windows cannot delete a database file while a connection pool (which may
+/// outlive this value in a background task) still holds it open, so drop alone
+/// leaks files. Each test process therefore gets its own fresh directory under
+/// `target/tmp` - names cannot collide with a previous run's leftovers, as a
+/// reused process id plus counter did - and the next run deletes directories
+/// older than a day.
 #[cfg(test)]
 pub(crate) struct TestDatabase {
     path: std::path::PathBuf,
@@ -92,14 +96,44 @@ pub(crate) struct TestDatabase {
 #[cfg(test)]
 impl TestDatabase {
     pub(crate) fn new(prefix: &str) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{
+            OnceLock,
+            atomic::{AtomicU64, Ordering},
+        };
+        static RUN_DIRECTORY: OnceLock<std::path::PathBuf> = OnceLock::new();
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "cairnworld-{prefix}-{}-{}.sqlite",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed),
-        ));
-        Self { path }
+        let directory = RUN_DIRECTORY.get_or_init(|| {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("tmp")
+                .join("test-databases");
+            std::fs::create_dir_all(&root).expect("creating test database root");
+            for entry in std::fs::read_dir(&root).expect("listing old test databases") {
+                let entry = entry.expect("reading old test database entry");
+                let age = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .expect("reading old test database age")
+                    .elapsed()
+                    .unwrap_or_default();
+                if age > std::time::Duration::from_secs(24 * 60 * 60) {
+                    std::fs::remove_dir_all(entry.path()).expect("removing old test databases");
+                }
+            }
+            let started = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before the Unix epoch")
+                .as_nanos();
+            let directory = root.join(format!("{}-{started}", std::process::id()));
+            std::fs::create_dir(&directory).expect("creating test database directory");
+            directory
+        });
+        Self {
+            path: directory.join(format!(
+                "{prefix}-{}.sqlite",
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )),
+        }
     }
 
     pub(crate) fn path(&self) -> &std::path::Path {
