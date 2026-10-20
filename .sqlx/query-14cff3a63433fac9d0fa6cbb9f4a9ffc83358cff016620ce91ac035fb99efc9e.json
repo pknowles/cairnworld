@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tool_execution SET status = ?, result_content_id = ?, error = ?, finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP) WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "14cff3a63433fac9d0fa6cbb9f4a9ffc83358cff016620ce91ac035fb99efc9e"
+}

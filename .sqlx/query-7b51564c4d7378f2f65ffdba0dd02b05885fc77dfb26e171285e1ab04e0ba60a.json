@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT result_content_id FROM action WHERE (requesting_tool_execution_id = ?1 AND pending_action_id IS NULL) OR approving_tool_execution_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "result_content_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7b51564c4d7378f2f65ffdba0dd02b05885fc77dfb26e171285e1ab04e0ba60a"
+}

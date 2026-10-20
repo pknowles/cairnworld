@@ -63,6 +63,23 @@ impl Store {
         serde_json::from_str(&body).with_context(|| format!("decoding recorded content {id}"))
     }
 
+    /// As `recorded_content`, inside an open transaction: the pool has one
+    /// connection, which the transaction holds.
+    pub(super) async fn content_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        id: i64,
+    ) -> Result<MessageContent> {
+        let body: String =
+            sqlx::query_scalar!("SELECT body FROM recorded_content WHERE id = ?", id,)
+                .fetch_optional(&mut **transaction)
+                .await
+                .with_context(|| format!("loading recorded content {id}"))?
+                .with_context(|| format!("recorded content {id} does not exist"))?;
+        let body: ContentBody = serde_json::from_str(&body)
+            .with_context(|| format!("decoding recorded content {id}"))?;
+        Ok(body.content)
+    }
+
     pub(super) async fn recorded_content(&self, id: i64) -> Result<(MessageContent, String)> {
         let body = self.content_body(id).await?;
         Ok((body.content, body.reasoning))

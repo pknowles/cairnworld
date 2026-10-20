@@ -201,7 +201,7 @@ impl Drop for InvocationGuard<'_> {
         // paper over exactly the bug this exists to catch. If a future edit
         // adds a return path that skips finish(), this must fail the test/
         // debug build that exercises it, not quietly self-heal at runtime;
-        // process-restart recovery (interrupt_open_inferences) already
+        // process-restart recovery (close_interrupted_turns) already
         // exists as the sanctioned recovery path for a genuine process
         // death (e.g. a panic), which Drop cannot reliably run for anyway.
         debug_assert!(
@@ -319,13 +319,12 @@ pub async fn complete_with_call_context<B: Backend>(
             // match, rather than an after-result `?` bypassing sibling
             // finalization below (design.md: "One awaited batch boundary
             // covers tool execution, result persistence and result
-            // delivery"). `committed` distinguishes the two failure shapes
-            // the outer match must tell apart: before a result commits, the
-            // call itself is recorded failed; after, its result and any
-            // completed mutation stand, and only the delivery failure is
-            // reported - never re-recorded as this call's own failure, never
-            // re-run.
-            let mut batch_error = None;
+            // delivery"). A failure leaves no call without a result: the
+            // failing call's result is the real error, unless its own result
+            // had already committed (`committed`), in which case that result
+            // and any completed mutation stand, and only the delivery failure
+            // propagates - never re-recorded as the call's failure, never
+            // re-run. Every call not yet run is closed as not executed.
             // Grouping proposals are never committed here (design.md's "Tool
             // boundary"): a topology change would retarget every sibling call
             // still to come in this same batch away from the group the model
@@ -340,6 +339,10 @@ pub async fn complete_with_call_context<B: Backend>(
                 ));
                 let mut committed = false;
                 let outcome: Result<()> = async {
+                    store
+                        .begin_tool_execution(*tool_execution_id)
+                        .await
+                        .with_context(|| format!("beginning tool call {}", tool_call.id))?;
                     let outcome = tools::execute(turn.tools, tool_call, *tool_execution_id)
                         .await
                         .with_context(|| format!("executing tool call {}", tool_call.id))?;
@@ -383,45 +386,41 @@ pub async fn complete_with_call_context<B: Backend>(
                 }
                 .await;
                 if let Err(error) = outcome {
-                    if !committed {
-                        store
-                            .complete_tool_execution(
-                                *tool_execution_id,
-                                "failed",
-                                None,
-                                Some(&format!("{error:#}")),
-                            )
-                            .await
-                            .with_context(|| {
-                                format!("recording failed tool execution for call {}", tool_call.id)
-                            })?;
-                    }
-                    batch_error = Some(error);
-                    break;
+                    return Err(close_failed_calls(
+                        store,
+                        completion.inference_id,
+                        Some(*tool_execution_id),
+                        error,
+                    )
+                    .await);
                 }
             }
-            if let Some(error) = batch_error {
-                store
-                    .mark_unexecuted_tool_executions(completion.inference_id)
-                    .await
-                    .context("marking unreached tool executions after a batch abort")?;
-                return Err(error);
-            }
             if !pending_changes.is_empty() {
-                let pending_changes = store
-                    .resolve_topology_changes(completion.inference_id, pending_changes)
-                    .await
-                    .context("resolving group proposals in the invoking Game Master's world")?;
-                compact_merge_sources(store, backend, &pending_changes, budget.limits(), &turn)
-                    .await
-                    .context("compacting merge source branches before applying topology changes")?;
-                store
-                    .apply_topology_changes(
-                        pending_changes,
-                        budget.limits().presence_departure_seconds,
-                    )
-                    .await
-                    .context("applying group topology changes")?;
+                // A failure here leaves each deferred call without a result.
+                let applied: Result<()> = async {
+                    let pending_changes = store
+                        .resolve_topology_changes(completion.inference_id, pending_changes)
+                        .await
+                        .context("resolving group proposals in the invoking Game Master's world")?;
+                    compact_merge_sources(store, backend, &pending_changes, budget.limits(), &turn)
+                        .await
+                        .context(
+                            "compacting merge source branches before applying topology changes",
+                        )?;
+                    store
+                        .apply_topology_changes(
+                            pending_changes,
+                            budget.limits().presence_departure_seconds,
+                        )
+                        .await
+                        .context("applying group topology changes")
+                }
+                .await;
+                if let Err(error) = applied {
+                    return Err(
+                        close_failed_calls(store, completion.inference_id, None, error).await,
+                    );
+                }
             }
         }
     }
@@ -444,6 +443,25 @@ pub async fn complete_with_call_context<B: Backend>(
             }
             Err(error)
         }
+    }
+}
+
+/// Close a failed batch's calls in history and return the error to propagate.
+/// If closing itself fails, that failure is added to the original error's context.
+async fn close_failed_calls(
+    store: &Store,
+    inference_id: i64,
+    failing_execution_id: Option<i64>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match store
+        .close_failed_tool_calls(inference_id, failing_execution_id, &format!("{error:#}"))
+        .await
+    {
+        Ok(()) => error,
+        Err(close_error) => error.context(format!(
+            "also failed to record the failure in history: {close_error:#}"
+        )),
     }
 }
 
@@ -982,6 +1000,68 @@ mod tests {
         assert_eq!(
             second_status, "unexecuted",
             "the never-reached second call must be marked unexecuted, not left running"
+        );
+    }
+
+    /// A system failure aborts the turn, but history must still show the
+    /// agent exactly what happened: the real error as the failed call's
+    /// result, and the calls that never ran as not executed.
+    #[tokio::test]
+    async fn a_failing_call_leaves_its_error_and_unrun_siblings_in_history() {
+        let (store, _db, agent_id) = test_store().await;
+        let explodes = Tool::new(
+            ToolDefinition {
+                name: "explodes".to_string(),
+                description: "Always fails.".to_string(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            |_context| Box::pin(async move { anyhow::bail!("disk full") }) as tools::ToolFuture,
+        );
+        let backend = ScriptedBackend::new([response(
+            Content::ToolCalls(vec![
+                ToolCall {
+                    id: "boom".to_string(),
+                    name: "explodes".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                ToolCall {
+                    id: "after".to_string(),
+                    name: "test_echo".to_string(),
+                    arguments: test_echo_arguments("never reached"),
+                },
+            ]),
+            "",
+        )]);
+        let error = complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(
+                store.agent_branch(agent_id).await.unwrap(),
+                &[explodes, tools::test_echo()],
+            ),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .expect_err("a failing tool must fail the turn");
+        assert!(format!("{error:#}").contains("disk full"), "{error:#}");
+
+        let entries = history(&store, agent_id).await;
+        let results: Vec<(&str, &str)> = entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                MessageContent::ToolResult {
+                    tool_call_id,
+                    content,
+                } => Some((tool_call_id.as_str(), content.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(results.as_slice(), [("boom", failed), ("after", skipped)]
+                if failed.contains("disk full") && skipped.starts_with("Not executed")),
+            "every call needs a result before the next inference: {results:?}"
         );
     }
 

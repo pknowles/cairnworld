@@ -148,19 +148,23 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   its invocation on success/error. Its InvocationGuard Drop only debug-asserts
   that finish was called; it does not persist cleanup on cancellation.
   `CallContext.parent_tool_execution_id` records the exact call causing nesting.
-  `create_tool_executions` inserts the complete batch before execution. Each
-  call's execution, result persistence and CompletedAfter delivery run inside
-  one awaited block per call, so a failure anywhere in that block - not only
-  execution - is caught by the same outer match. A `committed` flag
-  distinguishes the two failure shapes: before a result commits, the call
-  itself is recorded failed with full context; once committed, the result and
-  any completed mutation stand untouched and only the delivery failure
-  surfaces as the batch error. Either way the batch aborts and every
-  never-entered sibling is marked unexecuted by one `mark_unexecuted_tool_executions`
-  call after the loop, never a committed or entered call. `complete_with_call_context`
-  now inlines the whole per-invocation loop (previously a separate
-  `run_invocation` with a `#[allow(clippy::too_many_arguments)]`); that
-  function and the allow are gone.
+  `create_tool_executions` inserts the complete batch (status `unexecuted`)
+  before execution; `begin_tool_execution` marks each call `running` as it
+  starts, so a call that never began is provably unexecuted. Each call's
+  execution, result persistence and CompletedAfter delivery run inside one
+  awaited block, so a failure anywhere in it is caught by the same outer match.
+  A failure aborts the batch and the turn, but `Store::close_failed_tool_calls`
+  first gives every unanswered call a result in its agent's history: the real
+  error ("Tool failed: ...") for the failing call, "Not executed" for the
+  rest; a call whose result had already committed keeps it.
+  `src/store/interruption.rs` also holds startup cleanup
+  (`close_interrupted_turns`, called from `InferenceScheduler::resume`): in one
+  idempotent transaction it closes unanswered calls of open sequences (a begun
+  call reports the committed outcome its `action` row proves, e.g. a roll,
+  else "effects may already have been applied"; unbegun calls are "Not
+  executed"), rejects their pending actions and ends the open
+  inference/invocation/sequence records. `finish_sequence` with an error rejects
+  that sequence's pending actions the same way.
 - `src/inference.rs` - admits foreground work ahead of deferred compaction,
   capped by `max_concurrent_inferences`; mistral.rs batches admitted sequences.
   At execution-host startup it marks unfinished inferences interrupted, without
@@ -415,7 +419,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `allocate_position`'s existing idiom) rather than a `COUNT(*)` rescan of
   every prior inference. `tool_execution(inference_id, ordinal,
   result_content_id, status, error)` uniquely identifies each returned call;
-  status is running/completed/rejected/failed/unexecuted. Every write that
+  status is unexecuted (not begun)/running/completed/rejected/failed. Every write that
   finishes one of these lifecycle rows treats a failure to finish as
   secondary to whatever error it was recording - `InvocationGuard::finish`,
   `game.rs`'s two `finish_sequence` call sites, `compaction.rs`'s

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tool_execution SET status = 'running'              WHERE id = ? AND status = 'unexecuted' AND finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4e8987b634597e3475c05b81f0d2cf9de0e39b53e4a29c0c9bfc79df15ba68f4"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tool_execution (inference_id, ordinal, status) VALUES (?, ?, 'unexecuted')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ec0642fdec7822b9d104469f44e69cf750474715a8f156e0afea5d76f68a543d"
+}

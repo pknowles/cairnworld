@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT history_entry.branch_id, inference.output FROM inference JOIN history_entry ON history_entry.id = inference.history_entry_id WHERE inference.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "branch_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "output",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "b61b5a061de1a371488038b963b70af59119c12536d3a2c720fa0dc7ace75228"
+}

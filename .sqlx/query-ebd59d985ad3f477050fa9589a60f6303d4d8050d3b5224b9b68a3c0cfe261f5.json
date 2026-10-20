@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pending_action WHERE sequence_id = ? AND id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ebd59d985ad3f477050fa9589a60f6303d4d8050d3b5224b9b68a3c0cfe261f5"
+}

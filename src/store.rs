@@ -1,5 +1,6 @@
 mod content;
 mod history;
+mod interruption;
 mod prompt;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
@@ -1182,20 +1183,36 @@ impl Store {
     /// compaction is shown as caused deferred work rather than extending the
     /// foreground reply's wall time").
     pub async fn finish_sequence(&self, sequence_id: i64, error: Option<&str>) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .with_context(|| format!("finishing sequence {sequence_id}"))?;
         let result = sqlx::query!(
-            "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ? \
-             WHERE id = ? AND finished_at IS NULL",
+            "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ?              WHERE id = ? AND finished_at IS NULL",
             error,
             sequence_id,
         )
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .with_context(|| format!("finishing sequence {sequence_id}"))?;
         ensure!(
             result.rows_affected() == 1,
             "sequence {sequence_id} is missing or already finished"
         );
-        Ok(())
+        // A failed turn leaves no action for a later GM turn to approve.
+        if let Some(error) = error {
+            Self::close_pending_actions(
+                &mut transaction,
+                sequence_id,
+                &format!("the turn failed before the GM resolved this action: {error}"),
+            )
+            .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("finishing sequence {sequence_id}"))
     }
 
     /// Start one agent loop (design.md's `invocation`): the root of a
@@ -4492,32 +4509,7 @@ impl Store {
         })
     }
 
-    /// Called by the execution host before resuming jobs, never by read-only
-    /// replay. No duration, token usage or game effect is invented for work
-    /// lost with the process (design.md: "Process recovery marks open
-    /// sequences, invocations, inferences and tools interrupted; it never
-    /// invents completed game effects").
-    pub async fn interrupt_open_inferences(&self) -> Result<()> {
-        sqlx::query!(
-            "UPDATE inference SET error = 'Inference interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
-        )
-            .execute(&self.pool).await.context("marking interrupted inferences at startup")?;
-        sqlx::query!(
-            "UPDATE tool_execution SET status = 'unexecuted', error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
-        )
-            .execute(&self.pool).await.context("marking interrupted tool executions at startup")?;
-        sqlx::query!(
-            "UPDATE invocation SET outcome = 'interrupted', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
-        )
-            .execute(&self.pool).await.context("marking interrupted invocations at startup")?;
-        sqlx::query!(
-            "UPDATE sequence SET error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
-        )
-            .execute(&self.pool).await.context("marking interrupted sequences at startup")?;
-        Ok(())
-    }
-
-    /// Create one `running` tool_execution row per call in a returned batch,
+    /// Create one `unexecuted` tool_execution row per call in a returned batch,
     /// before any of them execute (design.md: "Create rows for every call
     /// before executing the batch"), keyed by output ordinal so two identical
     /// calls in one batch still resolve to distinct rows. Returns each row's
@@ -4536,7 +4528,7 @@ impl Store {
             let ordinal =
                 i64::try_from(ordinal).context("tool call ordinal exceeds SQLite range")?;
             let result = sqlx::query!(
-                "INSERT INTO tool_execution (inference_id, ordinal, status) VALUES (?, ?, 'running')",
+                "INSERT INTO tool_execution (inference_id, ordinal, status) VALUES (?, ?, 'unexecuted')",
                 inference_id,
                 ordinal,
             )
@@ -4552,55 +4544,21 @@ impl Store {
         Ok(ids)
     }
 
-    /// Complete one tool_execution as `completed`, `rejected`, `failed` or
-    /// `unexecuted`, recording its result content when it produced one.
-    /// Validated explicitly rather than trusting the caller and relying on
-    /// the table's CHECK constraint to reject a bad value with a raw SQL error.
-    pub async fn complete_tool_execution(
-        &self,
-        tool_execution_id: i64,
-        status: &str,
-        result_content_id: Option<i64>,
-        error: Option<&str>,
-    ) -> Result<()> {
-        ensure!(
-            matches!(status, "completed" | "rejected" | "failed" | "unexecuted"),
-            "invalid tool_execution status `{status}`"
-        );
+    /// Mark a created tool_execution as begun. A call that never began is
+    /// provably unexecuted; one that began may have taken effect before its
+    /// result was recorded, which restart cleanup must not deny.
+    pub async fn begin_tool_execution(&self, tool_execution_id: i64) -> Result<()> {
         let result = sqlx::query!(
-            "UPDATE tool_execution SET status = ?, result_content_id = ?, error = ?, finished_at = CURRENT_TIMESTAMP \
-             WHERE id = ? AND finished_at IS NULL",
-            status,
-            result_content_id,
-            error,
+            "UPDATE tool_execution SET status = 'running'              WHERE id = ? AND status = 'unexecuted' AND finished_at IS NULL",
             tool_execution_id,
         )
         .execute(&self.pool)
         .await
-        .with_context(|| format!("completing tool_execution {tool_execution_id}"))?;
+        .with_context(|| format!("beginning tool_execution {tool_execution_id}"))?;
         ensure!(
             result.rows_affected() == 1,
-            "tool_execution {tool_execution_id} is missing or already finished"
+            "tool_execution {tool_execution_id} is missing or already begun"
         );
-        Ok(())
-    }
-
-    /// Mark every tool_execution row still `running` for `inference_id` as
-    /// `unexecuted`: an early batch abort (budget/infrastructure failure mid
-    /// batch) must not leave a sibling that was never reached looking like it
-    /// is still in progress (design.md: "Unexecuted siblings retain an
-    /// explicit status").
-    pub async fn mark_unexecuted_tool_executions(&self, inference_id: i64) -> Result<()> {
-        sqlx::query!(
-            "UPDATE tool_execution SET status = 'unexecuted', finished_at = CURRENT_TIMESTAMP \
-             WHERE inference_id = ? AND status = 'running'",
-            inference_id,
-        )
-        .execute(&self.pool)
-        .await
-        .with_context(|| {
-            format!("marking unexecuted tool executions for inference {inference_id}")
-        })?;
         Ok(())
     }
 
@@ -7152,7 +7110,7 @@ mod tests {
             RecordedOutcome::Running,
             "opening a database for inspection must not interrupt live work"
         );
-        reopened.interrupt_open_inferences().await.unwrap();
+        reopened.close_interrupted_turns().await.unwrap();
         let interrupted = reopened.reconstruct_inference(id).await.unwrap();
         assert_eq!(interrupted.request, request);
         assert_eq!(interrupted.duration_ms, None);

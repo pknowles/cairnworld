@@ -1,8 +1,9 @@
 # Graceful server shutdown and crash cleanup
 
-Routine-shutdown lifecycle implemented (see implementation_reference.md). Crash
-cleanup pending: its model-facing interruption results need the user's
-use-case review first. Shared prerequisite before NPC interaction.
+Routine-shutdown lifecycle and tool-call history closure implemented (see
+implementation_reference.md). Still open: players' persistent view of an
+interrupted turn, GM-approval execution errors returned to the caller, and
+real-model verification. Shared prerequisite before NPC interaction.
 
 ## Outcome and authority
 

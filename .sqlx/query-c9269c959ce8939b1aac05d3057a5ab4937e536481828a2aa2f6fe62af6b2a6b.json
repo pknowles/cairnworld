@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ?              WHERE id = ? AND finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c9269c959ce8939b1aac05d3057a5ab4937e536481828a2aa2f6fe62af6b2a6b"
+}

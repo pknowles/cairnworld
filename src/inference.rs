@@ -107,7 +107,7 @@ where
     /// summary and notice have committed. Incomplete inferences are marked
     /// interrupted before execution resumes.
     pub async fn resume(&self, store: &Store, worlds: &Worlds) -> Result<()> {
-        store.interrupt_open_inferences().await?;
+        store.close_interrupted_turns().await?;
         for job in store.pending_compactions().await? {
             let events = World::get(worlds, job.branch.world_id())?.events.clone();
             self.admit_deferred(store.clone(), job.branch.branch_id(), events)
