@@ -2,9 +2,11 @@ mod content;
 mod history;
 mod interruption;
 mod prompt;
+mod speech;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
 pub use prompt::PromptEvidence;
+pub use speech::{Audience, InvalidAudience, SayAction, WhisperAction};
 
 // Developer Mode's inspection view types are shared with the browser; see
 // crate::inspection's doc comment. Re-exported here since this module's
@@ -374,6 +376,9 @@ pub struct ResolvedAction {
     pub id: i64,
     pub outcome: ActionOutcome,
     pub result_content_id: i64,
+    /// Who heard it, when this call committed an utterance (not when it
+    /// returns an earlier resolution).
+    pub heard_by: Vec<String>,
 }
 
 /// How a resolved action ended. Stored as `action.approved` plus its result
@@ -2933,11 +2938,19 @@ impl Store {
         let mut entries = Vec::new();
         for row in rows {
             let role = serde_json::from_str(&row.role).context("decoding player chat role")?;
-            let (MessageContent::Text(text), _) = self.recorded_content(row.content).await? else {
+            let text = if role == Role::Speech {
+                self.speech_text(row.id).await?
+            } else if let (MessageContent::Text(text), _) =
+                self.recorded_content(row.content).await?
+            {
+                text
+            } else {
                 continue;
             };
-            if matches!(role, Role::User | Role::Assistant | Role::Narration)
-                && !(role == Role::Assistant && text.is_empty())
+            if matches!(
+                role,
+                Role::User | Role::Assistant | Role::Narration | Role::Speech
+            ) && !(role == Role::Assistant && text.is_empty())
             {
                 entries.push(PlayerChatEntry {
                     id: row.id,
@@ -3448,6 +3461,7 @@ impl Store {
         action_id: i64,
         approving_tool_execution_id: i64,
         result: &str,
+        audience: &Audience,
     ) -> Result<ResolvedAction> {
         let mut transaction =
             self.pool.begin().await.with_context(|| {
@@ -3507,9 +3521,20 @@ impl Store {
                 id: action_id,
                 outcome: ActionOutcome::from_record(approved, text),
                 result_content_id,
+                heard_by: Vec::new(),
             });
         };
-        let outcome = if result == "approved" {
+        let mut speech = None;
+        let outcome = if result == "approved" && matches!(action.tool.as_str(), "say" | "whisper") {
+            match Self::plan_speech(&mut transaction, &action, audience).await? {
+                Ok(plan) => {
+                    let words = plan.words().to_string();
+                    speech = Some(plan);
+                    ActionOutcome::Applied(words)
+                }
+                Err(reason) => ActionOutcome::Failed(reason),
+            }
+        } else if result == "approved" {
             match Self::execute_approved_action(&mut transaction, &action).await? {
                 Ok(text) => ActionOutcome::Applied(text),
                 Err(reason) => ActionOutcome::Failed(reason),
@@ -3520,10 +3545,10 @@ impl Store {
         let (approved, result_text) = outcome.record();
         let result_content_id =
             Self::content_in(&mut transaction, &MessageContent::Text(result_text), "").await?;
-        sqlx::query!(
+        let recorded_action_id = sqlx::query_scalar!(
             "INSERT INTO action \
              (sequence_id, requesting_tool_execution_id, approving_tool_execution_id, result_content_id, approved, pending_action_id) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
             action.sequence_id,
             action.requesting_tool_execution_id,
             approving_tool_execution_id,
@@ -3531,9 +3556,22 @@ impl Store {
             approved,
             action.id,
         )
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await
         .with_context(|| format!("recording resolved action {action_id}"))?;
+        let mut heard_by = Vec::new();
+        if let Some(plan) = &speech {
+            Self::commit_speech(
+                &mut transaction,
+                plan,
+                world_id,
+                action.sequence_id,
+                recorded_action_id,
+                result_content_id,
+            )
+            .await?;
+            heard_by = plan.hearer_names();
+        }
         let deleted = sqlx::query!(
             "DELETE FROM pending_action WHERE world_id = ? AND id = ? AND gm_agent_id = ?",
             world_id,
@@ -3556,6 +3594,7 @@ impl Store {
             id: action_id,
             outcome,
             result_content_id,
+            heard_by,
         })
     }
 
@@ -3594,7 +3633,7 @@ impl Store {
         action: &PendingAction,
     ) -> Result<std::result::Result<String, String>> {
         match action.tool.as_str() {
-            "look" | "say" => Ok(Ok("approved".to_string())),
+            "look" => Ok(Ok("approved".to_string())),
             "take" => {
                 let arguments: TakeItemArguments = serde_json::from_str(&action.args)
                     .context("parsing stored take action arguments")?;
@@ -4612,10 +4651,14 @@ impl Store {
                         range.branch_id
                     );
                     for row in rows {
-                        let role = serde_json::from_str(&row.role).with_context(|| {
+                        let role: Role = serde_json::from_str(&row.role).with_context(|| {
                             format!("deserializing role for message {}", row.id)
                         })?;
-                        let (content, _) = self.recorded_content(row.content).await?;
+                        let content = if role == Role::Speech {
+                            MessageContent::Text(self.speech_text(row.id).await?)
+                        } else {
+                            self.recorded_content(row.content).await?.0
+                        };
                         messages.push(Message {
                             role,
                             origin: row.origin.parse().map_err(anyhow::Error::msg)?,
@@ -4640,8 +4683,12 @@ impl Store {
             system_positions.is_empty() || system_positions == [0],
             "assembled request for agent {agent_id} has system messages at {system_positions:?}, not only first"
         );
+        // Narration and speech reach the model as user input, so either gives
+        // an agent that has only heard something a turn to answer.
         ensure!(
-            messages.iter().any(|message| message.role == Role::User),
+            messages
+                .iter()
+                .any(|message| matches!(message.role, Role::User | Role::Narration | Role::Speech)),
             "assembled request for agent {agent_id} has no user turn for the model to answer"
         );
         Ok(Request {
@@ -5561,10 +5608,15 @@ impl Store {
                 .fetch_one(&self.pool)
                 .await
                 .with_context(|| format!("loading raw history message {}", entry.id))?;
-                let (content, reasoning) = self.recorded_content(row.content).await?;
+                let (mut content, reasoning) = self.recorded_content(row.content).await?;
+                let role: Role =
+                    serde_json::from_str(&row.role).context("decoding raw message role")?;
+                if role == Role::Speech {
+                    content = MessageContent::Text(self.speech_text(row.id).await?);
+                }
                 RawHistoryEntry::Message {
                     id: row.id,
-                    role: serde_json::from_str(&row.role).context("decoding raw message role")?,
+                    role,
                     origin: row
                         .origin
                         .parse::<MessageOrigin>()
@@ -7024,6 +7076,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
+                &Audience::default(),
             )
             .await
             .expect_err("a player agent cannot resolve its own action");
@@ -7035,6 +7088,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
+                &Audience::default(),
             )
             .await
             .unwrap();
@@ -7065,6 +7119,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
+                &Audience::default(),
             )
             .await
             .unwrap();
@@ -7154,6 +7209,7 @@ mod tests {
         )
         .await;
 
+        let audience = Audience::default();
         let resolve = |decision: &'static str| {
             store.resolve_pending_action(
                 action.gm_agent_id,
@@ -7161,6 +7217,7 @@ mod tests {
                 action.id,
                 approving,
                 decision,
+                &audience,
             )
         };
         let first = resolve("approved").await.unwrap();
@@ -7242,6 +7299,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
+                &Audience::default(),
             )
             .await
             .unwrap();
@@ -7284,6 +7342,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
+                &Audience::default(),
             )
             .await
             .expect("a repeated resolve must return the recorded outcome, not error");
@@ -7364,6 +7423,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
+                &Audience::default(),
             )
             .await
             .unwrap();
@@ -7383,6 +7443,7 @@ mod tests {
                 action.id,
                 reject_tool_execution_id,
                 "rejected: changed my mind",
+                &Audience::default(),
             )
             .await
             .expect("a conflicting resolve returns the original decision, it does not error");

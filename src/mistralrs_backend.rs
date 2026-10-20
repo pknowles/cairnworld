@@ -215,6 +215,8 @@ pub(crate) fn request_builder(
                     // The model has no narrator role; deliver it as input that
                     // names the GM as the source.
                     Role::Narration => (TextMessageRole::User, format!("GM narration:\n{content}")),
+                    // Speech content already names its speaker.
+                    Role::Speech => (TextMessageRole::User, content.clone()),
                 };
                 request_builder = request_builder.add_message(role, content);
             }

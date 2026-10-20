@@ -48,6 +48,9 @@ pub enum Role {
     /// A GM narration delivered into this history. Every character present sees
     /// it; a backend presents it to the model as input attributed to the GM.
     Narration,
+    /// Words a character said, delivered to each actual hearer. The message
+    /// holds only the words; readers attribute them from its speech record.
+    Speech,
 }
 
 /// Why a message was added to a chat history. This does not alter its model
@@ -90,6 +93,7 @@ impl Role {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
             Role::Narration => "narration",
+            Role::Speech => "speech",
         }
     }
 }

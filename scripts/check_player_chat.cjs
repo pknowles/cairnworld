@@ -59,6 +59,7 @@ sockets.on("connection", (socket) => {
     socket.send(JSON.stringify({ type: "activity", activity: "preparing_opening" }));
     openingReady.then(() => {
       socket.send(JSON.stringify({ type: "entry", role: "narration", text: "The door opens." }));
+      socket.send(JSON.stringify({ type: "entry", role: "speech", text: "Mara says to Toma: Who is there?" }));
       socket.send(JSON.stringify({ type: "error", message: "Recorded agent failure." }));
       socket.send(JSON.stringify({ type: "can_act", value: true }));
     });
@@ -127,6 +128,7 @@ checkBrowser(server, async (tab, port) => {
     await ready(tab, "The door opens.");
     assert.equal(await tab.locator("#chat-status").count(), 0);
     assert.equal(await tab.locator("#chat").getByText("The door opens.").count(), 1);
+    assert.equal(await tab.locator('#chat [data-role="speech"]').getByText("Mara says to Toma: Who is there?").count(), 1);
     assert.equal(await tab.locator('#chat [data-role="narration"]').getByText("GM").count(), 1);
     assert.equal(await tab.locator("#chat").getByText("Recorded agent failure.").count(), 1);
     await tab.locator("#chat").evaluate((chat) => (chat.scrollTop = 0));

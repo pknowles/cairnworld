@@ -1614,6 +1614,7 @@ fn player_chat_entries(history: Vec<PlayerChatEntry>) -> Vec<ChatEntry> {
                 crate::llm::Role::User => ChatRole::User,
                 crate::llm::Role::Assistant => ChatRole::Assistant,
                 crate::llm::Role::Narration => ChatRole::Narration,
+                crate::llm::Role::Speech => ChatRole::Speech,
                 crate::llm::Role::System => ChatRole::Notice,
                 crate::llm::Role::Tool => {
                     unreachable!("player chat entries are messages or system errors")
@@ -1762,6 +1763,7 @@ mod tests {
                         ChatRole::User => Role::User,
                         ChatRole::Assistant => Role::Assistant,
                         ChatRole::Narration => Role::Narration,
+                        ChatRole::Speech => Role::Speech,
                         ChatRole::Notice => panic!("fixture notices must use the chat event path"),
                     },
                     text: entry.text,

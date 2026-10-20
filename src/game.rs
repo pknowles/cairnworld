@@ -19,7 +19,10 @@ use crate::{
     inference::ScheduledBackend,
     llm::{Backend, Content, Message, Response, Role, Sampling, ToolDefinition},
     settings::Limits,
-    store::{ActionOutcome, PendingAction, PlayerAgent, PresenceNarration, Store},
+    store::{
+        ActionOutcome, Audience, InvalidAudience, PendingAction, PlayerAgent, PresenceNarration,
+        SayAction, Store, WhisperAction,
+    },
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
 };
@@ -1091,11 +1094,24 @@ where
                 sequence_id,
                 definition: ToolDefinition {
                     name: "say".to_string(),
-                    description: "Speak words your character says in the current scene.".to_string(),
-                    schema: serde_json::to_value(schema_for!(CharacterAction))
-                        .expect("character action schema should serialize"),
+                    description: "Say words aloud; everyone present hears them.".to_string(),
+                    schema: serde_json::to_value(schema_for!(SayAction))
+                        .expect("say action schema should serialize"),
                 },
-                validate: validate_character_action,
+                validate: validate_say_action,
+                budget: budget.clone(),
+                call: call.clone(),
+            }),
+            self.action_tool(PlayerActionTool {
+                member: member.clone(),
+                sequence_id,
+                definition: ToolDefinition {
+                    name: "whisper".to_string(),
+                    description: "Whisper words that only the named characters hear.".to_string(),
+                    schema: serde_json::to_value(schema_for!(WhisperAction))
+                        .expect("whisper action schema should serialize"),
+                },
+                validate: validate_whisper_action,
                 budget: budget.clone(),
                 call: call.clone(),
             }),
@@ -1138,6 +1154,20 @@ where
                 if let Err(error) = validate(&arguments) {
                     return Ok(ToolOutcome::rejected(error));
                 }
+                let named = named_hearers(&tool_name, &arguments);
+                if !named.is_empty()
+                    && let Err(reason) = game
+                        .store
+                        .check_speech_targets(
+                            member.character_id,
+                            &named.iter().map(String::as_str).collect::<Vec<_>>(),
+                        )
+                        .await?
+                {
+                    return Ok(ToolOutcome::Rejected(format!(
+                        "Tool arguments were rejected: {reason}"
+                    )));
+                }
                 let pending = game
                     .store
                     .create_pending_action(
@@ -1166,6 +1196,10 @@ where
                 Ok(ToolOutcome::CompletedAfter {
                     content,
                     after_result: Box::pin(async move {
+                        delivery_game
+                            .store
+                            .deliver_speech_to_speaker(requesting_tool_execution_id)
+                            .await?;
                         delivery_game.deliver_narration(&member, &narration).await
                     }),
                 })
@@ -1279,6 +1313,7 @@ where
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
+                let approval_pending = approval_pending.clone();
                 Box::pin(async move {
                     let approval: ApproveAction =
                         match serde_json::from_str(&arguments).context("parsing action approval") {
@@ -1291,7 +1326,14 @@ where
                             approval.action_id
                         )));
                     }
-                    let resolved = game
+                    if (!approval.include.is_empty() || !approval.exclude.is_empty())
+                        && !matches!(approval_pending.tool.as_str(), "say" | "whisper")
+                    {
+                        return Ok(ToolOutcome::Rejected(format!(
+                            "Tool arguments were rejected: include and exclude choose who hears speech, and action {action_id} is not speech"
+                        )));
+                    }
+                    let resolved = match game
                         .store
                         .resolve_pending_action(
                             approval_pending.gm_agent_id,
@@ -1299,9 +1341,32 @@ where
                             action_id,
                             tool_execution_id,
                             "approved",
+                            &Audience {
+                                include: approval.include,
+                                exclude: approval.exclude,
+                            },
                         )
                         .await
-                        .with_context(|| format!("approving action {action_id}"))?;
+                    {
+                        Ok(resolved) => resolved,
+                        // Nothing was resolved, so the GM may try again.
+                        Err(error) => match error.downcast_ref::<InvalidAudience>() {
+                            Some(invalid) => {
+                                return Ok(ToolOutcome::Rejected(format!(
+                                    "Tool arguments were rejected: {invalid}"
+                                )));
+                            }
+                            None => {
+                                return Err(error.context(format!("approving action {action_id}")));
+                            }
+                        },
+                    };
+                    if !resolved.heard_by.is_empty() {
+                        let _no_live_viewers = game
+                            .world(approval_pending.world_id)?
+                            .broadcasts
+                            .send(ChatChange::Entries);
+                    }
                     game.world(approval_pending.world_id)?.publish(
                         crate::inspection::DevEvent::Changed {
                             sequence_id: Some(approval_pending.sequence_id),
@@ -1311,6 +1376,13 @@ where
                     // The result is a report for the GM's later judgements; the
                     // acting player's own call receives its own result.
                     match resolved.outcome {
+                        // The GM saw the words in the request; it needs who heard them.
+                        ActionOutcome::Applied(_) if !resolved.heard_by.is_empty() => {
+                            Ok(ToolOutcome::Completed(format!(
+                                "Action {action_id} approved. Delivered as spoken to {}.",
+                                resolved.heard_by.join(", ")
+                            )))
+                        }
                         ActionOutcome::Applied(result) => Ok(ToolOutcome::Completed(format!(
                             "Action {action_id} approved. Outcome: {result}"
                         ))),
@@ -1365,6 +1437,7 @@ where
                             action_id,
                             tool_execution_id,
                             &format!("rejected: {}", rejection.reason),
+                            &Audience::default(),
                         )
                         .await
                         .with_context(|| format!("rejecting action {action_id}"))?;
@@ -1544,6 +1617,39 @@ fn validate_character_action(arguments: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_say_action(arguments: &str) -> Result<()> {
+    let action: SayAction =
+        serde_json::from_str(arguments).context("parsing say action arguments")?;
+    ensure!(!action.words.trim().is_empty(), "words are empty");
+    Ok(())
+}
+
+fn validate_whisper_action(arguments: &str) -> Result<()> {
+    let action: WhisperAction =
+        serde_json::from_str(arguments).context("parsing whisper action arguments")?;
+    ensure!(!action.words.trim().is_empty(), "words are empty");
+    ensure!(
+        !action.to.is_empty(),
+        "a whisper needs at least one listener"
+    );
+    Ok(())
+}
+
+/// The characters a speech action names, already validated as JSON.
+fn named_hearers(tool: &str, arguments: &str) -> Vec<String> {
+    match tool {
+        "say" => serde_json::from_str::<SayAction>(arguments)
+            .ok()
+            .and_then(|say| say.to)
+            .into_iter()
+            .collect(),
+        "whisper" => serde_json::from_str::<WhisperAction>(arguments)
+            .map(|whisper| whisper.to)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 fn validate_take_action(arguments: &str) -> Result<()> {
     let action: TakeAction =
         serde_json::from_str(arguments).context("parsing take action arguments")?;
@@ -1574,6 +1680,12 @@ fn parse_no_arguments(arguments: &str) -> Result<()> {
 struct ApproveAction {
     /// The visible action id to approve.
     action_id: i64,
+    /// For speech: characters who also hear it, by name.
+    #[serde(default)]
+    include: Vec<String>,
+    /// For speech: characters who must not hear it, by name.
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -3745,6 +3857,373 @@ mod tests {
         );
     }
 
+    fn tool_call(name: &str, arguments: serde_json::Value) -> Response {
+        response(Content::ToolCalls(vec![ToolCall {
+            id: format!("{name}-call"),
+            name: name.into(),
+            arguments: arguments.to_string(),
+        }]))
+    }
+
+    /// The text of each speech entry in a player's chat.
+    async fn heard(store: &Store, member: &PlayerAgent) -> Vec<String> {
+        store
+            .player_chat(member)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.role == Role::Speech)
+            .map(|entry| entry.text)
+            .collect()
+    }
+
+    /// The speech messages in an NPC's own history, as its model would see them.
+    async fn heard_by_npc(store: &Store, name: &str) -> Vec<String> {
+        let agent_id: i64 = sqlx::query_scalar(
+            "SELECT npc_agent.agent_id FROM npc_agent \
+             JOIN character ON character.id = npc_agent.character_id WHERE character.name = ?",
+        )
+        .bind(name)
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        let branch = store.agent_branch(agent_id).await.unwrap();
+        let messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM history_entry WHERE branch_id = ? AND kind = 'message'",
+        )
+        .bind(branch.branch_id())
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        if messages == 0 {
+            // A model request needs something to answer, so there is none to read.
+            return Vec::new();
+        }
+        let segments = store.live_segments(branch).await.unwrap();
+        store
+            .request_for_segments(agent_id, &segments, Sampling::default())
+            .await
+            .unwrap()
+            .messages
+            .into_iter()
+            .filter(|message| message.role == Role::Speech)
+            .filter_map(|message| match message.content {
+                MessageContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tool results a recorded request showed its model.
+    fn tool_results(request: &crate::llm::Request) -> Vec<String> {
+        request
+            .messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                MessageContent::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    struct SpeechScene {
+        game: Arc<Game<ScriptedBackend>>,
+        store: Store,
+        _db: crate::store::TestDatabase,
+        first: PlayerAgent,
+        second: PlayerAgent,
+        /// The character names of `first` and `second`.
+        names: [String; 2],
+        responses: Arc<Mutex<VecDeque<Response>>>,
+        requests: Arc<Mutex<Vec<crate::llm::Request>>>,
+    }
+
+    /// Two ready players and the NPC Toma in one group, with an empty script.
+    async fn speech_scene() -> SpeechScene {
+        let (backend, requests) = ScriptedBackend::recording([]);
+        let responses = Arc::clone(&backend.responses);
+        let (game, store, db, first, second) = two_player_bread_thief_game(backend).await;
+        let names = [
+            store.player_scene(&first).await.unwrap().character_name,
+            store.player_scene(&second).await.unwrap().character_name,
+        ];
+        SpeechScene {
+            game,
+            store,
+            _db: db,
+            first,
+            second,
+            names,
+            responses,
+            requests,
+        }
+    }
+
+    impl SpeechScene {
+        /// `first` speaks as `speech`, the GM approves with `approval`,
+        /// narrates, and the player agent finishes.
+        async fn speak(&self, speech: Response, approval: serde_json::Value) {
+            self.responses.lock().unwrap().extend([
+                speech,
+                tool_call("approve_action", approval),
+                response(Content::Text("The room goes quiet.".into())),
+                response(Content::Text(String::new())),
+            ]);
+            self.game
+                .player_message(self.first.clone(), "Say something.")
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn spoken_words_reach_every_hearer_attributed_and_the_speaker_once() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call(
+                    "say",
+                    serde_json::json!({"words": "I know who took the bread.", "to": "Toma"}),
+                ),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+        let expected = format!(
+            "{} says to Toma: I know who took the bread.",
+            scene.names[0]
+        );
+
+        // Another player who has no browser open still hears it, exactly once.
+        assert_eq!(
+            heard(&scene.store, &scene.second).await,
+            std::slice::from_ref(&expected)
+        );
+        // The speaker sees their own words once, not an echo beside another copy.
+        assert_eq!(
+            heard(&scene.store, &scene.first).await,
+            std::slice::from_ref(&expected)
+        );
+        // An NPC in the group has it in its own history, with the same words.
+        assert_eq!(heard_by_npc(&scene.store, "Toma").await, [expected]);
+        // The GM learns of it through its approval result.
+        let gm_report = tool_results(&scene.requests.lock().unwrap()[2]);
+        assert!(
+            matches!(gm_report.as_slice(), [report]
+                if report.contains("Delivered as spoken to")
+                    && report.contains("Toma")),
+            "{gm_report:?}"
+        );
+        // The speaker's and the GM's histories stay valid: every tool call is
+        // answered directly after it, with the speaker's own copy of the words
+        // arriving after its result.
+        let group = scene
+            .store
+            .character_group_id(scene.first.character_id)
+            .await
+            .unwrap();
+        for branch in [
+            scene
+                .store
+                .agent_branch(scene.first.agent_id)
+                .await
+                .unwrap(),
+            scene.store.group_branch(group).await.unwrap(),
+        ] {
+            let segments = scene.store.live_segments(branch).await.unwrap();
+            let messages = scene
+                .store
+                .request_for_segments(branch.agent_id(), &segments, Sampling::default())
+                .await
+                .unwrap()
+                .messages;
+            for (index, message) in messages.iter().enumerate() {
+                if matches!(message.content, MessageContent::ToolCalls(_)) {
+                    assert!(
+                        matches!(
+                            messages[index + 1].content,
+                            MessageContent::ToolResult { .. }
+                        ),
+                        "a tool call must be followed directly by its result: {messages:?}"
+                    );
+                }
+            }
+        }
+        // One utterance is stored once and shared by every history.
+        let contents: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT message.content) FROM speech_message \
+             JOIN message ON message.id = speech_message.message_id",
+        )
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(contents, 1);
+    }
+
+    #[tokio::test]
+    async fn a_whisper_is_heard_only_by_its_listeners_and_the_speaker() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call(
+                    "whisper",
+                    serde_json::json!({"words": "Meet me at the mill.", "to": [scene.names[1]]}),
+                ),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+
+        let expected = format!("{} whispers: Meet me at the mill.", scene.names[0]);
+        assert_eq!(
+            heard(&scene.store, &scene.second).await,
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(heard(&scene.store, &scene.first).await, [expected]);
+        assert!(
+            heard_by_npc(&scene.store, "Toma").await.is_empty(),
+            "an NPC that was not a listener must not receive the whisper"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gm_can_exclude_a_hearer_from_ordinary_speech() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call("say", serde_json::json!({"words": "Stand back."})),
+                serde_json::json!({"action_id": 1, "exclude": [scene.names[1]]}),
+            )
+            .await;
+
+        assert!(heard(&scene.store, &scene.second).await.is_empty());
+        assert_eq!(heard_by_npc(&scene.store, "Toma").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_audience_is_returned_to_the_gm_and_nothing_is_resolved() {
+        let scene = speech_scene().await;
+        scene.responses.lock().unwrap().extend([
+            tool_call("say", serde_json::json!({"words": "Hello."})),
+            tool_call(
+                "approve_action",
+                serde_json::json!({"action_id": 1, "include": ["Nobody"]}),
+            ),
+            tool_call("approve_action", serde_json::json!({"action_id": 1})),
+            response(Content::Text("A greeting.".into())),
+            response(Content::Text(String::new())),
+        ]);
+
+        scene
+            .game
+            .player_message(scene.first.clone(), "Greet them.")
+            .await
+            .unwrap();
+
+        let refusal = tool_results(&scene.requests.lock().unwrap()[2])
+            .pop()
+            .unwrap();
+        assert!(
+            refusal.contains("rejected") && refusal.contains("Nobody"),
+            "the GM must see why the audience was refused: {refusal}"
+        );
+        assert_eq!(
+            heard(&scene.store, &scene.second).await.len(),
+            1,
+            "the retry resolved it"
+        );
+    }
+
+    #[tokio::test]
+    async fn contradictory_or_impossible_audience_overrides_are_refused() {
+        let scene = speech_scene().await;
+        let listener = scene.names[1].clone();
+        let speaker = scene.names[0].clone();
+        scene.responses.lock().unwrap().extend([
+            tool_call("say", serde_json::json!({"words": "Hello."})),
+            tool_call(
+                "approve_action",
+                serde_json::json!({"action_id": 1, "include": [listener], "exclude": [listener]}),
+            ),
+            tool_call(
+                "approve_action",
+                serde_json::json!({"action_id": 1, "exclude": [speaker]}),
+            ),
+            tool_call("approve_action", serde_json::json!({"action_id": 1})),
+            response(Content::Text("A greeting.".into())),
+            response(Content::Text(String::new())),
+        ]);
+
+        scene
+            .game
+            .player_message(scene.first.clone(), "Greet them.")
+            .await
+            .unwrap();
+
+        let requests = scene.requests.lock().unwrap();
+        let both = tool_results(&requests[2]).pop().unwrap();
+        let speaker_excluded = tool_results(&requests[3]).pop().unwrap();
+        assert!(both.contains("both included and excluded"), "{both}");
+        assert!(
+            speaker_excluded.contains("hears their own words"),
+            "{speaker_excluded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn heard_speech_keeps_its_speaker_name_after_a_rename() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call("say", serde_json::json!({"words": "Good morning."})),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+
+        sqlx::query("UPDATE character SET name = 'Someone Else' WHERE id = ?")
+            .bind(scene.first.character_id)
+            .execute(&scene.store.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            heard(&scene.store, &scene.second).await,
+            [format!("{} says: Good morning.", scene.names[0])]
+        );
+    }
+
+    #[tokio::test]
+    async fn speech_to_someone_who_is_not_here_is_refused_before_anything_is_submitted() {
+        let scene = speech_scene().await;
+        scene.responses.lock().unwrap().extend([
+            tool_call(
+                "whisper",
+                serde_json::json!({"words": "Psst.", "to": ["Nobody"]}),
+            ),
+            response(Content::Text("Nobody answers.".into())),
+        ]);
+
+        let actions_before = scene.store.action_counts().await.unwrap();
+
+        scene
+            .game
+            .player_message(scene.first.clone(), "Whisper to nobody.")
+            .await
+            .unwrap();
+
+        let refusal = tool_results(&scene.requests.lock().unwrap()[1])
+            .pop()
+            .unwrap();
+        assert!(
+            refusal.contains("Nobody") && refusal.contains("is not in this group"),
+            "{refusal}"
+        );
+        assert!(heard(&scene.store, &scene.second).await.is_empty());
+        assert_eq!(
+            scene.store.action_counts().await.unwrap(),
+            actions_before,
+            "nothing was submitted for the GM"
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_does_not_start_presence_narration() {
         let (backend, started, release, requests) = DelayedBackend::new();
@@ -5096,6 +5575,79 @@ mod tests {
             }
         }
         panic!("the flour sack never moved across three prompts");
+    }
+
+    /// A real player agent speaks, a real GM approves, and the other player's
+    /// real agent then sees what was said as attributed speech in its context.
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn real_model_speech_reaches_another_player_in_their_context() {
+        let (mut backend, _model_path, _sampling, _limits) = device_test_game().await;
+        let observed_prompts = backend.observe_prompts();
+        let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
+        let _first_connection = game.connect(&first).await.unwrap();
+        let _second_connection = game.connect(&second).await.unwrap();
+
+        for attempt in 1..=3 {
+            game.player_message(first.clone(), "Say hello to Toma out loud.")
+                .await
+                .unwrap_or_else(|error| panic!("speaker turn {attempt} failed: {error:#}"));
+            if !heard(&store, &second).await.is_empty() {
+                break;
+            }
+        }
+        let overheard = heard(&store, &second).await;
+        assert!(
+            !overheard.is_empty(),
+            "no speech reached the other player across three prompts"
+        );
+
+        game.player_message(second.clone(), "What did you just hear? Answer briefly.")
+            .await
+            .expect("the listener's turn must accept speech in its history");
+        let listener_prompt = observed_prompts
+            .lock()
+            .unwrap()
+            .last()
+            .expect("the listener ran")
+            .prompt
+            .clone();
+        assert!(
+            listener_prompt.contains(&overheard[0]),
+            "the listener's model must be shown the attributed speech:
+{listener_prompt}"
+        );
+
+        // A private word: only the named listener hears it, marked as a whisper.
+        let listener = store.player_scene(&second).await.unwrap().character_name;
+        let before = heard(&store, &second).await.len();
+        for attempt in 1..=3 {
+            game.player_message(
+                first.clone(),
+                &format!("Whisper to {listener} that we should leave quietly."),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("whisper turn {attempt} failed: {error:#}"));
+            if heard(&store, &second).await.len() > before {
+                break;
+            }
+        }
+        let after = heard(&store, &second).await;
+        assert!(
+            after.len() > before,
+            "the whisper never reached its listener"
+        );
+        assert!(
+            after.last().unwrap().contains("whispers"),
+            "the listener should be told it was a whisper: {after:?}"
+        );
+        assert!(
+            heard_by_npc(&store, "Toma")
+                .await
+                .iter()
+                .all(|text| !text.contains("leave quietly")),
+            "a bystander must not hear the whisper"
+        );
     }
 
     #[tokio::test]

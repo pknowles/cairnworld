@@ -1,8 +1,9 @@
 # NPC speech, response selection and player interruption
 
-Implementation pending. Builds on the implemented server shutdown and failure
-handling, and precedes the coding-agent interface; it is not a claim that combat
-or InterventionCheck already exists.
+Slice 1 (shared speech) is implemented; the response rounds, player control and
+intervention slices are pending. Builds on the implemented server shutdown and
+failure handling, and precedes the coding-agent interface; it is not a claim that
+combat or InterventionCheck already exists.
 
 ## Outcome and authority
 
@@ -148,7 +149,7 @@ work transcript; decode them from the referenced immutable tool output.
 | Record | Columns and constraints |
 | --- | --- |
 | speech_batch | id primary key; world_id, group_id, sequence_id foreign keys. A batch contains one or more actual utterances. Simultaneity is derived from multiple utterances in that batch, not a second independent flag. |
-| speech | action_id primary key/FK action; batch_id FK; speaker_character_id FK; speaker_name snapshot, NOT NULL. The approved action's result_content_id is the one Text body containing the exact words. Frozen speaker_name keeps old requests reconstructable after renaming. |
+| speech | action_id primary key/FK action; batch_id FK; speaker_character_id FK; speaker_name snapshot, NOT NULL; kind say or whisper; addressed_name snapshot, nullable (Say's optional addressee). The approved action's result_content_id is the one Text body containing the exact words. Frozen names keep old requests reconstructable after renaming. |
 | speech_message | message_id primary key/FK message; speech_action_id FK speech. A message remains an ordinary conversation entry with shared content; this link identifies speech without rebuilding message's existing origin CHECK or treating speech as an answered tool call. |
 | npc_discussion | root_sequence_id primary key/FK sequence; limits JSON snapshot; spent_total nonnegative integer; state waiting_root, ready, settled or failed; failure_sequence_id nullable FK, present only for failure. Stores the existing Budget's checkpoint between complete steps. |
 | npc_round | id primary key; root_sequence_id FK discussion; group_id FK; scene_revision; mode speech or intervention; state collecting, selected, executing, settled, superseded or failed; original_request_tool_execution_id FK only for intervention. A partial unique index permits at most one collecting/selected speech round per group. An executing round may create that next round, which cannot run until its source sequence succeeds. |
@@ -192,6 +193,10 @@ Option fields and repeated existence checks. SQL nulls describe stages before
 an invocation or execution exists, not partially initialized runtime objects.
 
 ## Action and decision interfaces
+
+Slice 1 left the player-only lookup in create_pending_action: a CharacterActor
+with one constructor would be unused structure, so introduce it with the NPC
+execution slice that needs its second.
 
 Use a private CharacterActor containing character_id and its resolved AgentBranch.
 Store constructors resolve either a validated PlayerAgent or an npc_agent
@@ -370,7 +375,7 @@ intervention selections; they do not queue duplicate reactions.
 
 | Slice | Production change and finish line |
 | --- | --- |
-| Shared speech | First migration, private actor proof, Say/Whisper audience admission, canonical speech commit and the one reader used by live/reload/context/inspection. Exercise two PCs, privacy and speaker rename; existing non-speech actions still use their original path through the shared boundary. No unused NPC constructors. |
+| Shared speech | First migration, Say/Whisper audience admission, canonical speech commit and the one reader used by live/reload/context/inspection. Exercise two PCs, privacy and speaker rename; existing non-speech actions keep their original path. No unused NPC constructors. **Implemented.** Two choices differ from the first draft: the GM learns of speech through its approve_action result (a message between its call and result would break strict chat templates) rather than a history reference, and the speaker's own copy is written after the speaker's tool result for the same reason. |
 | NPC speech rounds | Second migration, terminal Say/Whisper decisions, selection, GM batch resolution, finite worker steps, causal inspection links, Budget checkpoints and shared shutdown/crash-cleanup integration. These form one coherent slice: do not commit unused round tables or a dispatcher unable to execute its declared actions. Verify multiple NPCs, tied speech, natural stopping, stale rounds, budget exhaustion, clean restart and visible mid-action crash failure before marking the slice complete. |
 | Player control | Add watched activity/holds, Interrupt/Never mind, ordered Send release and multi-tab control state. Test real inference-in-progress and action-in-progress barriers, other groups, disconnect and access revocation. No future combat state is fabricated. |
 | Tentative-action intervention | Add InterventionCheck, shared NPC Take execution, non-speech tie selection and original-action/follow-up handoff. Verify rejection-before-discussion, approval invalidating old intent, wrong-world/source rejection and completed-action retention after failure. |

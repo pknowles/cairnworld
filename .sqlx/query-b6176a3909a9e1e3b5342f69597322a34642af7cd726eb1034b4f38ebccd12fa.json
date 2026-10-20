@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action.id AS \"action_id!: i64\", action.sequence_id, action.result_content_id, agent_history.branch_id AS \"branch_id!: i64\" FROM action JOIN speech ON speech.action_id = action.id JOIN player_character ON player_character.character_id = speech.speaker_character_id JOIN agent_history ON agent_history.agent_id = player_character.agent_id WHERE action.requesting_tool_execution_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sequence_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "result_content_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "branch_id!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b6176a3909a9e1e3b5342f69597322a34642af7cd726eb1034b4f38ebccd12fa"
+}

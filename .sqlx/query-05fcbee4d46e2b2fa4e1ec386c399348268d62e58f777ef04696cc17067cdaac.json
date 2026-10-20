@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO action (sequence_id, requesting_tool_execution_id, approving_tool_execution_id, result_content_id, approved, pending_action_id) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "05fcbee4d46e2b2fa4e1ec386c399348268d62e58f777ef04696cc17067cdaac"
+}

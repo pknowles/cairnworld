@@ -71,6 +71,8 @@ pub enum ChatRole {
     User,
     Assistant,
     Narration,
+    /// A character's words, attributed in the text.
+    Speech,
     Notice,
 }
 
@@ -2366,11 +2368,13 @@ fn ChatEntryView(entry: ChatEntry, #[prop(default = false)] developer_mode: bool
         ChatRole::User => "chat chat-end",
         ChatRole::Assistant => "chat chat-start",
         ChatRole::Narration => "rounded-box bg-base-200 px-4 py-3 text-sm text-base-content/80",
+        ChatRole::Speech => "chat chat-start",
         ChatRole::Notice => "alert alert-warning text-sm",
     };
     let bubble = match entry.role {
         ChatRole::User => "chat-bubble chat-bubble-primary",
         ChatRole::Assistant => "chat-bubble",
+        ChatRole::Speech => "chat-bubble chat-bubble-secondary",
         ChatRole::Narration | ChatRole::Notice => "",
     };
     let gm = entry.role == ChatRole::Narration;
@@ -2396,6 +2400,7 @@ pub fn chat_role_name(role: ChatRole) -> &'static str {
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
         ChatRole::Narration => "narration",
+        ChatRole::Speech => "speech",
         ChatRole::Notice => "notice",
     }
 }

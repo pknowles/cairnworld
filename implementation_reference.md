@@ -608,6 +608,22 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   same tool turn, so beginning play never needs a second player message.
   Subsequent player messages expose creation or location-action tools
   according to durable character state.
+- Speech (design.md: NPC speech and response rounds; migration 0004).
+  `say` (optional addressee) and `whisper` (explicit listeners) are validated
+  against the speaker's group when submitted. On approval
+  `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
+  (everyone in the group for say, the listeners for whisper, adjusted by the
+  GM's `approve_action` include/exclude, which an unknown or contradictory name
+  refuses as `InvalidAudience` without resolving) and, in the same transaction
+  as the action row, records `speech_batch`/`speech` and a `Role::Speech`
+  message in each hearer's history, sharing the action's result content (the
+  exact words). PCs hear it with no browser open; NPCs receive it in their own
+  history. The speaker's copy follows their tool result
+  (`deliver_speech_to_speaker`); the GM learns through its approval result.
+  `Store::speech_text` is the one reader that attributes a speech message
+  ("Name says to X: ...") for model context, player chat and raw inspection,
+  from the frozen speaker/addressee names. Presence narration keeps its
+  connected-PC audience.
 - Presence (Developer Mode plan D2; design.md's Membership and presence).
   `world::World::load` constructs shared world values before model loading.
   Every `World` owns its action queue, Developer Mode/chat channels, opening
