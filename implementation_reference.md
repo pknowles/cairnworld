@@ -613,8 +613,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   against the speaker's group when submitted. On approval
   `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
   (everyone in the group for say, the listeners for whisper, adjusted by the
-  GM's `approve_action` include/exclude, which an unknown or contradictory name
-  refuses as `InvalidAudience` without resolving) and, in the same transaction
+  GM's `approve_action` include/exclude, plus an optional short `prefix` shown to every hearer before the words; an
+  unknown or contradictory name, or an overlong prefix, is refused as
+  `InvalidHearing` without resolving) and, in the same transaction
   as the action row, records `speech_batch`/`speech` and a `Role::Speech`
   message in each hearer's history, sharing the action's result content (the
   exact words; the addressee, when named, is stored as a character id plus its

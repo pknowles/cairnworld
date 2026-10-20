@@ -20,8 +20,8 @@ use crate::{
     llm::{Backend, Content, Message, Response, Role, Sampling, ToolDefinition},
     settings::Limits,
     store::{
-        ActionOutcome, Audience, InvalidAudience, PendingAction, PlayerAgent, PresenceNarration,
-        SayAction, Store, WhisperAction,
+        ActionOutcome, Hearing, InvalidHearing, MAX_PREFIX_CHARS, PendingAction, PlayerAgent,
+        PresenceNarration, SayAction, Store, WhisperAction,
     },
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
@@ -1328,11 +1328,13 @@ where
                             approval.action_id
                         )));
                     }
-                    if (!approval.include.is_empty() || !approval.exclude.is_empty())
+                    if (!approval.include.is_empty()
+                        || !approval.exclude.is_empty()
+                        || approval.prefix.is_some())
                         && !matches!(approval_pending.tool.as_str(), "say" | "whisper")
                     {
                         return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: include and exclude choose who hears speech, and action {action_id} is not speech"
+                            "Tool arguments were rejected: include, exclude and prefix shape how speech is heard, and action {action_id} is not speech"
                         )));
                     }
                     let resolved = match game
@@ -1343,16 +1345,17 @@ where
                             action_id,
                             tool_execution_id,
                             "approved",
-                            &Audience {
+                            &Hearing {
                                 include: approval.include,
                                 exclude: approval.exclude,
+                                prefix: approval.prefix,
                             },
                         )
                         .await
                     {
                         Ok(resolved) => resolved,
                         // Nothing was resolved, so the GM may try again.
-                        Err(error) => match error.downcast_ref::<InvalidAudience>() {
+                        Err(error) => match error.downcast_ref::<InvalidHearing>() {
                             Some(invalid) => {
                                 return Ok(ToolOutcome::Rejected(format!(
                                     "Tool arguments were rejected: {invalid}"
@@ -1439,7 +1442,7 @@ where
                             action_id,
                             tool_execution_id,
                             &format!("rejected: {}", rejection.reason),
-                            &Audience::default(),
+                            &Hearing::default(),
                         )
                         .await
                         .with_context(|| format!("rejecting action {action_id}"))?;
@@ -1688,6 +1691,11 @@ struct ApproveAction {
     /// For speech: characters who must not hear it, by name.
     #[serde(default)]
     exclude: Vec<String>,
+    /// For speech: a short phrase every hearer is shown before the words, such
+    /// as how or why only some of them can hear.
+    #[serde(default)]
+    #[schemars(length(max = MAX_PREFIX_CHARS))]
+    prefix: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -4178,6 +4186,85 @@ mod tests {
         assert!(
             speaker_excluded.contains("hears their own words"),
             "{speaker_excluded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gms_prefix_is_shown_to_every_hearer_before_the_words() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call("say", serde_json::json!({"words": "Run!"})),
+                serde_json::json!({"action_id": 1, "prefix": "(Over the din)"}),
+            )
+            .await;
+
+        let expected = format!("(Over the din) {} says: Run!", scene.names[0]);
+        assert_eq!(
+            heard(&scene.store, &scene.second).await,
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(
+            heard(&scene.store, &scene.first).await,
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(heard_by_npc(&scene.store, "Toma").await, [expected]);
+    }
+
+    #[tokio::test]
+    async fn a_prefix_on_something_that_is_not_speech_is_refused() {
+        let scene = speech_scene().await;
+        scene.responses.lock().unwrap().extend([
+            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call(
+                "approve_action",
+                serde_json::json!({"action_id": 1, "prefix": "(Quietly)"}),
+            ),
+            tool_call("approve_action", serde_json::json!({"action_id": 1})),
+            response(Content::Text("A bare room.".into())),
+            response(Content::Text(String::new())),
+        ]);
+
+        scene
+            .game
+            .player_message(scene.first.clone(), "Look around.")
+            .await
+            .unwrap();
+
+        let refusal = tool_results(&scene.requests.lock().unwrap()[2])
+            .pop()
+            .unwrap();
+        assert!(refusal.contains("is not speech"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn an_overlong_prefix_is_returned_to_the_gm() {
+        let scene = speech_scene().await;
+        scene.responses.lock().unwrap().extend([
+            tool_call("say", serde_json::json!({"words": "Hello."})),
+            tool_call(
+                "approve_action",
+                serde_json::json!({"action_id": 1, "prefix": "x".repeat(300)}),
+            ),
+            tool_call("approve_action", serde_json::json!({"action_id": 1})),
+            response(Content::Text("A greeting.".into())),
+            response(Content::Text(String::new())),
+        ]);
+
+        scene
+            .game
+            .player_message(scene.first.clone(), "Greet them.")
+            .await
+            .unwrap();
+
+        let refusal = tool_results(&scene.requests.lock().unwrap()[2])
+            .pop()
+            .unwrap();
+        assert!(refusal.contains("rejected"), "{refusal}");
+        assert_eq!(
+            heard(&scene.store, &scene.second).await.len(),
+            1,
+            "the retry without a prefix resolved it"
         );
     }
 

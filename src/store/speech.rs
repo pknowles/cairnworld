@@ -37,26 +37,32 @@ pub struct WhisperAction {
     pub to: Vec<String>,
 }
 
-/// The GM's adjustment of who hears an approved utterance, by character name
-/// within the speaker's group.
+/// The most characters of GM prefix a hearer is shown: it is a short phrase in
+/// every hearer's history, not a second narration.
+pub const MAX_PREFIX_CHARS: usize = 200;
+
+/// The GM's adjustment of how an approved utterance is heard: who hears it, by
+/// character name within the speaker's group, and a short phrase every hearer
+/// is shown before the words.
 #[derive(Default)]
-pub struct Audience {
+pub struct Hearing {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+    pub prefix: Option<String>,
 }
 
-/// The GM named hearers that cannot be applied, so nothing was resolved and it
+/// The GM's hearing adjustment cannot be applied, so nothing was resolved and it
 /// may try again.
 #[derive(Debug)]
-pub struct InvalidAudience(pub String);
+pub struct InvalidHearing(pub String);
 
-impl std::fmt::Display for InvalidAudience {
+impl std::fmt::Display for InvalidHearing {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl std::error::Error for InvalidAudience {}
+impl std::error::Error for InvalidHearing {}
 
 struct Member {
     id: i64,
@@ -73,6 +79,7 @@ pub(super) struct SpeechPlan {
     speaker_name: String,
     /// Who was spoken to, if anyone: their id and name when it was said.
     addressed: Option<(i64, String)>,
+    prefix: Option<String>,
     /// Everyone who hears it except the speaker, whose own history is written
     /// after the speaker's tool result (see `deliver_speech_to_speaker`).
     hearers: Vec<Member>,
@@ -96,12 +103,17 @@ pub(super) fn attributed(
     kind: &str,
     speaker: &str,
     addressed: Option<&str>,
+    prefix: Option<&str>,
     words: &str,
 ) -> String {
-    match (kind, addressed) {
+    let line = match (kind, addressed) {
         ("whisper", _) => format!("{speaker} whispers: {words}"),
         (_, Some(addressed)) => format!("{speaker} says to {addressed}: {words}"),
         (_, None) => format!("{speaker} says: {words}"),
+    };
+    match prefix {
+        Some(prefix) => format!("{prefix} {line}"),
+        None => line,
     }
 }
 
@@ -153,7 +165,7 @@ impl Store {
     /// chat and inspection): the utterance attributed from its speech record.
     pub(super) async fn speech_text(&self, message_id: i64) -> Result<String> {
         let row = sqlx::query!(
-            "SELECT speech.kind, speech.speaker_name, speech.addressed_name, message.content \
+            "SELECT speech.kind, speech.speaker_name, speech.addressed_name, speech.prefix, message.content \
              FROM speech_message \
              JOIN speech ON speech.action_id = speech_message.speech_action_id \
              JOIN message ON message.id = speech_message.message_id \
@@ -171,6 +183,7 @@ impl Store {
             &row.kind,
             &row.speaker_name,
             row.addressed_name.as_deref(),
+            row.prefix.as_deref(),
             &words,
         ))
     }
@@ -212,12 +225,12 @@ impl Store {
     }
 
     /// Decide the hearers of an approved say or whisper. `Err` is a typed
-    /// `InvalidAudience` for a GM override that cannot be applied; the inner
+    /// `InvalidHearing` for a GM override that cannot be applied; the inner
     /// `Err` is an utterance that cannot happen in the current scene.
     pub(super) async fn plan_speech(
         transaction: &mut Transaction<'_, Sqlite>,
         action: &PendingAction,
-        audience: &Audience,
+        hearing: &Hearing,
     ) -> Result<std::result::Result<SpeechPlan, String>> {
         let (kind, words, addressee, targets): (&'static str, String, Option<String>, Vec<String>) =
             match action.tool.as_str() {
@@ -260,28 +273,36 @@ impl Store {
             }
             ids
         };
-        let named = |names: &[String]| -> std::result::Result<Vec<i64>, InvalidAudience> {
+        let named = |names: &[String]| -> std::result::Result<Vec<i64>, InvalidHearing> {
             names
                 .iter()
                 .map(|name| {
                     find(&members, name)
                         .map(|member| member.id)
-                        .map_err(InvalidAudience)
+                        .map_err(InvalidHearing)
                 })
                 .collect()
         };
-        let included = named(&audience.include)?;
-        let excluded = named(&audience.exclude)?;
+        if let Some(prefix) = &hearing.prefix
+            && prefix.trim().chars().count() > MAX_PREFIX_CHARS
+        {
+            return Err(InvalidHearing(format!(
+                "the prefix is longer than {MAX_PREFIX_CHARS} characters; give a short phrase"
+            ))
+            .into());
+        }
+        let included = named(&hearing.include)?;
+        let excluded = named(&hearing.exclude)?;
         if let Some(id) = included.iter().find(|id| excluded.contains(id)) {
             let name = &members
                 .iter()
                 .find(|member| member.id == *id)
                 .expect("named")
                 .name;
-            return Err(InvalidAudience(format!("`{name}` is both included and excluded")).into());
+            return Err(InvalidHearing(format!("`{name}` is both included and excluded")).into());
         }
         if excluded.contains(&speaker.id) {
-            return Err(InvalidAudience("the speaker always hears their own words".into()).into());
+            return Err(InvalidHearing("the speaker always hears their own words".into()).into());
         }
         hearer_ids.extend(included);
         hearer_ids.retain(|id| *id != speaker.id && !excluded.contains(id));
@@ -300,6 +321,12 @@ impl Store {
             speaker_id,
             speaker_name,
             addressed,
+            prefix: hearing
+                .prefix
+                .as_deref()
+                .map(str::trim)
+                .filter(|prefix| !prefix.is_empty())
+                .map(str::to_string),
             hearers,
         }))
     }
@@ -326,8 +353,8 @@ impl Store {
         let addressed_id = plan.addressed.as_ref().map(|(id, _)| *id);
         let addressed_name = plan.addressed.as_ref().map(|(_, name)| name.as_str());
         sqlx::query!(
-            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name, prefix) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             action_id,
             batch_id,
             plan.speaker_id,
@@ -335,6 +362,7 @@ impl Store {
             plan.kind,
             addressed_id,
             addressed_name,
+            plan.prefix,
         )
         .execute(&mut **transaction)
         .await

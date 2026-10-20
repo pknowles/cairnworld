@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT speech.kind, speech.speaker_name, speech.addressed_name, message.content FROM speech_message JOIN speech ON speech.action_id = speech_message.speech_action_id JOIN message ON message.id = speech_message.message_id WHERE speech_message.message_id = ?",
+  "query": "SELECT speech.kind, speech.speaker_name, speech.addressed_name, speech.prefix, message.content FROM speech_message JOIN speech ON speech.action_id = speech_message.speech_action_id JOIN message ON message.id = speech_message.message_id WHERE speech_message.message_id = ?",
   "describe": {
     "columns": [
       {
@@ -19,8 +19,13 @@
         "type_info": "Text"
       },
       {
-        "name": "content",
+        "name": "prefix",
         "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "content",
+        "ordinal": 4,
         "type_info": "Integer"
       }
     ],
@@ -31,8 +36,9 @@
       false,
       false,
       true,
+      true,
       false
     ]
   },
-  "hash": "aa030efcb1479e14d3e09ddb901948c5910bad7b412d97e10770469b17542b82"
+  "hash": "8a81a4e173ad76bcad1b1085bf3d902a2b8052dbd5d0baa20c90c14442ea601d"
 }

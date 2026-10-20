@@ -20,6 +20,9 @@ CREATE TABLE speech (
     kind TEXT NOT NULL CHECK (kind IN ('say', 'whisper')),
     addressed_character_id INTEGER REFERENCES character(id),
     addressed_name TEXT,
+    -- The GM's short phrase shown to each hearer before the words (how or why
+    -- only some of them heard it).
+    prefix TEXT,
     CHECK ((addressed_character_id IS NULL) = (addressed_name IS NULL))
 );
 

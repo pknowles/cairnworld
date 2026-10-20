@@ -6,7 +6,7 @@ mod speech;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
 pub use prompt::PromptEvidence;
-pub use speech::{Audience, InvalidAudience, SayAction, WhisperAction};
+pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SayAction, WhisperAction};
 
 // Developer Mode's inspection view types are shared with the browser; see
 // crate::inspection's doc comment. Re-exported here since this module's
@@ -3501,7 +3501,7 @@ impl Store {
         action_id: i64,
         approving_tool_execution_id: i64,
         result: &str,
-        audience: &Audience,
+        audience: &Hearing,
     ) -> Result<ResolvedAction> {
         let mut transaction =
             self.pool.begin().await.with_context(|| {
@@ -7116,7 +7116,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
-                &Audience::default(),
+                &Hearing::default(),
             )
             .await
             .expect_err("a player agent cannot resolve its own action");
@@ -7128,7 +7128,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
-                &Audience::default(),
+                &Hearing::default(),
             )
             .await
             .unwrap();
@@ -7159,7 +7159,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
-                &Audience::default(),
+                &Hearing::default(),
             )
             .await
             .unwrap();
@@ -7249,7 +7249,7 @@ mod tests {
         )
         .await;
 
-        let audience = Audience::default();
+        let audience = Hearing::default();
         let resolve = |decision: &'static str| {
             store.resolve_pending_action(
                 action.gm_agent_id,
@@ -7339,7 +7339,7 @@ mod tests {
                     action.id,
                     approving,
                     "approved",
-                    &Audience::default(),
+                    &Hearing::default(),
                 )
                 .await
                 .unwrap();
@@ -7409,7 +7409,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
-                &Audience::default(),
+                &Hearing::default(),
             )
             .await
             .unwrap();
@@ -7452,7 +7452,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
-                &Audience::default(),
+                &Hearing::default(),
             )
             .await
             .expect("a repeated resolve must return the recorded outcome, not error");
@@ -7533,7 +7533,7 @@ mod tests {
                 action.id,
                 approving_tool_execution_id,
                 "approved",
-                &Audience::default(),
+                &Hearing::default(),
             )
             .await
             .unwrap();
@@ -7553,7 +7553,7 @@ mod tests {
                 action.id,
                 reject_tool_execution_id,
                 "rejected: changed my mind",
-                &Audience::default(),
+                &Hearing::default(),
             )
             .await
             .expect("a conflicting resolve returns the original decision, it does not error");
