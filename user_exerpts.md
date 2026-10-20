@@ -589,4 +589,4 @@ has such a trigger and error:
 
 > 1 sounds good. lets record this discussion and decision in the plan too
 
-Selected: derive from existing records, no table. See plans/server-shutdown.md.
+Selected: derive from existing records, no table. See plans/archive/server-shutdown.md.

@@ -826,9 +826,8 @@ errored. Players see only system failures, without Developer Mode: a failed
 sequence's `sequence.error` at its trigger message (their own, or one on their
 current group's GM branch).
 
-This shared lifecycle applies to player, GM and NPC execution. The
-[server shutdown plan](plans/server-shutdown.md) specifies admission, drain order,
-crash cleanup and verification. It replaces full arbitrary crash continuation.
+This shared lifecycle applies to player, GM and NPC execution. Admission,
+drain order and crash cleanup replace full arbitrary crash continuation.
 
 ### Live inspection protocol
 

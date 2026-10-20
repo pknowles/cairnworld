@@ -1,8 +1,8 @@
 # NPC speech, response selection and player interruption
 
-Implementation pending. Depends on [server shutdown](server-shutdown.md),
-then precedes the coding-agent
-interface; it is not a claim that combat or InterventionCheck already exists.
+Implementation pending. Builds on the implemented server shutdown and failure
+handling, and precedes the coding-agent interface; it is not a claim that combat
+or InterventionCheck already exists.
 
 ## Outcome and authority
 

@@ -13,11 +13,11 @@ report the interruption and leave subsequent chat usable. No rollback, automatic
 replay or reconstruction of an interrupted agent call stack.
 
 Authority: persistent world/chat and visible error requirements in
-user_declarations.md, [the shutdown decision](../user_exerpts.md#2026-10-20-shutdown-and-crashes),
-and [shared execution design](../design.md#server-shutdown-and-crashes).
-Follow the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
-[coding standards](../coding_standards.md) and
-[prompt standards](../prompt_standards.md).
+user_declarations.md, [the shutdown decision](../../user_exerpts.md#2026-10-20-shutdown-and-crashes),
+and [shared execution design](../../design.md#server-shutdown-and-crashes).
+Follow the [AGENTS.md checklist](../../AGENTS.md#post-feature-and-pre-commit-checklist),
+[coding standards](../../coding_standards.md) and
+[prompt standards](../../prompt_standards.md).
 
 web::serve drains through Game::shutdown; Game::drop only aborts
 world workers as a last resort. Startup Store::interrupt_open_inferences marks unfinished records
@@ -93,8 +93,8 @@ not automatic continuation of the old turn.
 
 ## Failure results and player-visible system errors
 
-Authority: [failure results decision](../user_exerpts.md#2026-10-20-failure-results-in-history)
-and [design.md](../design.md#server-shutdown-and-crashes), which state the rules.
+Authority: [failure results decision](../../user_exerpts.md#2026-10-20-failure-results-in-history)
+and [design.md](../../design.md#server-shutdown-and-crashes), which state the rules.
 
 Player-visible system errors need a stored home. Alternatives: (1) derive from
 existing records, since every sequence has a trigger item

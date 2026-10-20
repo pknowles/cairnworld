@@ -6,9 +6,6 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Server shutdown](server-shutdown.md): finish accepted turns before exiting;
-  preserve committed effects and repair interrupted tool history after crashes.
-  Shared prerequisite before NPC execution.
 - [NPC interaction](npc-interaction.md): shared Say/Whisper delivery, eagerness
   selection, queued NPC responses, Interrupt/Never mind and GM-selected
   intervention before action resolution.
