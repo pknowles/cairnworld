@@ -568,8 +568,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   runs fast and avoids duplicating dependency symbols in every test binary.
 - `store::TestDatabase` gives each test an on-disk SQLite database in a
   per-process directory under `target/tmp/test-databases` (unique by process id
-  and start time, so a reused process id cannot meet a stale file). Drop removes
-  the files where Windows allows; the next run deletes directories over a day old.
+  and start time, so a reused process id cannot meet a stale file) that the
+  process keeps locked. Drop removes files where Windows allows; the next run
+  deletes every directory whose owner has exited.
 
 ## Web play (design.md: Web server and UI; Auth)
 
