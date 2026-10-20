@@ -148,23 +148,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   its invocation on success/error. Its InvocationGuard Drop only debug-asserts
   that finish was called; it does not persist cleanup on cancellation.
   `CallContext.parent_tool_execution_id` records the exact call causing nesting.
-  `create_tool_executions` inserts the complete batch (status `unexecuted`)
-  before execution; `begin_tool_execution` marks each call `running` as it
-  starts, so a call that never began is provably unexecuted. Each call's
-  execution, result persistence and CompletedAfter delivery run inside one
-  awaited block, so a failure anywhere in it is caught by the same outer match.
-  A failure aborts the batch and the turn, but `Store::close_failed_tool_calls`
-  first gives every unanswered call a result in its agent's history: the real
-  error ("Tool failed: ...") for the failing call, "Not executed" for the
-  rest; a call whose result had already committed keeps it.
-  `src/store/interruption.rs` also holds startup cleanup
-  (`close_interrupted_turns`, called from `InferenceScheduler::resume`): in one
-  idempotent transaction it closes unanswered calls of open sequences (a begun
-  call reports the committed outcome its `action` row proves, e.g. a roll,
-  else "effects may already have been applied"; unbegun calls are "Not
-  executed"), rejects their pending actions and ends the open
-  inference/invocation/sequence records. `finish_sequence` with an error rejects
-  that sequence's pending actions the same way.
+  `create_tool_executions` inserts the batch as `unexecuted`; `begin_tool_execution`
+  marks each call `running`, so a call that never began is provably unexecuted.
+  A failure aborts the turn, but `Store::close_failed_tool_calls` first gives
+  every unanswered call a result: "Tool failed: <error>" for the failing call,
+  "Not executed" for the rest. `src/store/interruption.rs` also holds startup
+  cleanup (`close_interrupted_turns`, from `InferenceScheduler::resume`), one
+  idempotent transaction: a begun call reports the outcome its `action` row
+  proves (e.g. a roll), else "effects may already have been applied"; unbegun
+  calls are "Not executed"; pending actions are rejected, as `finish_sequence`
+  with an error also does.
 - `src/inference.rs` - admits foreground work ahead of deferred compaction,
   capped by `max_concurrent_inferences`; mistral.rs batches admitted sequences.
   At execution-host startup it marks unfinished inferences interrupted, without
