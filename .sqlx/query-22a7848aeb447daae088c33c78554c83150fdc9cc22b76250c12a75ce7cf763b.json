@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "22a7848aeb447daae088c33c78554c83150fdc9cc22b76250c12a75ce7cf763b"
+}

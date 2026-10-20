@@ -1094,7 +1094,7 @@ where
                 sequence_id,
                 definition: ToolDefinition {
                     name: "say".to_string(),
-                    description: "Say words aloud; everyone present hears them.".to_string(),
+                    description: "Say words aloud. Everyone present hears them, even when you address one character.".to_string(),
                     schema: serde_json::to_value(schema_for!(SayAction))
                         .expect("say action schema should serialize"),
                 },
@@ -1154,12 +1154,14 @@ where
                 if let Err(error) = validate(&arguments) {
                     return Ok(ToolOutcome::rejected(error));
                 }
+                // The membership is checked now, so a removed player cannot act.
+                let actor = game.store.player_actor(&member).await?;
                 let named = named_hearers(&tool_name, &arguments);
                 if !named.is_empty()
                     && let Err(reason) = game
                         .store
                         .check_speech_targets(
-                            member.character_id,
+                            actor.character_id(),
                             &named.iter().map(String::as_str).collect::<Vec<_>>(),
                         )
                         .await?
@@ -1171,7 +1173,7 @@ where
                 let pending = game
                     .store
                     .create_pending_action(
-                        &member,
+                        &actor,
                         sequence_id,
                         tool_execution_id,
                         &tool_name,
@@ -2973,7 +2975,7 @@ mod tests {
         .await;
         let pending = store
             .create_pending_action(
-                &member,
+                &store.player_actor(&member).await.unwrap(),
                 sequence.id,
                 requesting_tool_execution_id,
                 "say",
@@ -4048,6 +4050,17 @@ mod tests {
                 }
             }
         }
+        // Who was addressed is kept as a character, not only as a name.
+        let (addressed_id, addressed_name): (i64, String) =
+            sqlx::query_as("SELECT addressed_character_id, addressed_name FROM speech")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        let toma: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+        assert_eq!((addressed_id, addressed_name), (toma, "Toma".to_string()));
         // One utterance is stored once and shared by every history.
         let contents: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT message.content) FROM speech_message \

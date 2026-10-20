@@ -21,7 +21,8 @@ use crate::{
 pub struct SayAction {
     /// The exact words your character says aloud.
     pub words: String,
-    /// The one character you speak to, if any. Everyone present still hears you.
+    /// The character you are speaking to. This does not make your words private:
+    /// everyone present still hears them.
     #[serde(default)]
     pub to: Option<String>,
 }
@@ -70,7 +71,8 @@ pub(super) struct SpeechPlan {
     group_id: i64,
     speaker_id: i64,
     speaker_name: String,
-    addressed_name: Option<String>,
+    /// Who was spoken to, if anyone: their id and name when it was said.
+    addressed: Option<(i64, String)>,
     /// Everyone who hears it except the speaker, whose own history is written
     /// after the speaker's tool result (see `deliver_speech_to_speaker`).
     hearers: Vec<Member>,
@@ -217,7 +219,7 @@ impl Store {
         action: &PendingAction,
         audience: &Audience,
     ) -> Result<std::result::Result<SpeechPlan, String>> {
-        let (kind, words, addressed, targets): (&'static str, String, Option<String>, Vec<String>) =
+        let (kind, words, addressee, targets): (&'static str, String, Option<String>, Vec<String>) =
             match action.tool.as_str() {
                 "say" => {
                     let say: SayAction = serde_json::from_str(&action.args)
@@ -238,6 +240,13 @@ impl Store {
             .find(|member| member.id == action.character_id)
         else {
             return Ok(Err("the speaker is no longer here".to_string()));
+        };
+        let addressed = match addressee {
+            Some(name) => match find(&members, &name) {
+                Ok(member) => Some((member.id, member.name.clone())),
+                Err(reason) => return Ok(Err(reason)),
+            },
+            None => None,
         };
         let mut hearer_ids: Vec<i64> = if kind == "say" {
             members.iter().map(|member| member.id).collect()
@@ -290,7 +299,7 @@ impl Store {
             group_id,
             speaker_id,
             speaker_name,
-            addressed_name: addressed,
+            addressed,
             hearers,
         }))
     }
@@ -314,15 +323,18 @@ impl Store {
         .fetch_one(&mut **transaction)
         .await
         .context("recording speech batch")?;
+        let addressed_id = plan.addressed.as_ref().map(|(id, _)| *id);
+        let addressed_name = plan.addressed.as_ref().map(|(_, name)| name.as_str());
         sqlx::query!(
-            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_name) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
             action_id,
             batch_id,
             plan.speaker_id,
             plan.speaker_name,
             plan.kind,
-            plan.addressed_name,
+            addressed_id,
+            addressed_name,
         )
         .execute(&mut **transaction)
         .await

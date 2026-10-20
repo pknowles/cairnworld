@@ -513,7 +513,7 @@ mod tests {
             store.begin_tool_execution(executions[0]).await.unwrap();
             let pending = store
                 .create_pending_action(
-                    &installed.member,
+                    &store.player_actor(&installed.member).await.unwrap(),
                     sequence.id,
                     executions[0],
                     "take",

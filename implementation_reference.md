@@ -617,7 +617,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   refuses as `InvalidAudience` without resolving) and, in the same transaction
   as the action row, records `speech_batch`/`speech` and a `Role::Speech`
   message in each hearer's history, sharing the action's result content (the
-  exact words). PCs hear it with no browser open; NPCs receive it in their own
+  exact words; the addressee, when named, is stored as a character id plus its
+  frozen name). Actions are submitted for a `CharacterActor` (the acting
+  character; `Store::player_actor` verifies a player's membership into one).
+  PCs hear it with no browser open; NPCs receive it in their own
   history. The speaker's copy follows their tool result
   (`deliver_speech_to_speaker`); the GM learns through its approval result.
   `Store::speech_text` is the one reader that attributes a speech message

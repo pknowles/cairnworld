@@ -9,16 +9,18 @@ CREATE TABLE speech_batch (
     sequence_id INTEGER NOT NULL REFERENCES sequence(id)
 );
 
--- One utterance. speaker_name and addressed_name are frozen so old history
--- reconstructs after a rename; addressing is not privacy (a whisper's hearers
--- are exactly those holding a speech_message).
+-- One utterance. The names are frozen so old history reconstructs after a
+-- rename; the ids keep who spoke and who was addressed. Addressing is not
+-- privacy (a whisper's hearers are exactly those holding a speech_message).
 CREATE TABLE speech (
     action_id INTEGER PRIMARY KEY NOT NULL REFERENCES action(id),
     batch_id INTEGER NOT NULL REFERENCES speech_batch(id),
     speaker_character_id INTEGER NOT NULL REFERENCES character(id),
     speaker_name TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('say', 'whisper')),
-    addressed_name TEXT
+    addressed_character_id INTEGER REFERENCES character(id),
+    addressed_name TEXT,
+    CHECK ((addressed_character_id IS NULL) = (addressed_name IS NULL))
 );
 
 -- Identifies a history message as speech without changing message's origin

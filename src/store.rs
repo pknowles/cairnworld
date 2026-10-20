@@ -348,6 +348,22 @@ pub struct Sequence {
     pub trigger: String,
 }
 
+/// The character an action is submitted for. Actions belong to characters, not
+/// to browser memberships: a player's membership is verified once to produce
+/// one (`Store::player_actor`) and the action path works from the character.
+/// Only trusted code builds one; it is never taken from browser or model input.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CharacterActor {
+    world_id: i64,
+    character_id: i64,
+}
+
+impl CharacterActor {
+    pub fn character_id(&self) -> i64 {
+        self.character_id
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingAction {
     pub world_id: i64,
@@ -3348,32 +3364,13 @@ impl Store {
             .unwrap_or(false))
     }
 
-    /// Retain a validated character action and assign the next world-local id
-    /// before forwarding it to the location GM. The caller supplies only an
-    /// already-resolved membership; this lookup determines its character and
-    /// GM, so neither can be selected by model or browser input.
-    pub async fn create_pending_action(
-        &self,
-        member: &PlayerAgent,
-        sequence_id: i64,
-        requesting_tool_execution_id: i64,
-        tool: &str,
-        args: &str,
-    ) -> Result<PendingAction> {
-        let mut transaction = self.pool.begin().await.with_context(|| {
-            format!(
-                "starting pending {tool} action for member {}",
-                member.member_id
-            )
-        })?;
-        let (character_id, gm_agent_id, gm_branch_id): (i64, i64, i64) = sqlx::query!(
-            "SELECT character.id, world_gm.agent_id, \"group\".branch_id \
+    /// The character a player may act as: their active membership's character,
+    /// checked now rather than trusted from when the page loaded.
+    pub async fn player_actor(&self, member: &PlayerAgent) -> Result<CharacterActor> {
+        sqlx::query_scalar!(
+            "SELECT player_character.character_id AS \"character_id!: i64\" \
              FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
-             JOIN character ON character.id = player_character.character_id \
-             JOIN character_group ON character_group.character_id = character.id \
-             JOIN \"group\" ON \"group\".id = character_group.group_id \
-             JOIN world_gm ON world_gm.world_id = \"group\".world_id \
              WHERE member.id = ? AND member.world_id = ? AND member.user_id = ? \
                AND member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ?",
             member.member_id,
@@ -3381,15 +3378,58 @@ impl Store {
             member.user_id,
             member.character_id,
             member.agent_id,
-        ).map(|row| (row.id, row.agent_id, row.branch_id,))
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("checking the player's active character")?
+        .map(|character_id| CharacterActor {
+            world_id: member.world_id,
+            character_id,
+        })
+        .with_context(|| {
+            format!(
+                "member {} has no active character {} in world {}",
+                member.member_id, member.character_id, member.world_id
+            )
+        })
+    }
+
+    /// Retain a validated character action and assign the next world-local id
+    /// before forwarding it to the location GM. The actor's group determines
+    /// the GM, so neither can be selected by model or browser input.
+    pub async fn create_pending_action(
+        &self,
+        actor: &CharacterActor,
+        sequence_id: i64,
+        requesting_tool_execution_id: i64,
+        tool: &str,
+        args: &str,
+    ) -> Result<PendingAction> {
+        let mut transaction = self.pool.begin().await.with_context(|| {
+            format!(
+                "starting pending {tool} action for character {}",
+                actor.character_id
+            )
+        })?;
+        let (character_id, gm_agent_id, gm_branch_id): (i64, i64, i64) = sqlx::query!(
+            "SELECT character.id, world_gm.agent_id, \"group\".branch_id \
+             FROM character \
+             JOIN character_group ON character_group.character_id = character.id \
+             JOIN \"group\" ON \"group\".id = character_group.group_id \
+             JOIN world_gm ON world_gm.world_id = \"group\".world_id \
+             WHERE character.id = ? AND character.world_id = ?",
+            actor.character_id,
+            actor.world_id,
+        )
+        .map(|row| (row.id, row.agent_id, row.branch_id))
         .fetch_optional(&mut *transaction)
         .await
         .context("resolving action character and group GM")?
-        .context("active membership has no playable character and group GM")?;
+        .context("the acting character has no group and GM")?;
         let sequence_matches: Option<i64> = sqlx::query_scalar!(
             "SELECT id FROM sequence WHERE id = ? AND world_id = ?",
             sequence_id,
-            member.world_id,
+            actor.world_id,
         )
         .fetch_optional(&mut *transaction)
         .await
@@ -3397,21 +3437,21 @@ impl Store {
         ensure!(
             sequence_matches.is_some(),
             "sequence {sequence_id} is not in world {}",
-            member.world_id
+            actor.world_id
         );
         let action_id: i64 = sqlx::query_scalar!(
             "UPDATE world SET next_action_id = next_action_id + 1 WHERE id = ? \
              RETURNING next_action_id",
-            member.world_id,
+            actor.world_id,
         )
         .fetch_one(&mut *transaction)
         .await
-        .with_context(|| format!("allocating action id in world {}", member.world_id))?;
+        .with_context(|| format!("allocating action id in world {}", actor.world_id))?;
         sqlx::query!(
             "INSERT INTO pending_action \
              (world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            member.world_id,
+            actor.world_id,
             action_id,
             sequence_id,
             requesting_tool_execution_id,
@@ -3429,7 +3469,7 @@ impl Store {
             .await
             .with_context(|| format!("committing pending {tool} action {action_id}"))?;
         Ok(PendingAction {
-            world_id: member.world_id,
+            world_id: actor.world_id,
             id: action_id,
             sequence_id,
             requesting_tool_execution_id,
@@ -7035,7 +7075,7 @@ mod tests {
         .await;
         let action = store
             .create_pending_action(
-                &installed.member,
+                &store.player_actor(&installed.member).await.unwrap(),
                 sequence.id,
                 requesting_tool_execution_id,
                 "look",
@@ -7140,7 +7180,7 @@ mod tests {
             .unwrap();
         let error = store
             .create_pending_action(
-                &installed.member,
+                &store.player_actor(&installed.member).await.unwrap(),
                 other_sequence.id,
                 requesting_tool_execution_id,
                 "look",
@@ -7191,7 +7231,7 @@ mod tests {
         .await;
         let action = store
             .create_pending_action(
-                &installed.member,
+                &store.player_actor(&installed.member).await.unwrap(),
                 sequence.id,
                 requesting,
                 "take",
@@ -7247,6 +7287,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn speech_naming_someone_no_longer_present_is_a_recorded_failure() {
+        for (tool, args) in [
+            ("say", r#"{"words":"Hi","to":"Nobody"}"#),
+            ("whisper", r#"{"words":"Hi","to":["Nobody"]}"#),
+        ] {
+            let db = database();
+            let store = Store::open(db.path()).await.unwrap();
+            let owner = store
+                .find_or_create_user("speaker@example.test", "Speaker")
+                .await
+                .unwrap();
+            let scenario = Scenario::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/scenarios/bread_thief.json"
+            ))
+            .unwrap();
+            let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+            let sequence = store
+                .begin_sequence(installed.world_id, "player message")
+                .await
+                .unwrap();
+            let branch = store.agent_branch(installed.member.agent_id).await.unwrap();
+            let requesting =
+                record_tool_call_for_test(&store, branch, Some(sequence.id), "call-1", tool, args)
+                    .await;
+            let action = store
+                .create_pending_action(
+                    &store.player_actor(&installed.member).await.unwrap(),
+                    sequence.id,
+                    requesting,
+                    tool,
+                    args,
+                )
+                .await
+                .unwrap();
+            let approving = record_tool_call_for_test(
+                &store,
+                store.history_branch(action.gm_branch_id).await.unwrap(),
+                Some(sequence.id),
+                "approve-1",
+                "approve_action",
+                "{}",
+            )
+            .await;
+
+            let resolved = store
+                .resolve_pending_action(
+                    action.gm_agent_id,
+                    installed.world_id,
+                    action.id,
+                    approving,
+                    "approved",
+                    &Audience::default(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                matches!(&resolved.outcome, ActionOutcome::Failed(reason) if reason.contains("Nobody")),
+                "{tool}: {resolved:?}"
+            );
+            let spoken: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM speech")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+            assert_eq!(spoken, 0, "{tool}: a failed utterance reaches nobody");
+        }
+    }
+
+    #[tokio::test]
     async fn approved_take_transfers_one_available_item_exactly_once() {
         let db = database();
         let store = Store::open(db.path()).await.unwrap();
@@ -7275,7 +7385,7 @@ mod tests {
         .await;
         let action = store
             .create_pending_action(
-                &installed.member,
+                &store.player_actor(&installed.member).await.unwrap(),
                 sequence.id,
                 requesting_tool_execution_id,
                 "take",
@@ -7399,7 +7509,7 @@ mod tests {
         .await;
         let action = store
             .create_pending_action(
-                &installed.member,
+                &store.player_actor(&installed.member).await.unwrap(),
                 sequence.id,
                 requesting_tool_execution_id,
                 "take",
