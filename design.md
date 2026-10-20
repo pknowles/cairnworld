@@ -815,6 +815,15 @@ related pending records. Cleanup is idempotent and must leave valid tool-call
 history for the next human turn. No automatic model calls, narration replay or
 continuation of interrupted agent stacks occur at startup.
 
+Failures follow the same rule: an error is the result of the thing being
+computed, recorded in its place in history (a tool call's result, a failed
+inference entry), never an extra entry beside other items. A system failure fails
+the turn and every agent's history records it; the GM's approval result reports
+the approved action's outcome as context while the caller keeps its own result,
+or the error. Players see a failed sequence's `sequence.error` at its trigger
+message (their own, or one on their current group's GM branch) without
+Developer Mode.
+
 This shared lifecycle applies to player, GM and NPC execution. The
 [server shutdown plan](plans/server-shutdown.md) specifies admission, drain order,
 crash cleanup and verification. It replaces full arbitrary crash continuation.

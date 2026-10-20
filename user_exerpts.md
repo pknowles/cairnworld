@@ -578,3 +578,15 @@ On where errors live:
 > history, it has already happened and thus no error. If a tool call happens
 > that needs a result, we should always have a result or an error recorded in
 > the chat history that is agent visible anyway.
+
+Decision (2026-10-20): the assistant proposed storing player-visible system errors
+either by deriving them from `sequence.error` and the trigger message
+(`message.trigger_sequence_id`) or in a new error table. The user had first said
+"I think we do need an error table for these cases... the actual error would be
+tied to the system 'instruction' prompt. However without developer mode we should
+still display system errors to players", then, shown that every sequence already
+has such a trigger and error:
+
+> 1 sounds good. lets record this discussion and decision in the plan too
+
+Selected: derive from existing records, no table. See plans/server-shutdown.md.

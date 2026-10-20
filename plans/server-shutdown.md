@@ -91,6 +91,42 @@ or delivered as though the turn completed. The next human input starts a new
 turn using committed world state and valid history. This is failure handling,
 not automatic continuation of the old turn.
 
+## Failure results and player-visible system errors
+
+Authority: [failure results decision](../user_exerpts.md#2026-10-20-failure-results-in-history).
+An error is the result of the thing being computed, recorded where that result
+would have gone, never an extra entry beside other items:
+
+- A tool call always has a result in its agent's history: its real output, a
+  rejection, or on a system failure ("Tool failed: ...") the error. Rejections
+  and results the agent can act on stay agent-only and the loop continues. A
+  system failure fails the whole turn, and every agent on the stack records it.
+- A failed inference or compaction is its own history entry with the error in
+  place of an output.
+- The GM's approval result is a side-channel report of the approved action's
+  outcome (success, failure or error) as context for later resolution. The
+  calling tool still primarily receives its own result; if the approved action
+  errored, the caller receives that error in place of its result and continues.
+  Only genuine system failures abort the turn.
+
+Players see system errors without Developer Mode. Alternatives for where they
+are stored: (1) derive from existing records: every sequence has a trigger item
+(`message.trigger_sequence_id`: the player's message or the game instruction on
+the group GM branch) and `sequence.error` holds the system error; (2) a new
+error table linked to the trigger item. Selected: (1). It needs no schema, one
+rule covers player turns, presence narration, budget exhaustion, setup failures
+and crashes, and the error stays tied to the instruction that started the work.
+Player chat shows a failed sequence's error as an error entry at its trigger
+message when that message is in the player's own branch or in the branch of a
+group they are currently in. History entry ids share one id space across
+branches, so the trigger's id orders the error and serves as the reload cursor.
+Revisit (2) only if a sequence needs several structured errors; Developer Mode
+already reads per-call detail from the failed call's own result.
+
+Implemented: closing every unanswered call in history (failure and startup).
+Pending: the GM approval report and caller error; refusing budget as a failed
+inference entry; the player-chat error entry.
+
 ## Implementation and verification
 
 Implement one complete lifecycle/failure-handling slice before NPC interaction;
