@@ -784,12 +784,22 @@ unexecuted. A delivery failure after commit belongs to the enclosing invocation
 and sequence; it does not undo or rerun the action. Failure to persist finalization
 is reported with the original failure, with interruption recovery on restart.
 
-An invocation wrapper finishes its own outcome on every exit, including schema
-rejection, execution error and safety-budget exhaustion. Process recovery marks
-open sequences, invocations, inferences and tools interrupted; it never invents
-completed game effects. Durable pending work retains its original source and
-can be resumed explicitly. Do not rerun a completed state mutation to reconstruct
-its result. Total tokens/summed inference time aggregate distinct inference IDs;
+An invocation wrapper finishes its own outcome on every ordinary exit, including
+schema rejection, execution error and safety-budget exhaustion. A process restart
+records the interrupted inference attempt but retains its enclosing turn as
+unfinished work. Before accepting later work in that world, continue from its
+first unresolved operation, preserving original tool IDs, batch order and nested
+parent/child relationships. Completed model output is reused; completed actions
+and messages are retained. If an action committed before its tool receipt or
+delivery, obtain the original result from that action and finish the missing
+receipt/delivery without repeating its effects. Finish a child invocation before
+continuing its parent. Generate again only where no completed inference output
+exists; preserve interrupted attempts in inspection. Actual execution errors
+remain failures, distinct from a process interruption. Persist inference charges
+and turn limits before work is admitted so restarting grants no new budget.
+This is shared agent execution behavior, including player, GM and NPC turns,
+not an NPC-specific policy. See [continuing interrupted turns](plans/interrupted-turns.md).
+Total tokens/summed inference time aggregate distinct inference IDs;
 sequence wall time uses its own start/finish. Pending compaction is shown as
 caused deferred work rather than extending the foreground reply's wall time.
 
@@ -1279,12 +1289,12 @@ notification mechanism. Do not enqueue work into the worker's own bounded
 channel. Foreground events take priority between finite NPC steps.
 The causal discussion shares the existing inference/tool budget across follow-ups;
 exhaustion is a visible failure, not a fresh budget or a silent dropped response.
-Checkpoint the existing budget counter and limits when the original sequence
-and each finite follow-up step finish. On restart, unstarted work can resume;
-an interrupted running step fails its discussion visibly and is never replayed,
-including when some of its effects already committed. Recorded completed steps
-are not regenerated and speech is not delivered twice. This does not attempt to
-serialize or resume an arbitrary half-run agent loop.
+Use shared durable inference accounting and continuation from the first
+unresolved operation after restart. This applies inside a finite NPC step as
+well as between steps; interruption does not fail the discussion. Recorded
+completed decisions, actions and speech are reused, and interrupted child calls
+finish before their parent continues. Persist concrete operation progress;
+do not serialize Rust futures or restart a turn from its beginning.
 
 | Approach | Benefit | Cost / decision |
 | --- | --- | --- |

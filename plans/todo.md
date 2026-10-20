@@ -6,6 +6,9 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
+- [Continuing interrupted turns](interrupted-turns.md): shared player/GM agent
+  continuation after restart, completed-action retention, unfinished delivery
+  and durable inference accounting; required before NPC execution.
 - [NPC interaction](npc-interaction.md): shared Say/Whisper delivery, eagerness
   selection, queued NPC responses, Interrupt/Never mind and GM-selected
   intervention before action resolution.

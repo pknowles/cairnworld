@@ -1,6 +1,7 @@
 # NPC speech, response selection and player interruption
 
-Implementation pending. This is the next feature, ahead of the coding-agent
+Implementation pending. Depends on [continuing interrupted turns](interrupted-turns.md),
+then precedes the coding-agent
 interface; it is not a claim that combat or InterventionCheck already exists.
 
 ## Outcome and authority
@@ -99,10 +100,10 @@ use-case/edge-case/validation review and obtain the user's review.
   Other players may still submit
   legal input. Never mind needs no model/tool call and changes no game-turn flags.
   Resume revalidates proposals against current state instead of playing old replies.
-- Restart restores durable response progress and causal budget accounting without
-  duplicating speech or completed actions. Discard disconnected pause ownership,
-  expose interrupted inference failures through the existing failure path, and
-  do not silently retry a failed model decision.
+- Restart continues from the current unresolved operation using the shared turn
+  continuation path, retaining speech, completed actions and budget charges.
+  Discard disconnected pause ownership. Distinguish interrupted inference
+  attempts from actual model errors; actual errors remain visible failures.
 
 ### Tentative actions and GM-selected intervention
 
@@ -133,7 +134,7 @@ policy and automatic denial remain the user's playtesting decisions.
 | NPC decision protocol | Reuse the full agent loop: familiar, but permits extra tool batches and adds settling calls. Free text plus parsing: fewer schemas, unreliable control. One constrained terminal decision: one call per NPC, explicit failure on malformed output. | One recorded inference returning exactly one DoNothing/propose_action call; no second tool executor or text parser. |
 | Simultaneous speech | Sequential ordinary approvals can publish half a batch. Infer approval from NPC intent bypasses the GM. One GM batch-resolution tool admits all winners before a single transaction. | resolve_speech_batch for NPC speech; ordinary player Say and this tool share the same speech commit helper. |
 | Pause handling | Queue the control behind NPC work: cannot interrupt promptly. Cancel arbitrary futures: risks half-completed tools. Direct live control with boundary acknowledgement: permits typing while retaining committed work, but acknowledgement can wait for an active action. | Direct pause holds and a watched worker activity value; never cancel a running action. |
-| Budgets and recovery | Memory-only counters reset after restart. Charge every inference through new global SQL budget plumbing: strongest accounting but broadens every agent path. Checkpoint the existing Budget after finite steps and fail interrupted steps: smaller, but deliberately cannot resume a half-run agent loop. | Checkpointed discussion budget; resume only unstarted steps, fail an interrupted step visibly without replaying its actions. |
+| Budgets and restart | Memory-only counters grant a fresh budget after restart. Finite-step checkpoints with failure on interruption stop mid-turn. Shared durable accounting and continuation require changes to ordinary agent execution but preserve unfinished turns. | Implement shared turn continuation first; NPC steps use it and keep the same causal budget across follow-ups. |
 | Shared actions | Fake PlayerAgent for NPCs breaks ownership. A parallel NPC executor duplicates rules. A private resolved character actor plus existing action execution shares rules without giving browser callers NPC authority. | Resolved character actor; player authorization remains at the browser boundary. |
 
 ## Data model and invariants
@@ -149,7 +150,7 @@ work transcript; decode them from the referenced immutable tool output.
 | speech_batch | id primary key; world_id, group_id, sequence_id foreign keys. A batch contains one or more actual utterances. Simultaneity is derived from multiple utterances in that batch, not a second independent flag. |
 | speech | action_id primary key/FK action; batch_id FK; speaker_character_id FK; speaker_name snapshot, NOT NULL. The approved action's result_content_id is the one Text body containing the exact words. Frozen speaker_name keeps old requests reconstructable after renaming. |
 | speech_message | message_id primary key/FK message; speech_action_id FK speech. A message remains an ordinary conversation entry with shared content; this link identifies speech without rebuilding message's existing origin CHECK or treating speech as an answered tool call. |
-| npc_discussion | root_sequence_id primary key/FK sequence; limits JSON snapshot; spent_total nonnegative integer; state waiting_root, ready, settled or failed; failure_sequence_id nullable FK, present only for failure. Owns the shared budget checkpoint. |
+| npc_discussion | root_sequence_id primary key/FK sequence; state waiting_root, ready, settled or failed; failure_sequence_id nullable FK, present only for actual failure. References the originating turn's shared durable budget; does not maintain a second counter or limits snapshot. |
 | npc_round | id primary key; root_sequence_id FK discussion; group_id FK; scene_revision; mode speech or intervention; state collecting, selected, executing, settled, superseded or failed; original_request_tool_execution_id FK only for intervention. A partial unique index permits at most one collecting/selected speech round per group. An executing round may create that next round, which cannot run until its source sequence succeeds. |
 | npc_round_source | round_id and source_tool_execution_id FKs, composite primary key. Speech sources resolve committed Say/Whisper actions; intervention sources identify the exact InterventionCheck execution. Multiple tied utterances may trigger one round. |
 | npc_candidate | round_id and character_id form primary key; decision_invocation_id nullable UNIQUE FK until started; decision_tool_execution_id nullable UNIQUE FK until a valid decision completes; execution_sequence_id nullable FK until selected work starts. A simultaneous cohort shares one execution sequence. State is waiting, running, ready, selected, executing, done, superseded or failed. These references represent lifecycle stages, with CHECKs matching the state. Eagerness/action values remain in the original decision output. |
@@ -217,10 +218,11 @@ tool call is required. Free text, unknown tools, multiple calls or invalid
 arguments finish the recorded invocation with a visible protocol error. Reuse
 context::complete_recorded, existing inference completion and tool-execution
 recording; do not add another backend/recording implementation or automatic
-correction loop. Complete a valid decision's result and candidate checkpoint in
+correction loop. Complete a valid decision's result and candidate state in
 one transaction, after the normal inference-output recording has completed.
-A crash between those writes is an interrupted step, not permission to infer
-again. Completing the proposal means "intent recorded", not "action
+A crash between those writes continues by using the completed inference output
+to finish recording its decision; it does not generate a new proposal.
+Completing the proposal means "intent recorded", not "action
 performed". The normal capacity-compaction path and original model output remain
 available for inspection.
 
@@ -246,9 +248,9 @@ Store/Game operations, rather than a generic scheduling interface:
 | --- | --- |
 | Resolve character actor | Produce an authorized player or selected-NPC actor proof; existing shared action submission rechecks mutable ownership and group state. |
 | Commit speech batch | Validate all admissions, create canonical utterances and recipient links, advance revision and record response opportunities atomically. |
-| Claim/finish NPC decision | Persist invocation ownership before inference; finish the decision, candidate state, sequence and budget checkpoint afterward. |
+| Claim/finish NPC decision | Persist invocation ownership before inference; finish the decision, candidate state and sequence afterward. Inference admission uses the prerequisite's durable budget charge. |
 | Select NPC round | Validate revision and persist winners, including the random tie result, without executing them. |
-| Claim/finish NPC execution | Persist the new execution sequence and selection ownership; afterward finish the sequence, round outcome and budget together. |
+| Claim/finish NPC execution | Persist the new execution sequence and selection ownership; afterward finish the sequence and round outcome together. Use shared durable budget accounting throughout execution. |
 | Advance NPC round | Game runs one of those finite steps and returns to the existing world loop. |
 | Request/release NPC pause | World changes live holds and publishes authenticated control state; no database transaction spans acknowledgement waiting. |
 
@@ -266,9 +268,9 @@ Wait on channel/Notify/deadline when no work is eligible, with no timer polling.
 | --- | --- |
 | Speech commits | Record sources and NPC hearer roster; upsert the group's waiting round. It is ineligible until its source foreground sequence has finished successfully. Do not schedule the speaker for self-only speech. |
 | New heard input while a round is collecting/selected | Supersede its unexecuted proposals and create a round at the current revision, carrying unconsumed heard source references. A new human root owns the new budget; NPC-only follow-ups keep the same discussion root. Never merge budgets by taking a larger allowance. |
-| Collect one waiting candidate | Start a fresh causally linked sequence and claim running plus its decision invocation in a transaction. Run one inference outside transactions, then atomically complete the decision/candidate, sequence and budget checkpoint. Return to the worker boundary. Intervention collection instead uses child invocations inside its existing foreground sequence. |
+| Collect one waiting candidate | Start a fresh causally linked sequence and claim running plus its decision invocation in a transaction. Admit and charge one inference through shared accounting, run it outside transactions, then atomically complete the decision/candidate and sequence. Return to the worker boundary. Intervention collection instead uses child invocations inside its existing foreground sequence. |
 | All decisions ready | Validate group/revision, persist the highest selection and recorded random tie result. Mark DoNothing candidates done and losing proposals superseded. All-DoNothing settles without another job. Speech-only highest ties select the whole cohort; mixed/non-speech ties select one. |
-| Execute selected work | First admit live activity under the pause mutex as described below, then claim its fresh sequence and executing state in SQL, rechecking scene and ownership. A speech cohort uses one batch resolution; a Take uses the shared ordinary executor. Finish sequence/checkpoint/outcome before selecting more work. |
+| Execute selected work | First admit live activity under the pause mutex as described below, then claim its fresh sequence and executing state in SQL, rechecking scene and ownership. A speech cohort uses one batch resolution; a Take uses the shared ordinary executor. Finish sequence and outcome before selecting more work. |
 | Revision/group changed before execution | Mark superseded, not failed. Start a fresh round only for still-relevant unconsumed heard input/selected intervention intent in that group; departed actors keep heard history but do not act in their former group. |
 | Selected action rejected | Preserve its recorded rejection; do not try the losing candidates as fallbacks. A new actual event may create a new round. |
 | Inference/action failure or budget exhaustion | Preserve original error and committed effects, fail that discussion and its remaining rounds, and notify its actual participant PCs through the existing authorized failure path. Unrelated groups remain usable. |
@@ -279,17 +281,16 @@ invalidate it. A simultaneous cohort finishes all admission decisions before
 any of its words commit. Already completed effects are never rolled back because
 a later model completion or notification fails.
 
-Budget gains checkpoint/restore operations over its existing Limits and spent
-counter; spending rules remain one implementation. At the initiating foreground
-sequence's completion, persist its final counter and make its rounds eligible
-in the same transaction. Each later finite step restores that checkpoint, shares
-the Budget through all nested calls, and checkpoints it at step completion. A
-new sequence ID alone never creates a new budget. On failure save the spent count
-and fail the discussion. On restart an executing/running step is interrupted and
-fails its discussion, even if some action already committed; never replay that
-agent loop. Collecting rounds with only waiting/ready candidates and selected
-but unclaimed work can resume. Thus recovery never refunds an interrupted step
-into an active discussion, and needs no new global per-inference SQL counter.
+Use the shared durable budget and operation continuation implemented by the
+prerequisite. Make rounds eligible atomically with their source sequence's
+completion. Each later sequence and nested invocation uses the same causal
+budget; a new sequence ID never grants another allowance. Running decisions
+and actions continue from their first unresolved operation after restart,
+including missing result delivery after an effect committed. Reuse completed
+inference output and proposal selection. Do not rerun completed mutations or
+random selection, fail a discussion merely because the process stopped, or add
+a parallel NPC-only continuation mechanism. Actual errors and budget exhaustion
+still fail visibly with their original evidence.
 Settle a discussion when its root has finished and no active rounds remain.
 Superseding a collecting round and inserting its replacement happen in one
 transaction; carry source references and derive the new eligible hearer roster
@@ -365,7 +366,7 @@ intervention selections; they do not queue duplicate reactions.
 | Slice | Production change and finish line |
 | --- | --- |
 | Shared speech | First migration, private actor proof, Say/Whisper audience admission, canonical speech commit and the one reader used by live/reload/context/inspection. Exercise two PCs, privacy and speaker rename; existing non-speech actions still use their original path through the shared boundary. No unused NPC constructors. |
-| NPC speech rounds | Second migration, terminal Say/Whisper decisions, selection, GM batch resolution, finite worker steps, causal inspection links and checkpoint/recovery. These form one coherent slice: do not commit unused round tables or a dispatcher unable to execute its declared actions. Verify multiple NPCs, tied speech, natural stopping, stale rounds, budget exhaustion and restart before marking the slice complete. |
+| NPC speech rounds | Second migration, terminal Say/Whisper decisions, selection, GM batch resolution, finite worker steps, causal inspection links and integration with shared turn continuation/accounting. These form one coherent slice: do not commit unused round tables or a dispatcher unable to execute its declared actions. Verify multiple NPCs, tied speech, natural stopping, stale rounds, budget exhaustion and mid-action restart before marking the slice complete. |
 | Player control | Add watched activity/holds, Interrupt/Never mind, ordered Send release and multi-tab control state. Test real inference-in-progress and action-in-progress barriers, other groups, disconnect and access revocation. No future combat state is fabricated. |
 | Tentative-action intervention | Add InterventionCheck, shared NPC Take execution, non-speech tie selection and original-action/follow-up handoff. Verify rejection-before-discussion, approval invalidating old intent, wrong-world/source rejection and completed-action retention after failure. |
 
