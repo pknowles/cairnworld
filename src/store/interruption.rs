@@ -309,80 +309,10 @@ impl Store {
 mod tests {
     use super::*;
     use crate::{
-        llm::{Content, Response, Role, Sampling, ToolCall, Usage},
+        llm::{Role, Sampling},
         scenario::Scenario,
-        store::{AgentBranch, CompactionPolicy, InferenceInput, InferenceOutcome, TestDatabase},
+        store::{AgentBranch, TestDatabase, record_tool_batch_for_test as tool_batch},
     };
-
-    /// A model turn that returned `names` as one tool batch: its assistant
-    /// message is stored and the execution rows exist unfinished, exactly the
-    /// state the agent loop leaves while the batch runs.
-    async fn tool_batch(
-        store: &Store,
-        branch: AgentBranch,
-        sequence_id: i64,
-        names: &[&str],
-    ) -> (i64, Vec<i64>) {
-        let sampling = Sampling {
-            temperature: 0.0,
-            ..Default::default()
-        };
-        let invocation_id = store
-            .start_invocation(Some(sequence_id), branch, None, None)
-            .await
-            .unwrap();
-        let inference_id = store
-            .start_inference(InferenceInput {
-                agent_id: branch.agent_id(),
-                sequence_id: Some(sequence_id),
-                invocation_id,
-                segments: &[],
-                request: &crate::llm::Request {
-                    messages: vec![],
-                    tools: vec![],
-                    sampling: sampling.clone(),
-                },
-                model: "scripted",
-            })
-            .await
-            .unwrap();
-        let calls = names
-            .iter()
-            .map(|name| ToolCall {
-                id: format!("call-{name}"),
-                name: name.to_string(),
-                arguments: "{}".to_string(),
-            })
-            .collect();
-        store
-            .finish_chat_inference(
-                inference_id,
-                branch.agent_id(),
-                InferenceOutcome::Response(Response {
-                    content: Content::ToolCalls(calls),
-                    reasoning: String::new(),
-                    usage: Usage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                    },
-                }),
-                0,
-                CompactionPolicy {
-                    sequence_id: Some(sequence_id),
-                    compact_before_next_input_tokens: usize::MAX,
-                    sampling: &sampling,
-                    model: "scripted",
-                    static_segments: &[],
-                },
-            )
-            .await
-            .unwrap();
-        let executions = store
-            .create_tool_executions(inference_id, names.len())
-            .await
-            .unwrap();
-        (inference_id, executions)
-    }
 
     /// Every tool call the agent's next inference would be shown, with the
     /// text of its result if it has one.

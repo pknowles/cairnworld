@@ -4754,6 +4754,61 @@ mod tests {
         );
     }
 
+    /// A turn interrupted after its roll committed: after restart cleanup the
+    /// next real chat turn must accept the closed tool history and the model
+    /// must be able to use the recorded outcome it is shown.
+    #[tokio::test]
+    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
+    async fn real_model_chats_normally_after_an_interrupted_roll() {
+        let (backend, model_path, configured, _limits) = device_test_game().await;
+        let sampling = Sampling {
+            temperature: 0.0,
+            ..configured
+        };
+        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
+        let sequence = store
+            .begin_sequence(member.world_id, "interrupted turn")
+            .await
+            .unwrap();
+        store
+            .append_message_with_sequence(
+                member.agent_id,
+                &Message::text(Role::User, "Roll my Hit Protection."),
+                sequence.id,
+            )
+            .await
+            .unwrap();
+        let branch = store.agent_branch(member.agent_id).await.unwrap();
+        let (_, executions) = crate::store::record_tool_batch_for_test(
+            &store,
+            branch,
+            sequence.id,
+            &["roll_hit_protection"],
+        )
+        .await;
+        store.begin_tool_execution(executions[0]).await.unwrap();
+        let hp = store
+            .roll_hit_protection(&member, sequence.id, Some(executions[0]))
+            .await
+            .unwrap();
+        store.close_interrupted_turns().await.unwrap();
+
+        let response = game
+            .player_message(
+                member.clone(),
+                "What did my Hit Protection roll come to? Reply with the number only.",
+            )
+            .await
+            .expect("the closed tool history must be accepted by the real model");
+        let Content::Text(reply) = response.content else {
+            panic!("the player agent did not settle: {response:?}");
+        };
+        assert!(
+            reply.contains(&hp.to_string()),
+            "the model should report the recorded roll {hp}: {reply}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_compacts_a_long_chat_and_keeps_an_early_fact() {

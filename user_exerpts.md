@@ -542,3 +542,39 @@ unanswered tool history without automatic replay. The user accepted:
 
 This decision replaces automatic continuation of a crashed agent call stack.
 Durable work already between safe steps may still resume after restart.
+
+### 2026-10-20 Failure results in history
+
+While reviewing crash cleanup the user stated how failures are recorded:
+
+> all failures get inserted authentically in the chat. better to have an agent
+> see an error than be confused. this follows our coding stanards
+
+> yes, players should see the error as this is not a game state failure but a
+> system failure
+
+On how a failed action should reach its caller (the assistant first misread this
+as the approval call itself failing; the user corrected it: the approval worked,
+and the GM is shown the result of the thing approved, whatever it was):
+
+> gm approved; the approval worked fine. the GM should always be shown results
+> of things they approve whether success/fail/error; then the caller should
+> receive the error instead of a result and can continue.
+
+> I said the GM sees the *result*, regardless of whether it's an error or a
+> regular result.
+
+For system failures:
+
+> yes, this should fail the whole turn and the player(s) should see the error.
+> no contiuing. agents must also see this in their chats too, otherwise we run
+> into the same issue of missing tool call results etc.
+
+On where errors live:
+
+> Errors should relate to items in the history so an error is always linked to
+> the thing that was happening at the exact time it happened. this should also
+> make displaying it straightforward. I.e. if a message is added to the chat
+> history, it has already happened and thus no error. If a tool call happens
+> that needs a result, we should always have a result or an error recorded in
+> the chat history that is agent visible anyway.

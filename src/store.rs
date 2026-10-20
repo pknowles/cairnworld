@@ -5775,6 +5775,77 @@ pub(crate) async fn record_tool_call_for_test(
 }
 
 #[cfg(test)]
+/// A model turn that returned `names` as one tool batch: its assistant
+/// message is stored and the execution rows exist unfinished, exactly the
+/// state the agent loop leaves while the batch runs.
+pub(crate) async fn record_tool_batch_for_test(
+    store: &Store,
+    branch: AgentBranch,
+    sequence_id: i64,
+    names: &[&str],
+) -> (i64, Vec<i64>) {
+    let sampling = Sampling {
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let invocation_id = store
+        .start_invocation(Some(sequence_id), branch, None, None)
+        .await
+        .unwrap();
+    let inference_id = store
+        .start_inference(InferenceInput {
+            agent_id: branch.agent_id(),
+            sequence_id: Some(sequence_id),
+            invocation_id,
+            segments: &[],
+            request: &crate::llm::Request {
+                messages: vec![],
+                tools: vec![],
+                sampling: sampling.clone(),
+            },
+            model: "scripted",
+        })
+        .await
+        .unwrap();
+    let calls = names
+        .iter()
+        .map(|name| ToolCall {
+            id: format!("call-{name}"),
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+        })
+        .collect();
+    store
+        .finish_chat_inference(
+            inference_id,
+            branch.agent_id(),
+            InferenceOutcome::Response(Response {
+                content: Content::ToolCalls(calls),
+                reasoning: String::new(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            }),
+            0,
+            CompactionPolicy {
+                sequence_id: Some(sequence_id),
+                compact_before_next_input_tokens: usize::MAX,
+                sampling: &sampling,
+                model: "scripted",
+                static_segments: &[],
+            },
+        )
+        .await
+        .unwrap();
+    let executions = store
+        .create_tool_executions(inference_id, names.len())
+        .await
+        .unwrap();
+    (inference_id, executions)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::{Content, ToolCall};
