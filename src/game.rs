@@ -265,12 +265,12 @@ where
         Ok(self.world(member.world_id)?.broadcasts.subscribe())
     }
 
-    pub async fn chat_failure(
+    pub async fn player_chat_error(
         &self,
         member: &PlayerAgent,
         sequence_id: i64,
-    ) -> Result<Option<String>> {
-        self.store.chat_failure(member, sequence_id).await
+    ) -> Result<Option<crate::store::PlayerChatEntry>> {
+        self.store.player_chat_error(member, sequence_id).await
     }
 
     /// Register one live connection for a character, returning its id for the
@@ -3502,6 +3502,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_turn_shows_its_system_error_to_that_player_only() {
+        let (backend, _) = ScriptedBackend::recording([]);
+        let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
+
+        game.player_message(first.clone(), "Describe the scene.")
+            .await
+            .expect_err("the backend has no response, so the turn fails");
+
+        let chat = store.player_chat(&first).await.unwrap();
+        let positions: Vec<_> = chat
+            .iter()
+            .map(|entry| (entry.role.clone(), entry.text.as_str()))
+            .collect();
+        let [
+            ..,
+            (Role::User, "Describe the scene."),
+            (Role::System, error),
+        ] = positions.as_slice()
+        else {
+            panic!("the error must follow the message that started the turn: {positions:?}");
+        };
+        assert!(error.contains("unexpected inference"), "{error}");
+        let error_entry = chat.last().unwrap();
+        assert!(
+            store
+                .player_chat_after(&first, Some(error_entry.id))
+                .await
+                .unwrap()
+                .is_empty(),
+            "a reader past the trigger message does not see the error again"
+        );
+        assert!(
+            !store
+                .player_chat(&second)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.role == Role::System),
+            "another player in the group must not see this player's failed turn"
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_does_not_start_presence_narration() {
         let (backend, started, release, requests) = DelayedBackend::new();
         let (game, _store, _db, first, second) = two_player_bread_thief_game(backend).await;
@@ -4030,16 +4073,17 @@ mod tests {
             panic!("failed delivery must not announce successful entries")
         };
         assert!(
-            game.chat_failure(&first, sequence_id)
+            game.player_chat_error(&first, sequence_id)
                 .await
                 .unwrap()
                 .unwrap()
+                .text
                 .contains("presence recipient failure")
         );
         let mut foreign = first.clone();
         foreign.world_id += 1;
         assert!(
-            game.chat_failure(&foreign, sequence_id)
+            game.player_chat_error(&foreign, sequence_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -4057,7 +4101,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            game.chat_failure(&viewer, sequence_id)
+            game.player_chat_error(&viewer, sequence_id)
                 .await
                 .unwrap()
                 .is_some()
@@ -4067,7 +4111,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            game.chat_failure(&viewer, sequence_id)
+            game.player_chat_error(&viewer, sequence_id)
                 .await
                 .unwrap()
                 .is_none(),

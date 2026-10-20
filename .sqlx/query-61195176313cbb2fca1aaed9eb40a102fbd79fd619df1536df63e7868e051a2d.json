@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT sequence.id AS \"sequence_id!: i64\", sequence.error AS \"error!\", MIN(history_entry.id) AS \"trigger_id!: i64\" FROM sequence JOIN message ON message.trigger_sequence_id = sequence.id JOIN history_entry ON history_entry.id = message.id JOIN world_member ON world_member.world_id = sequence.world_id JOIN player_character ON player_character.member_id = world_member.id LEFT JOIN character_group ON character_group.character_id = player_character.character_id LEFT JOIN \"group\" ON \"group\".id = character_group.group_id AND \"group\".retired_at IS NULL WHERE world_member.id = ? AND world_member.world_id = ? AND world_member.user_id = ? AND world_member.access = 'active' AND player_character.character_id = ? AND player_character.agent_id = ? AND sequence.error IS NOT NULL AND (? IS NULL OR sequence.id = ?) AND history_entry.id > ? AND (history_entry.branch_id = (SELECT branch_id FROM agent_history WHERE agent_id = player_character.agent_id) OR (history_entry.branch_id = \"group\".branch_id AND NOT EXISTS (SELECT 1 FROM message AS player_turn JOIN history_entry AS player_entry ON player_entry.id = player_turn.id JOIN agent_history ON agent_history.branch_id = player_entry.branch_id JOIN player_character AS turn_owner ON turn_owner.agent_id = agent_history.agent_id WHERE player_turn.trigger_sequence_id = sequence.id))) GROUP BY sequence.id ORDER BY MIN(history_entry.id)",
+  "describe": {
+    "columns": [
+      {
+        "name": "sequence_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "error!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "trigger_id!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "61195176313cbb2fca1aaed9eb40a102fbd79fd619df1536df63e7868e051a2d"
+}

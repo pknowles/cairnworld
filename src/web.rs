@@ -1255,7 +1255,7 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
             }
             narration = broadcasts.recv() => match narration {
                 Ok(change) => {
-                    send_chat_failure(socket, game, member, change).await?;
+                    send_chat_failure(socket, game, member, change, cursor).await?;
                     cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1324,7 +1324,7 @@ async fn send_ready_broadcasts<B: Backend + Send + Sync + 'static>(
     loop {
         match broadcasts.try_recv() {
             Ok(change) => {
-                send_chat_failure(socket, game, member, change).await?;
+                send_chat_failure(socket, game, member, change, cursor).await?;
             }
             Err(
                 tokio::sync::broadcast::error::TryRecvError::Empty
@@ -1344,16 +1344,27 @@ async fn send_ready_broadcasts<B: Backend + Send + Sync + 'static>(
     Ok(cursor)
 }
 
+/// Show a failed sequence's stored error entry. One whose trigger is newer than
+/// `cursor` is left for the caller's `send_new_entries`; sending it here too
+/// would show it twice.
 async fn send_chat_failure<B: Backend + Send + Sync + 'static>(
     socket: &mut WebSocket,
     game: &Arc<Game<B>>,
     member: &PlayerAgent,
     change: crate::world::ChatChange,
+    cursor: Option<i64>,
 ) -> Result<()> {
     if let crate::world::ChatChange::Failed { sequence_id } = change
-        && let Some(message) = game.chat_failure(member, sequence_id).await?
+        && let Some(entry) = game.player_chat_error(member, sequence_id).await?
+        && entry.id <= cursor.unwrap_or_default()
     {
-        send_event(socket, &ServerEvent::Error { message }).await?;
+        send_event(
+            socket,
+            &ServerEvent::Error {
+                message: entry.text,
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1561,8 +1572,9 @@ fn player_chat_entries(history: Vec<PlayerChatEntry>) -> Vec<ChatEntry> {
                 crate::llm::Role::User => ChatRole::User,
                 crate::llm::Role::Assistant => ChatRole::Assistant,
                 crate::llm::Role::Narration => ChatRole::Narration,
-                crate::llm::Role::System | crate::llm::Role::Tool => {
-                    unreachable!("player chat entries are user, assistant, or narration")
+                crate::llm::Role::System => ChatRole::Notice,
+                crate::llm::Role::Tool => {
+                    unreachable!("player chat entries are messages or system errors")
                 }
             },
             text: entry.text,

@@ -157,7 +157,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   idempotent transaction: a begun call reports the outcome its `action` row
   proves (e.g. a roll), else "effects may already have been applied"; unbegun
   calls are "Not executed"; pending actions are rejected, as `finish_sequence`
-  with an error also does.
+  with an error also does. Players see a failed sequence's `sequence.error` as a
+  `Role::System` entry in `Store::player_chat_after` (a notice in the browser),
+  ordered at the sequence's trigger message in their own or current group's GM
+  history; the live path (`send_chat_failure`) sends it only when the reload
+  cursor has already passed that trigger.
 - `src/inference.rs` - admits foreground work ahead of deferred compaction,
   capped by `max_concurrent_inferences`; mistral.rs batches admitted sequences.
   At execution-host startup it marks unfinished inferences interrupted, without

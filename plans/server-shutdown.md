@@ -106,9 +106,11 @@ trigger message, in the player's own branch or a current group's GM branch;
 history entry ids share one id space, so the trigger id orders the error and is
 the reload cursor. Revisit (2) only if a sequence needs several structured errors.
 
-Done: closing every unanswered call in history, on failure and at startup.
-Pending: the GM approval report and caller error; a refused budget as a failed
-inference entry; the player-chat error entry.
+Done: closing every unanswered call in history, on failure and at startup; the
+player-chat error entry (`Store::player_chat_error`, `Role::System` entries in
+`player_chat_after`). Pending: the GM approval report and caller error. Proposed,
+not yet agreed: record a refused budget as a failed inference entry. A sequence
+with no stored trigger message has no place to show an error beyond Developer Mode.
 
 ## Implementation and verification
 

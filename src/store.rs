@@ -307,6 +307,7 @@ struct PlayerChatRow {
 
 /// A text entry safe to render in the player-facing chat. Tool calls and tool
 /// results remain in the stored agent history but never cross this boundary.
+/// `Role::System` is a system error, not a message.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerChatEntry {
     pub id: i64,
@@ -2648,29 +2649,75 @@ impl Store {
             .transpose()
     }
 
-    pub async fn chat_failure(
+    /// The player-visible system errors of failed sequences, each placed at
+    /// its sequence's trigger message (design.md's Server shutdown and
+    /// crashes): a message in the player's own history, or - for work no player
+    /// started, such as presence narration - one on their current group's GM
+    /// history. `Role::System` marks an error entry. Nothing is returned for a
+    /// member without active access.
+    async fn player_chat_errors(
+        &self,
+        member: &PlayerAgent,
+        after_message_id: i64,
+        only_sequence_id: Option<i64>,
+    ) -> Result<Vec<PlayerChatEntry>> {
+        let rows = sqlx::query!(
+            "SELECT sequence.id AS \"sequence_id!: i64\", sequence.error AS \"error!\", \
+                    MIN(history_entry.id) AS \"trigger_id!: i64\" \
+             FROM sequence \
+             JOIN message ON message.trigger_sequence_id = sequence.id \
+             JOIN history_entry ON history_entry.id = message.id \
+             JOIN world_member ON world_member.world_id = sequence.world_id \
+             JOIN player_character ON player_character.member_id = world_member.id \
+             LEFT JOIN character_group ON character_group.character_id = player_character.character_id \
+             LEFT JOIN \"group\" ON \"group\".id = character_group.group_id AND \"group\".retired_at IS NULL \
+             WHERE world_member.id = ? AND world_member.world_id = ? AND world_member.user_id = ? \
+               AND world_member.access = 'active' \
+               AND player_character.character_id = ? AND player_character.agent_id = ? \
+               AND sequence.error IS NOT NULL AND (? IS NULL OR sequence.id = ?) \
+               AND history_entry.id > ? \
+               AND (history_entry.branch_id = (SELECT branch_id FROM agent_history WHERE agent_id = player_character.agent_id) \
+                    OR (history_entry.branch_id = \"group\".branch_id \
+                        AND NOT EXISTS (SELECT 1 FROM message AS player_turn \
+                            JOIN history_entry AS player_entry ON player_entry.id = player_turn.id \
+                            JOIN agent_history ON agent_history.branch_id = player_entry.branch_id \
+                            JOIN player_character AS turn_owner ON turn_owner.agent_id = agent_history.agent_id \
+                            WHERE player_turn.trigger_sequence_id = sequence.id))) \
+             GROUP BY sequence.id ORDER BY MIN(history_entry.id)",
+            member.member_id,
+            member.world_id,
+            member.user_id,
+            member.character_id,
+            member.agent_id,
+            only_sequence_id,
+            only_sequence_id,
+            after_message_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("loading player-visible system errors")?;
+        Ok(rows
+            .into_iter()
+            .map(|row| PlayerChatEntry {
+                id: row.trigger_id,
+                role: Role::System,
+                text: row.error,
+                sequence_id: Some(row.sequence_id),
+            })
+            .collect())
+    }
+
+    /// The system error entry of one failed sequence, if this player may see it.
+    pub async fn player_chat_error(
         &self,
         member: &PlayerAgent,
         sequence_id: i64,
-    ) -> Result<Option<String>> {
-        sqlx::query_scalar!(
-            "SELECT sequence.error AS \"error!\" FROM sequence \
-             JOIN world_member ON world_member.world_id = sequence.world_id \
-             JOIN player_character ON player_character.member_id = world_member.id \
-             JOIN character_group ON character_group.character_id = player_character.character_id \
-             JOIN \"group\" ON \"group\".id = character_group.group_id \
-             WHERE sequence.id = ? AND sequence.world_id = ? AND sequence.error IS NOT NULL \
-             AND world_member.user_id = ? AND world_member.access = 'active' \
-             AND player_character.agent_id = ? AND player_character.character_id = ? \
-             AND EXISTS (SELECT 1 FROM invocation WHERE invocation.sequence_id = sequence.id \
-                         AND (invocation.agent_id = player_character.agent_id OR invocation.branch_id = \"group\".branch_id))",
-            sequence_id,
-            member.world_id,
-            member.user_id,
-            member.agent_id,
-            member.character_id,
-        )
-            .fetch_optional(&self.pool).await.context("authorizing recorded chat failure")
+    ) -> Result<Option<PlayerChatEntry>> {
+        Ok(self
+            .player_chat_errors(member, 0, Some(sequence_id))
+            .await?
+            .into_iter()
+            .next())
     }
 
     /// Claim once before inference. An error must not turn an overdue row into
@@ -2847,6 +2894,13 @@ impl Store {
                 });
             }
         }
+        entries.extend(
+            self.player_chat_errors(member, after_message_id, None)
+                .await?,
+        );
+        // Ids share one space across histories, so they order the error among
+        // the player's own entries; an error follows its trigger message.
+        entries.sort_by_key(|entry| (entry.id, entry.role == Role::System));
         Ok(entries)
     }
 
