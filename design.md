@@ -32,7 +32,8 @@ Layers, each depending only on those above it:
 The database is the single source of truth. Agents hold no in-memory chat
 state between inferences; each inference reads the (small) context it needs
 from the store. This makes NPC "paging" a non-problem - inactive agents simply
-occupy no memory - and means a crash or restart loses nothing.
+occupy no memory. Committed history and world effects survive restart; active
+turns finish during graceful shutdown, while a crash can interrupt a turn.
 
 # Inference layer
 
@@ -785,23 +786,38 @@ and sequence; it does not undo or rerun the action. Failure to persist finalizat
 is reported with the original failure, with interruption recovery on restart.
 
 An invocation wrapper finishes its own outcome on every ordinary exit, including
-schema rejection, execution error and safety-budget exhaustion. A process restart
-records the interrupted inference attempt but retains its enclosing turn as
-unfinished work. Before accepting later work in that world, continue from its
-first unresolved operation, preserving original tool IDs, batch order and nested
-parent/child relationships. Completed model output is reused; completed actions
-and messages are retained. If an action committed before its tool receipt or
-delivery, obtain the original result from that action and finish the missing
-receipt/delivery without repeating its effects. Finish a child invocation before
-continuing its parent. Generate again only where no completed inference output
-exists; preserve interrupted attempts in inspection. Actual execution errors
-remain failures, distinct from a process interruption. Persist inference charges
-and turn limits before work is admitted so restarting grants no new budget.
-This is shared agent execution behavior, including player, GM and NPC turns,
-not an NPC-specific policy. See [continuing interrupted turns](plans/interrupted-turns.md).
+schema rejection, execution error and safety-budget exhaustion. Exceptional
+process interruption fails its active turn without rolling back committed
+effects or replaying actions. Startup closes outstanding tool-call history
+truthfully before new model work, preserving original captured inference inputs.
 Total tokens/summed inference time aggregate distinct inference IDs;
 sequence wall time uses its own start/finish. Pending compaction is shown as
 caused deferred work rather than extending the foreground reply's wall time.
+
+### Server shutdown and crashes
+
+Authority: persistent world/chat, visible errors and
+[the shutdown decision](user_exerpts.md#2026-10-20-shutdown-and-crashes).
+Normal shutdown closes external game-input admission, finishes all accepted
+queued and active turns including nested calls and delivery, then finishes
+admitted deferred work and joins workers before releasing the backend/database.
+Stop starting independent automatic work. Close idle browser streams rather than
+wait for their connections forever. Show what shutdown is waiting for; forced
+termination is an explicit crash, not an automatic timeout.
+
+Complete chat-turns and boundaries between saved NPC steps are safe stopping
+points. Future durable consent waits or not-yet-admitted deferred jobs may remain
+pending; no active Rust call stack is saved. A crash fails active turns visibly.
+Keep committed actions and messages. For unresolved tool replies, reuse a proven
+committed result or record an accurate interruption result without claiming an
+unconfirmed action had no effect. Mark unreached calls not executed and close
+related pending records. Cleanup is idempotent and must leave valid tool-call
+history for the next human turn. No automatic model calls, narration replay or
+continuation of interrupted agent stacks occur at startup.
+
+This shared lifecycle applies to player, GM and NPC execution. The
+[server shutdown plan](plans/server-shutdown.md) specifies admission, drain order,
+crash cleanup and verification. It replaces full arbitrary crash continuation.
 
 ### Live inspection protocol
 
@@ -1289,17 +1305,17 @@ notification mechanism. Do not enqueue work into the worker's own bounded
 channel. Foreground events take priority between finite NPC steps.
 The causal discussion shares the existing inference/tool budget across follow-ups;
 exhaustion is a visible failure, not a fresh budget or a silent dropped response.
-Use shared durable inference accounting and continuation from the first
-unresolved operation after restart. This applies inside a finite NPC step as
-well as between steps; interruption does not fail the discussion. Recorded
-completed decisions, actions and speech are reused, and interrupted child calls
-finish before their parent continues. Persist concrete operation progress;
-do not serialize Rust futures or restart a turn from its beginning.
+During graceful shutdown finish the active NPC step, save its progress and
+shared budget, then stop before starting another. Clean restart resumes waiting
+work from that boundary. A crash during a step fails its causal discussion
+visibly, retaining committed speech/actions and closing outstanding tool history
+through shared crash cleanup. Completed steps are not regenerated. There is no
+saved agent call stack or per-inference durable budget system.
 
 | Approach | Benefit | Cost / decision |
 | --- | --- | --- |
 | Nested NPC calls inside Say | Uses the immediate call stack | Re-enters active agents and holds actions open; reject. |
-| Concrete response rounds in the world loop | Supports eagerness, stale-proposal cancellation, player input and restart recovery | Persist round progress and causal links; selected. |
+| Concrete response rounds in the world loop | Supports eagerness, stale-proposal cancellation, player input and restart between saved steps | Persist round progress and causal links; selected. |
 | New generic workflow engine | Could schedule arbitrary future jobs | Adds an unneeded framework alongside the world loop; reject. |
 
 Interrupt pauses future NPC actions in the character's group at a safe boundary.
@@ -1384,8 +1400,9 @@ validated installation. `world_build(world_id PRIMARY KEY, phase_index,
 round_index, step, question_index, question_inference_id, summary_inference_id)`
 is the persisted progress of the three declared phases. Each finished answer or
 summary advances one step atomically; a failed inference leaves that step and
-full error visible. Resume is explicit after failure, automatic after restart
-for work that was interrupted before completion.
+full error visible. Resume is explicit after failure. Pending work between saved
+steps resumes after a clean restart; a crash during an active turn uses shared
+crash cleanup rather than automatically replaying that turn.
 
 The Questioner sees the seed, phase, hard-coded meta-questions, and only the most
 recent Storyteller summary. Its structured output is `{questions, satisfied}`.

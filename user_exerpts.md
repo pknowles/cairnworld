@@ -523,3 +523,22 @@ Never mind do not reopen it; allowances reset only for the next game-turn.
 
 NPC interaction precedes the coding-agent interface and the remaining rules
 expansion. Existing browser and configured-model paths can verify it directly.
+
+## 2026-10-20 Shutdown and crashes
+
+The earlier request to continue interrupted operations was refined after
+comparing arbitrary crash continuation with finishing turns before shutdown:
+
+> perhaps server shutdown should just be made to happen outside of turns at
+> pausable points so we don't have to save/restore or keep lots of state in the
+> database? in this case a crash mid turn would be considered a failure and
+> should be rare rather than common/expected.
+
+The assistant recommended finishing accepted turns during planned shutdown,
+preserving completed effects after exceptional crashes, and cleaning up
+unanswered tool history without automatic replay. The user accepted:
+
+> sounds good. please update the plan
+
+This decision replaces automatic continuation of a crashed agent call stack.
+Durable work already between safe steps may still resume after restart.
