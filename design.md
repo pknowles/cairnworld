@@ -779,10 +779,12 @@ No per-invocation claim flag mirrors durable action state. A later rejection
 reason cannot rewrite the original result.
 
 One awaited batch boundary covers tool execution, result persistence and result
-delivery. On failure it preserves already committed results, records the active
-call's failure where no result committed, and marks subsequent unreached calls
-unexecuted. A delivery failure after commit belongs to the enclosing invocation
-and sequence; it does not undo or rerun the action. Failure to persist finalization
+delivery. Deliveries put messages into histories, possibly the caller's own, so
+they run only after every call of the batch has its result. On failure the
+batch preserves already committed results, records the active call's failure
+where no result committed, and marks subsequent unreached calls unexecuted. A
+delivery failure after commit belongs to the enclosing invocation and sequence;
+it does not undo or rerun the action. Failure to persist finalization
 is reported with the original failure, with interruption recovery on restart.
 
 An invocation wrapper finishes its own outcome on every ordinary exit, including

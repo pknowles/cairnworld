@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT player_character.character_id AS \"character_id!: i64\" FROM action JOIN speech_message ON speech_message.speech_action_id = action.id JOIN history_entry ON history_entry.id = speech_message.message_id JOIN agent_history ON agent_history.branch_id = history_entry.branch_id JOIN player_character ON player_character.agent_id = agent_history.agent_id WHERE action.requesting_tool_execution_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "41537574716c74a927ce57a69d097fae80391450707c28adfe212b9d2ababfbe"
+}

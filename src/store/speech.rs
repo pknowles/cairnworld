@@ -161,6 +161,41 @@ impl Store {
             .collect())
     }
 
+    /// The player characters who heard the speech a tool call requested: its
+    /// speaker and every PC with its message in their history. `None` when the
+    /// call produced no speech.
+    pub async fn speech_audience(
+        &self,
+        requesting_tool_execution_id: i64,
+    ) -> Result<Option<Vec<i64>>> {
+        let speaker = sqlx::query_scalar!(
+            "SELECT speech.speaker_character_id FROM action \
+             JOIN speech ON speech.action_id = action.id \
+             WHERE action.requesting_tool_execution_id = ?",
+            requesting_tool_execution_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("finding the utterance a call requested")?;
+        let Some(speaker) = speaker else {
+            return Ok(None);
+        };
+        let mut audience = sqlx::query_scalar!(
+            "SELECT player_character.character_id AS \"character_id!: i64\" FROM action \
+             JOIN speech_message ON speech_message.speech_action_id = action.id \
+             JOIN history_entry ON history_entry.id = speech_message.message_id \
+             JOIN agent_history ON agent_history.branch_id = history_entry.branch_id \
+             JOIN player_character ON player_character.agent_id = agent_history.agent_id \
+             WHERE action.requesting_tool_execution_id = ?",
+            requesting_tool_execution_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("finding who heard an utterance")?;
+        audience.push(speaker);
+        Ok(Some(audience))
+    }
+
     /// What a speech message shows every reader (the model's context, player
     /// chat and inspection): the utterance attributed from its speech record.
     pub(super) async fn speech_text(&self, message_id: i64) -> Result<String> {

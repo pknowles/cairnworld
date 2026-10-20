@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS( SELECT 1 FROM npc_agent WHERE character_id = ?1 UNION ALL SELECT 1 FROM player_character JOIN world_member ON world_member.id = player_character.member_id WHERE player_character.character_id = ?1 AND world_member.access = 'active') AS \"controlled!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "controlled!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cc6f8651c7783ca1bc851721d30876e2dee3991c93a9c5c62608b4f12b7073db"
+}

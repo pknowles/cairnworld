@@ -2997,13 +2997,15 @@ impl Store {
         world_id: i64,
         group_id: i64,
         content_id: i64,
+        audience: Option<&[i64]>,
     ) -> Result<()> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .context("starting group narration delivery")?;
-        Self::append_group_narration_in(&mut transaction, world_id, group_id, content_id).await?;
+        Self::append_group_narration_in(&mut transaction, world_id, group_id, content_id, audience)
+            .await?;
         transaction
             .commit()
             .await
@@ -3022,8 +3024,14 @@ impl Store {
             .begin()
             .await
             .context("starting presence narration delivery")?;
-        Self::append_group_narration_in(&mut transaction, world_id, narration.group_id, content_id)
-            .await?;
+        Self::append_group_narration_in(
+            &mut transaction,
+            world_id,
+            narration.group_id,
+            content_id,
+            None,
+        )
+        .await?;
         Self::announce_presence_in(
             &mut transaction,
             narration.group_id,
@@ -3042,14 +3050,17 @@ impl Store {
         world_id: i64,
         group_id: i64,
         content_id: i64,
+        audience: Option<&[i64]>,
     ) -> Result<()> {
         // Recipients are connected PCs in the interacting group (design.md's
         // Membership and presence: "Narration recipients are NPCs and
         // connected PCs in the interacting group; offline PCs do not receive
         // it"). NPCs have no player-agent history to append to here; their
-        // own narration delivery is not yet implemented.
-        let agents: Vec<i64> = sqlx::query_scalar!(
-            "SELECT player_character.agent_id FROM world_member \
+        // own narration delivery is not yet implemented. Narration of private
+        // speech passes `audience`, the characters who heard it, so it cannot
+        // describe the speech to anyone else.
+        let recipients = sqlx::query!(
+            "SELECT player_character.agent_id, player_character.character_id FROM world_member \
              JOIN player_character ON player_character.member_id = world_member.id \
              JOIN character_group ON character_group.character_id = player_character.character_id \
              JOIN \"group\" ON \"group\".id = character_group.group_id \
@@ -3063,6 +3074,10 @@ impl Store {
         .fetch_all(&mut **transaction)
         .await
         .context("finding connected player agents in narrated group")?;
+        let agents = recipients
+            .into_iter()
+            .filter(|row| audience.is_none_or(|audience| audience.contains(&row.character_id)))
+            .map(|row| row.agent_id);
         let source_inference_id: Option<i64> =
             sqlx::query_scalar!("SELECT id FROM inference WHERE output = ?", content_id,)
                 .fetch_optional(&mut **transaction)
@@ -3394,6 +3409,29 @@ impl Store {
         })
     }
 
+    /// Whether anyone currently controls this character: an NPC always, a PC
+    /// only while its player's membership is active. Checked in the
+    /// transactions that submit and apply an action, so access lost since the
+    /// actor was built is honoured.
+    async fn character_may_act(
+        transaction: &mut Transaction<'_, Sqlite>,
+        character_id: i64,
+    ) -> Result<bool> {
+        let controlled = sqlx::query_scalar!(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM npc_agent WHERE character_id = ?1 \
+                 UNION ALL \
+                 SELECT 1 FROM player_character \
+                 JOIN world_member ON world_member.id = player_character.member_id \
+                 WHERE player_character.character_id = ?1 AND world_member.access = 'active') AS \"controlled!: bool\"",
+            character_id,
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .context("checking who controls the character")?;
+        Ok(controlled)
+    }
+
     /// Retain a validated character action and assign the next world-local id
     /// before forwarding it to the location GM. The actor's group determines
     /// the GM, so neither can be selected by model or browser input.
@@ -3426,6 +3464,10 @@ impl Store {
         .await
         .context("resolving action character and group GM")?
         .context("the acting character has no group and GM")?;
+        ensure!(
+            Self::character_may_act(&mut transaction, character_id).await?,
+            "character {character_id} has no active player and cannot act"
+        );
         let sequence_matches: Option<i64> = sqlx::query_scalar!(
             "SELECT id FROM sequence WHERE id = ? AND world_id = ?",
             sequence_id,
@@ -3565,7 +3607,11 @@ impl Store {
             });
         };
         let mut speech = None;
-        let outcome = if result == "approved" && matches!(action.tool.as_str(), "say" | "whisper") {
+        let outcome = if result == "approved"
+            && !Self::character_may_act(&mut transaction, action.character_id).await?
+        {
+            ActionOutcome::Failed("the character no longer has an active player".to_string())
+        } else if result == "approved" && matches!(action.tool.as_str(), "say" | "whisper") {
             match Self::plan_speech(&mut transaction, &action, audience).await? {
                 Ok(plan) => {
                     let words = plan.words().to_string();
@@ -7357,6 +7403,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_removed_members_character_cannot_submit_or_execute_actions() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("owner@example.test", "Owner")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let guest = store
+            .find_or_create_user("guest@example.test", "Guest")
+            .await
+            .unwrap();
+        let invitation = store
+            .create_invitation(owner.id, installed.world_id, None)
+            .await
+            .unwrap();
+        let guest_member = store
+            .accept_invitation(&guest, &invitation.token)
+            .await
+            .unwrap();
+        let sequence = store
+            .begin_sequence(installed.world_id, "player message")
+            .await
+            .unwrap();
+        let branch = store.agent_branch(guest_member.agent_id).await.unwrap();
+        let args = r#"{"item":"flour sack"}"#;
+        let call =
+            record_tool_call_for_test(&store, branch, Some(sequence.id), "c1", "take", args).await;
+        let actor = store.player_actor(&guest_member).await.unwrap();
+        let pending = store
+            .create_pending_action(&actor, sequence.id, call, "take", args)
+            .await
+            .unwrap();
+
+        store
+            .remove_member(owner.id, installed.world_id, guest.id)
+            .await
+            .unwrap();
+
+        // Authority held from before the removal does not allow a new submission...
+        let second_call =
+            record_tool_call_for_test(&store, branch, Some(sequence.id), "c2", "take", args).await;
+        store
+            .create_pending_action(&actor, sequence.id, second_call, "take", args)
+            .await
+            .expect_err("a removed member's character cannot submit a new action");
+        // ...or let an action submitted earlier take effect.
+        let approving = record_tool_call_for_test(
+            &store,
+            store.history_branch(pending.gm_branch_id).await.unwrap(),
+            Some(sequence.id),
+            "a1",
+            "approve_action",
+            "{}",
+        )
+        .await;
+        let resolved = store
+            .resolve_pending_action(
+                pending.gm_agent_id,
+                installed.world_id,
+                pending.id,
+                approving,
+                "approved",
+                &Hearing::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(resolved.outcome, ActionOutcome::Failed(_)),
+            "{resolved:?}"
+        );
+        let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_character")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(held, 0, "the removed member's take must not move an item");
+    }
+
+    #[tokio::test]
     async fn approved_take_transfers_one_available_item_exactly_once() {
         let db = database();
         let store = Store::open(db.path()).await.unwrap();
@@ -7887,6 +8017,7 @@ mod tests {
                     .await
                     .unwrap(),
                 content_id,
+                None,
             )
             .await
             .unwrap();

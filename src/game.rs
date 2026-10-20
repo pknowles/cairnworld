@@ -75,6 +75,9 @@ struct Narration {
     /// recipient (design.md's Chat schema: "every recipient references that
     /// same selection").
     content_id: i64,
+    /// The characters who may be shown it when it describes private speech;
+    /// `None` for narration to the whole group.
+    audience: Option<Vec<i64>>,
 }
 
 /// Everything a player-facing action tool needs to submit one action to its
@@ -1266,6 +1269,7 @@ where
         Ok(Narration {
             group_id,
             content_id: settled.output_content_id,
+            audience: None,
         })
     }
 
@@ -1582,13 +1586,24 @@ where
         Ok(Narration {
             group_id: self.store.character_group_id(pending.character_id).await?,
             content_id: settled.output_content_id,
+            // The GM saw what was said; only those who heard it are told how
+            // the GM describes it.
+            audience: self
+                .store
+                .speech_audience(pending.requesting_tool_execution_id)
+                .await?,
         })
     }
 
     async fn deliver_narration(&self, member: &PlayerAgent, narration: &Narration) -> Result<()> {
         let world = self.world(member.world_id)?;
         self.store
-            .append_group_narration(member.world_id, narration.group_id, narration.content_id)
+            .append_group_narration(
+                member.world_id,
+                narration.group_id,
+                narration.content_id,
+                narration.audience.as_deref(),
+            )
             .await
             .context("storing GM narration before the player agent follows up")?;
         // A player may disconnect while the GM resolves. The narration remains
@@ -4266,6 +4281,105 @@ mod tests {
             1,
             "the retry without a prefix resolved it"
         );
+    }
+
+    /// Every tool call is followed directly by all of its batch's results.
+    fn assert_results_follow_calls(messages: &[Message]) {
+        for (index, message) in messages.iter().enumerate() {
+            if let MessageContent::ToolCalls(calls) = &message.content {
+                for offset in 1..=calls.len() {
+                    assert!(
+                        matches!(
+                            messages.get(index + offset).map(|message| &message.content),
+                            Some(MessageContent::ToolResult { .. })
+                        ),
+                        "result {offset} of {} must follow its calls directly: {messages:?}",
+                        calls.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gm_narration_of_a_whisper_reaches_only_those_who_heard_it() {
+        let scene = speech_scene().await;
+        for member in [&scene.first, &scene.second] {
+            scene
+                .store
+                .mark_character_present(member.character_id)
+                .await
+                .unwrap();
+        }
+        scene
+            .speak(
+                tool_call(
+                    "whisper",
+                    serde_json::json!({"words": "The cache is under the floor.", "to": ["Toma"]}),
+                ),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+
+        let narrations = |chat: Vec<crate::store::PlayerChatEntry>| {
+            chat.into_iter()
+                .filter(|entry| entry.role == Role::Narration)
+                .count()
+        };
+        assert_eq!(
+            narrations(scene.store.player_chat(&scene.first).await.unwrap()),
+            1,
+            "the speaker is told how the GM describes it"
+        );
+        assert_eq!(
+            narrations(scene.store.player_chat(&scene.second).await.unwrap()),
+            0,
+            "a connected player who was not a listener must not receive the narration of a private whisper"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_two_speech_calls_keeps_each_result_directly_after_the_calls() {
+        let scene = speech_scene().await;
+        scene.responses.lock().unwrap().extend([
+            response(Content::ToolCalls(vec![
+                ToolCall {
+                    id: "say-a".into(),
+                    name: "say".into(),
+                    arguments: serde_json::json!({"words": "One."}).to_string(),
+                },
+                ToolCall {
+                    id: "say-b".into(),
+                    name: "say".into(),
+                    arguments: serde_json::json!({"words": "Two."}).to_string(),
+                },
+            ])),
+            tool_call("approve_action", serde_json::json!({"action_id": 1})),
+            response(Content::Text("The first lands.".into())),
+            tool_call("approve_action", serde_json::json!({"action_id": 2})),
+            response(Content::Text("The second lands.".into())),
+            response(Content::Text(String::new())),
+        ]);
+
+        scene
+            .game
+            .player_message(scene.first.clone(), "Say two things.")
+            .await
+            .unwrap();
+
+        let branch = scene
+            .store
+            .agent_branch(scene.first.agent_id)
+            .await
+            .unwrap();
+        let segments = scene.store.live_segments(branch).await.unwrap();
+        let messages = scene
+            .store
+            .request_for_segments(branch.agent_id(), &segments, Sampling::default())
+            .await
+            .unwrap()
+            .messages;
+        assert_results_follow_calls(&messages);
     }
 
     #[tokio::test]

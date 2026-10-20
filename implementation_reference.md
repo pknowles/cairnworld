@@ -624,6 +624,12 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   PCs hear it with no browser open; NPCs receive it in their own
   history. The speaker's copy follows their tool result
   (`deliver_speech_to_speaker`); the GM learns through its approval result.
+  GM narration of a speech action is delivered only to the speaker and PCs who
+  heard it (`Store::speech_audience`). `character_may_act` is rechecked when an
+  action is submitted and when it is applied, so access lost since the actor
+  was built is honoured. `agent::complete_with_call_context` runs tool
+  deliveries (narration, the speaker's copy) after every call of a batch has its
+  result.
   `Store::speech_text` is the one reader that attributes a speech message
   ("Name says to X: ...") for model context, player chat and raw inspection,
   from the frozen speaker/addressee names. Presence narration keeps its

@@ -321,10 +321,10 @@ pub async fn complete_with_call_context<B: Backend>(
             // covers tool execution, result persistence and result
             // delivery"). A failure leaves no call without a result: the
             // failing call's result is the real error, unless its own result
-            // had already committed (`committed`), in which case that result
-            // and any completed mutation stand, and only the delivery failure
-            // propagates - never re-recorded as the call's failure, never
-            // re-run. Every call not yet run is closed as not executed.
+            // had already committed, in which case that result and any
+            // completed mutation stand - never re-recorded as the call's
+            // failure, never re-run. Every call not yet run is closed as not
+            // executed.
             // Grouping proposals are never committed here (design.md's "Tool
             // boundary"): a topology change would retarget every sibling call
             // still to come in this same batch away from the group the model
@@ -332,12 +332,16 @@ pub async fn complete_with_call_context<B: Backend>(
             // applied together, once, only after every ordinary call in the
             // batch has settled with no error.
             let mut pending_changes = Vec::new();
+            // Deliveries put messages into histories, possibly the caller's
+            // own, so they wait until every call of the batch has its result:
+            // a message between a call and a sibling's result would break the
+            // history.
+            let mut deliveries = Vec::new();
             for (tool_call, tool_execution_id) in calls.iter().zip(&executions) {
                 on_activity(format!(
                     "tool call {}: {}",
                     tool_call.name, tool_call.arguments
                 ));
-                let mut committed = false;
                 let outcome: Result<()> = async {
                     store
                         .begin_tool_execution(*tool_execution_id)
@@ -359,7 +363,6 @@ pub async fn complete_with_call_context<B: Backend>(
                                 *tool_execution_id,
                                 change,
                             ));
-                            committed = true;
                             return Ok(());
                         }
                     };
@@ -374,14 +377,10 @@ pub async fn complete_with_call_context<B: Backend>(
                         .with_context(|| {
                             format!("storing result for tool call {}", tool_call.id)
                         })?;
-                    committed = true;
-                    let activity = format!("tool result {}: {result}", tool_call.id);
+                    on_activity(format!("tool result {}: {result}", tool_call.id));
                     if let Some(after_result) = after_result {
-                        after_result.await.with_context(|| {
-                            format!("delivering result of tool call {}", tool_call.id)
-                        })?;
+                        deliveries.push((tool_call.id.clone(), after_result));
                     }
-                    on_activity(activity);
                     Ok(())
                 }
                 .await;
@@ -393,6 +392,18 @@ pub async fn complete_with_call_context<B: Backend>(
                         error,
                     )
                     .await);
+                }
+            }
+            for (call_id, delivery) in deliveries {
+                if let Err(error) = delivery
+                    .await
+                    .with_context(|| format!("delivering result of tool call {call_id}"))
+                {
+                    // Every call has its result except a deferred group change,
+                    // which reports the failure.
+                    return Err(
+                        close_failed_calls(store, completion.inference_id, None, error).await,
+                    );
                 }
             }
             if !pending_changes.is_empty() {
@@ -931,10 +942,11 @@ mod tests {
     /// A delivery failure after a call's result already committed (design.md:
     /// "One awaited batch boundary covers tool execution, result persistence
     /// and result delivery") must not re-record that call as failed or leave
-    /// its result unset - only the never-reached sibling after it is marked
-    /// unexecuted, and the batch error surfaces as the turn's failure.
+    /// its result unset. Deliveries run once every call of the batch has its
+    /// result, so the sibling still runs, and the failure surfaces as the
+    /// turn's failure.
     #[tokio::test]
-    async fn a_delivery_failure_after_commit_does_not_undo_its_own_result_but_stops_the_batch() {
+    async fn a_delivery_failure_after_commit_does_not_undo_any_result() {
         let (store, _db, agent_id) = test_store().await;
         let delivers_then_fails = Tool::new(
             ToolDefinition {
@@ -998,8 +1010,8 @@ mod tests {
             "the first call's own result committed before delivery failed and must stand"
         );
         assert_eq!(
-            second_status, "unexecuted",
-            "the never-reached second call must be marked unexecuted, not left running"
+            second_status, "completed",
+            "deliveries wait for the whole batch, so the sibling ran before the delivery failed"
         );
     }
 
