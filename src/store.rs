@@ -104,36 +104,12 @@ impl TestDatabase {
         static RUN_DIRECTORY: OnceLock<(std::path::PathBuf, std::fs::File)> = OnceLock::new();
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let (directory, _owner_lock) = RUN_DIRECTORY.get_or_init(|| {
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("target")
-                .join("tmp")
-                .join("test-databases");
-            std::fs::create_dir_all(&root).expect("creating test database root");
-            for entry in std::fs::read_dir(&root).expect("listing old test databases") {
-                let old = entry.expect("reading old test database entry").path();
-                let owner = std::fs::File::options()
-                    .write(true)
-                    .open(old.join("owner.lock"));
-                // A missing lock file means its creator died before taking it.
-                let owner_exited = match owner {
-                    Ok(file) => file.try_lock().is_ok(),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                    Err(error) => panic!("opening test database owner lock: {error}"),
-                };
-                if owner_exited {
-                    std::fs::remove_dir_all(&old).expect("removing old test databases");
-                }
-            }
-            let started = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock is before the Unix epoch")
-                .as_nanos();
-            let directory = root.join(format!("{}-{started}", std::process::id()));
-            std::fs::create_dir(&directory).expect("creating test database directory");
-            let lock = std::fs::File::create(directory.join("owner.lock"))
-                .expect("creating test database owner lock");
-            lock.lock().expect("locking test database directory");
-            (directory, lock)
+            claim_run_directory(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("target")
+                    .join("tmp")
+                    .join("test-databases"),
+            )
         });
         Self {
             path: directory.join(format!(
@@ -146,6 +122,48 @@ impl TestDatabase {
     pub(crate) fn path(&self) -> &std::path::Path {
         &self.path
     }
+}
+
+/// Held while a run is claiming its directory, so no run's scan can see
+/// another run's directory half set up.
+#[cfg(test)]
+const CLAIM_GUARD: &str = ".claim.lock";
+
+/// Delete the directories of test runs that have exited, then create and lock
+/// one for this run. Claims are serialized, so a directory without its owner
+/// lock can only belong to a creator that died mid-setup.
+#[cfg(test)]
+fn claim_run_directory(root: &std::path::Path) -> (std::path::PathBuf, std::fs::File) {
+    std::fs::create_dir_all(root).expect("creating test database root");
+    let guard = std::fs::File::create(root.join(CLAIM_GUARD)).expect("creating claim guard");
+    guard.lock().expect("locking claim guard");
+    for entry in std::fs::read_dir(root).expect("listing old test databases") {
+        let old = entry.expect("reading old test database entry").path();
+        if !old.is_dir() {
+            continue;
+        }
+        let owner = std::fs::File::options()
+            .write(true)
+            .open(old.join("owner.lock"));
+        let owner_exited = match owner {
+            Ok(file) => file.try_lock().is_ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => panic!("opening test database owner lock: {error}"),
+        };
+        if owner_exited {
+            std::fs::remove_dir_all(&old).expect("removing old test databases");
+        }
+    }
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_nanos();
+    let directory = root.join(format!("{}-{started}", std::process::id()));
+    std::fs::create_dir(&directory).expect("creating test database directory");
+    let lock = std::fs::File::create(directory.join("owner.lock"))
+        .expect("creating test database owner lock");
+    lock.lock().expect("locking test database directory");
+    (directory, lock)
 }
 
 #[cfg(test)]
@@ -6072,6 +6090,52 @@ mod tests {
             .await?
             .context("completed test summary was not activated")
             .map(|summary| summary.id)
+    }
+
+    /// A run still setting up its directory (created, owner lock not yet
+    /// taken) must not be mistaken for an exited run by a concurrent one.
+    #[test]
+    fn claiming_a_run_directory_never_deletes_one_still_being_set_up() {
+        let root = std::env::temp_dir().join(format!(
+            "cairnworld-claim-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let _cleanup = scopeguard_remove(root.clone());
+        // A creator mid-setup holds the claim guard, as claim_run_directory does.
+        let guard = std::fs::File::create(root.join(super::CLAIM_GUARD)).unwrap();
+        guard.lock().unwrap();
+        let setting_up = root.join("setting-up");
+        std::fs::create_dir(&setting_up).unwrap();
+
+        let claiming_root = root.clone();
+        let claim = std::thread::spawn(move || super::claim_run_directory(&claiming_root));
+        // Give the concurrent claim ample opportunity to scan.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            setting_up.exists(),
+            "a directory that is still being set up was deleted by a concurrent claim"
+        );
+        // Finish setting up: take the owner lock, as the real creator does.
+        let lock = std::fs::File::create(setting_up.join("owner.lock")).unwrap();
+        lock.lock().unwrap();
+        drop(guard);
+        let (claimed, _lock) = claim.join().unwrap();
+        assert!(setting_up.exists() && claimed.exists());
+    }
+
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn scopeguard_remove(path: std::path::PathBuf) -> RemoveOnDrop {
+        RemoveOnDrop(path)
     }
 
     fn database() -> super::TestDatabase {

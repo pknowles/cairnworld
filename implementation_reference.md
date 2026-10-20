@@ -160,8 +160,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   with an error also does. Players see a failed sequence's `sequence.error` as a
   `Role::System` entry in `Store::player_chat_after` (a notice in the browser),
   ordered at the sequence's trigger message in their own or current group's GM
-  history; the live path (`send_chat_failure`) sends it only when the reload
-  cursor has already passed that trigger.
+  history. A failed turn broadcasts `ChatChange::Failed` to every tab; the live
+  path (`send_chat_failure`) sends the error only to a tab whose cursor already
+  passed its trigger, and the requester's handler skips its own error event when
+  the error carries `FailedTurn` and is stored. A tab that rendered before the
+  failure and connects after it can still miss the error until it reloads.
   `resolve_pending_action` returns an `ActionOutcome` (Applied, Rejected, or
   Failed: approved but not applicable, e.g. a missing item, recorded unapproved
   with a `failed: ` result). `approve_action` reports it to the GM; the acting
@@ -575,7 +578,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - `store::TestDatabase` gives each test an on-disk SQLite database in a
   per-process directory under `target/tmp/test-databases` (unique by process id
   and start time, so a reused process id cannot meet a stale file) that the
-  process keeps locked. Drop removes files where Windows allows; the next run
+  process keeps locked; claims are serialized by a guard lock so a concurrent
+  run never deletes a directory still being set up. Drop removes files where Windows allows; the next run
   deletes every directory whose owner has exited.
 
 ## Web play (design.md: Web server and UI; Auth)

@@ -50,6 +50,20 @@ pub struct Game<B> {
     next_connection_id: AtomicI64,
 }
 
+/// A turn failed and its sequence recorded the error, which player chat
+/// delivers from storage. Attached as context so a caller that would otherwise
+/// report the error itself can tell it is already delivered.
+#[derive(Debug)]
+pub struct FailedTurn {
+    pub sequence_id: i64,
+}
+
+impl std::fmt::Display for FailedTurn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "turn {} failed", self.sequence_id)
+    }
+}
+
 struct Narration {
     group_id: i64,
     /// The recorded_content row the GM's own settled reply message already
@@ -129,27 +143,36 @@ where
         waiting.sort_unstable();
         tracing::info!(worlds = ?waiting, "shutting down: finishing accepted turns");
         // One world's failure must not abort the others' accepted turns, so
-        // keep joining and report the first failure afterwards.
-        let mut failure = None;
+        // keep draining and report every failure afterwards.
+        let mut failures = Vec::new();
         while let Some(stopped) = workers.join_next().await {
             match stopped {
                 Ok(world_id) => {
                     waiting.retain(|id| *id != world_id);
                     tracing::info!(world_id, remaining = ?waiting, "world finished its accepted turns");
                 }
-                Err(error) => {
-                    failure.get_or_insert(
-                        anyhow::Error::new(error)
-                            .context("world worker failed while shutting down"),
-                    );
-                }
+                Err(error) => failures.push(
+                    anyhow::Error::new(error).context("world worker failed while shutting down"),
+                ),
             }
         }
         tracing::info!("shutting down: finishing admitted deferred jobs");
-        let deferred = self.backend.finish_deferred_jobs().await;
-        match failure {
-            Some(error) => Err(error),
-            None => deferred,
+        failures.extend(self.backend.finish_deferred_jobs().await.err());
+        match failures.len() {
+            0 => Ok(()),
+            1 => Err(failures.remove(0)),
+            count => Err(anyhow::anyhow!(
+                "{count} failures while shutting down:
+{}",
+                failures
+                    .iter()
+                    .map(|failure| format!("{failure:#}"))
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+"
+                    )
+            )),
         }
     }
 
@@ -724,8 +747,14 @@ where
                 "failed to finish player message sequence"
             );
         }
-        let _no_live_viewers = world.broadcasts.send(ChatChange::Entries);
-        let response = result?;
+        let _no_live_viewers = world
+            .broadcasts
+            .send(Self::turn_change(&result, sequence.id));
+        let response = result.map_err(|error| {
+            error.context(FailedTurn {
+                sequence_id: sequence.id,
+            })
+        })?;
         ensure!(
             matches!(response.content, Content::Text(_)),
             "player agent did not settle after its action"
@@ -822,13 +851,26 @@ where
                 "failed to finish player entered sequence"
             );
         }
-        let _no_live_viewers = world.broadcasts.send(ChatChange::Entries);
+        let _no_live_viewers = world
+            .broadcasts
+            .send(Self::turn_change(&result, sequence.id));
         let response = result?;
         ensure!(
             matches!(response.content, Content::Text(_)),
             "player agent did not settle while opening the conversation"
         );
         Ok(Some(response))
+    }
+
+    /// What every connected tab is told when a turn ends: new entries, or - so a
+    /// tab whose cursor is already past the turn's trigger still learns of it -
+    /// the failure, which also carries the entries.
+    fn turn_change<T>(result: &Result<T>, sequence_id: i64) -> ChatChange {
+        if result.is_ok() {
+            ChatChange::Entries
+        } else {
+            ChatChange::Failed { sequence_id }
+        }
     }
 
     /// Whether the player agent has already produced its stored opening reply.
@@ -3642,6 +3684,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(held, 0, "nothing moves for an action that cannot happen");
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_every_failure_not_only_the_first() {
+        let (backend, _) = ScriptedBackend::recording([]);
+        let (game, store, _db, first_world_member, _) = two_player_bread_thief_game(backend).await;
+        let owner = store
+            .find_or_create_user("other@example.test", "Other")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let other = store.install_scenario(&owner, &scenario).await.unwrap();
+        game.start_world(World::install(&game.worlds, other.world_id));
+        for world_id in [first_world_member.world_id, other.world_id] {
+            game.world(world_id)
+                .unwrap()
+                .sender
+                .send(WorldEvent::Panic)
+                .await
+                .unwrap();
+        }
+
+        let error = game.shutdown().await.expect_err("both workers failed");
+
+        let report = format!("{error:#}");
+        assert_eq!(
+            report.matches("world worker failed").count(),
+            2,
+            "every failure must be reported: {report}"
+        );
+    }
+
+    /// Every connected tab of the character must be told when a turn fails:
+    /// a tab whose cursor already passed the turn's trigger message learns of
+    /// the error only from this signal.
+    #[tokio::test]
+    async fn a_failed_player_turn_notifies_every_subscriber() {
+        let (backend, _) = ScriptedBackend::recording([]);
+        let (game, _store, _db, first, _) = two_player_bread_thief_game(backend).await;
+        let mut other_tab = game.subscribe(&first).await.unwrap();
+
+        game.player_message(first.clone(), "Describe the scene.")
+            .await
+            .expect_err("the backend has no response, so the turn fails");
+
+        let mut changes = Vec::new();
+        while let Ok(change) = other_tab.try_recv() {
+            changes.push(change);
+        }
+        assert!(
+            changes
+                .iter()
+                .any(|change| matches!(change, ChatChange::Failed { .. })),
+            "the failure must be announced, not only new entries: {changes:?}"
+        );
     }
 
     #[tokio::test]

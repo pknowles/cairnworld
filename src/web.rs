@@ -1281,7 +1281,15 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                 let result = game.player_message(member.clone(), &text).await;
                 cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
                 if let Err(error) = result {
-                    send_event(socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
+                    // A recorded failure was just delivered from storage with the
+                    // turn's entries; anything else (a refused request) was not.
+                    let delivered = match error.downcast_ref::<crate::game::FailedTurn>() {
+                        Some(failed) => game.player_chat_error(member, failed.sequence_id).await?.is_some(),
+                        None => false,
+                    };
+                    if !delivered {
+                        send_event(socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
+                    }
                     send_event(socket, &ServerEvent::CanAct { value: true }).await?;
                     continue;
                 }
@@ -2316,6 +2324,7 @@ mod tests {
             "check_developer_mode.cjs",
             "check_world_detail.cjs",
             "check_presence_chat.cjs",
+            "check_failed_turn_chat.cjs",
             // Last: it stops the fixture's chat sockets for good.
             "check_shutdown_chat.cjs",
         ] {
