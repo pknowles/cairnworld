@@ -4,14 +4,16 @@
 
 Rust enforces the declared creation, character/NPC actions, inventory, combat,
 time and travel rules through the existing agent tools. Required history/group,
-inspection, membership and presence data already exists.
+inspection, membership and presence data already exists. The preceding
+[NPC interaction](npc-interaction.md) feature supplies speech delivery, response
+rounds, interruption and GM-selected intervention; extend those paths here.
 
 | Slice | Declaration | Design |
 | --- | --- | --- |
 | Creation and item state | [Character creation actions](../user_declarations.md#character-creation-actions), [Game state](../user_declarations.md#game-state) | Rules and action execution |
-| Conversation and arbitration | [Character actions](../user_declarations.md#character-actions), [NPC actions](../user_declarations.md#npc-character-actions), [GM tools](../user_declarations.md#gm-tools) | Rules and action execution |
+| Persuasion and notes | [Character actions](../user_declarations.md#character-actions), [NPC actions](../user_declarations.md#npc-character-actions), [GM tools](../user_declarations.md#gm-tools) | Rules and action execution |
 | Consent and travel | [Character actions](../user_declarations.md#character-actions) | Player replies and coordinated travel |
-| Combat and time | [Turns and time](../user_declarations.md#turns-and-time) | Rules and action execution |
+| Combat and time | [Game turns and time](../user_declarations.md#game-turns-and-time) | Rules and action execution |
 
 The combat order, time lead and travel choices are explicit proposals under
 [Product decisions](../design.md#product-decisions). Their dependent steps wait
@@ -38,7 +40,7 @@ stubbed with unconditional approval here.
    Render the resulting action/dice via existing history entries. Test concurrent
    attempts to take one item, full inventory, bulky/petty items and repeated
    approval: exactly one holder and no second mutation.
-3. Add the concrete pending_reply rows and Transfer/Travel/Intervention continuation variants.
+3. Add the concrete pending_reply rows and Transfer/Travel continuation variants.
    agent.rs returns Suspended while preserving invocation/call IDs, tool ordinals
    and budgets. Game::process_world releases the current event and accepts the
    requested character's reply through ordinary chat. Add accept/decline tools
@@ -47,29 +49,32 @@ stubbed with unconditional approval here.
    motionless narration and propagates an error, without transferring the item.
    Recheck target ownership/capacity when resuming. Test two real player chats,
    ambiguity requiring another reply, disconnect, timeout and restart.
-4. Extend say with explicit target/GM-selected hearers; append speech content
-   references to their histories and invoke addressed NPC agents. Add lie with
-   the declared WIL/suspicion outcomes and BePersuaded as an NPC-owned save tool.
+4. Extend the shared speech path with lie's declared WIL/suspicion outcomes and
+   BePersuaded as an NPC-owned save tool.
    Add authorized per-object note-edit tools and feed current notes into each
-   GM/NPC invocation. Give present NPCs response opportunities for local
-   interactions, with explicit DoNothing when no response or intervention is
-   appropriate. Add GM InterventionCheck with explicit action and character IDs
-   using the same pending reply flow before Approve executes the action.
-   Playtest GM routing, fan-out latency and whether intervention must prevent
-   approval; do not assume the declaration's tentative auto-denial policy.
+   GM/NPC invocation. Reuse NPC interaction's hearing rules, proposal selection,
+   shared character executor and GM intervention. Explicit human consent for
+   transfers/travel uses pending_reply; do not reopen ordinary NPC discussion
+   inside an unresolved tool call.
    Reuse look for investigation/open/ask and its refusal-with-
    alternatives flow. Test heard/unheard/private conversation, persuasion,
-   intervention before execution and explicit no-response outcomes without a GM
+   the existing intervention and no-response paths without a GM
    recursion cycle; inspect actual supplied context, not prose alone.
 5. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
    from the bundled core rules. Add attack, retreat, take_damage, begin_combat,
    end_combat and wait. Store combat/participant order, turn flags and time in
    the same action transaction. Compute can_act server-side before accepting a
    command and publish it afterward; a disabled button is not enforcement.
+   Closing a character's game-turn consumes any remaining move/action allowance,
+   including Wait. Reset flags only when its next game-turn begins. Interrupt,
+   Never mind and unused allowance do not grant out-of-turn permission. Wire
+   these checks into the same action admission used by players and NPC follow-ups.
    Add movement's within-location description and approved duration. Advance
    world time to the maximum and queue crossed-hour NPC opportunities through
    WorldEvents. Verify the approved initiative/time policy, second move/action
-   rejection, early wait, armor/STR damage, death and environmental damage.
+   rejection, early Wait followed by an attempted action, repeated Interrupt/
+   Never mind, out-of-turn requests with unused flags, armor/STR damage, death
+   and environmental damage. Do not add the proposed future combat Delay tool.
 6. Add travel(Connection ID) using the same pending reply continuation. Collect
    PC/NPC responses, apply the approved stay/join/object policy and ask the GM
    for final arbitration with all responses visible. On approval, call the real

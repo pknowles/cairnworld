@@ -497,3 +497,29 @@ Updated 2026-10-19: the user revised Memory Usage to require bounded allocation
 and a launch-time capacity check: "I.e. we compute a maximum we will use and
 make sure it's free." Full upfront allocation is preferred where supported,
 rather than mandatory. This supersedes the startup-only requirement above.
+
+## 2026-10-20: NPC speech, interruption and game-turn allowance
+
+> Lets go with everyone hears for now by default, but the GM may override it.
+> The GM chooses who may intervene. I may change this later after play testing.
+
+> I guess the player needs a "oh nevermind" response to an accidental interrupt
+> too. Can this simply be a button rather than a tool call?
+
+The assistant proposed a direct Never mind button releasing the player's pause
+without inference, undoing actions or restoring allowance. The user accepted:
+
+> Good call. Once a player has finished their turn (e.g. using their action/move
+> or with a call to Wait), we should mark their flags as consumed so they cannot
+> delay arbitrarily.
+
+This applies to the character's RPG game-turn, independently of agent chat-turns.
+Closing a game-turn consumes its remaining move/action allowance. Interrupt and
+Never mind do not reopen it; allowances reset only for the next game-turn.
+
+> Can you update the todo to implement these features now? I think getting NPC
+> interaction is the right next step. Maybe this needs moving items forward or
+> maybe it can be inserted. Whatever fits most cleanly
+
+NPC interaction precedes the coding-agent interface and the remaining rules
+expansion. Existing browser and configured-model paths can verify it directly.

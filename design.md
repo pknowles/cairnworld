@@ -1196,9 +1196,9 @@ fiction rather than substituting for mechanical state.
 | --- | --- |
 | Look/investigate/open/ask | GM can answer, request a save/time cost, or reject with a reason. No automatic repeated save. |
 | Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
-| Say/lie | GM supplies hearers from the current group. Append speech to recipient histories by source reference; invoke addressed NPCs in stable character-ID order. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
+| Say/Whisper/lie | Say defaults to all characters in the group; Whisper names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
 | DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
-| InterventionCheck/Approve | GM requests responses from named characters for an explicit action ID before approval. Responses can precede execution; Approve accepts the named action and applies it immediately. Whether intervention automatically prevents approval remains subject to playtesting. |
+| InterventionCheck/Approve/Reject | GM selects characters to consult about an explicit tentative action before deciding it. Collect response proposals without executing them. GM sees the selected intervention before resolving the original action; any follow-up action runs afterward. Automatic rejection on intervention remains subject to playtesting. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Give/take/drop/place | One holder change after arbitration/consent; no duplicate item on repeated approval. |
 | Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
@@ -1210,17 +1210,86 @@ fiction rather than substituting for mechanical state.
 `combat(id, group_id, round, current_character_id)` and
 `combat_participant(combat_id, character_id, initiative_order)` own the stable
 turn order. Character moved/acted flags clear when its new turn begins; wait
-can end it early. Rust derives can_act from combat order, death/disabled state,
+can end it early. Closing the game-turn consumes any remaining move/action
+allowance; Interrupt and Never mind never reset it or grant a turn. Rust derives
+can_act from combat order, death/disabled state,
 pending reply eligibility and out-of-combat time. GM cannot set can_act directly.
 The proposed initiative order and out-of-combat time window are Product decisions.
 World time is the maximum character time. Each character advances by approved
 elapsed seconds; time advancement queues hourly distant-NPC opportunities only
 for elapsed whole hours, in stable character order, through the world task.
 
-Local interactions also give each present NPC an opportunity to respond or act,
-including before an action completes when intervention is requested. NPCs have
-an explicit DoNothing response to avoid unnecessary exchanges. GM routing and
-the response fan-out require playtesting for relevance and latency.
+## NPC speech and response rounds
+
+Authority: NPC Interaction, Say/Whisper, GM InterventionCheck, World game page,
+Developer view and [the turn/pause clarifications](user_exerpts.md#2026-10-20-npc-speech-interruption-and-game-turn-allowance).
+
+Speech is a completed game event, not a call awaiting an answer. GM arbitration
+can determine whether the speaker can speak and override hearers; the character
+agent owns the words and decisions. Addressing a character does not make Say
+private. Whisper supplies explicit targets; hearing overrides must stay within
+the authorized scene and an include/exclude override cannot specify both.
+Snapshot hearers at commitment, retaining speaker identity and one original
+content reference in their histories. All group characters hear ordinary Say,
+including PCs whose browser is disconnected. Presence narration retains its
+separate connected-PC audience rule. Only actual hearers receive private speech.
+
+Once the caller's chat-turn has unwound, hearing NPCs other than the speaker get
+response opportunities. Their character facts and heard history supply context;
+GM/Storyteller-only notes remain private. NPCs return DoNothing or an explicit
+action proposal with eagerness. A proposal records intent, never executes an
+action. Select the highest eagerness; ties between speech-only proposals commit
+as one simultaneous batch with an overlap marker visible only to its hearers.
+Otherwise choose one tied proposal randomly and record the selection. Proposed
+implementation range: integer eagerness 0–100, compared only within that round.
+Unselected proposals are superseded, not failed or executed tools. After a
+committed event, NPCs reconsider against the new history instead of executing
+stale replies. All-DoNothing ends the round; unchanged history does not trigger
+another round. Recheck actor eligibility, hearers and group topology before
+executing any selected action through the ordinary shared character action path.
+
+Use concrete durable response rounds in the existing world event loop. A round
+records its source tool execution(s), group/history cut, phase, candidate
+inference references and selected proposal references. Advance finite steps and
+yield to player input between them; do not await the whole discussion inside
+Say, an NPC action or the originating world event. A related follow-up is a new
+chat-turn linked to the triggering Say/InterventionCheck and proposal execution.
+Retain these causal links in Developer Mode, distinct from nested call stacks.
+The causal discussion shares the existing inference/tool budget across follow-ups;
+exhaustion is a visible failure, not a fresh budget or a silent dropped response.
+On restart, recorded completed steps are not regenerated and speech is not
+delivered twice. Failure remains visible through the existing recording path.
+
+| Approach | Benefit | Cost / decision |
+| --- | --- | --- |
+| Nested NPC calls inside Say | Uses the immediate call stack | Re-enters active agents and holds actions open; reject. |
+| Concrete response rounds in the world loop | Supports eagerness, stale-proposal cancellation, player input and restart recovery | Persist round progress and causal links; selected. |
+| New generic workflow engine | Could schedule arbitrary future jobs | Adds an unneeded framework alongside the world loop; reject. |
+
+Interrupt pauses future NPC actions in the character's group at a safe boundary.
+An in-flight proposal inference may finish recording; it must not publish an
+action after the pause is acknowledged. Completed speech/actions remain intact.
+The control path can request the pause while the world worker awaits inference;
+it cannot merely enqueue a command behind the entire discussion. Active tool
+execution commits or fails before acknowledging a safe pause. Human input and
+other groups continue through the ordinary world loop. Pause ownership belongs
+to each requesting character: Send or Never mind releases that character's hold,
+as does its final disconnect or loss of access; other players' holds remain.
+Release holds in a retired group or whose character has left that group, and
+publish the changed pause state to its viewers. Never mind is an
+authenticated button action with no model inference. A pause neither restores
+allowance nor authorizes an out-of-turn action. Existing action checks remain
+mandatory; full combat enforcement is implemented with the combat rules,
+not simulated by a disabled Send button in the NPC experiment.
+
+InterventionCheck runs a short decision phase before approval of a tentative
+action. Its NPCs propose responses without recursively invoking the active GM.
+The GM receives the selection, then approves or rejects the original action.
+For example, a rejected Take can lead to separately queued NPC dialogue after
+the original tool returns. Do not hold Take open for that discussion. An idle
+human's default non-intervention is not consent to a transfer/travel request
+that explicitly requires an answer; those requests use the separate protocol
+below. GM routing, response costs and automatic denial require playtesting.
 
 ## Player replies and coordinated travel
 
@@ -1228,7 +1297,7 @@ Authority: Take/Request, Accept, Travel and Agent syntax's recursion tree.
 The action that needs a human response persists
 `pending_reply(action_id, character_id, deadline, status, response_content_id)`;
 its deadline and intended character are explicit. The corresponding
-`pending_action` also holds a typed continuation `Transfer|Travel|Intervention`, original
+`pending_action` also holds a typed continuation `Transfer|Travel`, original
 invocation/call IDs and the ordered remaining tool-call ordinals. It retains
 budget consumption. It never serializes a Rust future or re-executes earlier tools.
 

@@ -6,6 +6,9 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
+- [NPC interaction](npc-interaction.md): shared Say/Whisper delivery, eagerness
+  selection, queued NPC responses, Interrupt/Never mind and GM-selected
+  intervention before action resolution.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and
@@ -15,7 +18,8 @@ there yet". Remove and archive only verified completions.
 - [Model evaluation](model-selection.md): recorded repeated Bread Thief cases,
   measured comparison and default selection for the implemented capabilities.
 - [Rules and travel](playable-rules.md): complete creation/items, suspended
-  consent, NPC conversations, combat/time and coordinated group travel.
+  consent, persuasion, combat/time and coordinated group travel using the shared
+  NPC interaction and action paths.
 - [Storyteller worlds](storyteller-worlds.md): persisted phased initialization,
   validated objects, public/private backgrounds, guidance and replacements.
 - [Campaign completion](campaign-completion.md): event-driven ending,

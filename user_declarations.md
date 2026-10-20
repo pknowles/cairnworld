@@ -444,11 +444,57 @@ does something they need to react to. For simplicity I'm thinking this should be
 handled with an inference for each NPC present asking whether they want to
 respond/act. They will have an explicit tool call to do nothing and be
 encouraged to use it appropriately to prevent explosions of response and high
-latency from all the LLM inference for every NPC present. The GM may be needed
-to route these requests. Responses may need to happen before an action is
-completed. For example, a character may try to pick up some treasure and the GM
-could ask specific other characters if they wish to intervene, which must happen
-before the action can be approved.
+latency from all the LLM inference for every NPC present. An idea for the future
+is to have the GM route these requests - actually it already does with
+InterventionCheck. Responses may need to happen before an action is completed.
+For example, a character may try to pick up some treasure and the GM could ask
+specific other characters if they wish to intervene, which must happen before
+the action can be approved.
+
+The response - Say or the reply to InteventionCheck - should be one of:
+
+- DoNothing
+- The scheduled action (such as Say) with an eagerness value (indicating they
+  will do/say it unless another NPC has a higher value)
+
+Ties are broken at random, unless the action is simply saying something in which
+case all things said with highest eagerness can be said at once into the chat,
+including a marker or message that the characters actually talk over each other
+simultaneously. Simultaneous may even be appropriate in combat as per Cairn
+rules but I haven't thought it through.
+
+When an NPC does choose to respond, e.g. say something, the process repeats to
+allow a conversation to happen as part of a chat-turn. Many things could happen:
+the discussion ends, one character may start combat, leave mid-discussion etc.
+
+If multiple NPCs choose to respond, either replying to conversation or
+intervening in some action, one of them must go first. What they say may then
+change what others would do, so their initial responses would be cancelled and
+they may instead respond to the NPC that did respond.
+
+This needs careful planning as the chat-turn's call stack of tools may grow and
+I'm concerned about limiting the depth. Simply saying something should be
+considered an instantaneous event that completes and inserts a message into
+present characters' chat history, not something that awaits a reply. This will
+need some play testing.
+
+Players probably need an explicit interrupt button to pause inference and
+discussions while they type. This allows them to react quickly to things said
+and even break an infinite loop of discussion. It could be seen as an equivalent
+to asking NPCs if they want to respond - an implied "no" from the player unless
+they press interrupt and make some action. This must not be exploitable
+mid-combat. E.g. any attempt to take multiple actions should be explicitly
+rejected by code and not even reach the GM. I had hoped to keep chat-turns a
+stack that cannot be recursive, but interrupting means a player may say
+something while their original tool call is still awaiting a response. To
+prevent this I'm thinkin tool calls should be greedily resolved. Perhaps even
+scheduling responses once the tool call returns all the way to the top. E.g. the
+player tries to pick up an item and an npc stops them, wanting to start a dialog
+about it. That initial Take call should be rejected right away and then the
+discussion happens as a follow-up outside it. Then the discussion does not
+happen as part of the Take call. Interrupt would then only be available when
+outside their tool calls so the player cannot accidentally interrupt a tool
+call.
 
 ## Dynamic Storyteller
 
@@ -664,7 +710,9 @@ edit them. It is up to the GM to maintain consistency with whatever the
 Storyteller decrees. The Storyteller should not see the GM's notes or it would
 be overloaded with unnecessary detail.
 
-## Turns and time
+## Game turns and time
+
+(*There are RPG game-turns and LLM agent chat-turns which are separate)
 
 With many PC actions, the GM returns how much time has progressed. The GM may
 decide since the players were only chatting, not much time has passed. Rust
@@ -818,13 +866,15 @@ indirectly explains why this happened to connect the character with the story.
   the GM re-populate their description within the location to note their
   position near the connection they entered from, among any other required
   consistency updates.
-- Say - just raw text that the GM is told the character wishes to say, with an
-  optional target for who the character is addressing. The character agent may
-  need to translate a general desire into a specific sentence. E.g. "I want to
-  ask if the bartender has heard of any unusual events recently" -> "Hey
+- Say/Whisper - just raw text that the GM is told the character wishes to say,
+  with an optional target for who the character is addressing. The character
+  agent may need to translate a general desire into a specific sentence. E.g. "I
+  want to ask if the bartender has heard of any unusual events recently" -> "Hey
   NPC-name, have you noticed anything unusual recently?". The GM would typically
-  just accept/forward this to the NPC provided they can hear it. The GM add an
-  additional list of characters who overhear what was said.
+  just approve this (i.e. unless they were incapable of speaking). The GM may
+  provide an optional list of characters who overhear what was said (or who
+  can't overhear), otherwise everyone in the group hears. Whisper is a Say but
+  takes specific characters to whisper to.
 - Lie - the same as Say, except the speaker and all characters who hear it make
   a WILL roll. Those that pass receive a canned note saying they think
   Speaker-Name may be lying. This opposed check diverts from Cairn rules, but
@@ -862,7 +912,7 @@ indirectly explains why this happened to connect the character with the story.
   time. This could default to waiting to catch up to world time (e.g. waiting
   for another PC to finish doing something). If the wait is significant (i.e.
   not in combat), the GM should quickly narrate the wait, e.g. what they see
-  while waiting.
+  while waiting. A future idea is to add a combat Delay call, but not for now.
 
 The Give/Take actions are a formal way to let rust transfer items in the world.
 The idea is to avoid the risk that the GM fails/hallucinates and an item is
@@ -906,13 +956,17 @@ the case may be.
 
 ## GM tools
 
-- Approve - single response to accept a characters's action, given as an
-  argument to the tool call. The result applies immediately.
+- Approve and Reject - single response to accept or reject a characters's
+  action, given as an argument to the tool call. The result applies immediately.
 - InterventionCheck - called with an action ID and character(s) as arguments,
   who are then each requested if they wish to intervene before the character
-  makes this action. The GM may call this before approving actions. Depending on
-  how reliable the GM is, we may tie it explicitly to Approve and auto-deny if
-  any character intervenes. Needs play testing.
+  makes this action. Specifically for when an action may be tentative. E.g. if
+  the situation implies the player may stop if requested. If NPCs are in no
+  position to prevent an action and the player has made it clear they're going
+  through with it then the GM would call Approve/Reject. The GM may call this
+  before approving actions. Depending on how reliable the GM is, we may tie it
+  explicitly to Approve and auto-deny if any character intervenes. Needs play
+  testing.
 - Save - makes a character roll a given stat to pass a check, defend against
   something etc. For example when the player wants to look for something, the GM
   may make them save to find it. The save roll should take a very short string
@@ -1067,7 +1121,9 @@ agents - the Storyteller, GM and NPCs.
 ## World game page
 
 This is the main page where the game is actually played. It is simple: one big
-chat history, a box at the bottom to enter text and a send button.
+chat history, a box at the bottom to enter text and a send button. Also an
+interrupt button that may be used to pause NPC discussions or say something
+mid-combat - specifically, prevent future NPC replies until the player(s) acts.
 
 When players join, the GM agent narrates their entry, e.g. entering the
 camp/walking up to the party from along the path/through the tavern
@@ -1164,11 +1220,11 @@ The developer view will need to be able to display the following.
   will likely be many. The aim is to just present data cleanly and intuitively
   including relations/links without any effort to project or transform relations
   into simplified displays. This is for developers.
-- A turn view. User messages may trigger or be involved in full agent turns,
-  where a turn is the entire stack of messages and tool calls, appropriately
-  displaying tool calls and their results. In most cases turns are initiated by
-  players, but some player messages may be responses (e.g. when a travel action
-  asks players if they will to join).
+- A chat-turn view. User messages may trigger or be involved in full agent
+  turns, where a turn is the entire stack of messages and tool calls,
+  appropriately displaying tool calls and their results. In most cases turns are
+  initiated by players, but some player messages may be responses (e.g. when a
+  travel action asks players if they will to join).
 - An inference view. As mentioned earlier we need a way to reconstruct all that
   went into an LLM's response. Messages in the debug view should link to an
   inference view that shows the entire verbatim input prompt, system message,
@@ -1209,6 +1265,13 @@ points compaction has occurred.
 
 Chat compaction is the result of LLM inference, so summaries will have an
 inference view too, again, showing the exact input and output.
+
+Scheduled inference such as chat compaction or an NPC response should retain a
+link to the event that triggered it. For example it would be important to know
+which NPC chose to reply to a Say or intervene in a player's action
+(InterventionCheck) and the point in the turn at which they did, but the
+response to it (discussion, begin-combat, whatever) is probably going to be a
+separate turn.
 
 Implementation wise, it is important that we do not redundantly store duplicate
 prompts. The database would contain chat messages that can be stitched together
