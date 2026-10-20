@@ -106,9 +106,32 @@ pub struct GameLoad {
     state: Arc<RwLock<GameLoadState>>,
     changed: Arc<Notify>,
     /// Tells long-lived browser streams to close when shutdown begins, so
-    /// idle websockets cannot hold HTTP graceful shutdown open. The Game
-    /// closes game-input admission separately in `Game::shutdown`.
+    /// idle websockets cannot hold shutdown open. The Game closes game-input
+    /// admission separately in `Game::shutdown`.
     stopping: Arc<watch::Sender<bool>>,
+    /// How many streams are open. Axum does not track upgraded websocket
+    /// connections, so shutdown waits for this to reach zero itself; otherwise
+    /// the process could exit before a stream sent its final events.
+    open_streams: Arc<watch::Sender<usize>>,
+}
+
+/// One open browser stream (websocket), counted until dropped.
+pub struct OpenStream {
+    stopping: watch::Receiver<bool>,
+    open_streams: Arc<watch::Sender<usize>>,
+}
+
+impl OpenStream {
+    /// Completes once the server is shutting down and the stream should close.
+    pub async fn stopped(&mut self) {
+        crate::world::stopped(&mut self.stopping).await;
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        self.open_streams.send_modify(|open| *open -= 1);
+    }
 }
 
 enum GameLoadState {
@@ -130,22 +153,33 @@ impl GameLoad {
             state: Arc::new(RwLock::new(GameLoadState::Loading)),
             changed: Arc::new(Notify::new()),
             stopping: Arc::new(watch::channel(false).0),
+            open_streams: Arc::new(watch::channel(0).0),
         })
     }
 
-    pub fn stopping(&self) -> watch::Receiver<bool> {
-        self.stopping.subscribe()
+    pub fn open_stream(&self) -> OpenStream {
+        self.open_streams.send_modify(|open| *open += 1);
+        OpenStream {
+            stopping: self.stopping.subscribe(),
+            open_streams: Arc::clone(&self.open_streams),
+        }
     }
 
-    /// Routine shutdown: close browser streams, then let the game finish all
-    /// accepted work. A game that is still loading or failed to load has
-    /// accepted none.
+    /// Routine shutdown: tell browser streams to close, let the game finish
+    /// all accepted work (a game that is still loading or failed to load has
+    /// accepted none), then wait for every stream to finish sending.
     pub async fn shutdown(&self) -> Result<()> {
         self.stopping.send_replace(true);
-        match self.availability().await {
+        let drained = match self.availability().await {
             GameAvailability::Ready(game) => game.shutdown().await,
             GameAvailability::Loading | GameAvailability::Failed(_) => Ok(()),
-        }
+        };
+        self.open_streams
+            .subscribe()
+            .wait_for(|open| *open == 0)
+            .await
+            .context("waiting for browser streams to close")?;
+        drained
     }
 
     pub async fn finish(&self, build: impl FnOnce() -> Result<Arc<Game<MistralRsBackend>>>) {
@@ -830,10 +864,10 @@ async fn inspect_events(
     let viewer = session_user(&app.store, &session).await?;
     let events = app.game.world(world_id)?.events.subscribe();
     let access = app.store.access_for(viewer.id, world_id).await?;
-    let stopping = app.game.stopping();
+    let stream = app.game.open_stream();
     Ok(websocket.on_upgrade(move |socket| {
         dev_events_connection(
-            socket, events, stopping, app.store, viewer.id, world_id, access,
+            socket, events, stream, app.store, viewer.id, world_id, access,
         )
     }))
 }
@@ -847,7 +881,7 @@ async fn inspect_events(
 async fn dev_events_connection(
     mut socket: WebSocket,
     mut events: tokio::sync::broadcast::Receiver<crate::inspection::DevEvent>,
-    mut stopping: watch::Receiver<bool>,
+    mut stream: OpenStream,
     store: Store,
     viewer_id: i64,
     world_id: i64,
@@ -902,7 +936,7 @@ async fn dev_events_connection(
         let result = match tokio::select! {
             received = events.recv() => received,
             // The viewer reconnects when the server is back.
-            _ = crate::world::stopped(&mut stopping) => return,
+            _ = stream.stopped() => return,
         } {
             Ok(event) => {
                 // A dropped AccessChanged cannot authorize later private
@@ -1061,9 +1095,9 @@ async fn game_socket(
         GameAvailability::Ready(game) => game,
         GameAvailability::Failed(error) => return Err(WebError::unavailable(error)),
     };
-    let stopping = app.game.stopping();
+    let stream = app.game.open_stream();
     Ok(websocket
-        .on_upgrade(move |socket| play(socket, game, stopping, member, cursor.after_message_id)))
+        .on_upgrade(move |socket| play(socket, game, stream, member, cursor.after_message_id)))
 }
 
 #[derive(Deserialize)]
@@ -1111,11 +1145,11 @@ async fn session_user(
 async fn play(
     socket: WebSocket,
     game: Arc<Game<MistralRsBackend>>,
-    stopping: watch::Receiver<bool>,
+    stream: OpenStream,
     member: PlayerAgent,
     after_message_id: Option<i64>,
 ) {
-    if let Err(error) = play_connection(socket, game, stopping, member, after_message_id).await {
+    if let Err(error) = play_connection(socket, game, stream, member, after_message_id).await {
         tracing::error!(error = %format!("{error:#}"), "player chat websocket ended with an error");
     }
 }
@@ -1123,7 +1157,7 @@ async fn play(
 async fn play_connection<B: Backend + Send + Sync + 'static>(
     mut socket: WebSocket,
     game: Arc<Game<B>>,
-    stopping: watch::Receiver<bool>,
+    stream: OpenStream,
     member: PlayerAgent,
     after_message_id: Option<i64>,
 ) -> Result<()> {
@@ -1139,7 +1173,7 @@ async fn play_connection<B: Backend + Send + Sync + 'static>(
     // single disconnect call below - matching agent.rs's InvocationGuard
     // pattern for a guaranteed exit action without async work in Drop.
     let connection_id = game.connect(&member).await?;
-    let result = play_connected(&mut socket, &game, stopping, &member, after_message_id).await;
+    let result = play_connected(&mut socket, &game, stream, &member, after_message_id).await;
     game.disconnect(&member, connection_id)
         .await
         .context("releasing player chat connection")?;
@@ -1149,7 +1183,7 @@ async fn play_connection<B: Backend + Send + Sync + 'static>(
 async fn play_connected<B: Backend + Send + Sync + 'static>(
     socket: &mut WebSocket,
     game: &Arc<Game<B>>,
-    mut stopping: watch::Receiver<bool>,
+    mut stream: OpenStream,
     member: &PlayerAgent,
     after_message_id: Option<i64>,
 ) -> Result<()> {
@@ -1214,7 +1248,7 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
             // Checked between messages: a turn this connection already
             // submitted finishes and is sent before the stop is noticed. An
             // accepted turn never depends on this connection staying open.
-            _ = crate::world::stopped(&mut stopping) => {
+            _ = stream.stopped() => {
                 send_event(socket, &ServerEvent::Stopping).await?;
                 return Ok(());
             }
@@ -1961,18 +1995,18 @@ mod tests {
             }
         };
         let chat_game = Arc::clone(&game);
-        let chat_stopping = Arc::new(watch::channel(false).0);
-        let stop_chat = Arc::clone(&chat_stopping);
+        let stop_chat = game_load.clone();
+        let chat_stream_source = game_load.clone();
         let chat_members = chat_viewers.clone();
         let chat_socket = move |Path(index): Path<usize>,
                                 Query(cursor): Query<ChatCursor>,
                                 socket: WebSocketUpgrade| {
             let game = Arc::clone(&chat_game);
             let member = chat_members[index].clone();
-            let stopping = chat_stopping.subscribe();
+            let stream = chat_stream_source.open_stream();
             async move {
                 socket.on_upgrade(move |socket| async move {
-                    play_connection(socket, game, stopping, member, cursor.after_message_id)
+                    play_connection(socket, game, stream, member, cursor.after_message_id)
                         .await
                         .unwrap();
                 })
@@ -2232,8 +2266,11 @@ mod tests {
             .route(
                 "/browser/stop",
                 post(move || {
-                    stop_chat.send_replace(true);
-                    async { StatusCode::NO_CONTENT }
+                    let stop_chat = stop_chat.clone();
+                    async move {
+                        stop_chat.shutdown().await.unwrap();
+                        StatusCode::NO_CONTENT
+                    }
                 }),
             )
             .route("/browser/render", post(render_browser_page))
@@ -2663,6 +2700,23 @@ mod tests {
                 .unwrap()
                 .developer_mode
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_open_streams_to_finish() {
+        let (_app, _store, _db, game) = test_app_with_game().await;
+        let mut stream = game.open_stream();
+        let stopping_game = game.clone();
+        let shutdown = tokio::spawn(async move { stopping_game.shutdown().await });
+
+        stream.stopped().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must not finish while a stream is still sending"
+        );
+        drop(stream);
+        shutdown.await.unwrap().unwrap();
     }
 
     #[tokio::test]
