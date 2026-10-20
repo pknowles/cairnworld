@@ -1233,6 +1233,11 @@ Snapshot hearers at commitment, retaining speaker identity and one original
 content reference in their histories. All group characters hear ordinary Say,
 including PCs whose browser is disconnected. Presence narration retains its
 separate connected-PC audience rule. Only actual hearers receive private speech.
+Use the committed action result as the shared speech body, with explicit speech
+metadata and a frozen speaker name for reproducible history. Delivery, reload,
+context reconstruction and inspection use the same speech reader. Audience
+overrides select characters in the current group; cross-group direct interaction
+uses the existing merge operation first.
 
 Once the caller's chat-turn has unwound, hearing NPCs other than the speaker get
 response opportunities. Their character facts and heard history supply context;
@@ -1241,12 +1246,24 @@ action proposal with eagerness. A proposal records intent, never executes an
 action. Select the highest eagerness; ties between speech-only proposals commit
 as one simultaneous batch with an overlap marker visible only to its hearers.
 Otherwise choose one tied proposal randomly and record the selection. Proposed
-implementation range: integer eagerness 0–100, compared only within that round.
+range: integer eagerness 0–100, compared only within that round.
 Unselected proposals are superseded, not failed or executed tools. After a
 committed event, NPCs reconsider against the new history instead of executing
 stale replies. All-DoNothing ends the round; unchanged history does not trigger
 another round. Recheck actor eligibility, hearers and group topology before
 executing any selected action through the ordinary shared character action path.
+Collect each NPC decision with one recorded inference and exactly one terminal
+DoNothing/propose_action call. Invalid output fails visibly without an automatic
+correction loop. The proposal contains a typed supported character action and
+does not perform it. Player authorization stays at the browser boundary; a
+private resolved character actor lets PC and selected NPC requests share action
+admission without pretending NPCs are players.
+
+For simultaneous speech, a fresh GM invocation receives the selected proposals
+and uses resolve_speech_batch with an explicit approval/rejection for each.
+Validate every admission before committing all approved utterances atomically
+through the same speech helper as ordinary Say. A repeated resolution returns
+its recorded outcome. GM narration does not duplicate the characters' words.
 
 Use concrete durable response rounds in the existing world event loop. A round
 records its source tool execution(s), group/history cut, phase, candidate
@@ -1255,10 +1272,19 @@ yield to player input between them; do not await the whole discussion inside
 Say, an NPC action or the originating world event. A related follow-up is a new
 chat-turn linked to the triggering Say/InterventionCheck and proposal execution.
 Retain these causal links in Developer Mode, distinct from nested call stacks.
+Use an explicit group scene revision for stale-work detection; actual committed
+fiction/state changes advance it, inference/proposal bookkeeping does not.
+Record round progress in SQLite and wake the worker through its existing
+notification mechanism. Do not enqueue work into the worker's own bounded
+channel. Foreground events take priority between finite NPC steps.
 The causal discussion shares the existing inference/tool budget across follow-ups;
 exhaustion is a visible failure, not a fresh budget or a silent dropped response.
-On restart, recorded completed steps are not regenerated and speech is not
-delivered twice. Failure remains visible through the existing recording path.
+Checkpoint the existing budget counter and limits when the original sequence
+and each finite follow-up step finish. On restart, unstarted work can resume;
+an interrupted running step fails its discussion visibly and is never replayed,
+including when some of its effects already committed. Recorded completed steps
+are not regenerated and speech is not delivered twice. This does not attempt to
+serialize or resume an arbitrary half-run agent loop.
 
 | Approach | Benefit | Cost / decision |
 | --- | --- | --- |
@@ -1281,6 +1307,12 @@ authenticated button action with no model inference. A pause neither restores
 allowance nor authorizes an out-of-turn action. Existing action checks remain
 mandatory; full combat enforcement is implemented with the combat rules,
 not simulated by a disabled Send button in the NPC experiment.
+World owns live per-character holds and watched worker activity. Pause admission
+and action-start admission share a short synchronous mutex, released before any
+await; acknowledgements wait for an already-active NPC action to unwind. Show
+Pausing until then, and catch up the committed chat cursor before showing Paused.
+Send reserves a foreground queue slot before atomically enqueueing input and
+releasing its character's hold, so NPC work cannot overtake that input.
 
 InterventionCheck runs a short decision phase before approval of a tentative
 action. Its NPCs propose responses without recursively invoking the active GM.
@@ -1290,6 +1322,15 @@ the original tool returns. Do not hold Take open for that discussion. An idle
 human's default non-intervention is not consent to a transfer/travel request
 that explicitly requires an answer; those requests use the separate protocol
 below. GM routing, response costs and automatic denial require playtesting.
+If approval or another event changes the scene, discard stale proposals and
+let the GM-selected cohort reconsider the actual outcome under the same budget.
+Never undo an executed action or automatically reject because someone proposed
+an intervention.
+
+The [NPC interaction plan](plans/npc-interaction.md#design-choices) compares the
+alternatives and specifies schema, transaction boundaries, pause protocol,
+recovery and complete implementation slices. Full combat remains a separate
+rules increment; scheduling controls confer no action allowance.
 
 ## Player replies and coordinated travel
 
