@@ -18,8 +18,8 @@ Follow the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checkl
 [coding standards](../coding_standards.md) and
 [prompt standards](../prompt_standards.md).
 
-Current production web::serve has no graceful-shutdown hook. Game::drop aborts
-world workers. Startup Store::interrupt_open_inferences marks unfinished records
+web::serve drains through Game::shutdown; Game::drop only aborts
+world workers as a last resort. Startup Store::interrupt_open_inferences marks unfinished records
 interrupted, but those labels alone do not ensure valid subsequent model history.
 Extend these existing paths rather than add another executor or workflow system.
 

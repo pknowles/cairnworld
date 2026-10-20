@@ -287,17 +287,24 @@ impl<B> ScheduledBackend<B> {
     }
 
     /// Wait for every admitted deferred job, which finishes its stored obligation.
-    pub async fn finish_deferred_jobs(&self) {
+    /// A job that failed is reported here; its obligation stays stored.
+    pub async fn finish_deferred_jobs(&self) -> Result<()> {
         loop {
             let changed = self.scheduler.changed.notified();
             {
-                let state = self
+                let mut state = self
                     .scheduler
                     .state
                     .lock()
                     .expect("scheduler state poisoned");
                 if state.deferred_branches.is_empty() {
-                    return;
+                    let mut failures: Vec<_> = state.failures.drain().collect();
+                    failures.sort();
+                    ensure!(
+                        failures.is_empty(),
+                        "deferred jobs failed during shutdown: {failures:?}"
+                    );
+                    return Ok(());
                 }
                 tracing::info!(branches = ?state.deferred_branches, "shutting down: waiting for deferred jobs");
             }
@@ -610,7 +617,7 @@ mod tests {
         scheduler
             .admit_deferred(store.clone(), branch.branch_id(), events)
             .await;
-        backend.finish_deferred_jobs().await;
+        backend.finish_deferred_jobs().await.unwrap();
         assert!(scheduler.state.lock().unwrap().deferred_branches.is_empty());
         assert!(store.pending_compaction(agent).await.unwrap().is_none());
     }

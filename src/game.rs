@@ -128,14 +128,29 @@ where
         }
         waiting.sort_unstable();
         tracing::info!(worlds = ?waiting, "shutting down: finishing accepted turns");
+        // One world's failure must not abort the others' accepted turns, so
+        // keep joining and report the first failure afterwards.
+        let mut failure = None;
         while let Some(stopped) = workers.join_next().await {
-            let world_id = stopped.context("world worker panicked while shutting down")?;
-            waiting.retain(|id| *id != world_id);
-            tracing::info!(world_id, remaining = ?waiting, "world finished its accepted turns");
+            match stopped {
+                Ok(world_id) => {
+                    waiting.retain(|id| *id != world_id);
+                    tracing::info!(world_id, remaining = ?waiting, "world finished its accepted turns");
+                }
+                Err(error) => {
+                    failure.get_or_insert(
+                        anyhow::Error::new(error)
+                            .context("world worker failed while shutting down"),
+                    );
+                }
+            }
         }
         tracing::info!("shutting down: finishing admitted deferred jobs");
-        self.backend.finish_deferred_jobs().await;
-        Ok(())
+        let deferred = self.backend.finish_deferred_jobs().await;
+        match failure {
+            Some(error) => Err(error),
+            None => deferred,
+        }
     }
 
     fn world(&self, id: i64) -> Result<Arc<World>> {

@@ -150,9 +150,16 @@ impl GameLoad {
 
     pub async fn finish(&self, build: impl FnOnce() -> Result<Arc<Game<MistralRsBackend>>>) {
         let mut current = self.state.write().await;
-        let state = match build() {
-            Ok(game) => GameLoadState::Ready(game),
-            Err(error) => GameLoadState::Failed(format!("{error:#}")),
+        // Shutdown sets the flag before it reads the state, so either it sees
+        // the finished game and drains it, or this sees the flag: no game
+        // ever starts workers after shutdown has returned.
+        let state = if *self.stopping.borrow() {
+            GameLoadState::Failed("the server is stopping".to_string())
+        } else {
+            match build() {
+                Ok(game) => GameLoadState::Ready(game),
+                Err(error) => GameLoadState::Failed(format!("{error:#}")),
+            }
         };
         *current = state;
         self.changed.notify_waiters();
@@ -305,15 +312,21 @@ pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Resu
     // The signal future completes only once accepted work has drained, so
     // HTTP stays up (refusing new game input) until then and the caller
     // releases the database and model only after serving has finished.
+    let shutdown_result = Arc::new(std::sync::Mutex::new(Ok(())));
+    let recorded_result = Arc::clone(&shutdown_result);
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(async move {
             shutdown_requested().await;
-            if let Err(error) = shutdown_game.shutdown().await {
-                tracing::error!(error = %format!("{error:#}"), "shutting down the game");
-            }
+            *recorded_result.lock().expect("shutdown result poisoned") =
+                shutdown_game.shutdown().await;
         })
         .await
-        .context("serving web application")
+        .context("serving web application")?;
+    std::mem::replace(
+        &mut *shutdown_result.lock().expect("shutdown result poisoned"),
+        Ok(()),
+    )
+    .context("shutting down the game")
 }
 
 /// Wait for the first supported termination request, then arm a second one as
@@ -2638,6 +2651,18 @@ mod tests {
                 .unwrap()
                 .developer_mode
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_while_loading_prevents_a_later_game_from_starting() {
+        let (_app, _store, _db, game) = test_app_with_game().await;
+        game.shutdown().await.unwrap();
+        game.finish(|| unreachable!("a stopping server must not build its game"))
+            .await;
+        assert!(matches!(
+            game.availability().await,
+            GameAvailability::Failed(error) if error.contains("stopping")
+        ));
     }
 
     async fn test_app_with_game() -> (Router, Store, crate::store::TestDatabase, GameLoad) {
