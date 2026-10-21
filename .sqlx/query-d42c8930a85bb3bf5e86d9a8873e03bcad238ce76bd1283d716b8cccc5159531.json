@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO invocation (sequence_id, agent_id, branch_id) VALUES (?, ?, ?) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d42c8930a85bb3bf5e86d9a8873e03bcad238ce76bd1283d716b8cccc5159531"
+}

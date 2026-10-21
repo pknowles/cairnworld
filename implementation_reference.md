@@ -634,6 +634,21 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   ("Name says to X: ...") for model context, player chat and raw inspection,
   from the frozen speaker/addressee names. Presence narration keeps its
   connected-PC audience.
+- NPC speech rounds (design.md: NPC speech and response rounds; migration
+  0005; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
+  (`commit_speech`) opens an `npc_round` whose candidates are the NPCs who heard
+  it. The world worker runs one `NpcStep` at a time at lowest priority
+  (`Store::next_npc_step`, none while draining): Refresh (stale
+  `group.scene_revision`), Decide (one recorded inference per NPC, exactly one
+  `do_nothing` or `propose_action`, eagerness 1 to 3), Select (highest
+  eagerness; speech ties all win), Execute (pending actions for the winners and
+  one GM invocation, `resolve_speech_batch`, which must decide exactly the
+  presented actions). Discussions share the root turn's `Budget`
+  (`Budget::restore`/`spent`) and fail visibly through a failure sequence
+  (`ensure_discussion_failed`; `sequence_cause` links it to the human turn so
+  `player_chat_errors` shows it there). Startup recovery
+  (`fail_interrupted_discussions`) fails a discussion with an interrupted step
+  instead of replaying it.
 - Presence (Developer Mode plan D2; design.md's Membership and presence).
   `world::World::load` constructs shared world values before model loading.
   Every `World` owns its action queue, Developer Mode/chat channels, opening

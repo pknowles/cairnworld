@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state FROM npc_discussion WHERE root_sequence_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cbfc4270e7728f43516790717f9ed7d79a0cd76761b17bfd569fd9b179aea4f3"
+}

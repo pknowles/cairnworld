@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_round SET state = 'superseded' WHERE group_id = ? AND state IN ('collecting', 'selected')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b29b068f949b48dbd3882e13de7e225abe5dc5b453ddffbf5f7b4980bb203562"
+}

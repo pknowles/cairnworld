@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_discussion SET spent_total = ? WHERE root_sequence_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "82602ab6954904d1f0270b8aa8bb050cca6a17b22c38658e42cf5c98bcae7ac4"
+}

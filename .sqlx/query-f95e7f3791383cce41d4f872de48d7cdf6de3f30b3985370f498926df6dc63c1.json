@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT spent_total FROM npc_discussion WHERE root_sequence_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "spent_total",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f95e7f3791383cce41d4f872de48d7cdf6de3f30b3985370f498926df6dc63c1"
+}

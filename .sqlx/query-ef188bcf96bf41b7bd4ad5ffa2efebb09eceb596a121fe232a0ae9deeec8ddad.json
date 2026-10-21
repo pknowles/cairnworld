@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE invocation SET finished_at = CURRENT_TIMESTAMP, outcome = 'error' WHERE id = ? AND finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ef188bcf96bf41b7bd4ad5ffa2efebb09eceb596a121fe232a0ae9deeec8ddad"
+}

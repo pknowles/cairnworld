@@ -36,8 +36,19 @@ impl Budget {
         }
     }
 
+    /// A budget that has already spent `spent` inferences: the saved counter of
+    /// a discussion whose earlier steps ran in other call stacks.
+    pub fn restore(limits: Limits, spent: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(BudgetState {
+                limits,
+                total_spent: spent,
+            })),
+        }
+    }
+
     /// Charge one inference against the whole trigger and the current chat.
-    fn spend(&self, chat_spent: u32) -> Result<()> {
+    pub fn spend(&self, chat_spent: u32) -> Result<()> {
         let mut state = self.state.lock().expect("inference budget poisoned");
         if chat_spent >= state.limits.max_inferences_per_chat {
             bail!(
@@ -57,11 +68,11 @@ impl Budget {
         Ok(())
     }
 
-    fn limits(&self) -> Limits {
+    pub fn limits(&self) -> Limits {
         self.state.lock().expect("inference budget poisoned").limits
     }
 
-    #[cfg(test)]
+    /// Inferences charged so far, to checkpoint between steps.
     pub fn spent(&self) -> u32 {
         self.state
             .lock()

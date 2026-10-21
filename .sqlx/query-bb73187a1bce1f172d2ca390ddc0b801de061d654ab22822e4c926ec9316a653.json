@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE invocation SET finished_at = CURRENT_TIMESTAMP, outcome = 'settled' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bb73187a1bce1f172d2ca390ddc0b801de061d654ab22822e4c926ec9316a653"
+}

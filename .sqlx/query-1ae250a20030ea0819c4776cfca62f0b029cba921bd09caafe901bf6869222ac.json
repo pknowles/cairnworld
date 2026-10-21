@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_round SET state = 'executing' WHERE id = ? AND state = 'selected'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1ae250a20030ea0819c4776cfca62f0b029cba921bd09caafe901bf6869222ac"
+}

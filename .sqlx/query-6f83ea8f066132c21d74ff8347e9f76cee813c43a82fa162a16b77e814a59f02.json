@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT scene_revision FROM \"group\" WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "scene_revision",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f83ea8f066132c21d74ff8347e9f76cee813c43a82fa162a16b77e814a59f02"
+}

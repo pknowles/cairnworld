@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_round SET state = 'failed'                  WHERE root_sequence_id = ? AND state IN ('collecting', 'selected', 'executing')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ba6c5589edb261bf35ea9d4d22573c83b0d3a5f87e4188589202737186ffd123"
+}

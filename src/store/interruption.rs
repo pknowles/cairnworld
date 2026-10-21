@@ -14,6 +14,9 @@ use crate::{
     llm::{Message, MessageContent},
 };
 
+/// The error a sequence ends with when the process stopped during it.
+pub(super) const INTERRUPTED_SEQUENCE_ERROR: &str = "Interrupted by process restart";
+
 /// Why a batch's unanswered calls are being closed.
 pub(super) enum CallClosure<'a> {
     /// The server kept running and a call raised `error`. `failing_execution_id`
@@ -32,7 +35,7 @@ pub(super) enum CallClosure<'a> {
 impl Store {
     /// Give every call of `inference_id` that has no result message one, in
     /// call order, and finish its execution row to match.
-    async fn close_tool_calls(
+    pub(super) async fn close_tool_calls(
         transaction: &mut Transaction<'_, Sqlite>,
         inference_id: i64,
         closure: &CallClosure<'_>,
@@ -214,6 +217,40 @@ impl Store {
         Ok(())
     }
 
+    /// A discussion with a step that was running when the process stopped
+    /// fails, keeping its committed speech and never replaying the step. Work
+    /// that had not started resumes: a crash never refunds spent work into a
+    /// discussion that is still running.
+    pub(super) async fn fail_interrupted_discussions(
+        transaction: &mut Transaction<'_, Sqlite>,
+    ) -> Result<()> {
+        let interrupted = INTERRUPTED_SEQUENCE_ERROR;
+        let roots = sqlx::query_scalar!(
+            "SELECT DISTINCT npc_round.root_sequence_id FROM npc_round              WHERE npc_round.state IN ('collecting', 'selected', 'executing') AND (                  EXISTS (SELECT 1 FROM npc_candidate                          JOIN invocation ON invocation.id = npc_candidate.decision_invocation_id                          WHERE npc_candidate.round_id = npc_round.id AND invocation.outcome = 'interrupted')                  OR EXISTS (SELECT 1 FROM npc_candidate                             JOIN sequence ON sequence.id = npc_candidate.execution_sequence_id                             WHERE npc_candidate.round_id = npc_round.id AND sequence.error = ?1)                  OR EXISTS (SELECT 1 FROM npc_round_source                             JOIN action ON action.requesting_tool_execution_id = npc_round_source.source_tool_execution_id                             JOIN speech ON speech.action_id = action.id                             JOIN speech_batch ON speech_batch.id = speech.batch_id                             JOIN sequence ON sequence.id = speech_batch.sequence_id                             WHERE npc_round_source.round_id = npc_round.id AND sequence.error = ?1))",
+            interrupted,
+        )
+        .fetch_all(&mut **transaction)
+        .await
+        .context("finding discussions with an interrupted step")?;
+        for root in roots {
+            sqlx::query!(
+                "UPDATE npc_discussion SET state = 'failed', failure_sequence_id = root_sequence_id                  WHERE root_sequence_id = ? AND state <> 'failed'",
+                root,
+            )
+            .execute(&mut **transaction)
+            .await
+            .context("failing an interrupted discussion")?;
+            sqlx::query!(
+                "UPDATE npc_round SET state = 'failed'                  WHERE root_sequence_id = ? AND state IN ('collecting', 'selected', 'executing')",
+                root,
+            )
+            .execute(&mut **transaction)
+            .await
+            .context("failing an interrupted discussion's rounds")?;
+        }
+        Ok(())
+    }
+
     /// A tool call failed while the server kept running: record the error as
     /// that call's result and mark the rest of the batch not executed.
     pub async fn close_failed_tool_calls(
@@ -293,11 +330,13 @@ impl Store {
         .await
         .context("marking interrupted invocations")?;
         sqlx::query!(
-            "UPDATE sequence SET error = 'Interrupted by process restart', finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+            "UPDATE sequence SET error = ?, finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+            INTERRUPTED_SEQUENCE_ERROR,
         )
         .execute(&mut *transaction)
         .await
         .context("marking interrupted sequences")?;
+        Self::fail_interrupted_discussions(&mut transaction).await?;
         transaction
             .commit()
             .await

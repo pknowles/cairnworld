@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_discussion SET state = 'failed', failure_sequence_id = root_sequence_id                  WHERE root_sequence_id = ? AND state <> 'failed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "9662499df66a9b8cb940cc2bd660cf8eb53bbf04be0a4a481c7062adb5ee8992"
+}

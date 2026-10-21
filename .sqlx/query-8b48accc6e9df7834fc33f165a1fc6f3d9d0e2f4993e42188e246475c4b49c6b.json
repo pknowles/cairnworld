@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT npc_round.root_sequence_id FROM npc_round              WHERE npc_round.state IN ('collecting', 'selected', 'executing') AND (                  EXISTS (SELECT 1 FROM npc_candidate                          JOIN invocation ON invocation.id = npc_candidate.decision_invocation_id                          WHERE npc_candidate.round_id = npc_round.id AND invocation.outcome = 'interrupted')                  OR EXISTS (SELECT 1 FROM npc_candidate                             JOIN sequence ON sequence.id = npc_candidate.execution_sequence_id                             WHERE npc_candidate.round_id = npc_round.id AND sequence.error = ?1)                  OR EXISTS (SELECT 1 FROM npc_round_source                             JOIN action ON action.requesting_tool_execution_id = npc_round_source.source_tool_execution_id                             JOIN speech ON speech.action_id = action.id                             JOIN speech_batch ON speech_batch.id = speech.batch_id                             JOIN sequence ON sequence.id = speech_batch.sequence_id                             WHERE npc_round_source.round_id = npc_round.id AND sequence.error = ?1))",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_sequence_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b48accc6e9df7834fc33f165a1fc6f3d9d0e2f4993e42188e246475c4b49c6b"
+}

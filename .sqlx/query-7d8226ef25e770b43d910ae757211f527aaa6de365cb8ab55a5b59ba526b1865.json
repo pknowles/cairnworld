@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tool_execution SET status = 'completed', result_content_id = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7d8226ef25e770b43d910ae757211f527aaa6de365cb8ab55a5b59ba526b1865"
+}

@@ -6,6 +6,7 @@ mod prompt;
 mod speech;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
+pub use npc::{BatchChoice, Decision, ExecutionClaim, NpcRound, NpcStep, ProposeAction};
 pub use prompt::PromptEvidence;
 pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SayAction, WhisperAction};
 
@@ -2387,6 +2388,7 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("retiring split group {group_id}"))?;
+        Self::retire_group_rounds(transaction, group_id).await?;
         Ok(Ok(format!(
             "Group {group_id} split into groups {}.",
             result_group_ids
@@ -2480,6 +2482,7 @@ impl Store {
             .execute(&mut **transaction)
             .await
             .with_context(|| format!("retiring merged group {group_id}"))?;
+            Self::retire_group_rounds(transaction, group_id).await?;
         }
         Self::transfer_presence(
             transaction,
@@ -2757,10 +2760,19 @@ impl Store {
         only_sequence_id: Option<i64>,
     ) -> Result<Vec<PlayerChatEntry>> {
         let rows = sqlx::query!(
-            "SELECT sequence.id AS \"sequence_id!: i64\", sequence.error AS \"error!\", \
+            "WITH RECURSIVE ancestry(failed_id, ancestor_id) AS ( \
+                 SELECT id, id FROM sequence WHERE error IS NOT NULL \
+                 UNION \
+                 SELECT ancestry.failed_id, inference.sequence_id FROM ancestry \
+                 JOIN sequence_cause ON sequence_cause.child_sequence_id = ancestry.ancestor_id \
+                 JOIN tool_execution ON tool_execution.id = sequence_cause.source_tool_execution_id \
+                 JOIN inference ON inference.id = tool_execution.inference_id \
+                 WHERE inference.sequence_id IS NOT NULL) \
+             SELECT sequence.id AS \"sequence_id!: i64\", sequence.error AS \"error!\", \
                     MIN(history_entry.id) AS \"trigger_id!: i64\" \
-             FROM sequence \
-             JOIN message ON message.trigger_sequence_id = sequence.id \
+             FROM ancestry \
+             JOIN sequence ON sequence.id = ancestry.failed_id \
+             JOIN message ON message.trigger_sequence_id = ancestry.ancestor_id \
              JOIN history_entry ON history_entry.id = message.id \
              JOIN world_member ON world_member.world_id = sequence.world_id \
              JOIN player_character ON player_character.member_id = world_member.id \
@@ -2777,7 +2789,7 @@ impl Store {
                             JOIN history_entry AS player_entry ON player_entry.id = player_turn.id \
                             JOIN agent_history ON agent_history.branch_id = player_entry.branch_id \
                             JOIN player_character AS turn_owner ON turn_owner.agent_id = agent_history.agent_id \
-                            WHERE player_turn.trigger_sequence_id = sequence.id))) \
+                            WHERE player_turn.trigger_sequence_id = ancestry.ancestor_id))) \
              GROUP BY sequence.id ORDER BY MIN(history_entry.id)",
             member.member_id,
             member.world_id,
@@ -3699,6 +3711,10 @@ impl Store {
         } else {
             ActionOutcome::Rejected(result.to_string())
         };
+        if action.tool == "take" && matches!(outcome, ActionOutcome::Applied(_)) {
+            let group_id = Self::character_group_in(transaction, action.character_id).await?;
+            Self::advance_scene_revision(transaction, group_id).await?;
+        }
         let (approved, result_text) = outcome.record();
         let result_content_id =
             Self::content_in(transaction, &MessageContent::Text(result_text), "").await?;

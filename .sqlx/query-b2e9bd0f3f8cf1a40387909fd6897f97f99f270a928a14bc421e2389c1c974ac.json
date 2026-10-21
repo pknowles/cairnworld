@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tool_execution (inference_id, ordinal, status) VALUES (?, 0, 'running') RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b2e9bd0f3f8cf1a40387909fd6897f97f99f270a928a14bc421e2389c1c974ac"
+}

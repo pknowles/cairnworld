@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO sequence_cause (child_sequence_id, source_tool_execution_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ce7435062a84c32f7c0dcb075cd6823a1f0a97eedb5c050326fd77e1ea4ed339"
+}

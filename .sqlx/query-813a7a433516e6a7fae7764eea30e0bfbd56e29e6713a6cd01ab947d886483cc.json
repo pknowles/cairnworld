@@ -1,10 +1,10 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id FROM npc_round WHERE group_id = ? AND state IN ('collecting', 'selected')",
+  "query": "SELECT agent_id FROM npc_agent WHERE character_id = ?",
   "describe": {
     "columns": [
       {
-        "name": "id",
+        "name": "agent_id",
         "ordinal": 0,
         "type_info": "Integer"
       }
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "79d57ee638626b3e37f3462cf4a049b8dce317ea37731eb50100fa68bf573060"
+  "hash": "813a7a433516e6a7fae7764eea30e0bfbd56e29e6713a6cd01ab947d886483cc"
 }

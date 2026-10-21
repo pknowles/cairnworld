@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character_id FROM npc_candidate WHERE round_id = ? AND decision_invocation_id IS NULL ORDER BY character_id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3b14f567eea203b2cd7a0d22b825efb912da7a59ee925151d737a779ec814fed"
+}

@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.name, character.description, character.background, character.motive,                     character.ambition, location.id AS location_id, location.name AS location,                     location.description AS location_description, character_group.group_id              FROM character              JOIN character_group ON character_group.character_id = character.id              JOIN \"group\" ON \"group\".id = character_group.group_id              JOIN location ON location.id = \"group\".location_id              WHERE character.id = ? AND character.role = 'npc'",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "background",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "motive",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "ambition",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "location",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "location_description",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "group_id",
+        "ordinal": 8,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c7348c6ca74729d8117de9507a990a8a5ece2be6f3986d9b750502d1032fd0b2"
+}

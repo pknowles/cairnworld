@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT npc_candidate.character_id, inference.output AS \"output!: i64\" FROM npc_candidate JOIN inference ON inference.invocation_id = npc_candidate.decision_invocation_id AND inference.ordinal = 0 WHERE npc_candidate.round_id = ? ORDER BY npc_candidate.character_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "output!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "6c17454b2a450574156bb89c139593bd0a6b372e1d103d8f2cf9cd9730f8b428"
+}

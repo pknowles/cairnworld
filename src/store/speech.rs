@@ -68,6 +68,7 @@ struct Member {
     id: i64,
     name: String,
     branch_id: i64,
+    is_npc: bool,
 }
 
 /// An approved utterance and its snapshot of hearers, ready to commit.
@@ -80,6 +81,7 @@ pub(super) struct SpeechPlan {
     /// Who was spoken to, if anyone: their id and name when it was said.
     addressed: Option<(i64, String)>,
     prefix: Option<String>,
+    npc_speaker_branch: Option<i64>,
     /// Everyone who hears it except the speaker, whose own history is written
     /// after the speaker's tool result (see `deliver_speech_to_speaker`).
     hearers: Vec<Member>,
@@ -136,7 +138,8 @@ impl Store {
     ) -> Result<Vec<Member>> {
         let rows = sqlx::query!(
             "SELECT character.id AS \"id!: i64\", character.name AS \"name!\", \
-                    agent_history.branch_id AS \"branch_id!: i64\" \
+                    agent_history.branch_id AS \"branch_id!: i64\", \
+                    npc_agent.agent_id IS NOT NULL AS \"is_npc!: bool\" \
              FROM character_group \
              JOIN character ON character.id = character_group.character_id \
              LEFT JOIN player_character ON player_character.character_id = character.id \
@@ -157,6 +160,7 @@ impl Store {
                 id: row.id,
                 name: row.name,
                 branch_id: row.branch_id,
+                is_npc: row.is_npc,
             })
             .collect())
     }
@@ -245,7 +249,7 @@ impl Store {
         Ok(Ok(()))
     }
 
-    async fn character_group_in(
+    pub(super) async fn character_group_in(
         transaction: &mut Transaction<'_, Sqlite>,
         character_id: i64,
     ) -> Result<i64> {
@@ -345,6 +349,9 @@ impl Store {
         hearer_ids.dedup();
         let speaker_id = speaker.id;
         let speaker_name = speaker.name.clone();
+        // A player speaker's copy follows their tool result; an NPC is not
+        // inside a call, so its copy is written with everyone else's.
+        let npc_speaker_branch = speaker.is_npc.then_some(speaker.branch_id);
         let hearers = members
             .into_iter()
             .filter(|member| hearer_ids.contains(&member.id))
@@ -356,6 +363,7 @@ impl Store {
             speaker_id,
             speaker_name,
             addressed,
+            npc_speaker_branch,
             prefix: hearing
                 .prefix
                 .as_deref()
@@ -410,10 +418,15 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .context("recording utterance")?;
-        for hearer in &plan.hearers {
+        for branch_id in plan
+            .hearers
+            .iter()
+            .map(|hearer| hearer.branch_id)
+            .chain(plan.npc_speaker_branch)
+        {
             Self::append_speech_message(
                 transaction,
-                hearer.branch_id,
+                branch_id,
                 action_id,
                 words_content_id,
                 sequence_id,

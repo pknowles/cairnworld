@@ -98,11 +98,11 @@ work transcript; decode them from the referenced immutable tool output.
 
 | Record | Columns and constraints |
 | --- | --- |
-| npc_discussion | root_sequence_id primary key/FK sequence; limits JSON snapshot; spent_total nonnegative integer; state waiting_root, ready, settled or failed; failure_sequence_id nullable FK, present only for failure. Stores the existing Budget's checkpoint between complete steps. |
+| npc_discussion | root_sequence_id primary key/FK sequence; spent_total nonnegative integer; state ready, settled or failed; failure_sequence_id nullable FK, present only for failure. Created when the root turn finishes (so no waiting state) with that turn's spent budget; limits come from the running `Limits`, not a stored snapshot. Stores the existing Budget's checkpoint between complete steps. |
 | npc_round | id primary key; root_sequence_id FK discussion; group_id FK; scene_revision; mode speech or intervention; state collecting, selected, executing, settled, superseded or failed; original_request_tool_execution_id FK only for intervention. A partial unique index permits at most one collecting/selected speech round per group. An executing round may create that next round, which cannot run until its source sequence succeeds. |
 | npc_round_source | round_id and source_tool_execution_id FKs, composite primary key. Speech sources resolve committed Say/Whisper actions; intervention sources identify the exact InterventionCheck execution. Multiple tied utterances may trigger one round. |
 | npc_candidate | round_id and character_id form primary key; decision_invocation_id nullable UNIQUE FK until started; selected NOT NULL boolean initially false; execution_sequence_id nullable FK until selected work starts, CHECK that it requires selected. A simultaneous cohort shares one execution sequence. No candidate status column or copied decision-tool FK: derive progress/outcomes from its round, invocation, tool execution and sequence records as described below. |
-| sequence_cause | child_sequence_id and source_tool_execution_id FKs, composite primary key. All source executions belong to the same world and earlier sequences; validate this on insertion. Existing invocation parent links still describe nesting, while this table describes separate causally related chat-turns. |
+| sequence_cause | child_sequence_id and source_tool_execution_id FKs, composite primary key. All source executions belong to the same world and earlier sequences; validate this on insertion. Existing invocation parent links still describe nesting, while this table describes separate causally related chat-turns. Player-visible failures follow the cause chain back to the human turn's message; a step failure without its own sequence gets a finished failed "npc discussion failed" sequence caused by the round's sources. |
 | group.scene_revision | NOT NULL integer starting at zero. Increment in the transaction applying a fiction/state change, never for inference, tool-record or proposal bookkeeping. |
 
 Candidate progress has one source of truth:
@@ -177,7 +177,7 @@ the source execution is propose_action, instead of labelling it as an executed
 world action named "propose_action".
 
 The decision tools are do_nothing with an empty object schema and propose_action
-with {action: typed supported character action, eagerness: integer 1..3}.
+with flat arguments {words, to: names, whisper: flag, eagerness: integer 1..3} (the real model stringified a nested action object, and flattening an internally tagged enum drops its fields from the tool schema, so no nested or tagged object).
 Enforce the range in argument validation as well as the schema. Describe the
 NPC's own desire to act; it does not know the other NPCs' proposed eagerness.
 Initially offer Say/Whisper; add Take only in the intervention slice. Exactly one
