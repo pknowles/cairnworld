@@ -8,8 +8,8 @@ use {
     crate::inspection::{
         AgentInfo, BranchGroup, BranchNode, BranchParent, Content, MessageContent, MessageOrigin,
         RawHistoryCursor, RawHistoryEntry, RawHistoryPageResponse, RecordedAction,
-        RecordedInference, RecordedOutcome, Request, Response, Role, SequenceNode, ToolCall,
-        WorldObjects,
+        RecordedInference, RecordedOutcome, Request, Response, Role, SequenceInspection,
+        SequenceNode, ToolCall, WorldObjects,
     },
     std::{cell::RefCell, rc::Rc},
     wasm_bindgen::{JsCast, JsValue, closure::Closure},
@@ -319,6 +319,8 @@ struct BranchSection {
 enum InspectData {
     Sequence {
         id: i64,
+        trigger: String,
+        caused_by: Vec<i64>,
         nodes: Vec<SequenceNode>,
     },
     Inference(RecordedInference),
@@ -470,10 +472,12 @@ fn inspect_pane(
             } => fetch_json(
                 format!("/world/{world_id}/inspect/sequences/{sequence_id}"),
                 "turn view",
-                move |nodes| {
+                move |inspection: SequenceInspection| {
                     apply(InspectData::Sequence {
                         id: sequence_id,
-                        nodes,
+                        trigger: inspection.trigger,
+                        caused_by: inspection.caused_by,
+                        nodes: inspection.nodes,
                     })
                 },
                 state.error,
@@ -901,7 +905,7 @@ fn inspect_pane(
                 {
                     (move || match data.get() {
                         None => ().into_any(),
-                        Some(InspectData::Sequence { id, nodes }) => {
+                        Some(InspectData::Sequence { id, trigger, caused_by, nodes }) => {
                             // Each inference appears once in this list (one
                             // SequenceNode per inference id), so summing
                             // it directly counts every inference exactly
@@ -939,7 +943,18 @@ fn inspect_pane(
                                             <span>{format!("{input_tokens}+{output_tokens} tokens total")}</span>
                                             <span>{format!("{duration_ms}ms summed inference time")}</span>
                                             <span>{format!("record {id}")}</span>
+                                            <span>{format!("trigger: {trigger}")}</span>
                                         </div>
+                                        {(!caused_by.is_empty()).then(|| view! {
+                                            <div class="mt-1 flex flex-wrap items-center gap-1">
+                                                <span>"Caused by"</span>
+                                                {caused_by.into_iter().map(|cause| view! {
+                                                    <button class="btn btn-ghost btn-xs" on:click=move |_| selection.set(Some(InspectSelection::Sequence { id: cause, entry_id: None }))>
+                                                        {format!("turn {cause}")}
+                                                    </button>
+                                                }).collect_view()}
+                                            </div>
+                                        })}
                                     </details>
                                     {nodes.into_iter().map(|node| view! {
                                         <SequenceNodeCard node selection agents live_tokens/>

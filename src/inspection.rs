@@ -357,6 +357,19 @@ pub struct SequenceSummary {
     pub inference_count: i64,
 }
 
+/// One turn as Developer Mode shows it: its inference tree, and the earlier
+/// turns whose events caused it (an NPC reply is caused by the speech it
+/// answers).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SequenceInspection {
+    /// What began the turn, e.g. `player message`, or `npc response` for an
+    /// NPC's decision (a proposal, not an action) and `npc speech` for the
+    /// approval of one.
+    pub trigger: String,
+    pub caused_by: Vec<i64>,
+    pub nodes: Vec<SequenceNode>,
+}
+
 /// One inference in a sequence tree, with the entries it produced. The tree
 /// shape comes from each node's `RecordedInference::parent_inference_id`, a
 /// derived field resolved from `invocation.parent_tool_execution_id` (see its

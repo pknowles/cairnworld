@@ -176,7 +176,10 @@ Publish world chat/Developer Mode notifications only after commit.
 
 Audit the existing writers that can change NPC context: actual character action
 effects, delivered narration/presence, character creation/readiness/fact edits,
-and split/merge. Their transaction helpers advance affected scene revisions;
+and split/merge. (Audited: applied take, speech, a player character joining a
+group and split/merge change it. Narration and presence delivery write only
+player-agent histories, and readiness edits only the sheet, which NPCs do not
+see. Revisit if narration is ever delivered to NPCs.) Their transaction helpers advance affected scene revisions;
 new groups initialize their revision and retired groups supersede their rounds.
 Private player input, prompt artifacts and decision records do not advance it.
 Do not introduce polling, field hashing or catch-all database triggers.
@@ -258,7 +261,10 @@ add new grouping/overlap storage for tied NPC replies.
 
 In this slice replace the GM's current NPC dialogue with NPC-owned responses.
 The GM continues to approve speech and narrate consequences; it does not compose
-NPC replies on their behalf. This is required prompt/context work, not a pending
+NPC replies on their behalf. Its approval request states the facts and the tool
+to call but no longer tells it to narrate afterward: with that sentence a real GM
+skipped the tool in a run of speech actions or overflowed its context with long
+narration (about 20 of 24 actions resolved), without it all 24 of 24 did. This is required prompt/context work, not a pending
 policy question. Verify the actual assembled prompts and real-model dialogue.
 
 ## Worker transitions and transaction boundaries

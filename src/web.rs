@@ -736,7 +736,7 @@ async fn inspect_sequence(
     let viewer = session_user(&app.store, &session).await?;
     Ok(Json(
         app.store
-            .sequence_tree(viewer.id, world_id, sequence_id)
+            .sequence_inspection(viewer.id, world_id, sequence_id)
             .await?,
     ))
 }

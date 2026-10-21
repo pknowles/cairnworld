@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT cause_inference.sequence_id AS \"cause_sequence_id!: i64\"              FROM sequence_cause              JOIN tool_execution ON tool_execution.id = sequence_cause.source_tool_execution_id              JOIN inference AS cause_inference ON cause_inference.id = tool_execution.inference_id              WHERE sequence_cause.child_sequence_id = ? AND cause_inference.sequence_id IS NOT NULL              ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "cause_sequence_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "75bf3ffedf006e799b5eb2e03898d002c50067bc372a39fdef5d4a85f7fb516d"
+}

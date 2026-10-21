@@ -654,7 +654,14 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   waits for the set to finish). Discussions share the root turn's `Budget`
   (`Budget::restore`/`spent`) and fail visibly through a failure sequence
   (`ensure_discussion_failed`; `sequence_cause` links it to the human turn so
-  `player_chat_errors` shows it there). Startup recovery
+  `player_chat_errors` shows it there). Developer Mode shows the links:
+  `Store::sequence_inspection` returns `SequenceInspection { caused_by, nodes }`
+  and the turn view lists "Caused by" turns. `group.scene_revision` advances in
+  the writers that change what an NPC sees: an applied `take`, committed speech
+  (the selected set's own speech counts as its progress) and a player character
+  joining a group; GM narration is not delivered to NPC histories, so it does not
+  advance it. Narration of a say/whisper that was not delivered reaches only its
+  speaker. Startup recovery
   (`fail_interrupted_discussions`) fails a discussion with an interrupted step
   instead of replaying it.
 - Presence (Developer Mode plan D2; design.md's Membership and presence).

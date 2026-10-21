@@ -16,8 +16,8 @@ pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SayAction, WhisperAc
 pub use crate::inspection::{
     AgentInfo, BranchGroup, BranchNode, BranchParent, GameObject, InferenceMessage, MessageOrigin,
     ObjectField, ObjectLink, ObjectType, RawHistoryCursor, RawHistoryEntry, RecordedAction,
-    RecordedInference, RecordedOutcome, Segment, SequenceNode, SequenceSummary, WorldObjectCursor,
-    WorldObjects,
+    RecordedInference, RecordedOutcome, Segment, SequenceInspection, SequenceNode, SequenceSummary,
+    WorldObjectCursor, WorldObjects,
 };
 
 use std::{collections::HashMap, path::Path};
@@ -4036,6 +4036,8 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("placing Adventurer in world {world_id}"))?;
+        // NPCs in the group now see one more character present.
+        Self::advance_scene_revision(transaction, starting_group_id).await?;
         Ok((character_id, agent_id, tool_id))
     }
 
@@ -5542,6 +5544,33 @@ impl Store {
         .into_iter()
         .map(SequenceSummary::try_from)
         .collect()
+    }
+
+    /// A turn's inference tree together with the earlier turns that caused it.
+    pub async fn sequence_inspection(
+        &self,
+        viewer_id: i64,
+        world_id: i64,
+        sequence_id: i64,
+    ) -> Result<SequenceInspection> {
+        let nodes = self.sequence_tree(viewer_id, world_id, sequence_id).await?;
+        let trigger =
+            sqlx::query_scalar!("SELECT trigger FROM sequence WHERE id = ?", sequence_id,)
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("loading sequence {sequence_id}"))?;
+        let caused_by = sqlx::query_scalar!(
+            "SELECT DISTINCT cause_inference.sequence_id AS \"cause_sequence_id!: i64\"              FROM sequence_cause              JOIN tool_execution ON tool_execution.id = sequence_cause.source_tool_execution_id              JOIN inference AS cause_inference ON cause_inference.id = tool_execution.inference_id              WHERE sequence_cause.child_sequence_id = ? AND cause_inference.sequence_id IS NOT NULL              ORDER BY 1",
+            sequence_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading what caused sequence {sequence_id}"))?;
+        Ok(SequenceInspection {
+            trigger,
+            caused_by,
+            nodes,
+        })
     }
 
     /// The full tool-call stack for one trigger: every inference in recorded
