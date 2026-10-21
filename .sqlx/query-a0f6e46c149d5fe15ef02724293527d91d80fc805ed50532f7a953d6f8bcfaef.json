@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO npc_round (root_sequence_id, group_id, scene_revision, state) VALUES (?, ?, ?, 'collecting') RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a0f6e46c149d5fe15ef02724293527d91d80fc805ed50532f7a953d6f8bcfaef"
+}

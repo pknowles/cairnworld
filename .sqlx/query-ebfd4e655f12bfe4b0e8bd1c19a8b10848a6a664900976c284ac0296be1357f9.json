@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_round SET state = 'superseded' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ebfd4e655f12bfe4b0e8bd1c19a8b10848a6a664900976c284ac0296be1357f9"
+}

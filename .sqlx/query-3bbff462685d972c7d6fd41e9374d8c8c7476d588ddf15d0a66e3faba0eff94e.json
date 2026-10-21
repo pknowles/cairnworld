@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT source_tool_execution_id FROM npc_round_source WHERE round_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_tool_execution_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3bbff462685d972c7d6fd41e9374d8c8c7476d588ddf15d0a66e3faba0eff94e"
+}

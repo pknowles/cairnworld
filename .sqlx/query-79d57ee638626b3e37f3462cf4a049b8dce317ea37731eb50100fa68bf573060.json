@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM npc_round WHERE group_id = ? AND state IN ('collecting', 'selected')",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "79d57ee638626b3e37f3462cf4a049b8dce317ea37731eb50100fa68bf573060"
+}

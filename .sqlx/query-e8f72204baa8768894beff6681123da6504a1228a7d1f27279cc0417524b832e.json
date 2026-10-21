@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO npc_round_source (round_id, source_tool_execution_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e8f72204baa8768894beff6681123da6504a1228a7d1f27279cc0417524b832e"
+}

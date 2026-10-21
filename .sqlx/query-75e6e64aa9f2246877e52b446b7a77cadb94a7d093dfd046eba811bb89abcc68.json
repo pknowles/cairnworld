@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT requesting_tool_execution_id FROM action WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "requesting_tool_execution_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "75e6e64aa9f2246877e52b446b7a77cadb94a7d093dfd046eba811bb89abcc68"
+}

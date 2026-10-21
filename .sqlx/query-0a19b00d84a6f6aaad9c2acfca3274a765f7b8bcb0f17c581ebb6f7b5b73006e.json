@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO npc_candidate (round_id, character_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0a19b00d84a6f6aaad9c2acfca3274a765f7b8bcb0f17c581ebb6f7b5b73006e"
+}

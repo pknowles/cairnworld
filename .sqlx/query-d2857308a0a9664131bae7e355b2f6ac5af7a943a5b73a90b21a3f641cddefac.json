@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT npc_agent.character_id AS \"character_id!: i64\" FROM action JOIN speech ON speech.action_id = action.id JOIN speech_message ON speech_message.speech_action_id = speech.action_id JOIN history_entry ON history_entry.id = speech_message.message_id JOIN agent_history ON agent_history.branch_id = history_entry.branch_id JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id JOIN character_group ON character_group.character_id = npc_agent.character_id WHERE action.requesting_tool_execution_id = ? AND npc_agent.character_id <> speech.speaker_character_id AND character_group.group_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d2857308a0a9664131bae7e355b2f6ac5af7a943a5b73a90b21a3f641cddefac"
+}

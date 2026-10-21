@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE \"group\" SET scene_revision = scene_revision + 1 WHERE id = ? RETURNING scene_revision",
+  "describe": {
+    "columns": [
+      {
+        "name": "scene_revision",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "44c7407d54ce79ade8d1b1b9ad214fefdfb282aa7ca9413a92f979f74998fef2"
+}

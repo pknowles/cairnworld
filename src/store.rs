@@ -1,6 +1,7 @@
 mod content;
 mod history;
 mod interruption;
+mod npc;
 mod prompt;
 mod speech;
 use history::EntryKind;
@@ -395,6 +396,16 @@ pub struct ResolvedAction {
     /// Who heard it, when this call committed an utterance (not when it
     /// returns an earlier resolution).
     pub heard_by: Vec<String>,
+}
+
+/// Everything one resolution needs besides its transaction.
+pub(super) struct Resolution<'a> {
+    pub gm_agent_id: i64,
+    pub world_id: i64,
+    pub action_id: i64,
+    pub approving_tool_execution_id: i64,
+    pub result: &'a str,
+    pub hearing: &'a Hearing,
 }
 
 /// How a resolved action ended. Stored as `action.approved` plus its result
@@ -1263,12 +1274,25 @@ impl Store {
             .begin()
             .await
             .with_context(|| format!("finishing sequence {sequence_id}"))?;
+        Self::finish_sequence_in(&mut transaction, sequence_id, error).await?;
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("finishing sequence {sequence_id}"))
+    }
+
+    pub(super) async fn finish_sequence_in(
+        transaction: &mut Transaction<'_, Sqlite>,
+        sequence_id: i64,
+        error: Option<&str>,
+    ) -> Result<()> {
         let result = sqlx::query!(
-            "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ?              WHERE id = ? AND finished_at IS NULL",
+            "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ? \
+             WHERE id = ? AND finished_at IS NULL",
             error,
             sequence_id,
         )
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .with_context(|| format!("finishing sequence {sequence_id}"))?;
         ensure!(
@@ -1278,16 +1302,13 @@ impl Store {
         // A failed turn leaves no action for a later GM turn to approve.
         if let Some(error) = error {
             Self::close_pending_actions(
-                &mut transaction,
+                transaction,
                 sequence_id,
                 &format!("the turn failed before the GM resolved this action: {error}"),
             )
             .await?;
         }
-        transaction
-            .commit()
-            .await
-            .with_context(|| format!("finishing sequence {sequence_id}"))
+        Ok(())
     }
 
     /// Start one agent loop (design.md's `invocation`): the root of a
@@ -3449,6 +3470,28 @@ impl Store {
                 actor.character_id
             )
         })?;
+        let pending = Self::create_pending_action_in(
+            &mut transaction,
+            actor,
+            sequence_id,
+            requesting_tool_execution_id,
+            (tool, args),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("committing pending {tool} action {}", pending.id))?;
+        Ok(pending)
+    }
+
+    pub(super) async fn create_pending_action_in(
+        transaction: &mut Transaction<'_, Sqlite>,
+        actor: &CharacterActor,
+        sequence_id: i64,
+        requesting_tool_execution_id: i64,
+        (tool, args): (&str, &str),
+    ) -> Result<PendingAction> {
         let (character_id, gm_agent_id, gm_branch_id): (i64, i64, i64) = sqlx::query!(
             "SELECT character.id, world_gm.agent_id, \"group\".branch_id \
              FROM character \
@@ -3460,12 +3503,12 @@ impl Store {
             actor.world_id,
         )
         .map(|row| (row.id, row.agent_id, row.branch_id))
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .context("resolving action character and group GM")?
         .context("the acting character has no group and GM")?;
         ensure!(
-            Self::character_may_act(&mut transaction, character_id).await?,
+            Self::character_may_act(transaction, character_id).await?,
             "character {character_id} has no active player and cannot act"
         );
         let sequence_matches: Option<i64> = sqlx::query_scalar!(
@@ -3473,7 +3516,7 @@ impl Store {
             sequence_id,
             actor.world_id,
         )
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .context("checking action sequence world")?;
         ensure!(
@@ -3486,7 +3529,7 @@ impl Store {
              RETURNING next_action_id",
             actor.world_id,
         )
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await
         .with_context(|| format!("allocating action id in world {}", actor.world_id))?;
         sqlx::query!(
@@ -3503,13 +3546,9 @@ impl Store {
             tool,
             args,
         )
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .with_context(|| format!("storing pending {tool} action {action_id}"))?;
-        transaction
-            .commit()
-            .await
-            .with_context(|| format!("committing pending {tool} action {action_id}"))?;
         Ok(PendingAction {
             world_id: actor.world_id,
             id: action_id,
@@ -3543,12 +3582,47 @@ impl Store {
         action_id: i64,
         approving_tool_execution_id: i64,
         result: &str,
-        audience: &Hearing,
+        hearing: &Hearing,
     ) -> Result<ResolvedAction> {
         let mut transaction =
             self.pool.begin().await.with_context(|| {
                 format!("resolving action {action_id} through GM {gm_agent_id}")
             })?;
+        let resolved = Self::resolve_in(
+            &mut transaction,
+            &Resolution {
+                gm_agent_id,
+                world_id,
+                action_id,
+                approving_tool_execution_id,
+                result,
+                hearing,
+            },
+            &mut None,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("committing resolved action {action_id}"))?;
+        Ok(resolved)
+    }
+
+    /// The resolution itself, inside the caller's transaction. A batch of
+    /// utterances passes one `batch` slot so they share a speech_batch row.
+    pub(super) async fn resolve_in(
+        transaction: &mut Transaction<'_, Sqlite>,
+        resolution: &Resolution<'_>,
+        batch: &mut Option<i64>,
+    ) -> Result<ResolvedAction> {
+        let Resolution {
+            gm_agent_id,
+            world_id,
+            action_id,
+            approving_tool_execution_id,
+            result,
+            hearing,
+        } = *resolution;
         let pending: Option<PendingAction> = sqlx::query_as!(
             PendingActionRow,
             "SELECT world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args \
@@ -3557,7 +3631,7 @@ impl Store {
             action_id,
             gm_agent_id,
         )
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .context("loading pending action for group GM")?
         .map(Into::into);
@@ -3583,7 +3657,7 @@ impl Store {
                 gm_agent_id,
             )
             .map(|row| (row.approved, row.result_content_id))
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await
             .context("checking for an already-resolved action")?;
             let (approved, result_content_id) = resolved.with_context(|| {
@@ -3592,13 +3666,10 @@ impl Store {
                 )
             })?;
             let MessageContent::Text(text) =
-                Self::content_in_transaction(&mut transaction, result_content_id).await?
+                Self::content_in_transaction(transaction, result_content_id).await?
             else {
                 anyhow::bail!("recorded result of action {action_id} is not text");
             };
-            transaction.commit().await.with_context(|| {
-                format!("committing idempotent re-resolve of action {action_id}")
-            })?;
             return Ok(ResolvedAction {
                 id: action_id,
                 outcome: ActionOutcome::from_record(approved, text),
@@ -3608,11 +3679,11 @@ impl Store {
         };
         let mut speech = None;
         let outcome = if result == "approved"
-            && !Self::character_may_act(&mut transaction, action.character_id).await?
+            && !Self::character_may_act(transaction, action.character_id).await?
         {
             ActionOutcome::Failed("the character no longer has an active player".to_string())
         } else if result == "approved" && matches!(action.tool.as_str(), "say" | "whisper") {
-            match Self::plan_speech(&mut transaction, &action, audience).await? {
+            match Self::plan_speech(transaction, &action, hearing).await? {
                 Ok(plan) => {
                     let words = plan.words().to_string();
                     speech = Some(plan);
@@ -3621,7 +3692,7 @@ impl Store {
                 Err(reason) => ActionOutcome::Failed(reason),
             }
         } else if result == "approved" {
-            match Self::execute_approved_action(&mut transaction, &action).await? {
+            match Self::execute_approved_action(transaction, &action).await? {
                 Ok(text) => ActionOutcome::Applied(text),
                 Err(reason) => ActionOutcome::Failed(reason),
             }
@@ -3630,7 +3701,7 @@ impl Store {
         };
         let (approved, result_text) = outcome.record();
         let result_content_id =
-            Self::content_in(&mut transaction, &MessageContent::Text(result_text), "").await?;
+            Self::content_in(transaction, &MessageContent::Text(result_text), "").await?;
         let recorded_action_id = sqlx::query_scalar!(
             "INSERT INTO action \
              (sequence_id, requesting_tool_execution_id, approving_tool_execution_id, result_content_id, approved, pending_action_id) \
@@ -3642,14 +3713,15 @@ impl Store {
             approved,
             action.id,
         )
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await
         .with_context(|| format!("recording resolved action {action_id}"))?;
         let mut heard_by = Vec::new();
         if let Some(plan) = &speech {
             Self::commit_speech(
-                &mut transaction,
+                transaction,
                 plan,
+                batch,
                 world_id,
                 action.sequence_id,
                 recorded_action_id,
@@ -3664,7 +3736,7 @@ impl Store {
             action_id,
             gm_agent_id,
         )
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .context("retiring resolved pending action")?
         .rows_affected();
@@ -3672,10 +3744,6 @@ impl Store {
             deleted == 1,
             "pending action {action_id} changed while resolving"
         );
-        transaction
-            .commit()
-            .await
-            .with_context(|| format!("committing resolved action {action_id}"))?;
         Ok(ResolvedAction {
             id: action_id,
             outcome,

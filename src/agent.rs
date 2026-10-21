@@ -62,7 +62,7 @@ impl Budget {
     }
 
     #[cfg(test)]
-    pub fn total_spent(&self) -> u32 {
+    pub fn spent(&self) -> u32 {
         self.state
             .lock()
             .expect("inference budget poisoned")
@@ -1122,7 +1122,7 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("max_inferences_per_chat"), "got {message}");
         assert_eq!(
-            budget.total_spent(),
+            budget.spent(),
             limits.max_inferences_per_chat,
             "the loop must stop at the limit, not after it"
         );
@@ -1179,7 +1179,7 @@ mod tests {
         let nested = budget.clone();
         budget.spend(0).unwrap();
         nested.spend(0).unwrap();
-        assert_eq!(budget.total_spent(), 2);
+        assert_eq!(budget.spent(), 2);
     }
 
     #[test]
