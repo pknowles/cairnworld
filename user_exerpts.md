@@ -612,3 +612,28 @@ responses is implementation work, not a policy question:
 The revised declaration permits the GM to describe overlap with a prefix.
 Selected tied replies share their pre-response history and may be delivered in
 any order. Keep mandatory GM approval; no automatic overlap marker is required.
+
+### 2026-10-21 Individual approvals and expressive speech
+
+This supersedes the batch-approval choice above, retaining tied speech composed
+before hearing the other selected replies:
+
+> Re. batching and whispers I think we should remove batching afterall. Cool
+> idea but that we are finding awkward edge cases is the design trying to tell
+> us we did it wrong.
+
+On character-authored phrasing and delivery style:
+
+> Giving player agents the ability to add style and phrasing will greatly
+> improve an otherwise dry game. Moreover the GM and NPCs get to see how
+> something is said which can add subtlety to the communication. Hard coding
+> "Name says" was a mistake and not something I asked for.
+
+The user accepted committed as the intent distinction:
+
+> committed is great. updated
+
+The declaration now allows individual GM approvals in any order for tied speech.
+Tentative means willing to pause for an objection; committed means proceeding
+despite objections, while actual prevention and ordinary action rules still
+apply. ConditionalApprove remains speculative, not an implementation requirement.

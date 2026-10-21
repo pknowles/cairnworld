@@ -6,9 +6,9 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [NPC interaction](npc-interaction.md): shared Say/Whisper delivery, eagerness
-  selection, queued NPC responses, Interrupt/Never mind and GM-selected
-  intervention before action resolution.
+- [NPC interaction](npc-interaction.md): expressive speech and individual GM
+  approvals, complete response scheduling/causal inspection, Interrupt/Never mind,
+  perceived-event opportunities and tentative/committed intervention.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and

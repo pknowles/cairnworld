@@ -69,6 +69,12 @@ stubbed with unconditional approval here.
    including Wait. Reset flags only when its next game-turn begins. Interrupt,
    Never mind and unused allowance do not grant out-of-turn permission. Wire
    these checks into the same action admission used by players and NPC follow-ups.
+   Extend NPC interaction's tentative/committed intervention to physical contests:
+   committed intent does not bypass a shopkeeper's actual obstruction, initiative
+   or consumed allowance. Resolve checks and approved reaction effects before
+   deciding the original action, without re-entering an active GM. Exercise the
+   declared shopkeeper example; ConditionalApprove and dynamic executable rules
+   remain unimplemented ideas pending playtesting, not prerequisites here.
    Add movement's within-location description and approved duration. Advance
    world time to the maximum and queue crossed-hour NPC opportunities through
    WorldEvents. Verify the approved initiative/time policy, second move/action

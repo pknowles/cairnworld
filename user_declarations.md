@@ -439,33 +439,82 @@ from other locations. This needs play testing.
 ## NPC Interaction
 
 There will be frequent times when NPCs may be present for some interaction and
-occasionally they may need to respond. E.g. when a character talks to them or
-does something they need to react to. For simplicity I'm thinking this should be
-handled with an inference for each NPC present asking whether they want to
-respond/act. They will have an explicit tool call to do nothing and be
-encouraged to use it appropriately to prevent explosions of response and high
-latency from all the LLM inference for every NPC present. An idea for the future
-is to have the GM route these requests - actually it already does with
-InterventionCheck. Responses may need to happen before an action is completed.
-For example, a character may try to pick up some treasure and the GM could ask
-specific other characters if they wish to intervene, which must happen before
-the action can be approved.
+occasionally they may need to respond. A response to something that already happened is straightforward. E.g. after a character says something, all those who heard it may make an action to respond. This could be a Say, but it could also start combat and attack.
 
-The response - Say or the reply to InteventionCheck - should be one of:
+For simplicity I'm thinking this should be handled with an inference for each
+NPC present asking whether they want to respond/act. They will have an explicit
+tool call to do nothing and be encouraged to use it appropriately to prevent
+explosions of response and high latency from all the LLM inference for every NPC
+present. An idea for the future is to have the GM route these requests -
+actually it already does with InterventionCheck. Responses may need to happen
+before an action is completed.
+
+Some interactions may be preventable by other characters. For example, a
+character may try to pick up some treasure and the GM could ask specific other
+characters if they wish to intervene, which must happen before the action can be
+approved. At first I was thinking this could implicitly reject the action and
+the rejecting character's action (or reaction) could then be processed
+separately in a new turn to avoid agent recursion/re-entry. However there are
+some complexities this doesn't handle.
+
+Some interruptions wouldn't make sense and we need tests to catch it. For
+example: a player goes to pick up some treasure in a prison. A prisoner
+interrupts the action, calling out "don't pick it up; it's cursed". The player
+chooses to pick it up anyway, calling the Take action again. This time the GM
+should not allow the prisoner to keep blocking the character's attempt as all
+they can do is call out. A simple solution might be to add a committed flag to
+actions that player agents would typically keep off.
+
+A further example: a player tries to pick up a trinket on display in the shop.
+The shopkeeper is standing next to them and says "hands off; that's not for
+sale". The player tries again, this time committed. The shopkeeper should be
+able to interrupt this with a physical response, perhaps requiring a STR or DEX
+roll or even initiating combat. For simplicity the shopkeeper's roll could be
+modelled as a melee attack action at the start of combat, with the option for
+ending combat immediately after if both characters accept the outcome. Needs
+play testing.
+
+These examples suggest the GM can always make an InterventionCheck, asking
+players if they wish to intervene and which action they will intervene with.
+Their action then comes back as a possible intervention that the GM may approve.
+This is a bit awkward because it stacks up two in-flight actions - one being a
+reaction. A ConditionalApprove tool call could be interesting here, but it may
+not be necessary. The GM can approve the reaction, wait to see its result and
+approve or reject the initial action depending on the result.  A player who is
+fast enough might succeed in picking up an item even if it is the start of
+combat. The distinction is that a character intervening does not necessarily
+stop the action, but tells the GM of the intent. A simple "please don't" when an
+action is not "committed" could be enough. ConditionalApprove would make this more
+rigid and avoid a possible causal mistake by the GM, but this needs play
+testing.
+
+## NPC Inference
+
+NPCs can make regular actions, responding to heard conversations or world events
+in a new turn or as a reaction to an InterventionCheck. For now inference is
+chosen to conservatively include those hearing something said or seeing some
+event. It can be limited - characters who did not hear anything cannot react.
+Perhaps this could be modelled with a dirty flag in their chat history (or a
+perceived-event flag if a general dirty flag is too broad), which allows them to
+respond to any update at all. This may be a performance issue, and needs play
+testing.
+
+Example actions and reactions:
 
 - DoNothing
-- The scheduled action (such as Say) with an eagerness value (indicating they
-  will do/say it unless another NPC has a higher value)
+- Say, with a 1-3 eagerness value (indicating they will do/say it unless another
+  NPC has a higher value)
 
 Ties are broken at random, unless the action is simply saying something in which
-case all things said with highest eagerness can be said at once into the chat.
-The GM may batch approve and include a lead-in prefix that the characters
-actually talk over each other simultaneously. The key part is characters will
-not have heard each others responses before theirs. Simultaneous response may
-even be appropriate in combat as per Cairn rules but I haven't thought it
-through.
+case all things said with highest eagerness can be said at once into the chat. I
+was thinking that batch approval could happen but it gets complex with
+non-overlapping listeners. Better to have the GM narrate that characters all
+talk at once and then approve each Say one by one in any order. The key part is
+characters will not have heard each others responses before theirs and that
+might be useful to know in chat histories. Simultaneous response may even be
+appropriate in combat as per Cairn rules but I haven't thought it through.
 
-When an NPC does choose to respond, e.g. say something, the process repeats to
+When an NPC does choose to respond, e.g. Say something, the process repeats to
 allow a conversation to happen as part of a chat-turn. Many things could happen:
 the discussion ends, one character may start combat, leave mid-discussion etc.
 
@@ -491,12 +540,13 @@ stack that cannot be recursive, but interrupting means a player may say
 something while their original tool call is still awaiting a response. To
 prevent this I'm thinkin tool calls should be greedily resolved. Perhaps even
 scheduling responses once the tool call returns all the way to the top. E.g. the
-player tries to pick up an item and an npc stops them, wanting to start a dialog
-about it. That initial Take call should be rejected right away and then the
-discussion happens as a follow-up outside it. Then the discussion does not
-happen as part of the Take call. Interrupt would then only be available when
-outside their tool calls so the player cannot accidentally interrupt a tool
-call.
+player tries to pick up an item (without the committed flag), the GM does an
+InterventionCheck and an npc stops them by saying something, wanting to start a
+dialog about it. The Say reaction is should be approved and the initial Take
+call should be rejected right away. Then the discussion happens as a regular
+follow-up outside it. The discussion does not happen as part of the Take call. A
+player can press interrupt whenever but it should only take effect between tool
+calls so the player cannot accidentally interrupt a tool call.
 
 ## Dynamic Storyteller
 
@@ -868,15 +918,15 @@ indirectly explains why this happened to connect the character with the story.
   the GM re-populate their description within the location to note their
   position near the connection they entered from, among any other required
   consistency updates.
-- Say/Whisper - just raw text that the GM is told the character wishes to say,
+- Say/Whisper - text to be said that may include descriptions of how it is said,
   with an optional target for who the character is addressing. The character
   agent may need to translate a general desire into a specific sentence. E.g. "I
-  want to ask if the bartender has heard of any unusual events recently" -> "Hey
-  NPC-name, have you noticed anything unusual recently?". The GM would typically
-  just approve this (i.e. unless they were incapable of speaking). The GM may
-  provide an optional list of characters who overhear what was said (or who
-  can't overhear), otherwise everyone in the group hears. Whisper is a Say but
-  takes specific characters to whisper to.
+  want to ask if the bartender has heard of any unusual events recently, but
+  discretely" -> "PC-name says in a low voice: Hey NPC-name, have you noticed
+  anything unusual recently?". This must pass GM approval (i.e. unless they were
+  incapable of speaking). The GM may provide an optional list of characters who
+  overhear what was said (or who can't overhear), otherwise everyone in the
+  group hears. Whisper is a Say but takes specific characters to whisper to.
 - Lie - the same as Say, except the speaker and all characters who hear it make
   a WILL roll. Those that pass receive a canned note saying they think
   Speaker-Name may be lying. This opposed check diverts from Cairn rules, but
@@ -960,6 +1010,8 @@ the case may be.
 
 - Approve and Reject - single response to accept or reject a characters's
   action, given as an argument to the tool call. The result applies immediately.
+  The GM gets to see the result of whatever they approve, including failures or
+  errors, as it may affect future decisions. If rejecting, the GM must give a reason so that the caller may try something else.
 - InterventionCheck - called with an action ID and character(s) as arguments,
   who are then each requested if they wish to intervene before the character
   makes this action. Specifically for when an action may be tentative. E.g. if
@@ -995,7 +1047,8 @@ the case may be.
   this.
 - BeginCombat - takes a list of characters, sets their InCombat flag and they
   all roll DEX for turn order.
-- EndCombat - unsets the characters' InCombat flag.
+- EndCombat - unsets the characters' InCombat flag. InterventionCheck could be
+  used first to see if all characters actually wish to end combat.
 - UpdateStoryteller - send the Storyteller a text summary of some
   event/interaction/resolution that just happened or completed, letting the
   Storyteller make actions, update notes in turn.
@@ -1169,6 +1222,12 @@ Ideas for the future, after the basics are implemented.
   agent interpret would be ideal but we will hit the recursion bug where the
   player's agent is expecting a response for the initial tool call but instead
   sees a confirmation request. Will need to think about it.
+- Allow the GM to dynamically create rules that can be executed and evaluated by
+  the code. This keeps things more fair and random by asking the LLM to make
+  structure that then gets enforced. E.g. an NPC tries to stop the player
+  picking up an item by force - the GM then constructs an opposed strength test
+  whos result leads to the player taking the item or not.
+
 
 # Debugging and Telemetry
 

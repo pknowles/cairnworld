@@ -1236,7 +1236,7 @@ fiction rather than substituting for mechanical state.
 | Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
 | Say/Whisper/lie | Say defaults to all characters in the group; Whisper names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
 | DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
-| InterventionCheck/Approve/Reject | GM selects characters to consult about an explicit tentative action before deciding it. Collect response proposals without executing them. GM sees the selected intervention before resolving the original action; any follow-up action runs afterward. Automatic rejection on intervention remains subject to playtesting. |
+| InterventionCheck/Approve/Reject | GM consults selected characters about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may pause for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Give/take/drop/place | One holder change after arbitration/consent; no duplicate item on repeated approval. |
 | Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
@@ -1264,49 +1264,62 @@ Developer view and [the turn/pause clarifications](user_exerpts.md#2026-10-20-np
 
 Speech is a completed game event, not a call awaiting an answer. GM arbitration
 can determine whether the speaker can speak and override hearers; the character
-agent owns the words and decisions. Addressing a character does not make Say
-private. Whisper supplies explicit targets; hearing overrides must stay within
-the authorized scene and an include/exclude override cannot specify both.
+agent owns the expressive text, including phrasing and descriptions of its own
+delivery. Store and show that text unchanged: readers do not manufacture a
+"Name says" sentence, strip style or infer identity from text. Speaker identity,
+intent, addressee and hearers remain structured metadata. The GM's optional
+prefix supplies circumstances of hearing rather than replacing the character's
+style. Addressing a character does not make Say private. Whisper supplies
+explicit targets; hearing overrides must stay within
+the authorized scene; a character cannot be both included and excluded.
 Snapshot hearers at commitment, retaining speaker identity and one original
 content reference in their histories. All group characters hear ordinary Say,
 including PCs whose browser is disconnected. Presence narration retains its
 separate connected-PC audience rule. Only actual hearers receive private speech.
 Use the committed action result as the shared speech body, with explicit speech
-metadata and a frozen speaker name for reproducible history. Delivery, reload,
-context reconstruction and inspection use the same speech reader. Audience
-overrides select characters in the current group; cross-group direct interaction
+metadata and frozen names for reproducible inspection. Delivery, reload,
+context reconstruction and inspection use the same stored expressive text.
+Speaker metadata remains available to model context and inspection without a
+fixed prose wrapper. Audience overrides select characters in the current group;
+cross-group direct interaction
 uses the existing merge operation first.
 
 Once the caller's chat-turn has unwound, hearing NPCs other than the speaker get
 response opportunities. Their character facts and heard history supply context;
-GM/Storyteller-only notes remain private. NPCs return DoNothing or an explicit
-action proposal with eagerness. A proposal records intent, never executes an
+GM/Storyteller-only notes remain private. NPCs call do_nothing or an offered
+character action with eagerness. During collection the call records intent, not an
 action. Eagerness is an integer 1–3: low, moderate or strong desire to act now.
-Select the highest eagerness; ties between speech-only proposals are presented
-together for GM approval. Their words were composed against the same history,
-without hearing one another's replies. Deliver the approved words in any order
-before another response round. The GM may describe overlap through the existing
-prefix; no automatic overlap marker is required. Otherwise choose one tied
-proposal randomly and record the selection.
+Select the highest eagerness; speech-only highest ties may all speak. Their words
+were composed against the same history, without hearing one another's replies.
+The GM approves/rejects each action separately in any order, through ordinary
+approval tools. Finish the selected set before another response round; an earlier
+selected utterance does not by itself invalidate its peers. The GM may describe
+overlap through each utterance's prefix, only to its actual hearers. Otherwise
+choose one tied proposal randomly and record the selection.
 Unselected proposals are superseded, not failed or executed tools. After a
 committed event, NPCs reconsider against the new history instead of executing
 stale replies. All-DoNothing ends the round; unchanged history does not trigger
 another round. Recheck actor eligibility, hearers and group topology before
 executing any selected action through the ordinary shared character action path.
 Collect each NPC decision with one recorded inference and exactly one terminal
-DoNothing/propose_action call. Invalid output fails visibly without an automatic
-correction loop. The proposal contains a typed supported character action and
-does not perform it. Player authorization stays at the browser boundary; a
+do_nothing or real character-action tool call, using the same action schema and
+validation as players plus eagerness. Invalid output fails visibly without an
+automatic correction loop. There is no separate propose_action interface.
+Player authorization stays at the browser boundary; a
 private resolved character actor lets PC and selected NPC requests share action
 admission without pretending NPCs are players.
 
-For simultaneous speech, a fresh GM invocation receives the selected proposals
-and uses resolve_speech_batch with an explicit approval/rejection and hearing
-adjustments (include/exclude/prefix) for each. GM approval is required for NPC
-speech just as for player speech: speaking ability and hearers are GM decisions.
-Validate every admission before committing all approved utterances atomically
-through the same speech helper as ordinary Say. A repeated resolution returns
-its recorded outcome. GM narration does not duplicate the characters' words.
+After the originating stack unwinds, each selected utterance uses a fresh GM
+invocation and ordinary approve_action/reject_action for its presented action ID.
+Each approval commits its own utterance and hearing adjustments independently;
+a later rejection or failure does not undo earlier speech. Yield to the world
+worker between utterances; NPC reply collection waits until the selected set
+finishes, but human input can supersede stale remaining intentions. There is no
+batch approval tool or all-or-nothing multi-utterance transaction. Repeated resolution
+returns that action's recorded outcome without another delivery. GM approval is
+mandatory: speaking ability and hearers remain GM decisions. Prefixes and any
+additional narration have explicit per-utterance audiences. A combined final GM
+reply that has seen several whispers is not broadcast to their union of hearers.
 When NPC response rounds are introduced, the GM narrates consequences while
 NPC agents supply their own dialogue. This replaces the current GM-voiced NPC
 replies and requires real-model prompt verification.
@@ -1360,18 +1373,30 @@ Pausing until then, and catch up the committed chat cursor before showing Paused
 Send reserves a foreground queue slot before atomically enqueueing input and
 releasing its character's hold, so NPC work cannot overtake that input.
 
-InterventionCheck runs a short decision phase before approval of a tentative
-action. Its NPCs propose responses without recursively invoking the active GM.
-The GM receives the selection, then approves or rejects the original action.
-For example, a rejected Take can lead to separately queued NPC dialogue after
-the original tool returns. Do not hold Take open for that discussion. An idle
+InterventionCheck collects reaction intentions before an action resolves. NPC
+decision calls do not invoke the already-active GM. The GM may approve a proposed
+reaction directly, receive its actual result, then decide the original action.
+This uses the existing action/roll operations, not a ConditionalApprove tool,
+general dependency engine or dynamically generated rule language. Actions that
+can be tentative carry committed intent (initially Take, default false): false
+means willing to pause for an objection; true means proceeding despite objections,
+not guaranteed success or permission to bypass physical opposition or turn rules.
+The GM gets this intent in the action request. A prisoner's warning can stop a
+tentative Take, but cannot repeatedly veto a committed retry. A shopkeeper may
+still physically prevent either attempt using implemented checks/combat rules.
+
+Do not ask an agent already active in the call stack for another inference.
+Use its already-recorded intent, or resolve the current call before further
+dialogue. Once the bounded reaction/original-action decision finishes, ordinary
+conversation runs through scheduled follow-up turns. An idle
 human's default non-intervention is not consent to a transfer/travel request
 that explicitly requires an answer; those requests use the separate protocol
 below. GM routing, response costs and automatic denial require playtesting.
-If approval or another event changes the scene, discard stale proposals and
-let the GM-selected cohort reconsider the actual outcome under the same budget.
-Never undo an executed action or automatically reject because someone proposed
-an intervention.
+Actual perceived world events may also create NPC opportunities. Use their
+recorded sources and authorized recipients, not a dirty flag on arbitrary chat
+writes: tool receipts, inference records and private GM notes are not new
+perceptions. Expanded action sets and physical/combat reactions follow the
+implemented rules; they are not simulated by speech-only tools.
 
 The [NPC interaction plan](plans/npc-interaction.md#design-choices) compares the
 alternatives and specifies schema, transaction boundaries, pause protocol,
