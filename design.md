@@ -1280,9 +1280,13 @@ Use the committed action result as the shared speech body, with explicit speech
 metadata and frozen names for reproducible inspection. Delivery, reload,
 context reconstruction and inspection use the same stored expressive text.
 Speaker metadata remains available to model context and inspection without a
-fixed prose wrapper. Audience overrides select characters in the current group;
-cross-group direct interaction
-uses the existing merge operation first.
+fixed prose wrapper. New speech uses typed message content containing the authored
+text and its recorded attribution/hearing metadata. The backend serializes that
+content as JSON in a user-role model message; chat renders the authored prose and
+GM prefix, retaining identity as metadata. Legacy speech retains its original
+text rendering and request reconstruction. Audience overrides select characters
+in the current group; cross-group direct interaction uses the existing merge
+operation first.
 
 Once the caller's chat-turn has unwound, hearing NPCs other than the speaker get
 response opportunities. Their character facts and heard history supply context;
@@ -1352,6 +1356,9 @@ saved agent call stack or per-inference durable budget system.
 | New generic workflow engine | Could schedule arbitrary future jobs | Adds an unneeded framework alongside the world loop; reject. |
 
 Interrupt pauses future NPC actions in the character's group at a safe boundary.
+Accept the hold even during the requesting character's own foreground turn;
+finish that turn normally before acknowledging the safe pause. The hold does
+not suspend tools inside that turn or permit re-entry into the player agent.
 An in-flight proposal inference may finish recording; it must not publish an
 action after the pause is acknowledged. Completed speech/actions remain intact.
 The control path can request the pause while the world worker awaits inference;
@@ -1376,6 +1383,9 @@ releasing its character's hold, so NPC work cannot overtake that input.
 InterventionCheck collects reaction intentions before an action resolves. NPC
 decision calls do not invoke the already-active GM. The GM may approve a proposed
 reaction directly, receive its actual result, then decide the original action.
+Record these intentions through existing child invocations and pending actions
+inside the current turn, not scheduled response rounds. Only subsequent dialogue
+uses the world worker's response rounds after the original stack unwinds.
 This uses the existing action/roll operations, not a ConditionalApprove tool,
 general dependency engine or dynamically generated rule language. Actions that
 can be tentative carry committed intent (initially Take, default false): false

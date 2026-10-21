@@ -22,8 +22,8 @@ Authority: [NPC Interaction](../user_declarations.md#npc-interaction),
 Follow [NPC speech and response rounds](../design.md#npc-speech-and-response-rounds).
 
 The current game has recorded NPC identities/history branches, group topology,
-an inference scheduler, serialized world events and shared chat delivery. Say
-currently reaches GM arbitration and narration without invoking NPC agents.
+an inference scheduler, serialized world events and shared chat delivery, plus
+initial speech-triggered NPC response scheduling.
 Use those production paths; MCP, a new job framework, complete character creation,
 inventory normalization and full combat are not prerequisites for this experiment.
 
@@ -89,6 +89,9 @@ policy and automatic denial remain the user's playtesting decisions.
 | Pause handling | Queue the control behind NPC work: cannot interrupt promptly. Cancel arbitrary futures: risks half-completed tools. Direct live control with boundary acknowledgement: permits typing while retaining committed work, but acknowledgement can wait for an active action. | Direct pause holds and a watched worker activity value; never cancel a running action. |
 | Budgets and restart | Memory-only counters grant a fresh budget after restart. Arbitrary crash continuation requires durable nested-call progress and inference admission. Saving counters between complete steps permits clean restarts with smaller changes, while crashes fail active discussions. | Finish steps on planned shutdown and checkpoint the existing Budget between them; use shared crash cleanup for exceptional interruptions. |
 | Shared actions | Fake PlayerAgent for NPCs breaks ownership. A parallel NPC executor duplicates rules. A private resolved character actor plus existing action execution shares rules without giving browser callers NPC authority. | Resolved character actor; player authorization remains at the browser boundary. |
+| Intervention lifetime | Schedule the reaction after the original turn: reuses rounds but cannot affect the unresolved action. Suspend and persist the GM stack: supports long waits but adds unnecessary continuation state. Collect child decisions and approve reactions in the active GM turn: reuses invocations and pending actions, with bounded work sharing its budget. | Child decisions in the current turn; only subsequent dialogue uses scheduled rounds. Preserve applied effects on failure, without replay. |
+| Interrupt during the caller's turn | Reject: simple but contradicts the declaration. Cancel or suspend the turn: responsive but risks incomplete tools and agent re-entry. Record a hold while the current action finishes: permits immediate input control without cancelling accepted work. | Accept the hold at any time; acknowledge a safe pause after active action work finishes. New input still uses ordinary foreground admission. |
+| Speech attribution | Put names into authored prose: no representation change but loses reliable attribution and constrains expression. Preformat metadata into ordinary text: fewer match arms but makes consumers parse presentation. Add a typed speech content variant: touches existing message consumers but keeps identity and authored prose together without conflating them. | Typed speech content, serialized as a compact JSON object for model input and rendered as authored prose in chat. Preserve legacy text messages and their exact reconstruction. |
 
 ## Data model and invariants
 
@@ -102,8 +105,8 @@ work transcript; decode them from the referenced immutable tool output.
 | Record | Columns and constraints |
 | --- | --- |
 | npc_discussion | root_sequence_id primary key/FK sequence; spent_total nonnegative integer; state ready, settled or failed; failure_sequence_id nullable FK, present only for failure. Created when the root turn finishes (so no waiting state) with that turn's spent budget; limits come from the running `Limits`, not a stored snapshot. Stores the existing Budget's checkpoint between complete steps. |
-| npc_round | id primary key; root_sequence_id FK discussion; group_id FK; scene_revision; mode speech or intervention; state collecting, selected, executing, settled, superseded or failed; original_request_tool_execution_id FK only for intervention. Adjust the speech-round indexes to allow one collecting follow-up alongside one selected/executing set per group. The follow-up cannot run until its source sequences succeed and that selected set finishes or is superseded. |
-| npc_round_source | round_id and source_tool_execution_id FKs, composite primary key. Speech sources resolve committed Say/Whisper actions; intervention sources identify the exact InterventionCheck execution. Multiple tied utterances may trigger one round. |
+| npc_round | id primary key; root_sequence_id FK discussion; group_id FK; scene_revision; state collecting, selected, executing, settled, superseded or failed. Scheduled rounds describe responses to completed events, not unresolved intervention. Adjust the speech-round indexes to allow one collecting follow-up alongside one selected/executing set per group. The follow-up cannot run until its source sequences succeed and that selected set finishes or is superseded. |
+| npc_round_source | round_id and source_tool_execution_id FKs, composite primary key. Speech sources resolve committed Say/Whisper actions. Multiple tied utterances may trigger one round. |
 | npc_candidate | round_id and character_id form primary key; decision_invocation_id nullable UNIQUE FK until started; selected NOT NULL boolean initially false; execution_sequence_id nullable FK until that selected action starts, CHECK that it requires selected. Each selected utterance has its own execution sequence. No candidate status column or copied decision-tool FK: derive progress/outcomes from its round, invocation, tool execution and sequence records. |
 | sequence_cause | child_sequence_id and source_tool_execution_id FKs, composite primary key. All source executions belong to the same world and earlier sequences; validate this on insertion. Existing invocation parent links still describe nesting, while this table describes separate causally related chat-turns. Player-visible failures follow the cause chain back to the human turn's message; a step failure without its own sequence gets a finished failed "npc discussion failed" sequence caused by the round's sources. |
 | group.scene_revision | NOT NULL integer starting at zero. Increment in the transaction applying a fiction/state change, never for inference, tool-record or proposal bookkeeping. |
@@ -149,12 +152,24 @@ live/reload reads, raw inspection and model context. Remove fixed "Name says",
 that demands bare literal words. Keep speaker/addressee IDs, frozen names,
 whisper intent and actual hearers as metadata. Model context must still identify
 the source character using structured context rather than rebuilding a fixed
-speech sentence; do not parse an actor's name out of authored text.
+speech sentence; do not parse an actor's name out of authored text. Extend the
+existing MessageContent with a Speech variant carrying speaker ID/frozen name,
+optional addressee ID/frozen name, kind, prefix and authored text, loaded together
+by the shared speech reader. Keep these fields out of ordinary text messages.
+The backend presents new speech as a user-role message containing the JSON
+serialization of that object. Browser chat renders the authored text with the
+GM prefix and exposes attribution as metadata, without manufacturing dialogue.
+Inspection shows the same structured content and captured model input. Use the
+same content representation across consumers; no new message framework or
+name-extraction parser is needed. Update history compaction and token accounting
+to consume this content too; speech must remain eligible for summarization, with
+its attribution preserved, rather than disappearing from text-only matches.
 The GM prefix describes hearing circumstances; it does not overwrite style or
 invent the character's words. Preserve old recorded content, names and captured
 inference inputs: add an explicit speech text-format discriminator in a forward
 migration. Existing utterances retain legacy literal-word rendering for exact
-reconstruction; new utterances use authored text without the fixed wrapper.
+reconstruction, including their existing Text message representation and backend
+format; new utterances use typed authored speech without the fixed wrapper.
 Keep this distinction in the shared reader, not heuristics that guess from
 wording or duplicated formatting paths in each consumer.
 Publish world chat/Developer Mode notifications only after commit.
@@ -188,7 +203,7 @@ operations. Submit the selected NPC call's real action name and arguments
 through CharacterActor, without a second action schema or translation layer. Its original
 say/whisper decision execution is the requesting execution; it can belong to the
 earlier decision sequence. Do not fabricate an inference/tool call to imitate a
-player. Inspection must resolve the nested proposed action name/arguments when
+player. Inspection must resolve the real proposed action name/arguments when
 the source execution is an NPC decision, instead of labelling it as an executed
 world action.
 
@@ -263,7 +278,7 @@ Wait on channel/Notify/deadline when no work is eligible, with no timer polling.
 | Collect one waiting candidate | Start a fresh causally linked sequence and attach its decision invocation to the candidate in a transaction. Run one inference outside transactions using the shared in-memory Budget, then atomically finish the decision result, invocation, sequence and budget checkpoint. Return to the worker boundary. Intervention collection instead uses child invocations inside its existing foreground sequence. |
 | All decisions ready | Validate group/revision, persist selected winners and the round phase, including the random tie result. DoNothing and losers need no additional status writes. All-DoNothing settles without another job. Speech-only highest ties select the whole cohort; mixed/non-speech ties select one. |
 | Execute selected work | Admit one selected action under the pause protocol, then attach a fresh execution sequence to that candidate and set the round executing, rechecking scene and ownership. Run ordinary GM arbitration and delivery. Save its sequence outcome/budget and return the round to selected if chosen actions remain, or settled otherwise, before yielding. |
-| Revision/group changed before execution | Mark superseded, not failed. Start a fresh round only for still-relevant unconsumed heard input/selected intervention intent in that group; departed actors keep heard history but do not act in their former group. |
+| Revision/group changed before execution | Mark superseded, not failed. Start a fresh round only for still-relevant unconsumed heard input in that group; departed actors keep heard history but do not act in their former group. |
 | Selected action rejected | Preserve its recorded rejection; do not try the losing candidates as fallbacks. A new actual event may create a new round. |
 | Inference/action failure or budget exhaustion | Preserve original error and committed effects, fail that discussion and its remaining rounds, and notify its actual participant PCs through the existing authorized failure path. Unrelated groups remain usable. |
 
@@ -303,26 +318,35 @@ Settle a discussion when its root has finished and no active rounds remain.
 Superseding a collecting round and inserting its replacement happen in one
 transaction; carry source references and derive the new eligible hearer roster
 from committed deliveries, rather than retaining stale candidate identities.
-An intervention round can execute selected work after its original sequence
-finishes just as a speech round can; it never becomes eligible mid-GM call.
+Intervention intentions instead belong to child invocations in the active GM
+turn, as specified below. They are not pending response rounds and never become
+eligible worker jobs after the original action has resolved.
 
 ## Pause protocol
 
 World owns live pause holds keyed by (group_id, character_id), plus a watched
-activity enum: Idle, Foreground(character_id), NpcDecision(round_id), or
-NpcAction(round_id). Use a short synchronous mutex to change this state and
+activity enum: Idle, Foreground(group_id, character_id),
+NpcDecision(group_id, round_id), or NpcAction(group_id, round_id).
+Use a short synchronous mutex to change this state and
 claim work; release it before any await. A guard restores activity on every
 success/error exit. The durable round remains the recovery record, not a second
 live queue. Controls carry no prompts or model work.
 
-- Interrupt authenticates the character/group and rejects the request while
+- Interrupt authenticates the character/group and accepts the hold even while
   that character's own foreground chat-turn is active. Under the live mutex it
   inserts the hold. During an NPC decision it acknowledges immediately: the
   inference may finish, but execution is gated. If an NPC action is already
-  active, it waits on the watched activity until that complete action unwinds
-  before acknowledging. Show "Pausing" while waiting; never claim it is paused
-  while an action can still publish. Waiting does not block the worker or hold
-  a mutex/connection. Recheck access before returning the acknowledgement.
+  active, or a foreground turn is active in the held group, it waits on the
+  watched activity until that complete action/turn unwinds
+  before acknowledging. Activity in another group does not delay this group's
+  acknowledgement. Show "Pausing" while waiting; never claim it is paused
+  while an already-active action in this group can still publish.
+  Waiting does not block the worker or hold
+  a mutex/connection. The current turn continues normally; the hold gates future
+  NPC actions, not tools required to finish that turn. Send cannot re-enter an
+  active player agent and retains existing foreground admission. Recheck access
+  and that the hold still exists before acknowledging a paused state; Never mind,
+  Send or disconnect may have released it while waiting.
 - Claiming another NPC action checks holds under the same mutex that records
   active work, eliminating the check/start race. If held, leave work selected
   and unclaimed. Otherwise set NpcAction with its activity guard, release the
@@ -360,6 +384,11 @@ child decision invocations. These do not execute actions or ask the active GM
 for approval again. Never invoke an agent already active on the stack; its
 original intent is already available. Human non-intervention remains the default;
 blocking for human consent belongs to the later explicit-consent protocol.
+Use the existing child invocation/tool records and pending actions for these
+intentions, applying the same decision validation and eagerness selection rules
+as responses. No npc_discussion/npc_round/npc_candidate rows are needed to hold
+an unresolved InterventionCheck. Collect against the pre-reaction histories,
+return selected intentions, and close that child collection before GM approval.
 
 Return reaction IDs and intentions to the current GM. Let that GM approve a
 reaction through the existing action executor, receive its real result, then
@@ -455,7 +484,7 @@ not after every state transition or cosmetic edit.
 
 | Case | Expected outcome | Verification |
 | --- | --- | --- |
-| U1: Say addresses one NPC | All actual NPC hearers get an opportunity; an addressed NPC may choose DoNothing. Selected speech retains the actor's authored style, without a fixed reader-added sentence, and gets ordinary GM approval. | A/B compare authored text through live/reload/context paths; C links speaker and source. |
+| U1: Say addresses one NPC | All actual NPC hearers get an opportunity; an addressed NPC may choose DoNothing. Selected speech retains the actor's authored style, without a fixed reader-added sentence, and gets ordinary GM approval. | A/B compare authored text through live/reload/context paths; C links speaker and source. Include text that omits the speaker's name: the captured backend input must still identify the speaker and addressee. Verify historical request reconstruction remains unchanged. |
 | U2: Different eagerness | Highest wins; losing proposals are superseded and their actors reconsider newly heard speech. | A contrasts 1/2/3; C checks only the winner acted. |
 | U3: Tied speech | Highest ties composed from the same history get separate single-action GM turns in any order. Earlier tied speech does not regenerate/invalidate the remaining chosen words. Approved words arrive once before a new response round; prefix is optional. | A/C check original decisions, individual approvals and deliveries; B checks intelligible overlap/style. |
 | U4: All DoNothing | No GM approval or follow-up inference after collection completes. | A counts model work; C shows a settled round without actions. |
@@ -472,7 +501,9 @@ not after every state transition or cosmetic edit.
 | E9: Another group | It is not paused, superseded or given private speech by this discussion. Its accepted input uses the ordinary serialized world worker between finite steps, not concurrent world mutation. | A submits input in both groups; C checks isolation and ordering. |
 
 Later increments retain their own verification: Interrupt/Never mind and multiple
-holds, perceived-event delivery without bookkeeping-triggered loops, then
+holds, including Interrupt during the caller's active turn followed by release
+before acknowledgement (no cancellation, re-entry or false Paused state);
+perceived-event delivery without bookkeeping-triggered loops, then
 tentative/committed Take and intervention. The prisoner's warning must not veto
 a committed retry forever; approved reactions precede the original decision and
 do not re-enter the active GM. Verify shopkeeper physical opposition with the
