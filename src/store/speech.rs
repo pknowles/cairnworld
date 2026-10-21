@@ -379,28 +379,20 @@ impl Store {
     pub(super) async fn commit_speech(
         transaction: &mut Transaction<'_, Sqlite>,
         plan: &SpeechPlan,
-        batch: &mut Option<i64>,
         world_id: i64,
         sequence_id: i64,
         action_id: i64,
         words_content_id: i64,
     ) -> Result<()> {
-        let batch_id = match *batch {
-            Some(batch_id) => batch_id,
-            None => {
-                let batch_id = sqlx::query_scalar!(
-                    "INSERT INTO speech_batch (world_id, group_id, sequence_id) VALUES (?, ?, ?) RETURNING id",
-                    world_id,
-                    plan.group_id,
-                    sequence_id,
-                )
-                .fetch_one(&mut **transaction)
-                .await
-                .context("recording speech batch")?;
-                *batch = Some(batch_id);
-                batch_id
-            }
-        };
+        let batch_id = sqlx::query_scalar!(
+            "INSERT INTO speech_batch (world_id, group_id, sequence_id) VALUES (?, ?, ?) RETURNING id",
+            world_id,
+            plan.group_id,
+            sequence_id,
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .context("recording speech batch")?;
         let addressed_id = plan.addressed.as_ref().map(|(id, _)| *id);
         let addressed_name = plan.addressed.as_ref().map(|(_, name)| name.as_str());
         sqlx::query!(

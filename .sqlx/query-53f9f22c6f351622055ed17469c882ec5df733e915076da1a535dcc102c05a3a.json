@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, root_sequence_id FROM npc_round WHERE group_id = ? AND state IN ('collecting', 'selected')",
+  "query": "SELECT npc_round.id, npc_round.root_sequence_id FROM npc_candidate JOIN npc_round ON npc_round.id = npc_candidate.round_id WHERE npc_candidate.execution_sequence_id = ?",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "9e1a569a51fd79cb292c8242b6ff54eb447439ffd09b6319149b59e14b803659"
+  "hash": "53f9f22c6f351622055ed17469c882ec5df733e915076da1a535dcc102c05a3a"
 }

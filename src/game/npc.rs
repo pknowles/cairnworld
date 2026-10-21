@@ -6,56 +6,22 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
-use schemars::{JsonSchema, schema_for};
-use serde::Deserialize;
+use anyhow::{Context, Result};
+use schemars::schema_for;
 
-use super::{Budget, CallContext, GM_ROLE, Game, Narration, no_argument_schema};
+use super::{Budget, CallContext, Game, no_argument_schema};
 use crate::{
-    agent,
     context::{self, RecordedCompletion},
     inspection::DevEvent,
-    llm::{Backend, Content, Message, Role, ToolDefinition},
-    store::{
-        BatchChoice, Decision, ExecutionClaim, Hearing, InvalidHearing, MAX_PREFIX_CHARS, NpcRound,
-        NpcStep, SayAction, WhisperAction, with_eagerness,
-    },
-    tools::{Tool, ToolFuture, ToolOutcome},
+    llm::{Backend, Message, Role, ToolDefinition},
+    store::{Decision, NpcRound, NpcStep, SayAction, WhisperAction, with_eagerness},
     world::{ChatChange, World},
 };
 
 const NPC_ROLE: &str = "You are the character described below, in a scene you share with others. Speak only for yourself. Decide whether to respond to what you just heard: call do_nothing, or call say or whisper with the words and how strongly you want to speak now. Most of the time the right choice is do_nothing: stay silent unless you were spoken to or have something new that matters to say, and let a conversation end once your point has been made. The GM decides whether your words are said, and others may speak first or at the same time.";
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ResolveSpeechBatch {
-    /// One decision for every presented action.
-    decisions: Vec<SpeechDecision>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct SpeechDecision {
-    /// The visible action id.
-    action_id: i64,
-    /// Whether the character can say it.
-    approve: bool,
-    /// When not approved, why it cannot be said.
-    #[serde(default)]
-    reason: Option<String>,
-    /// Characters who also hear it, by name.
-    #[serde(default)]
-    include: Vec<String>,
-    /// Characters who must not hear it, by name.
-    #[serde(default)]
-    exclude: Vec<String>,
-    /// Normally omitted. A short phrase every hearer is shown before the words,
-    /// only for how they are heard (such as "(Muffled through the door)"); never
-    /// the speaker's name or manner.
-    #[serde(default)]
-    #[schemars(length(max = MAX_PREFIX_CHARS))]
-    prefix: Option<String>,
-}
+/// Tells the GM why two replies in a row heard nothing of each other.
+const TIED_NOTE: &str = "This reply was composed at the same moment as others from the characters present, before anyone heard the others; they will be presented to you separately. You may describe the overlap in the prefix, but do not treat replies you have not approved as said.";
 
 impl<B> Game<B>
 where
@@ -223,241 +189,27 @@ where
             self.limits,
             self.store.discussion_spent(round.root_sequence_id).await?,
         );
-        let result = self.take_words_to_the_gm(world, &claim, &budget).await;
-        let finished = match &result {
-            Ok(()) => {
-                self.store
-                    .finish_npc_execution(&claim, budget.spent())
-                    .await
-            }
-            Err(_) => Ok(()),
-        };
+        let result = async {
+            let narration = self
+                .arbitrate(
+                    claim.pending.clone(),
+                    budget.clone(),
+                    CallContext::root(Some(claim.sequence_id)),
+                    claim.tied.then_some(TIED_NOTE),
+                )
+                .await?;
+            self.deliver_narration(round.world_id, &narration).await?;
+            self.store
+                .finish_npc_execution(&claim, budget.spent())
+                .await
+        }
+        .await;
         self.finish_npc_step(
             world,
             (claim.root_sequence_id, claim.sequence_id),
             None,
-            result.and(finished),
+            result,
         )
         .await
     }
-
-    /// A fresh GM invocation judges the winners' words together.
-    async fn take_words_to_the_gm(
-        self: &Arc<Self>,
-        world: &Arc<World>,
-        claim: &ExecutionClaim,
-        budget: &Budget,
-    ) -> Result<()> {
-        let branch = self.store.group_branch(claim.group_id).await?;
-        let scene = serde_json::to_string(
-            &self
-                .store
-                .gm_scene(branch.world_id(), branch.branch_id())
-                .await
-                .context("loading group GM scene for NPC speech")?,
-        )
-        .context("serializing group GM scene")?;
-        let scene_packet = format!("Current scene packet:\n{scene}");
-        let mut listing = String::new();
-        for proposal in &claim.proposals {
-            listing.push_str(&format!(
-                "\n- Action {}: {}",
-                proposal.pending.id,
-                describe(
-                    &proposal.speaker_name,
-                    &proposal.pending.tool,
-                    &proposal.pending.args
-                )?
-            ));
-        }
-        let request = Message::text(
-            Role::User,
-            format!(
-                "Characters replied to what was just said, each without hearing the others:{listing}\nJudge each from the current scene: whether the character can say it and who hears it. Call resolve_speech_batch once with a decision for every action. Delivered words are heard as spoken; then narrate anything else that happens."
-            ),
-        );
-        self.store
-            .append_instruction(branch, &request, claim.sequence_id)
-            .await
-            .context("storing the NPC speech request")?;
-        let proposals: Vec<_> = claim
-            .proposals
-            .iter()
-            .map(|proposal| (proposal.pending.id, proposal.speaker_name.clone()))
-            .collect();
-        let gm_agent_id = branch.agent_id();
-        let world_id = branch.world_id();
-        let game = Arc::clone(self);
-        let batch_tool = Tool::new(
-            ToolDefinition {
-                name: "resolve_speech_batch".to_string(),
-                description: "Decide every presented reply at once: approve (optionally adjusting who hears it or adding a short prefix) or reject with a reason.".to_string(),
-                schema: serde_json::to_value(schema_for!(ResolveSpeechBatch))
-                    .expect("resolve_speech_batch schema should serialize"),
-            },
-            move |context| {
-                let arguments = context.arguments.to_string();
-                let tool_execution_id = context.tool_execution_id;
-                let game = Arc::clone(&game);
-                let proposals = proposals.clone();
-                Box::pin(async move {
-                    let batch: ResolveSpeechBatch = match serde_json::from_str(&arguments)
-                        .context("parsing speech batch decisions")
-                    {
-                        Ok(batch) => batch,
-                        Err(error) => return Ok(ToolOutcome::rejected(error)),
-                    };
-                    let mut choices = Vec::new();
-                    for decision in batch.decisions {
-                        let choice = if decision.approve {
-                            BatchChoice::Approve(Hearing {
-                                include: decision.include,
-                                exclude: decision.exclude,
-                                prefix: decision.prefix,
-                            })
-                        } else {
-                            match decision.reason.filter(|reason| !reason.trim().is_empty()) {
-                                Some(reason) => BatchChoice::Reject(reason),
-                                None => {
-                                    return Ok(ToolOutcome::Rejected(format!(
-                                        "Tool arguments were rejected: say why action {} is rejected",
-                                        decision.action_id
-                                    )));
-                                }
-                            }
-                        };
-                        choices.push((decision.action_id, choice));
-                    }
-                    let mut presented: Vec<i64> = proposals.iter().map(|(id, _)| *id).collect();
-                    let mut decided: Vec<i64> = choices.iter().map(|(id, _)| *id).collect();
-                    presented.sort_unstable();
-                    decided.sort_unstable();
-                    if presented != decided {
-                        return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: decide exactly the presented actions {presented:?} once each, not {decided:?}"
-                        )));
-                    }
-                    let resolved = match game
-                        .store
-                        .resolve_speech_batch(gm_agent_id, world_id, tool_execution_id, &choices)
-                        .await
-                    {
-                        Ok(resolved) => resolved,
-                        Err(error) => match error.downcast_ref::<InvalidHearing>() {
-                            Some(invalid) => {
-                                return Ok(ToolOutcome::Rejected(format!(
-                                    "Tool arguments were rejected: {invalid}"
-                                )));
-                            }
-                            None => return Err(error.context("resolving the speech batch")),
-                        },
-                    };
-                    let mut report = Vec::new();
-                    for resolved in resolved {
-                        let speaker = proposals
-                            .iter()
-                            .find(|(id, _)| *id == resolved.id)
-                            .map_or("", |(_, name)| name.as_str());
-                        report.push(match resolved.outcome {
-                            crate::store::ActionOutcome::Applied(_) if !resolved.heard_by.is_empty() => format!(
-                                "Action {} ({speaker}) approved. Delivered as spoken to {}.",
-                                resolved.id,
-                                resolved.heard_by.join(", ")
-                            ),
-                            crate::store::ActionOutcome::Applied(_) => {
-                                format!("Action {} ({speaker}) approved.", resolved.id)
-                            }
-                            crate::store::ActionOutcome::Failed(reason) => format!(
-                                "Action {} ({speaker}) approved, but could not be said: {reason}",
-                                resolved.id
-                            ),
-                            crate::store::ActionOutcome::Rejected(_) => {
-                                format!("Action {} ({speaker}) rejected.", resolved.id)
-                            }
-                        });
-                    }
-                    Ok(ToolOutcome::Completed(report.join("\n")))
-                }) as ToolFuture
-            },
-        );
-        let call = CallContext::root(Some(claim.sequence_id));
-        let settled = agent::complete_with_call_context(
-            &self.store,
-            &self.backend,
-            budget,
-            agent::Turn {
-                events: world.events.clone(),
-                branch,
-                static_messages: &[Message::text(Role::System, GM_ROLE)],
-                dynamic_context: &[scene_packet.as_str()],
-                tools: &[batch_tool],
-                sampling: self.sampling.clone(),
-                model: &self.model,
-            },
-            &call,
-            |_| {},
-            |_| {},
-        )
-        .await
-        .context("asking the GM to judge the NPC replies")?;
-        ensure!(
-            matches!(settled.response.content, Content::Text(_)),
-            "the GM did not settle after judging the NPC replies"
-        );
-        for proposal in &claim.proposals {
-            ensure!(
-                !self
-                    .store
-                    .has_pending_action(proposal.pending.world_id, proposal.pending.id)
-                    .await?,
-                "the GM narrated without deciding action {}",
-                proposal.pending.id
-            );
-        }
-        // Narration of the replies reaches only those who heard them.
-        let mut audience = Vec::new();
-        let mut spoken = false;
-        for proposal in &claim.proposals {
-            if let Some(heard) = self
-                .store
-                .speech_audience(proposal.pending.requesting_tool_execution_id)
-                .await?
-            {
-                spoken = true;
-                audience.extend(heard);
-            }
-        }
-        self.deliver_narration(
-            world_id,
-            &Narration {
-                group_id: claim.group_id,
-                content_id: settled.output_content_id,
-                audience: spoken.then_some(audience),
-            },
-        )
-        .await
-    }
-}
-
-/// How one proposal reads to the GM.
-fn describe(speaker: &str, tool: &str, args: &str) -> Result<String> {
-    Ok(match tool {
-        "say" => {
-            let say: SayAction = serde_json::from_str(args).context("parsing a proposed say")?;
-            match say.to {
-                Some(to) => format!("{speaker} says to {to}: \"{}\"", say.words),
-                None => format!("{speaker} says: \"{}\"", say.words),
-            }
-        }
-        "whisper" => {
-            let whisper: WhisperAction =
-                serde_json::from_str(args).context("parsing a proposed whisper")?;
-            format!(
-                "{speaker} whispers to {}: \"{}\"",
-                whisper.to.join(", "),
-                whisper.words
-            )
-        }
-        tool => anyhow::bail!("`{tool}` is not a proposed speech"),
-    })
 }

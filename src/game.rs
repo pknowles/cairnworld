@@ -1216,7 +1216,7 @@ where
                     .await
                     .with_context(|| format!("submitting {tool_name} to location GM"))?;
                 let requesting_tool_execution_id = pending.requesting_tool_execution_id;
-                let narration = game.arbitrate(pending, budget, call).await?;
+                let narration = game.arbitrate(pending, budget, call, None).await?;
                 // An approved action that could not happen is this call's
                 // result in place of the usual one; the GM's narration is
                 // still delivered and the agent continues.
@@ -1306,11 +1306,14 @@ where
         })
     }
 
+    /// `note` adds circumstances the GM should weigh, such as replies composed
+    /// at the same moment.
     async fn arbitrate(
         self: &Arc<Self>,
         pending: PendingAction,
         budget: Budget,
         call: CallContext,
+        note: Option<&str>,
     ) -> Result<Narration> {
         let group_id = self
             .store
@@ -1578,8 +1581,10 @@ where
         let request = Message::text(
             Role::User,
             format!(
-                "{actor} takes action {action_id}: a `{}` request with arguments {}. Judge it from the current scene. Call approve_action with action_id {action_id} if it can happen, or reject_action with action_id {action_id} and a concise reason. Then narrate the outcome to the characters present.",
-                pending.tool, pending.args,
+                "{actor} takes action {action_id}: a `{}` request with arguments {}. Judge it from the current scene. Call approve_action with action_id {action_id} if it can happen, or reject_action with action_id {action_id} and a concise reason. Then narrate the outcome to the characters present.{}",
+                pending.tool,
+                pending.args,
+                note.map(|note| format!(" {note}")).unwrap_or_default(),
             ),
         );
         self.store
@@ -1819,6 +1824,15 @@ mod tests {
         /// When set, an inference with no scripted response never returns,
         /// as if the process were stopped mid-inference.
         hang_when_empty: Arc<AtomicBool>,
+        /// Holds the numbered (1-based) request until released, telling
+        /// `reached` when it arrives.
+        gate: Arc<Mutex<Option<Gate>>>,
+    }
+
+    struct Gate {
+        request: usize,
+        reached: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
     }
 
     impl ScriptedBackend {
@@ -1831,6 +1845,7 @@ mod tests {
                     responses: Arc::new(Mutex::new(responses.into_iter().collect())),
                     requests: Arc::clone(&requests),
                     hang_when_empty: Arc::new(AtomicBool::new(false)),
+                    gate: Arc::new(Mutex::new(None)),
                 },
                 requests,
             )
@@ -1843,7 +1858,22 @@ mod tests {
             request: crate::llm::Request,
             _on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
-            self.requests.lock().unwrap().push(request);
+            let number = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
+            let gate = self
+                .gate
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|gate| gate.request == number)
+                .map(|gate| (Arc::clone(&gate.reached), Arc::clone(&gate.release)));
+            if let Some((reached, release)) = gate {
+                reached.notify_one();
+                release.notified().await;
+            }
             let next = self.responses.lock().unwrap().pop_front();
             if next.is_none() && self.hang_when_empty.load(Ordering::SeqCst) {
                 std::future::pending::<()>().await;
@@ -3060,6 +3090,7 @@ mod tests {
                 pending.clone(),
                 Budget::new(limits),
                 CallContext::root(Some(sequence.id)),
+                None,
             )
             .await
             .expect("a real GM turn must resolve the pending action on the merged branch DAG");
@@ -3999,6 +4030,7 @@ mod tests {
         responses: Arc<Mutex<VecDeque<Response>>>,
         requests: Arc<Mutex<Vec<crate::llm::Request>>>,
         hang_when_empty: Arc<AtomicBool>,
+        gate: Arc<Mutex<Option<Gate>>>,
     }
 
     /// Two ready players and the NPCs Mara and Toma in one group, with an empty script.
@@ -4010,6 +4042,7 @@ mod tests {
         let (backend, requests) = ScriptedBackend::recording([]);
         let responses = Arc::clone(&backend.responses);
         let hang_when_empty = Arc::clone(&backend.hang_when_empty);
+        let gate = Arc::clone(&backend.gate);
         let (game, store, db, first, second) =
             two_player_bread_thief_game_with_limits(backend, limits).await;
         let names = [
@@ -4026,6 +4059,7 @@ mod tests {
             responses,
             requests,
             hang_when_empty,
+            gate,
         }
     }
 
@@ -4474,10 +4508,7 @@ mod tests {
             tool_call("do_nothing", serde_json::json!({})),
             propose("In the hut.", &speaker, 2),
             // The GM judges Toma's reply.
-            tool_call(
-                "resolve_speech_batch",
-                serde_json::json!({"decisions": [{"action_id": 2, "approve": true}]}),
-            ),
+            approve(2),
             response(Content::Text("The hut is quiet.".into())),
             // Mara hears Toma and has nothing to add: the talk ends.
             tool_call("do_nothing", serde_json::json!({})),
@@ -4538,10 +4569,10 @@ mod tests {
         tool_call("do_nothing", serde_json::json!({}))
     }
 
-    fn judge(decisions: serde_json::Value) -> Response {
+    fn approve(action_id: i64) -> Response {
         tool_call(
-            "resolve_speech_batch",
-            serde_json::json!({ "decisions": decisions }),
+            "approve_action",
+            serde_json::json!({ "action_id": action_id }),
         )
     }
 
@@ -4561,6 +4592,10 @@ mod tests {
         wait_for_npc_work(scene).await;
     }
 
+    fn requests_made(scene: &SpeechScene) -> usize {
+        scene.requests.lock().unwrap().len()
+    }
+
     async fn failed_sequences(scene: &SpeechScene) -> Vec<String> {
         sqlx::query_scalar("SELECT error FROM sequence WHERE error IS NOT NULL ORDER BY id")
             .fetch_all(&scene.store.pool())
@@ -4578,7 +4613,7 @@ mod tests {
                 propose("Ask the miller.", &speaker, 1),
                 propose("It is in the hut.", &speaker, 3),
                 // Only the winner reaches the GM.
-                judge(serde_json::json!([{"action_id": 2, "approve": true}])),
+                approve(2),
                 response(Content::Text("The hut is quiet.".into())),
                 // Mara heard Toma and reconsiders instead of playing her stale reply.
                 do_nothing(),
@@ -4599,7 +4634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tied_replies_reach_the_gm_together_and_are_delivered_as_one_batch() {
+    async fn tied_replies_are_approved_one_at_a_time_before_anyone_reconsiders() {
         let scene = speech_scene().await;
         let speaker = scene.names[0].clone();
         talk(
@@ -4607,12 +4642,14 @@ mod tests {
             [
                 propose("Ask the miller.", &speaker, 2),
                 propose("It is in the hut.", &speaker, 2),
-                judge(serde_json::json!([
-                    {"action_id": 2, "approve": true},
-                    {"action_id": 3, "approve": true, "prefix": "(Together)"},
-                ])),
-                response(Content::Text("Both speak at once.".into())),
-                // Each heard the other's reply and has nothing to add.
+                approve(2),
+                response(Content::Text("Mara speaks over Toma.".into())),
+                tool_call(
+                    "approve_action",
+                    serde_json::json!({"action_id": 3, "prefix": "(Together)"}),
+                ),
+                response(Content::Text("Toma speaks over Mara.".into())),
+                // Only now does each hear the other's reply, and have nothing to add.
                 do_nothing(),
                 do_nothing(),
             ],
@@ -4625,37 +4662,194 @@ mod tests {
             "(Together) Toma says to {speaker}: It is in the hut."
         )));
         let (batches, utterances): (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT COUNT(*) FROM speech_batch WHERE sequence_id > 3), \
-                    (SELECT COUNT(*) FROM speech WHERE batch_id IN (SELECT id FROM speech_batch WHERE sequence_id > 3))",
+            "SELECT COUNT(*), COUNT(DISTINCT speech_batch.id) FROM speech_batch              JOIN speech ON speech.batch_id = speech_batch.id WHERE speech_batch.sequence_id > 3",
         )
         .fetch_one(&scene.store.pool())
         .await
         .unwrap();
         assert_eq!(
             (batches, utterances),
-            (1, 2),
-            "the tied replies share one batch"
+            (2, 2),
+            "each reply is its own utterance"
         );
-        // The GM saw both replies composed from the same history in one request.
-        let request = scene.requests.lock().unwrap();
-        let gm_request = request
+        // Each approval was a separate GM turn that knew the replies overlapped,
+        // and each reconsideration came after both were said.
+        let requests = scene.requests.lock().unwrap();
+        let gm_requests = requests
             .iter()
-            .find_map(|request| {
+            .filter(|request| {
                 request
                     .messages
                     .iter()
-                    .find_map(|message| match &message.content {
-                        MessageContent::Text(text) if text.contains("each without hearing") => {
-                            Some(text.clone())
-                        }
-                        _ => None,
+                    .any(|message| match &message.content {
+                        MessageContent::Text(text) => text.contains("composed at the same moment"),
+                        _ => false,
                     })
             })
-            .expect("the GM was asked to judge the replies");
-        assert!(
-            gm_request.contains("Ask the miller.") && gm_request.contains("It is in the hut."),
-            "{gm_request}"
+            .count();
+        assert_eq!(
+            gm_requests, 4,
+            "two GM turns, each with a tool and a narration request"
         );
+        assert_eq!(requests.len(), 12);
+    }
+
+    #[tokio::test]
+    async fn a_clean_stop_between_tied_replies_resumes_with_only_the_remaining_one() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        let (reached, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // Request 8 is the GM narrating Mara's approved reply.
+        *scene.gate.lock().unwrap() = Some(Gate {
+            request: 8,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(say_to_toma("Where is the flour?"));
+        scene.responses.lock().unwrap().extend([
+            propose("Ask the miller.", &speaker, 2),
+            propose("It is in the hut.", &speaker, 2),
+            approve(2),
+            response(Content::Text("Mara speaks.".into())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        reached.notified().await;
+        let stopping_game = Arc::clone(&scene.game);
+        let shutdown = tokio::spawn(async move { stopping_game.shutdown().await });
+        let mut stopping = scene.game.stopping.subscribe();
+        world::stopped(&mut stopping).await;
+        release.notify_one();
+        shutdown.await.unwrap().unwrap();
+
+        let (executed, state): (i64, String) = sqlx::query_as(
+            "SELECT COUNT(execution_sequence_id), (SELECT state FROM npc_round WHERE state <> 'superseded' ORDER BY id LIMIT 1)              FROM npc_candidate WHERE selected = 1",
+        )
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        assert_eq!((executed, state.as_str()), (1, "selected"));
+        assert_eq!(requests_made(&scene), 8, "no step started while stopping");
+
+        // A new process picks up the remaining reply and nothing is replayed.
+        scene.store.close_interrupted_turns().await.unwrap();
+        let (backend, requests) = ScriptedBackend::recording([
+            approve(3),
+            response(Content::Text("Toma speaks.".into())),
+            do_nothing(),
+            do_nothing(),
+        ]);
+        let limits = Limits::default();
+        let restarted = Game::new(
+            scene.store.clone(),
+            World::load(&scene.store).await.unwrap(),
+            InferenceScheduler::new(backend, limits)
+                .unwrap()
+                .foreground(),
+            limits,
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        );
+        for _ in 0..400 {
+            let open: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
+            )
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+            if open == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        let chat = heard(&scene.store, &scene.first).await;
+        assert_eq!(
+            chat.iter()
+                .filter(|line| line.contains("Mara says") || line.contains("Toma says"))
+                .count(),
+            2,
+            "{chat:?}"
+        );
+        let failed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM npc_discussion WHERE state = 'failed'")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(failed, 0, "the restart did not fail the discussion");
+        drop(restarted);
+    }
+
+    #[tokio::test]
+    async fn human_input_between_tied_replies_replaces_the_unsaid_one() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        let (reached, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // Request 8 is the GM narrating Mara's approved reply.
+        *scene.gate.lock().unwrap() = Some(Gate {
+            request: 8,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(say_to_toma("Where is the flour?"));
+        scene.responses.lock().unwrap().extend([
+            propose("Ask the miller.", &speaker, 2),
+            propose("It is in the hut.", &speaker, 2),
+            approve(2),
+            response(Content::Text("Mara speaks.".into())),
+            // The other player interrupts before Toma's reply is taken to the GM.
+            tool_call("say", serde_json::json!({"words": "Hold on."})),
+            approve(3),
+            response(Content::Text("The room stills.".into())),
+            response(Content::Text(String::new())),
+            do_nothing(),
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        reached.notified().await;
+        let interrupting = {
+            let game = Arc::clone(&scene.game);
+            let member = scene.second.clone();
+            tokio::spawn(async move { game.player_message(member, "Interrupt.").await })
+        };
+        // Let the interruption reach the world queue before the step ends.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        release.notify_one();
+        interrupting.await.unwrap().unwrap();
+        wait_for_npc_work(&scene).await;
+
+        let chat = heard(&scene.store, &scene.first).await;
+        assert!(chat.iter().any(|line| line.contains("Ask the miller.")));
+        assert!(chat.iter().any(|line| line.contains("Hold on.")));
+        assert!(
+            !chat.iter().any(|line| line.contains("It is in the hut.")),
+            "the reply composed before the interruption was not said: {chat:?}"
+        );
+        assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
     }
 
     #[tokio::test]
@@ -4732,10 +4926,12 @@ mod tests {
             [
                 propose("Ask the miller.", &speaker, 2),
                 propose("It is in the hut.", &speaker, 2),
-                judge(serde_json::json!([
-                    {"action_id": 2, "approve": false, "reason": "Mara is gagged."},
-                    {"action_id": 3, "approve": true},
-                ])),
+                tool_call(
+                    "reject_action",
+                    serde_json::json!({"action_id": 2, "reason": "Mara is gagged."}),
+                ),
+                response(Content::Text("Mara strains against the gag.".into())),
+                approve(3),
                 response(Content::Text("Only Toma speaks.".into())),
                 // Mara reconsiders after hearing Toma.
                 do_nothing(),
@@ -4752,51 +4948,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_incomplete_batch_is_returned_to_the_gm_and_nothing_is_published() {
+    async fn approving_a_different_action_is_returned_to_the_gm_and_nothing_is_published() {
         let scene = speech_scene().await;
         let speaker = scene.names[0].clone();
         talk(
             &scene,
             [
-                propose("Ask the miller.", &speaker, 2),
-                propose("It is in the hut.", &speaker, 2),
-                // Missing Toma's action, and a foreign one.
-                judge(serde_json::json!([
-                    {"action_id": 2, "approve": true},
-                    {"action_id": 99, "approve": true},
-                ])),
-                judge(serde_json::json!([
-                    {"action_id": 2, "approve": true},
-                    {"action_id": 3, "approve": true},
-                ])),
-                response(Content::Text("Both speak.".into())),
                 do_nothing(),
+                propose("It is in the hut.", &speaker, 2),
+                // Not the presented action.
+                approve(99),
+                approve(2),
+                response(Content::Text("Toma answers.".into())),
                 do_nothing(),
             ],
         )
         .await;
 
-        let first_try = tool_results(
-            scene
-                .requests
-                .lock()
-                .unwrap()
+        let refused = scene.requests.lock().unwrap().iter().any(|request| {
+            tool_results(request)
                 .iter()
-                .find(|request| {
-                    tool_results(request)
-                        .iter()
-                        .any(|result| result.contains("decide exactly the presented actions"))
-                })
-                .expect("the GM saw why its first decision was refused"),
-        );
-        assert!(first_try.iter().any(|result| result.contains("[2, 3]")));
+                .any(|result| result.contains("was presented action 2"))
+        });
+        assert!(refused, "the GM saw why its first approval was refused");
         let chat = heard(&scene.store, &scene.first).await;
         assert_eq!(
             chat.iter()
-                .filter(|line| line.contains("Mara says") || line.contains("Toma says"))
+                .filter(|line| line.contains("Toma says"))
                 .count(),
-            2,
-            "each reply was published once, by the complete decision: {chat:?}"
+            1,
+            "the reply was published once: {chat:?}"
         );
     }
 
@@ -4876,7 +5057,7 @@ mod tests {
             // One decision each for Mara and Toma, about both things said.
             do_nothing(),
             propose("Fine, I will answer.", &first_name, 1),
-            judge(serde_json::json!([{"action_id": 3, "approve": true}])),
+            approve(3),
             response(Content::Text("Toma answers.".into())),
             do_nothing(),
         ]);

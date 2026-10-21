@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_round SET scene_revision = ?1 WHERE id = ?2 AND scene_revision = ?1 - 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f3b3fe1700261e2fbcc27e61705654dc6fd61f8a14fd17b9f5a8ebc694e4734d"
+}

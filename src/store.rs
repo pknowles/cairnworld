@@ -6,7 +6,7 @@ mod prompt;
 mod speech;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
-pub use npc::{BatchChoice, Decision, ExecutionClaim, NpcRound, NpcStep, with_eagerness};
+pub use npc::{Decision, NpcRound, NpcStep, with_eagerness};
 pub use prompt::PromptEvidence;
 pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SayAction, WhisperAction};
 
@@ -397,16 +397,6 @@ pub struct ResolvedAction {
     /// Who heard it, when this call committed an utterance (not when it
     /// returns an earlier resolution).
     pub heard_by: Vec<String>,
-}
-
-/// Everything one resolution needs besides its transaction.
-pub(super) struct Resolution<'a> {
-    pub gm_agent_id: i64,
-    pub world_id: i64,
-    pub action_id: i64,
-    pub approving_tool_execution_id: i64,
-    pub result: &'a str,
-    pub hearing: &'a Hearing,
 }
 
 /// How a resolved action ended. Stored as `action.approved` plus its result
@@ -3596,45 +3586,11 @@ impl Store {
         result: &str,
         hearing: &Hearing,
     ) -> Result<ResolvedAction> {
-        let mut transaction =
+        let mut owned =
             self.pool.begin().await.with_context(|| {
                 format!("resolving action {action_id} through GM {gm_agent_id}")
             })?;
-        let resolved = Self::resolve_in(
-            &mut transaction,
-            &Resolution {
-                gm_agent_id,
-                world_id,
-                action_id,
-                approving_tool_execution_id,
-                result,
-                hearing,
-            },
-            &mut None,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .with_context(|| format!("committing resolved action {action_id}"))?;
-        Ok(resolved)
-    }
-
-    /// The resolution itself, inside the caller's transaction. A batch of
-    /// utterances passes one `batch` slot so they share a speech_batch row.
-    pub(super) async fn resolve_in(
-        transaction: &mut Transaction<'_, Sqlite>,
-        resolution: &Resolution<'_>,
-        batch: &mut Option<i64>,
-    ) -> Result<ResolvedAction> {
-        let Resolution {
-            gm_agent_id,
-            world_id,
-            action_id,
-            approving_tool_execution_id,
-            result,
-            hearing,
-        } = *resolution;
+        let transaction = &mut owned;
         let pending: Option<PendingAction> = sqlx::query_as!(
             PendingActionRow,
             "SELECT world_id, id, sequence_id, requesting_tool_execution_id, character_id, gm_agent_id, gm_branch_id, tool, args \
@@ -3737,7 +3693,6 @@ impl Store {
             Self::commit_speech(
                 transaction,
                 plan,
-                batch,
                 world_id,
                 action.sequence_id,
                 recorded_action_id,
@@ -3760,12 +3715,17 @@ impl Store {
             deleted == 1,
             "pending action {action_id} changed while resolving"
         );
-        Ok(ResolvedAction {
+        let resolved = ResolvedAction {
             id: action_id,
             outcome,
             result_content_id,
             heard_by,
-        })
+        };
+        owned
+            .commit()
+            .await
+            .with_context(|| format!("committing resolved action {action_id}"))?;
+        Ok(resolved)
     }
 
     /// Why an action requested by this tool call was approved but could not be

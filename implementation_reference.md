@@ -616,7 +616,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   GM's `approve_action` include/exclude, plus an optional short `prefix` shown to every hearer before the words; an
   unknown or contradictory name, or an overlong prefix, is refused as
   `InvalidHearing` without resolving) and, in the same transaction
-  as the action row, records `speech_batch`/`speech` and a `Role::Speech`
+  as the action row, records a `speech_batch` row (one per utterance)/`speech` and a `Role::Speech`
   message in each hearer's history, sharing the action's result content (the
   exact words; the addressee, when named, is stored as a character id plus its
   frozen name). Actions are submitted for a `CharacterActor` (the acting
@@ -634,16 +634,19 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   ("Name says to X: ...") for model context, player chat and raw inspection,
   from the frozen speaker/addressee names. Presence narration keeps its
   connected-PC audience.
-- NPC speech rounds (design.md: NPC speech and response rounds; migration
-  0005; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
+- NPC speech rounds (design.md: NPC speech and response rounds; migrations
+  0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
   (`commit_speech`) opens an `npc_round` whose candidates are the NPCs who heard
   it. The world worker runs one `NpcStep` at a time at lowest priority
   (`Store::next_npc_step`, none while draining): Refresh (stale
   `group.scene_revision`), Decide (one recorded inference per NPC, exactly one
   `do_nothing`, `say` or `whisper`, the player tools plus eagerness 1 to 3), Select (highest
-  eagerness; speech ties all win), Execute (pending actions for the winners and
-  one GM invocation, `resolve_speech_batch`, which must decide exactly the
-  presented actions). Discussions share the root turn's `Budget`
+  eagerness; speech ties all win), Execute (one selected utterance per step:
+  a pending action for that NPC and an ordinary single-action GM turn through
+  `arbitrate`, so tied replies are approved one at a time and the round stays
+  selected until all are done; the selected set's own speech does not
+  supersede it, human input or other speech does, and the follow-up round
+  waits for the set to finish). Discussions share the root turn's `Budget`
   (`Budget::restore`/`spent`) and fail visibly through a failure sequence
   (`ensure_discussion_failed`; `sequence_cause` links it to the human turn so
   `player_chat_errors` shows it there). Startup recovery

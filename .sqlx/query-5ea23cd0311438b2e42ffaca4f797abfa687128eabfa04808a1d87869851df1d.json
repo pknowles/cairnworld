@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, root_sequence_id FROM npc_round              WHERE group_id = ?1 AND state IN ('collecting', 'selected') AND id IS NOT ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "root_sequence_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5ea23cd0311438b2e42ffaca4f797abfa687128eabfa04808a1d87869851df1d"
+}

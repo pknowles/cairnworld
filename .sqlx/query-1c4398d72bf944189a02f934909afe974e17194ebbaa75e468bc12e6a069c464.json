@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tool_execution.id FROM npc_candidate              JOIN inference ON inference.invocation_id = npc_candidate.decision_invocation_id                            AND inference.ordinal = 0              JOIN tool_execution ON tool_execution.inference_id = inference.id AND tool_execution.ordinal = 0              WHERE npc_candidate.round_id = ? AND npc_candidate.character_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1c4398d72bf944189a02f934909afe974e17194ebbaa75e468bc12e6a069c464"
+}

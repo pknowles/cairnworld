@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character_id FROM npc_candidate WHERE round_id = ? AND selected = 1              ORDER BY character_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d5c20ec7af344dadac62e88a41c41e16b98199421ad89b9dd4782bf6bc52bb04"
+}

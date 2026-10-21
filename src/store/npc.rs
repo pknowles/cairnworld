@@ -7,8 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use sqlx::{Sqlite, Transaction};
 
 use super::{
-    AgentBranch, CharacterActor, Hearing, PendingAction, ResolvedAction, SceneItem, Store,
-    interruption::CallClosure,
+    AgentBranch, CharacterActor, PendingAction, SceneItem, Store, interruption::CallClosure,
 };
 use crate::llm::{Content, Message, MessageContent, ToolCall};
 
@@ -128,7 +127,7 @@ pub enum NpcStep {
     Decide { round: NpcRound, character_id: i64 },
     /// Every NPC has decided: pick the winners.
     Select(NpcRound),
-    /// Take the winners' words to the GM.
+    /// Take the next selected utterance to the GM.
     Execute(NpcRound),
 }
 
@@ -140,29 +139,19 @@ pub struct DecisionClaim {
     pub branch: AgentBranch,
 }
 
-/// The winners' proposals, now pending actions for the GM.
+/// One selected utterance, now a pending action for the GM.
 pub struct ExecutionClaim {
     pub round_id: i64,
     pub root_sequence_id: i64,
-    pub group_id: i64,
     pub sequence_id: i64,
-    pub proposals: Vec<Proposal>,
-}
-
-pub struct Proposal {
     pub pending: PendingAction,
-    pub speaker_name: String,
+    /// Other replies were chosen alongside this one, composed without hearing it.
+    pub tied: bool,
 }
 
 struct Decided {
     character_id: i64,
     decision: Decision,
-}
-
-/// The GM's choice for one proposal.
-pub enum BatchChoice {
-    Approve(Hearing),
-    Reject(String),
 }
 
 impl Store {
@@ -188,17 +177,38 @@ impl Store {
         };
         // A follow-up speech belongs to the discussion whose step produced it;
         // anything else is a human turn starting its own.
-        let root = sqlx::query_scalar!(
-            "SELECT npc_round.root_sequence_id FROM npc_candidate \
+        let own = sqlx::query!(
+            "SELECT npc_round.id, npc_round.root_sequence_id FROM npc_candidate \
              JOIN npc_round ON npc_round.id = npc_candidate.round_id \
              WHERE npc_candidate.execution_sequence_id = ?",
             sequence_id,
         )
         .fetch_optional(&mut **transaction)
         .await
-        .context("finding the discussion this speech continues")?
-        .unwrap_or(sequence_id);
-        Self::reopen_round(transaction, group_id, root, revision, Some(source)).await
+        .context("finding the discussion this speech continues")?;
+        let root = own.as_ref().map_or(sequence_id, |own| own.root_sequence_id);
+        let own_round = own.map(|own| own.id);
+        // The selected set's own utterances are its progress, not an outside
+        // change, unless something else changed the scene since it was chosen.
+        if let Some(own_round) = own_round {
+            sqlx::query!(
+                "UPDATE npc_round SET scene_revision = ?1 WHERE id = ?2 AND scene_revision = ?1 - 1",
+                revision,
+                own_round,
+            )
+            .execute(&mut **transaction)
+            .await
+            .context("recording the selected set's progress")?;
+        }
+        Self::reopen_round(
+            transaction,
+            group_id,
+            root,
+            revision,
+            own_round,
+            Some(source),
+        )
+        .await
     }
 
     /// Committed fiction or state in the group changed, so work collected
@@ -227,36 +237,41 @@ impl Store {
         group_id: i64,
         root: i64,
         revision: i64,
+        keep_round: Option<i64>,
         new_source: Option<i64>,
     ) -> Result<()> {
         let mut sources = Vec::new();
-        if let Some((open, previous_root)) = sqlx::query!(
-            "SELECT id, root_sequence_id FROM npc_round \
-             WHERE group_id = ? AND state IN ('collecting', 'selected')",
+        // `keep_round` is the selected set executing this very speech.
+        let open_rounds = sqlx::query!(
+            "SELECT id, root_sequence_id FROM npc_round              WHERE group_id = ?1 AND state IN ('collecting', 'selected') AND id IS NOT ?2",
             group_id,
+            keep_round,
         )
-        .fetch_optional(&mut **transaction)
+        .fetch_all(&mut **transaction)
         .await
-        .context("finding the group's open round")?
-        .map(|row| (row.id, row.root_sequence_id))
-        {
-            sources = sqlx::query_scalar!(
-                "SELECT source_tool_execution_id FROM npc_round_source WHERE round_id = ?",
-                open,
-            )
-            .fetch_all(&mut **transaction)
-            .await
-            .context("carrying the open round's unanswered speech")?;
+        .context("finding the group's open rounds")?;
+        for open in open_rounds {
+            sources.extend(
+                sqlx::query_scalar!(
+                    "SELECT source_tool_execution_id FROM npc_round_source WHERE round_id = ?",
+                    open.id,
+                )
+                .fetch_all(&mut **transaction)
+                .await
+                .context("carrying an open round's unanswered speech")?,
+            );
             sqlx::query!(
                 "UPDATE npc_round SET state = 'superseded' WHERE id = ?",
-                open
+                open.id
             )
             .execute(&mut **transaction)
             .await
-            .context("superseding the open round")?;
-            Self::settle_idle_discussion(transaction, previous_root).await?;
+            .context("superseding an open round")?;
+            Self::settle_idle_discussion(transaction, open.root_sequence_id).await?;
         }
         sources.extend(new_source);
+        sources.sort_unstable();
+        sources.dedup();
         let mut roster = Vec::new();
         for source in &sources {
             roster.extend(
@@ -452,7 +467,7 @@ impl Store {
              JOIN npc_discussion ON npc_discussion.root_sequence_id = npc_round.root_sequence_id \
              WHERE \"group\".world_id = ? AND \"group\".retired_at IS NULL \
                AND npc_round.state IN ('collecting', 'selected') \
-               AND npc_discussion.state = 'ready' \
+               AND npc_discussion.state = 'ready'                AND (npc_round.state = 'selected' OR NOT EXISTS (                    SELECT 1 FROM npc_round AS earlier                    WHERE earlier.group_id = npc_round.group_id                      AND earlier.state IN ('selected', 'executing'))) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM npc_round_source \
                    JOIN action ON action.requesting_tool_execution_id = npc_round_source.source_tool_execution_id \
@@ -520,6 +535,7 @@ impl Store {
             round.group_id,
             round.root_sequence_id,
             revision,
+            None,
             None,
         )
         .await?;
@@ -922,8 +938,9 @@ impl Store {
             .context("committing a round's selection")
     }
 
-    /// Start taking the winners' words to the GM: one sequence caused by their
-    /// proposals, and each proposal submitted as a pending action for its NPC.
+    /// Start taking the next selected utterance to the GM: its own sequence,
+    /// caused by the NPC's proposal, with the proposal submitted as a pending
+    /// action for that NPC.
     pub async fn claim_npc_execution(&self, round: &NpcRound) -> Result<ExecutionClaim> {
         let decided = self.round_decisions(round.id).await?;
         let mut transaction = self
@@ -943,79 +960,64 @@ impl Store {
             "round {} is not selected",
             round.id
         );
-        let mut winners = Vec::new();
-        for candidate in decided {
-            let Decision::Propose(proposal) = candidate.decision else {
-                continue;
-            };
-            let selected = sqlx::query_scalar!(
-                "SELECT selected FROM npc_candidate WHERE round_id = ? AND character_id = ?",
-                round.id,
-                candidate.character_id,
-            )
-            .fetch_one(&mut *transaction)
-            .await
-            .context("checking the candidate was selected")?;
-            if selected == 0 {
-                continue;
-            }
-            let execution_id = sqlx::query_scalar!(
-                "SELECT tool_execution.id FROM npc_candidate \
-                 JOIN inference ON inference.invocation_id = npc_candidate.decision_invocation_id \
-                               AND inference.ordinal = 0 \
-                 JOIN tool_execution ON tool_execution.inference_id = inference.id AND tool_execution.ordinal = 0 \
-                 WHERE npc_candidate.round_id = ? AND npc_candidate.character_id = ?",
-                round.id,
-                candidate.character_id,
-            )
-            .fetch_one(&mut *transaction)
-            .await
-            .context("finding the proposal's call")?;
-            winners.push((candidate.character_id, execution_id, proposal));
-        }
-        let proposal_calls: Vec<i64> = winners.iter().map(|(_, execution, _)| *execution).collect();
+        let selected = sqlx::query_scalar!(
+            "SELECT character_id FROM npc_candidate WHERE round_id = ? AND selected = 1              ORDER BY character_id",
+            round.id,
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("listing the selected replies")?;
+        let character_id = sqlx::query_scalar!(
+            "SELECT character_id FROM npc_candidate              WHERE round_id = ? AND selected = 1 AND execution_sequence_id IS NULL              ORDER BY character_id LIMIT 1",
+            round.id,
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("finding the next selected reply")?
+        .with_context(|| format!("round {} has no selected reply left", round.id))?;
+        let Some(Decision::Propose(proposal)) = decided
+            .into_iter()
+            .find(|candidate| candidate.character_id == character_id)
+            .map(|candidate| candidate.decision)
+        else {
+            bail!("selected NPC {character_id} has no proposal");
+        };
+        let execution_id = sqlx::query_scalar!(
+            "SELECT tool_execution.id FROM npc_candidate              JOIN inference ON inference.invocation_id = npc_candidate.decision_invocation_id                            AND inference.ordinal = 0              JOIN tool_execution ON tool_execution.inference_id = inference.id AND tool_execution.ordinal = 0              WHERE npc_candidate.round_id = ? AND npc_candidate.character_id = ?",
+            round.id,
+            character_id,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .context("finding the proposal's call")?;
         let sequence_id = Self::begin_caused_sequence(
             &mut transaction,
             round.world_id,
             "npc speech",
             round.id,
-            Some(&proposal_calls),
+            Some(&[execution_id]),
         )
         .await?;
-        let mut proposals = Vec::new();
-        for (character_id, execution_id, proposal) in winners {
-            sqlx::query!(
-                "UPDATE npc_candidate SET execution_sequence_id = ? WHERE round_id = ? AND character_id = ?",
-                sequence_id,
-                round.id,
-                character_id,
-            )
-            .execute(&mut *transaction)
-            .await
-            .context("recording the execution sequence")?;
-            let actor = CharacterActor {
+        sqlx::query!(
+            "UPDATE npc_candidate SET execution_sequence_id = ? WHERE round_id = ? AND character_id = ?",
+            sequence_id,
+            round.id,
+            character_id,
+        )
+        .execute(&mut *transaction)
+        .await
+        .context("recording the execution sequence")?;
+        let pending = Self::create_pending_action_in(
+            &mut transaction,
+            &CharacterActor {
                 world_id: round.world_id,
                 character_id,
-            };
-            let (tool, args) = (proposal.tool, proposal.arguments);
-            let pending = Self::create_pending_action_in(
-                &mut transaction,
-                &actor,
-                sequence_id,
-                execution_id,
-                (tool, &args),
-            )
-            .await?;
-            let speaker_name =
-                sqlx::query_scalar!("SELECT name FROM character WHERE id = ?", character_id)
-                    .fetch_one(&mut *transaction)
-                    .await
-                    .context("loading the speaker's name")?;
-            proposals.push(Proposal {
-                pending,
-                speaker_name,
-            });
-        }
+            },
+            sequence_id,
+            execution_id,
+            (proposal.tool, &proposal.arguments),
+        )
+        .await?;
         transaction
             .commit()
             .await
@@ -1023,14 +1025,15 @@ impl Store {
         Ok(ExecutionClaim {
             round_id: round.id,
             root_sequence_id: round.root_sequence_id,
-            group_id: round.group_id,
             sequence_id,
-            proposals,
+            pending,
+            tied: selected.len() > 1,
         })
     }
 
-    /// The GM has dealt with the winners' words: end the step with the
-    /// discussion's budget checkpoint.
+    /// The GM has dealt with this utterance: end the step with the
+    /// discussion's budget checkpoint. The round stays selected while chosen
+    /// replies remain.
     pub async fn finish_npc_execution(&self, claim: &ExecutionClaim, spent: u32) -> Result<()> {
         let mut transaction = self
             .pool
@@ -1039,64 +1042,18 @@ impl Store {
             .context("finishing a round's execution")?;
         Self::finish_sequence_in(&mut transaction, claim.sequence_id, None).await?;
         sqlx::query!(
-            "UPDATE npc_round SET state = 'settled' WHERE id = ?",
-            claim.round_id
+            "UPDATE npc_round SET state = CASE WHEN EXISTS (                  SELECT 1 FROM npc_candidate WHERE round_id = ?1 AND selected = 1                    AND execution_sequence_id IS NULL) THEN 'selected' ELSE 'settled' END              WHERE id = ?1 AND state = 'executing'",
+            claim.round_id,
         )
         .execute(&mut *transaction)
         .await
-        .context("settling the round")?;
+        .context("returning the round to the worker")?;
         Self::save_discussion_budget(&mut transaction, claim.root_sequence_id, spent).await?;
         Self::settle_idle_discussion(&mut transaction, claim.root_sequence_id).await?;
         transaction
             .commit()
             .await
             .context("committing a round's execution")
-    }
-
-    /// The GM's decision for every proposal of a round, applied in one
-    /// transaction: nothing is published unless every choice is valid, and the
-    /// approved words share one batch.
-    pub async fn resolve_speech_batch(
-        &self,
-        gm_agent_id: i64,
-        world_id: i64,
-        approving_tool_execution_id: i64,
-        choices: &[(i64, BatchChoice)],
-    ) -> Result<Vec<ResolvedAction>> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .context("resolving a speech batch")?;
-        let mut batch = None;
-        let unadjusted = Hearing::default();
-        let mut resolved = Vec::with_capacity(choices.len());
-        for (action_id, choice) in choices {
-            let (result, hearing) = match choice {
-                BatchChoice::Approve(hearing) => ("approved".to_string(), hearing),
-                BatchChoice::Reject(reason) => (format!("rejected: {reason}"), &unadjusted),
-            };
-            resolved.push(
-                Self::resolve_in(
-                    &mut transaction,
-                    &super::Resolution {
-                        gm_agent_id,
-                        world_id,
-                        action_id: *action_id,
-                        approving_tool_execution_id,
-                        result: &result,
-                        hearing,
-                    },
-                    &mut batch,
-                )
-                .await?,
-            );
-        }
-        transaction
-            .commit()
-            .await
-            .context("committing a speech batch")?;
-        Ok(resolved)
     }
 }
 
