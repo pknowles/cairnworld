@@ -12,14 +12,15 @@ use sqlx::{Sqlite, Transaction};
 use super::{PendingAction, Store};
 use crate::{
     inspection::MessageOrigin,
-    llm::{MessageContent, Role},
+    llm::{MessageContent, Role, SpeechContent},
 };
 
 /// What the model supplies to speak to the whole group.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SayAction {
-    /// The exact words your character says aloud.
+    /// Your character's speech as it should read in the chat: who speaks and
+    /// how it is said when that matters, e.g. `Mara says in a low voice: ...`.
     pub words: String,
     /// The character you are speaking to. This does not make your words private:
     /// everyone present still hears them.
@@ -31,7 +32,8 @@ pub struct SayAction {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WhisperAction {
-    /// The exact words your character whispers.
+    /// Your character's whisper as it should read in the chat, with who speaks
+    /// and how it is said when that matters.
     pub words: String,
     /// The characters who hear the whisper. Nobody else does.
     pub to: Vec<String>,
@@ -200,31 +202,51 @@ impl Store {
         Ok(Some(audience))
     }
 
-    /// What a speech message shows every reader (the model's context, player
-    /// chat and inspection): the utterance attributed from its speech record.
-    pub(super) async fn speech_text(&self, message_id: i64) -> Result<String> {
+    /// What a speech message is to every reader (the model's context, player
+    /// chat and inspection). An utterance recorded in the legacy text format
+    /// keeps its fixed attributed sentence, so recorded requests reconstruct
+    /// exactly; newer ones are the authored text with its attribution.
+    pub(super) async fn speech_content(&self, message_id: i64) -> Result<MessageContent> {
         let row = sqlx::query!(
-            "SELECT speech.kind, speech.speaker_name, speech.addressed_name, speech.prefix, message.content \
-             FROM speech_message \
-             JOIN speech ON speech.action_id = speech_message.speech_action_id \
-             JOIN message ON message.id = speech_message.message_id \
-             WHERE speech_message.message_id = ?",
+            "SELECT speech.speaker_character_id, speech.kind, speech.speaker_name,                     speech.addressed_character_id, speech.addressed_name, speech.prefix,                     speech.text_format, message.content              FROM speech_message              JOIN speech ON speech.action_id = speech_message.speech_action_id              JOIN message ON message.id = speech_message.message_id              WHERE speech_message.message_id = ?",
             message_id,
         )
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("loading speech for message {message_id}"))?
         .with_context(|| format!("speech message {message_id} has no speech record"))?;
-        let (MessageContent::Text(words), _) = self.recorded_content(row.content).await? else {
+        let (MessageContent::Text(text), _) = self.recorded_content(row.content).await? else {
             bail!("speech message {message_id} does not hold text");
         };
-        Ok(attributed(
-            &row.kind,
-            &row.speaker_name,
-            row.addressed_name.as_deref(),
-            row.prefix.as_deref(),
-            &words,
-        ))
+        Ok(if row.text_format == "legacy" {
+            MessageContent::Text(attributed(
+                &row.kind,
+                &row.speaker_name,
+                row.addressed_name.as_deref(),
+                row.prefix.as_deref(),
+                &text,
+            ))
+        } else {
+            MessageContent::Speech(SpeechContent {
+                speaker_id: row.speaker_character_id,
+                speaker: row.speaker_name,
+                addressee_id: row.addressed_character_id,
+                addressee: row.addressed_name,
+                kind: row.kind,
+                prefix: row.prefix,
+                text,
+            })
+        })
+    }
+
+    /// What a player reads for a speech message, and who said it when the
+    /// text itself does not say.
+    pub(super) async fn speech_chat(&self, message_id: i64) -> Result<(String, Option<String>)> {
+        Ok(match self.speech_content(message_id).await? {
+            MessageContent::Speech(speech) => (speech.display(), Some(speech.speaker)),
+            MessageContent::Text(text) => (text, None),
+            _ => bail!("speech message {message_id} has unexpected content"),
+        })
     }
 
     /// Check the names a speaker supplied against their current group, so a
@@ -396,8 +418,8 @@ impl Store {
         let addressed_id = plan.addressed.as_ref().map(|(id, _)| *id);
         let addressed_name = plan.addressed.as_ref().map(|(_, name)| name.as_str());
         sqlx::query!(
-            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name, prefix) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name, prefix, text_format) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'authored')",
             action_id,
             batch_id,
             plan.speaker_id,

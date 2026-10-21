@@ -71,6 +71,6 @@ pub trait Backend {
 // browser can render exactly what the server sent/received with no separate
 // mirrored struct (see that module's doc comment).
 pub use crate::inspection::{
-    Content, Message, MessageContent, Request, Response, Role, Sampling, ToolCall, ToolDefinition,
-    Usage,
+    Content, Message, MessageContent, Request, Response, Role, Sampling, SpeechContent, ToolCall,
+    ToolDefinition, Usage,
 };

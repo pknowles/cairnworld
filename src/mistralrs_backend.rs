@@ -236,6 +236,22 @@ pub(crate) fn request_builder(
                 tool_call_id,
                 content,
             } => request_builder = request_builder.add_tool_message(content, tool_call_id),
+            // The text may not name its speaker, so the source goes with it.
+            MessageContent::Speech(speech) => {
+                let mut heard = serde_json::json!({
+                    "speaker": speech.speaker,
+                    "kind": speech.kind,
+                    "text": speech.text,
+                });
+                if let Some(addressee) = &speech.addressee {
+                    heard["addressee"] = addressee.clone().into();
+                }
+                if let Some(prefix) = &speech.prefix {
+                    heard["prefix"] = prefix.clone().into();
+                }
+                request_builder =
+                    request_builder.add_message(TextMessageRole::User, heard.to_string());
+            }
         }
     }
     let sampling = &request.sampling;

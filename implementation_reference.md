@@ -608,7 +608,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   same tool turn, so beginning play never needs a second player message.
   Subsequent player messages expose creation or location-action tools
   according to durable character state.
-- Speech (design.md: NPC speech and response rounds; migration 0004).
+- Speech (design.md: NPC speech and response rounds; migrations 0004, 0007).
   `say` (optional addressee) and `whisper` (explicit listeners) are validated
   against the speaker's group when submitted. On approval
   `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
@@ -618,7 +618,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `InvalidHearing` without resolving) and, in the same transaction
   as the action row, records a `speech_batch` row (one per utterance)/`speech` and a `Role::Speech`
   message in each hearer's history, sharing the action's result content (the
-  exact words; the addressee, when named, is stored as a character id plus its
+  speaker's authored text, unchanged; the addressee, when named, is stored as a character id plus its
   frozen name). Actions are submitted for a `CharacterActor` (the acting
   character; `Store::player_actor` verifies a player's membership into one).
   PCs hear it with no browser open; NPCs receive it in their own
@@ -630,9 +630,14 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   was built is honoured. `agent::complete_with_call_context` runs tool
   deliveries (narration, the speaker's copy) after every call of a batch has its
   result.
-  `Store::speech_text` is the one reader that attributes a speech message
-  ("Name says to X: ...") for model context, player chat and raw inspection,
-  from the frozen speaker/addressee names. Presence narration keeps its
+  `Store::speech_content` is the one reader for a speech message, for model
+  context, player chat and raw inspection: `MessageContent::Speech`
+  (`SpeechContent`: speaker/addressee ids and frozen names, kind, GM prefix,
+  authored text) for utterances with `speech.text_format = 'authored'`, which
+  the backend presents as a user-role JSON object and the browser shows as the
+  prefixed authored text with `data-speaker`; legacy utterances keep the fixed
+  "Name says to X: ..." text so recorded requests reconstruct exactly.
+  Presence narration keeps its
   connected-PC audience.
 - NPC speech rounds (design.md: NPC speech and response rounds; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech

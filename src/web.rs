@@ -1331,6 +1331,7 @@ async fn send_new_entries<B: Backend + Send + Sync + 'static>(
             &ServerEvent::Entry {
                 role: entry.role,
                 text: entry.text,
+                speaker: entry.speaker,
                 id: entry.id,
                 sequence_id: entry.sequence_id,
             },
@@ -1621,6 +1622,7 @@ fn player_chat_entries(history: Vec<PlayerChatEntry>) -> Vec<ChatEntry> {
                 }
             },
             text: entry.text,
+            speaker: entry.speaker,
             id: Some(entry.id),
             sequence_id: entry.sequence_id,
         })
@@ -1767,6 +1769,7 @@ mod tests {
                         ChatRole::Notice => panic!("fixture notices must use the chat event path"),
                     },
                     text: entry.text,
+                    speaker: entry.speaker,
                     sequence_id: entry.sequence_id,
                 })
                 .collect();
@@ -2987,8 +2990,8 @@ mod tests {
     fn game_page_renders_stored_chat_entries_with_their_visible_roles() {
         let html = render_page("Cairnworld", true, || {
             view! { <GamePage world_id=7 character_id=8 history=vec![
-                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), sequence_id: Some(1) },
-                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), sequence_id: None },
+                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), speaker: None, sequence_id: Some(1) },
+                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), speaker: None, sequence_id: None },
             ]/> }
         });
         assert!(html.contains("I look around."));
@@ -3003,11 +3006,26 @@ mod tests {
     }
 
     #[test]
+    fn speech_is_shown_as_authored_with_its_speaker_as_metadata() {
+        let html = render_page("Cairnworld", true, || {
+            view! { <GamePage world_id=7 character_id=8 history=vec![
+                PlayerChatEntry { id: 1, role: crate::llm::Role::Speech, text: "(Over the din) Run!".into(), speaker: Some("Mara".into()), sequence_id: None },
+            ]/> }
+        });
+        assert!(html.contains("(Over the din) Run!"));
+        assert!(html.contains("data-speaker=\"Mara\""));
+        assert!(
+            !html.contains("Mara says"),
+            "no sentence is manufactured around the words"
+        );
+    }
+
+    #[test]
     fn developer_mode_game_page_exposes_inspect_links_for_entries_with_a_sequence() {
         let html = render_page("Cairnworld", true, || {
             view! { <GamePage world_id=7 character_id=8 developer_mode=true history=vec![
-                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), sequence_id: Some(42) },
-                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), sequence_id: None },
+                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), speaker: None, sequence_id: Some(42) },
+                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), speaker: None, sequence_id: None },
             ]/> }
         });
         assert!(
@@ -3133,6 +3151,7 @@ mod tests {
         let event = ServerEvent::Entry {
             role: ChatRole::Narration,
             text: "Toma watches.".into(),
+            speaker: None,
             id: None,
             sequence_id: None,
         };

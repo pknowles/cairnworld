@@ -335,6 +335,8 @@ pub struct PlayerChatEntry {
     pub id: i64,
     pub role: Role,
     pub text: String,
+    /// Who said it, for speech whose authored text does not carry attribution.
+    pub speaker: Option<String>,
     /// The sequence this entry belongs to, for Developer Mode's chat-entry
     /// inspect button: `trigger_sequence_id` for player input that began a
     /// turn, or the producing inference's sequence for anything an inference
@@ -2799,6 +2801,7 @@ impl Store {
                 id: row.trigger_id,
                 role: Role::System,
                 text: row.error,
+                speaker: None,
                 sequence_id: Some(row.sequence_id),
             })
             .collect())
@@ -2977,8 +2980,11 @@ impl Store {
         let mut entries = Vec::new();
         for row in rows {
             let role = serde_json::from_str(&row.role).context("decoding player chat role")?;
+            let mut speaker = None;
             let text = if role == Role::Speech {
-                self.speech_text(row.id).await?
+                let (text, from) = self.speech_chat(row.id).await?;
+                speaker = from;
+                text
             } else if let (MessageContent::Text(text), _) =
                 self.recorded_content(row.content).await?
             {
@@ -2995,6 +3001,7 @@ impl Store {
                     id: row.id,
                     role,
                     text,
+                    speaker,
                     sequence_id: row.trigger_sequence_id.or(row.inference_sequence_id),
                 });
             }
@@ -4785,7 +4792,7 @@ impl Store {
                             format!("deserializing role for message {}", row.id)
                         })?;
                         let content = if role == Role::Speech {
-                            MessageContent::Text(self.speech_text(row.id).await?)
+                            self.speech_content(row.id).await?
                         } else {
                             self.recorded_content(row.content).await?.0
                         };
@@ -5325,8 +5332,8 @@ impl Store {
                 let content = match content {
                     MessageContent::Text(text) => crate::llm::Content::Text(text),
                     MessageContent::ToolCalls(calls) => crate::llm::Content::ToolCalls(calls),
-                    MessageContent::ToolResult { .. } => {
-                        anyhow::bail!("inference {} output is a tool result", row.id)
+                    MessageContent::ToolResult { .. } | MessageContent::Speech(_) => {
+                        anyhow::bail!("inference {} output is not a model reply", row.id)
                     }
                 };
                 let response = Response {
@@ -5742,7 +5749,7 @@ impl Store {
                 let role: Role =
                     serde_json::from_str(&row.role).context("decoding raw message role")?;
                 if role == Role::Speech {
-                    content = MessageContent::Text(self.speech_text(row.id).await?);
+                    content = self.speech_content(row.id).await?;
                 }
                 RawHistoryEntry::Message {
                     id: row.id,

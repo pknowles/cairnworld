@@ -123,6 +123,34 @@ pub enum MessageContent {
         tool_call_id: String,
         content: String,
     },
+    /// An utterance in a hearer's history: the speaker's authored text with
+    /// who said it kept as structure.
+    Speech(SpeechContent),
+}
+
+/// Speech as one character said it. The names are frozen at the time, and the
+/// text is not rewritten to add the speaker.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SpeechContent {
+    pub speaker_id: i64,
+    pub speaker: String,
+    pub addressee_id: Option<i64>,
+    pub addressee: Option<String>,
+    /// `say` or `whisper`.
+    pub kind: String,
+    /// What the GM showed hearers before the text, if anything.
+    pub prefix: Option<String>,
+    pub text: String,
+}
+
+impl SpeechContent {
+    /// What a player reads: the GM's prefix, then the authored text.
+    pub fn display(&self) -> String {
+        match &self.prefix {
+            Some(prefix) => format!("{prefix} {}", self.text),
+            None => self.text.clone(),
+        }
+    }
 }
 
 impl Message {

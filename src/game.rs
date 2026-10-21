@@ -4002,6 +4002,7 @@ mod tests {
             .filter(|message| message.role == Role::Speech)
             .filter_map(|message| match message.content {
                 MessageContent::Text(text) => Some(text),
+                MessageContent::Speech(speech) => Some(speech.display()),
                 _ => None,
             })
             .collect()
@@ -4092,10 +4093,7 @@ mod tests {
                 serde_json::json!({"action_id": 1}),
             )
             .await;
-        let expected = format!(
-            "{} says to Toma: I know who took the bread.",
-            scene.names[0]
-        );
+        let expected = "I know who took the bread.".to_string();
 
         // Another player who has no browser open still hears it, exactly once.
         assert_eq!(
@@ -4187,7 +4185,7 @@ mod tests {
             )
             .await;
 
-        let expected = format!("{} whispers: Meet me at the mill.", scene.names[0]);
+        let expected = "Meet me at the mill.".to_string();
         assert_eq!(
             heard(&scene.store, &scene.second).await,
             std::slice::from_ref(&expected)
@@ -4293,7 +4291,7 @@ mod tests {
             )
             .await;
 
-        let expected = format!("(Over the din) {} says: Run!", scene.names[0]);
+        let expected = "(Over the din) Run!".to_string();
         assert_eq!(
             heard(&scene.store, &scene.second).await,
             std::slice::from_ref(&expected)
@@ -4521,7 +4519,7 @@ mod tests {
             .unwrap();
         wait_for_npc_work(&scene).await;
 
-        let expected = format!("Toma says to {speaker}: In the hut.");
+        let expected = "In the hut.".to_string();
         assert!(
             heard(&scene.store, &scene.first).await.contains(&expected),
             "the player hears Toma: {:?}",
@@ -4622,10 +4620,7 @@ mod tests {
         .await;
 
         let chat = heard(&scene.store, &scene.first).await;
-        assert!(
-            chat.contains(&format!("Toma says to {speaker}: It is in the hut.")),
-            "{chat:?}"
-        );
+        assert!(chat.contains(&"It is in the hut.".to_string()), "{chat:?}");
         assert!(
             !chat.iter().any(|line| line.contains("Ask the miller.")),
             "the loser's superseded proposal is never said: {chat:?}"
@@ -4657,10 +4652,8 @@ mod tests {
         .await;
 
         let chat = heard(&scene.store, &scene.first).await;
-        assert!(chat.contains(&format!("Mara says to {speaker}: Ask the miller.")));
-        assert!(chat.contains(&format!(
-            "(Together) Toma says to {speaker}: It is in the hut."
-        )));
+        assert!(chat.contains(&"Ask the miller.".to_string()));
+        assert!(chat.contains(&"(Together) It is in the hut.".to_string()));
         let (batches, utterances): (i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COUNT(DISTINCT speech_batch.id) FROM speech_batch              JOIN speech ON speech.batch_id = speech_batch.id WHERE speech_batch.sequence_id > 3",
         )
@@ -4779,7 +4772,9 @@ mod tests {
         let chat = heard(&scene.store, &scene.first).await;
         assert_eq!(
             chat.iter()
-                .filter(|line| line.contains("Mara says") || line.contains("Toma says"))
+                .filter(
+                    |line| line.contains("Ask the miller.") || line.contains("It is in the hut.")
+                )
                 .count(),
             2,
             "{chat:?}"
@@ -4848,6 +4843,59 @@ mod tests {
         assert!(
             !chat.iter().any(|line| line.contains("It is in the hut.")),
             "the reply composed before the interruption was not said: {chat:?}"
+        );
+        assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn tied_whispers_to_different_people_stay_private_to_their_listeners() {
+        let scene = speech_scene().await;
+        let [first_name, second_name] = scene.names.clone();
+        talk(
+            &scene,
+            [
+                tool_call(
+                    "whisper",
+                    serde_json::json!({"words": "Mara whispers: trust me.", "to": [first_name], "eagerness": 2}),
+                ),
+                tool_call(
+                    "whisper",
+                    serde_json::json!({"words": "Toma whispers: not him.", "to": [second_name], "eagerness": 2}),
+                ),
+                approve(2),
+                response(Content::Text("Mara leans toward the first adventurer.".into())),
+                approve(3),
+                response(Content::Text("Toma leans toward the second adventurer.".into())),
+            ],
+        )
+        .await;
+
+        for (player, own, other) in [
+            (&scene.first, "trust me", "not him"),
+            (&scene.second, "not him", "trust me"),
+        ] {
+            let seen: Vec<String> = scene
+                .store
+                .player_chat(player)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|entry| matches!(entry.role, Role::Speech | Role::Narration))
+                .map(|entry| entry.text)
+                .collect();
+            assert!(seen.iter().any(|text| text.contains(own)), "{seen:?}");
+            assert!(
+                !seen.iter().any(|text| text.contains(other)),
+                "a private whisper reached a bystander: {seen:?}"
+            );
+        }
+        // Narration of one whisper does not reach the other's listener.
+        let second_chat = scene.store.player_chat(&scene.second).await.unwrap();
+        assert!(
+            !second_chat
+                .iter()
+                .any(|entry| entry.text.contains("Mara leans")),
+            "{second_chat:?}"
         );
         assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
     }
@@ -4974,7 +5022,7 @@ mod tests {
         let chat = heard(&scene.store, &scene.first).await;
         assert_eq!(
             chat.iter()
-                .filter(|line| line.contains("Toma says"))
+                .filter(|line| line.contains("It is in the hut."))
                 .count(),
             1,
             "the reply was published once: {chat:?}"
@@ -5123,7 +5171,7 @@ mod tests {
             !heard(&scene.store, &scene.first)
                 .await
                 .iter()
-                .any(|line| line.contains("Mara says") || line.contains("Toma says")),
+                .any(|line| line.contains("Ask the miller.") || line.contains("It is in the hut.")),
             "no dropped-then-replayed reply"
         );
     }
@@ -5196,8 +5244,67 @@ mod tests {
 
         assert_eq!(
             heard(&scene.store, &scene.second).await,
-            [format!("{} says: Good morning.", scene.names[0])]
+            ["Good morning.".to_string()]
         );
+        // The chat carries who said it as structure, under the name used then.
+        let speakers: Vec<_> = scene
+            .store
+            .player_chat(&scene.second)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.role == Role::Speech)
+            .map(|entry| entry.speaker)
+            .collect();
+        assert_eq!(speakers, [Some(scene.names[0].clone())]);
+    }
+
+    #[tokio::test]
+    async fn an_npc_is_shown_authored_speech_with_its_speaker_as_structure() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        talk(&scene, [do_nothing(), do_nothing()]).await;
+
+        // Toma's decision request holds the player's words as authored, with
+        // the source alongside, though the words name nobody.
+        let requests = scene.requests.lock().unwrap();
+        let heard = requests
+            .iter()
+            .flat_map(|request| &request.messages)
+            .find_map(|message| match &message.content {
+                MessageContent::Speech(speech) => Some(speech.clone()),
+                _ => None,
+            })
+            .expect("an NPC was shown the speech");
+        assert_eq!(heard.text, "Where is the flour?");
+        assert_eq!(heard.speaker, speaker);
+        assert_eq!(heard.addressee.as_deref(), Some("Toma"));
+        assert_eq!(heard.kind, "say");
+    }
+
+    #[tokio::test]
+    async fn speech_recorded_before_authored_text_keeps_its_fixed_wording() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call(
+                    "say",
+                    serde_json::json!({"words": "Good morning.", "to": "Toma"}),
+                ),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+        sqlx::query("UPDATE speech SET text_format = 'legacy'")
+            .execute(&scene.store.pool())
+            .await
+            .unwrap();
+
+        let expected = format!("{} says to Toma: Good morning.", scene.names[0]);
+        assert_eq!(
+            heard(&scene.store, &scene.second).await,
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(heard_by_npc(&scene.store, "Toma").await, [expected]);
     }
 
     #[tokio::test]
@@ -6611,8 +6718,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_npc_answers_a_question_put_to_it() {
-        let (backend, _model_path, _sampling, _limits) = device_test_game().await;
-        let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
+        let (backend, _model_path, _sampling, limits) = device_test_game().await;
+        let (game, store, _db, first, second) =
+            two_player_bread_thief_game_with_limits(backend, limits).await;
         let _first_connection = game.connect(&first).await.unwrap();
         let _second_connection = game.connect(&second).await.unwrap();
 
@@ -6648,9 +6756,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
     async fn real_model_speech_reaches_another_player_in_their_context() {
-        let (mut backend, _model_path, _sampling, _limits) = device_test_game().await;
+        let (mut backend, _model_path, _sampling, limits) = device_test_game().await;
         let observed_prompts = backend.observe_prompts();
-        let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
+        let (game, store, _db, first, second) =
+            two_player_bread_thief_game_with_limits(backend, limits).await;
         let _first_connection = game.connect(&first).await.unwrap();
         let _second_connection = game.connect(&second).await.unwrap();
 
@@ -6678,8 +6787,10 @@ mod tests {
             .expect("the listener ran")
             .prompt
             .clone();
+        // The speech reaches the model as a JSON object, so the text is escaped.
+        let escaped = serde_json::to_string(&overheard[0]).unwrap();
         assert!(
-            listener_prompt.contains(&overheard[0]),
+            listener_prompt.contains(escaped.trim_matches('"')),
             "the listener's model must be shown the attributed speech:
 {listener_prompt}"
         );
@@ -6703,10 +6814,12 @@ mod tests {
             after.len() > before,
             "the whisper never reached its listener"
         );
-        assert!(
-            after.last().unwrap().contains("whispers"),
-            "the listener should be told it was a whisper: {after:?}"
-        );
+        let kind: String =
+            sqlx::query_scalar("SELECT kind FROM speech ORDER BY action_id DESC LIMIT 1")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        assert_eq!(kind, "whisper");
         assert!(
             heard_by_npc(&store, "Toma")
                 .await

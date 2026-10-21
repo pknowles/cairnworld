@@ -18,7 +18,7 @@ use crate::{
     world::{ChatChange, World},
 };
 
-const NPC_ROLE: &str = "You are the character described below, in a scene you share with others. Speak only for yourself. Decide whether to respond to what you just heard: call do_nothing, or call say or whisper with the words and how strongly you want to speak now. Most of the time the right choice is do_nothing: stay silent unless you were spoken to or have something new that matters to say, and let a conversation end once your point has been made. The GM decides whether your words are said, and others may speak first or at the same time.";
+const NPC_ROLE: &str = "You are the character described below, in a scene you share with others. Speak only for yourself. Decide whether to respond to what you just heard: call do_nothing, or call say or whisper with the words and how strongly you want to speak now. The GM decides whether your words are said, and others may speak first or at the same time.";
 
 /// Tells the GM why two replies in a row heard nothing of each other.
 const TIED_NOTE: &str = "This reply was composed at the same moment as others from the characters present, before anyone heard the others; they will be presented to you separately. You may describe the overlap in the prefix, but do not treat replies you have not approved as said.";

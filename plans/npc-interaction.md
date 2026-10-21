@@ -1,8 +1,8 @@
 # NPC speech, response selection and player interruption
 
-Speech delivery and initial NPC response scheduling exist. The response slice
-is incomplete: apply the individual-approval/expressive-text changes below,
-finish causal inspection and the scene-revision audit, and verify the outstanding
+Speech delivery, initial NPC response scheduling, individual GM approval of tied
+replies and expressive authored speech exist. The response slice
+is incomplete: finish causal inspection and the scene-revision audit, and verify the outstanding
 scenarios before player control and intervention. Builds on implemented shutdown
 and failure handling; combat and InterventionCheck are not implemented.
 

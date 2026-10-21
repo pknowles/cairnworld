@@ -34,6 +34,9 @@ pub enum ServerEvent {
     Entry {
         role: ChatRole,
         text: String,
+        /// Who said it, for speech whose authored text does not carry attribution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
         /// The stored message and its Developer Mode sequence, when this
         /// entry comes from a durable row. `None` for text streamed before
         /// its row is known to exist; a later resync fills it in, so a live
@@ -81,6 +84,9 @@ pub enum ChatRole {
 pub struct ChatEntry {
     pub role: ChatRole,
     pub text: String,
+    /// Who said it, for speech whose authored text does not carry attribution.
+    #[serde(default)]
+    pub speaker: Option<String>,
     /// See `ServerEvent::Entry`: `None` until this entry's durable row (and,
     /// for Developer Mode, its sequence) is known.
     #[serde(default)]
@@ -980,6 +986,15 @@ fn ContentBlock(content: MessageContent) -> impl IntoView {
             view! { <ToolCallList calls actions=Vec::new() selection=RwSignal::new(None)/> }
                 .into_any()
         }
+        MessageContent::Speech(speech) => view! {
+            <div class="flex flex-wrap items-start gap-1">
+                <span class="badge badge-ghost badge-sm">
+                    {format!("{} {}", speech.speaker, speech.kind)}
+                </span>
+                <CopyableText text=speech.display()/>
+            </div>
+        }
+        .into_any(),
         MessageContent::ToolResult {
             tool_call_id: _,
             content,
@@ -2144,6 +2159,7 @@ pub fn PlayerChat(
                         entries.push(ChatEntry {
                             role: ChatRole::User,
                             text,
+                            speaker: None,
                             id: None,
                             sequence_id: None,
                         })
@@ -2388,7 +2404,7 @@ fn ChatEntryView(entry: ChatEntry, #[prop(default = false)] developer_mode: bool
         class.to_string()
     };
     view! {
-        <li class=class data-role=chat_role_name(entry.role) data-inspect-sequence=inspect.map(|id| id.to_string()) data-inspect-entry=entry.id.map(|id| id.to_string())>
+        <li class=class data-role=chat_role_name(entry.role) data-speaker=entry.speaker data-inspect-sequence=inspect.map(|id| id.to_string()) data-inspect-entry=entry.id.map(|id| id.to_string())>
             {gm.then(|| view! { <span class="badge badge-outline badge-sm mb-2">"GM"</span> })}
             <div class=bubble>{entry.text}</div>
         </li>
@@ -2483,6 +2499,7 @@ fn connect_player_chat(
             Ok(ServerEvent::Entry {
                 role,
                 text,
+                speaker,
                 id,
                 sequence_id,
             }) => upsert_chat_entry(
@@ -2490,6 +2507,7 @@ fn connect_player_chat(
                 ChatEntry {
                     role,
                     text,
+                    speaker,
                     id,
                     sequence_id,
                 },
@@ -2687,6 +2705,7 @@ fn add_notice(entries: RwSignal<Vec<ChatEntry>>, text: String) {
         entries.push(ChatEntry {
             role: ChatRole::Notice,
             text,
+            speaker: None,
             id: None,
             sequence_id: None,
         })
