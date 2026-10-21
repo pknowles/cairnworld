@@ -82,7 +82,7 @@ policy and automatic denial remain the user's playtesting decisions.
 | NPC scheduling | Nested calls need little queue code but re-enter the active GM. Detached tasks allow overlap but race world state and complicate shared budgets. Concrete SQLite rounds in the existing worker require checkpoints but retain one executor. | Concrete rounds; reuse world serialization rather than introduce another scheduler. |
 | Speech storage | Copy text to every recipient: easy but duplicates history. Point into arbitrary JSON tool output: avoids a text row but couples readers to proposal layout. Share one committed action-result body and retain speech metadata: small explicit schema and existing content reconstruction. | Shared action-result body; event words are stored once for delivery. The original model arguments remain original inference evidence, not another recipient transcript. |
 | Stale decisions | Compare every live field/hash: expensive and easy to omit. Use the GM branch head: existing value, but inference bookkeeping would invalidate its own round. Use a group scene revision: one explicit semantic counter, requiring an audited write boundary. | Group scene revision, changed only by committed fiction/state changes. |
-| NPC decision protocol | Reuse the full agent loop: familiar, but permits extra tool batches and adds settling calls. Free text plus parsing: fewer schemas, unreliable control. One constrained terminal decision: one call per NPC, explicit failure on malformed output. | One recorded inference returning exactly one DoNothing/propose_action call; no second tool executor or text parser. |
+| NPC decision protocol | Reuse the full agent loop: familiar, but permits extra tool batches and adds settling calls. Free text plus parsing: fewer schemas, unreliable control. One constrained terminal decision: one call per NPC, explicit failure on malformed output. | One recorded inference returning exactly one do_nothing, say or whisper call; no second tool executor or text parser. |
 | Simultaneous speech | Sequential ordinary approvals can publish half a batch. Infer approval from NPC intent bypasses the GM. One GM batch-resolution tool admits all winners before a single transaction. | resolve_speech_batch for NPC speech; ordinary player Say and this tool share the same speech commit helper. |
 | Pause handling | Queue the control behind NPC work: cannot interrupt promptly. Cancel arbitrary futures: risks half-completed tools. Direct live control with boundary acknowledgement: permits typing while retaining committed work, but acknowledgement can wait for an active action. | Direct pause holds and a watched worker activity value; never cancel a running action. |
 | Budgets and restart | Memory-only counters grant a fresh budget after restart. Arbitrary crash continuation requires durable nested-call progress and inference admission. Saving counters between complete steps permits clean restarts with smaller changes, while crashes fail active discussions. | Finish steps on planned shutdown and checkpoint the existing Budget between them; use shared crash cleanup for exceptional interruptions. |
@@ -170,16 +170,13 @@ Reuse create_pending_action's existing character boundary.
 Retain the existing pending action, GM arbitration and execute_approved_action
 operations for ordinary actions. Decode a selected NPC proposal into the same
 typed CharacterActionRequest that player tools construct. Its original
-propose_action execution is the requesting execution; it can belong to the
+say/whisper decision execution is the requesting execution; it can belong to the
 earlier decision sequence. Do not fabricate an inference/tool call to imitate a
 player. Inspection must resolve the nested proposed action name/arguments when
-the source execution is propose_action, instead of labelling it as an executed
-world action named "propose_action".
+the source execution is an NPC decision, instead of labelling it as an executed
+world action.
 
-The decision tools are do_nothing with an empty object schema and propose_action
-with flat arguments {words, to: names, whisper: flag, eagerness: integer 1..3} (the real model stringified a nested action object, and flattening an internally tagged enum drops its fields from the tool schema, so no nested or tagged object).
-Enforce the range in argument validation as well as the schema. Describe the
-NPC's own desire to act; it does not know the other NPCs' proposed eagerness.
+The decision tools are do_nothing with an empty object schema and the real action tools (say, whisper) with the same arguments the player tools take plus an eagerness integer 1..3 (`with_eagerness` adds it to the action's own schema; a duplicate action schema or nested action object was rejected: the real model stringified it). Enforce the range in argument validation as well as the schema. Describe the NPC's own desire to act; it does not know the other NPCs' proposed eagerness.
 Initially offer Say/Whisper; add Take only in the intervention slice. Exactly one
 tool call is required. Free text, unknown tools, multiple calls or invalid
 arguments finish the recorded invocation with a visible protocol error. Reuse

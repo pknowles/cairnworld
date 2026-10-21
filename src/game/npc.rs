@@ -18,13 +18,13 @@ use crate::{
     llm::{Backend, Content, Message, Role, ToolDefinition},
     store::{
         BatchChoice, Decision, ExecutionClaim, Hearing, InvalidHearing, MAX_PREFIX_CHARS, NpcRound,
-        NpcStep, ProposeAction, SayAction, WhisperAction,
+        NpcStep, SayAction, WhisperAction, with_eagerness,
     },
     tools::{Tool, ToolFuture, ToolOutcome},
     world::{ChatChange, World},
 };
 
-const NPC_ROLE: &str = "You are the character described below, in a scene you share with others. Speak only for yourself. Decide whether to respond to what you just heard: call do_nothing, or call propose_action with the words you would say (set whisper to speak privately to those in `to`) and how strongly you want to say them now. Most of the time the right choice is do_nothing: stay silent unless you were spoken to or have something new that matters to say, and let a conversation end once your point has been made. The GM decides whether your words are said, and others may speak first or at the same time.";
+const NPC_ROLE: &str = "You are the character described below, in a scene you share with others. Speak only for yourself. Decide whether to respond to what you just heard: call do_nothing, or call say or whisper with the words and how strongly you want to speak now. Most of the time the right choice is do_nothing: stay silent unless you were spoken to or have something new that matters to say, and let a conversation end once your point has been made. The GM decides whether your words are said, and others may speak first or at the same time.";
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -125,10 +125,20 @@ where
                     schema: no_argument_schema(),
                 },
                 ToolDefinition {
-                    name: "propose_action".to_string(),
-                    description: "Propose what you would do now.".to_string(),
-                    schema: serde_json::to_value(schema_for!(ProposeAction))
-                        .expect("propose_action schema should serialize"),
+                    name: "say".to_string(),
+                    description: super::SAY_DESCRIPTION.to_string(),
+                    schema: with_eagerness(
+                        serde_json::to_value(schema_for!(SayAction))
+                            .expect("say action schema should serialize"),
+                    ),
+                },
+                ToolDefinition {
+                    name: "whisper".to_string(),
+                    description: super::WHISPER_DESCRIPTION.to_string(),
+                    schema: with_eagerness(
+                        serde_json::to_value(schema_for!(WhisperAction))
+                            .expect("whisper action schema should serialize"),
+                    ),
                 },
             ];
             let completion = context::complete_recorded(
@@ -152,9 +162,15 @@ where
             .context("running the NPC's decision inference")?;
             inference_id = Some(completion.inference_id);
             let (call, decision) = Decision::parse(&completion.response.content)?;
+            if let Decision::Propose(proposal) = &decision {
+                match proposal.tool {
+                    "say" => super::validate_say_action(&proposal.arguments)?,
+                    _ => super::validate_whisper_action(&proposal.arguments)?,
+                }
+            }
             let recorded = match decision {
                 Decision::Nothing => "You stay silent.",
-                Decision::Propose(_) => "Your proposal is recorded. It is said only if the GM allows it and nobody wants to act more.",
+                Decision::Propose(_) => "Your words are recorded. They are said only if the GM allows it and nobody wants to act more.",
             };
             self.store
                 .finish_npc_decision(&claim, completion.inference_id, &call, recorded, budget.spent())

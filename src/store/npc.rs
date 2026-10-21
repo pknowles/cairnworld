@@ -4,8 +4,6 @@
 //! produce, never copied into a parallel state machine.
 
 use anyhow::{Context, Result, bail, ensure};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use sqlx::{Sqlite, Transaction};
 
 use super::{
@@ -14,63 +12,48 @@ use super::{
 };
 use crate::llm::{Content, Message, MessageContent, ToolCall};
 
-/// The arguments of `propose_action`: words the NPC would say. Proposals never
-/// act; the GM decides whether the words are said and who hears them. The
-/// fields are flat because the model does not reliably emit a nested object.
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProposeAction {
-    /// The exact words your character says.
-    pub words: String,
-    /// Who you speak to: at most one character when speaking aloud, any
-    /// number when whispering. Leave empty to speak to the room.
-    #[serde(default)]
-    pub to: Vec<String>,
-    /// True to whisper: only the characters in `to` hear it. Otherwise
-    /// everyone present hears it, whoever you address.
-    #[serde(default)]
-    pub whisper: bool,
-    /// How strongly you want to act now: 1 mild, 2 moderate, 3 strong.
-    #[schemars(range(min = 1, max = 3))]
+/// A speech action an NPC would take, with how strongly it wants to.
+/// Proposals never act; the GM decides whether the words are said and who
+/// hears them.
+pub struct SpeechProposal {
+    /// The action tool the NPC called: `say` or `whisper`.
+    pub tool: &'static str,
+    /// The action's own arguments, exactly as that tool takes them.
+    pub arguments: String,
     pub eagerness: u8,
-}
-
-impl ProposeAction {
-    /// The character action this becomes: the tool the GM judges and its arguments.
-    fn request(&self) -> Result<(&'static str, String)> {
-        let (tool, arguments) = if self.whisper {
-            ensure!(!self.to.is_empty(), "a whisper needs someone in `to`");
-            (
-                "whisper",
-                serde_json::json!({"words": self.words, "to": self.to}),
-            )
-        } else {
-            ensure!(self.to.len() <= 1, "say addresses at most one character");
-            (
-                "say",
-                serde_json::json!({"words": self.words, "to": self.to.first()}),
-            )
-        };
-        Ok((tool, arguments.to_string()))
-    }
 }
 
 /// The one terminal decision an NPC returns.
 pub enum Decision {
     Nothing,
-    Propose(ProposeAction),
+    Propose(SpeechProposal),
+}
+
+/// The action's own tool schema plus the NPC-only `eagerness` argument.
+pub fn with_eagerness(mut schema: serde_json::Value) -> serde_json::Value {
+    schema["properties"]["eagerness"] = serde_json::json!({
+        "description": "How strongly you want to act now: 1 mild, 2 moderate, 3 strong.",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3,
+    });
+    match schema["required"].as_array_mut() {
+        Some(required) => required.push("eagerness".into()),
+        None => schema["required"] = serde_json::json!(["eagerness"]),
+    }
+    schema
 }
 
 impl Decision {
     /// The decision a model's whole response makes, or why it breaks the
-    /// protocol: exactly one `do_nothing` or `propose_action` call.
+    /// protocol: exactly one `do_nothing`, `say` or `whisper` call.
     pub fn parse(content: &Content) -> Result<(ToolCall, Self)> {
         let Content::ToolCalls(calls) = content else {
-            bail!("the NPC replied with text instead of calling do_nothing or propose_action");
+            bail!("the NPC replied with text instead of calling do_nothing, say or whisper");
         };
         let [call] = calls.as_slice() else {
             bail!(
-                "the NPC made {} tool calls; exactly one of do_nothing or propose_action is required",
+                "the NPC made {} tool calls; exactly one of do_nothing, say or whisper is required",
                 calls.len()
             );
         };
@@ -84,18 +67,26 @@ impl Decision {
                 );
                 Self::Nothing
             }
-            "propose_action" => {
-                let proposal: ProposeAction = serde_json::from_str(&call.arguments)
-                    .context("parsing propose_action arguments")?;
-                ensure!(
-                    (1..=3).contains(&proposal.eagerness),
-                    "eagerness {} is outside 1 to 3",
-                    proposal.eagerness
-                );
-                proposal.request()?;
-                Self::Propose(proposal)
+            name @ ("say" | "whisper") => {
+                let mut arguments: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(&call.arguments)
+                        .with_context(|| format!("parsing {name} arguments"))?;
+                let eagerness = arguments
+                    .remove("eagerness")
+                    .context("an eagerness from 1 to 3 is required")?;
+                let eagerness = eagerness
+                    .as_u64()
+                    .filter(|value| (1..=3).contains(value))
+                    .with_context(|| {
+                        format!("eagerness {eagerness} is not an integer from 1 to 3")
+                    })?;
+                Self::Propose(SpeechProposal {
+                    tool: if name == "say" { "say" } else { "whisper" },
+                    arguments: serde_json::Value::Object(arguments).to_string(),
+                    eagerness: u8::try_from(eagerness).context("eagerness out of range")?,
+                })
             }
-            name => bail!("the NPC called `{name}`, not do_nothing or propose_action"),
+            name => bail!("the NPC called `{name}`, not do_nothing, say or whisper"),
         };
         Ok((call.clone(), decision))
     }
@@ -992,7 +983,7 @@ impl Store {
         )
         .await?;
         let mut proposals = Vec::new();
-        for (character_id, execution_id, action) in winners {
+        for (character_id, execution_id, proposal) in winners {
             sqlx::query!(
                 "UPDATE npc_candidate SET execution_sequence_id = ? WHERE round_id = ? AND character_id = ?",
                 sequence_id,
@@ -1006,7 +997,7 @@ impl Store {
                 world_id: round.world_id,
                 character_id,
             };
-            let (tool, args) = action.request()?;
+            let (tool, args) = (proposal.tool, proposal.arguments);
             let pending = Self::create_pending_action_in(
                 &mut transaction,
                 &actor,

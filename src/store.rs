@@ -6,7 +6,7 @@ mod prompt;
 mod speech;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
-pub use npc::{BatchChoice, Decision, ExecutionClaim, NpcRound, NpcStep, ProposeAction};
+pub use npc::{BatchChoice, Decision, ExecutionClaim, NpcRound, NpcStep, with_eagerness};
 pub use prompt::PromptEvidence;
 pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SayAction, WhisperAction};
 

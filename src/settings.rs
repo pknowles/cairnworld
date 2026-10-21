@@ -262,12 +262,15 @@ impl Settings {
     pub fn for_device_test(model: &str) -> Result<Self> {
         // 4096 keeps the paged KV reservation under 2 GB so an 8 GB card holds
         // the model too; the compaction trigger just needs to sit comfortably
-        // inside that with output-token headroom.
+        // inside that with output-token headroom. The raw tail compaction never
+        // summarizes must fit that context too, so it is far shorter than the
+        // default.
         Self::for_test(&format!(
             "model = \"{model}\"\n\
              [limits]\n\
              max_context_tokens = 4096\n\
-             compact_before_next_input_tokens = 2048\n"
+             compact_before_next_input_tokens = 2048\n\
+             keep_tail_messages = 8\n"
         ))
     }
 

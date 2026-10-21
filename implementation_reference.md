@@ -640,7 +640,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   it. The world worker runs one `NpcStep` at a time at lowest priority
   (`Store::next_npc_step`, none while draining): Refresh (stale
   `group.scene_revision`), Decide (one recorded inference per NPC, exactly one
-  `do_nothing` or `propose_action`, eagerness 1 to 3), Select (highest
+  `do_nothing`, `say` or `whisper`, the player tools plus eagerness 1 to 3), Select (highest
   eagerness; speech ties all win), Execute (pending actions for the winners and
   one GM invocation, `resolve_speech_batch`, which must decide exactly the
   presented actions). Discussions share the root turn's `Budget`

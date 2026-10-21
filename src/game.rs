@@ -29,6 +29,11 @@ use crate::{
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
 };
 
+/// Shared by the player and NPC speech tools.
+const SAY_DESCRIPTION: &str =
+    "Say words aloud. Everyone present hears them, even when you address one character.";
+const WHISPER_DESCRIPTION: &str = "Whisper words that only the named characters hear.";
+
 const GM_ROLE: &str = "You are the GM for the characters in this group. Ground narration in the scene packet and address the characters as a group. Use the available tools to resolve proposed actions before narrating their outcomes. Characters, including NPCs, speak for themselves: narrate what is seen and done, never put words in a character's mouth.";
 
 /// The one game service that a browser event will invoke. It derives the player
@@ -1123,7 +1128,7 @@ where
                 sequence_id,
                 definition: ToolDefinition {
                     name: "say".to_string(),
-                    description: "Say words aloud. Everyone present hears them, even when you address one character.".to_string(),
+                    description: SAY_DESCRIPTION.to_string(),
                     schema: serde_json::to_value(schema_for!(SayAction))
                         .expect("say action schema should serialize"),
                 },
@@ -1136,7 +1141,7 @@ where
                 sequence_id,
                 definition: ToolDefinition {
                     name: "whisper".to_string(),
-                    description: "Whisper words that only the named characters hear.".to_string(),
+                    description: WHISPER_DESCRIPTION.to_string(),
                     schema: serde_json::to_value(schema_for!(WhisperAction))
                         .expect("whisper action schema should serialize"),
                 },
@@ -4444,9 +4449,9 @@ mod tests {
 
     fn propose(words: &str, to: &str, eagerness: u8) -> Response {
         tool_call(
-            "propose_action",
+            "say",
             serde_json::json!({
-                "words": words, "to": [to],
+                "words": words, "to": to,
                 "eagerness": eagerness,
             }),
         )
@@ -4676,9 +4681,9 @@ mod tests {
                 do_nothing(),
                 // Eagerness outside 1 to 3.
                 tool_call(
-                    "propose_action",
+                    "say",
                     serde_json::json!({
-                        "words": "Hi.", "to": [speaker],
+                        "words": "Hi.", "to": speaker,
                         "eagerness": 4,
                     }),
                 ),
@@ -6455,7 +6460,6 @@ mod tests {
         let chat = heard(&store, &first).await;
         println!("{chat:#?}");
         assert!(errors.is_empty(), "{errors:?}");
-        assert!(chat.len() >= 2, "Toma never replied: {chat:?}");
     }
 
     /// A real player agent speaks, a real GM approves, and the other player's

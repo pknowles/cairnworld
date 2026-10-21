@@ -68,7 +68,8 @@ async fn run_invocation<B: Backend>(
     events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
 ) -> Result<()> {
     let mut keep = limits.keep_tail_messages;
-    let mut recovering_capacity = false;
+    // A fixed-KV rejection queues a job with no cause inference.
+    let mut recovering_capacity = job.cause_inference_id.is_none();
     loop {
         let (segments, branch_id, split, covered) =
             summary_segments(store, job.branch.branch_id(), keep).await?;
