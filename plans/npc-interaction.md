@@ -5,15 +5,17 @@ expressive authored speech, Developer Mode causal links, NPC response wording an
 the split, merge, access-loss, shutdown and crash scenarios exist. Still open
 before player control is NPC restraint (the declaration asks NPCs to be
 encouraged to use do_nothing), which is last because it takes the longest to
-tune and test. Evidence so far, from a real-model run: wording that says silence
-leaves the scene waiting and that speech may be answered made addressed NPCs
-respond, but in the run read in full the answers were whispers: an unaddressed
-Mara whispered "don't answer him" to Toma, Toma whispered his private reasoning
-back to Mara, then repeated it verbatim, and the player heard nothing. Cause
-untested; candidates are whisper being the only non-public output, Toma
-obeying Mara, and the role text saying speech is heard by everyone present,
-which whispers contradict. Builds on implemented shutdown and failure
-handling; combat and InterventionCheck are not implemented.
+tune and test. The role text states only what is true (all-DoNothing ends the
+round, so it does not say silence keeps the scene waiting; say and whisper carry
+their own audience rules). With it, in about eight real-model runs of a question
+put to Toma, the addressed Toma was usually silent, Mara usually whispered to the
+player, and in one run Mara and Toma only whispered to each other and the player
+heard nothing, which the NPC-answer device test fails on. Earlier runs, with a
+false sentence saying silence leaves the scene waiting, had Toma answer; the
+answers were then often whispers carrying private reasoning, and one run repeated
+a whisper verbatim. Why a named NPC stays silent or whispers is untested. Builds
+on implemented shutdown and failure handling; combat and InterventionCheck are
+not implemented.
 
 ## Outcome and authority
 
