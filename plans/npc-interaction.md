@@ -10,9 +10,10 @@ leaves the scene waiting and that speech may be answered made addressed NPCs
 respond, but in the run read in full the answers were whispers: an unaddressed
 Mara whispered "don't answer him" to Toma, Toma whispered his private reasoning
 back to Mara, then repeated it verbatim, and the player heard nothing. Cause
-untested; candidates are whisper being the only non-public output and Toma
-obeying Mara. Builds on implemented shutdown and failure handling; combat and
-InterventionCheck are not implemented.
+untested; candidates are whisper being the only non-public output, Toma
+obeying Mara, and the role text saying speech is heard by everyone present,
+which whispers contradict. Builds on implemented shutdown and failure
+handling; combat and InterventionCheck are not implemented.
 
 ## Outcome and authority
 
