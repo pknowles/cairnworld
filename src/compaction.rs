@@ -512,14 +512,19 @@ mod tests {
             responses: Mutex::new(VecDeque::from([response("lasting fact")])),
             requests: Mutex::new(Vec::new()),
         };
-        run(
-            store,
-            &backend,
-            &job,
-            limits,
-            tokio::sync::broadcast::channel(256).0,
+        // A recovery that stops making progress loops forever; fail instead.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run(
+                store,
+                &backend,
+                &job,
+                limits,
+                tokio::sync::broadcast::channel(256).0,
+            ),
         )
         .await
+        .expect("the capacity recovery did not finish: it stopped making progress")
         .unwrap();
         store.latest_summary(agent).await.unwrap().unwrap()
     }

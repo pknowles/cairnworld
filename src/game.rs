@@ -6029,13 +6029,18 @@ mod tests {
                 ),
                 response(Content::Text(narration.clone())),
             ]);
-            game.arbitrate(
-                pending,
-                Budget::new(limits),
-                CallContext::root(Some(sequence.id)),
-                None,
+            // Recovery that stops making progress loops forever; fail instead.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                game.arbitrate(
+                    pending,
+                    Budget::new(limits),
+                    CallContext::root(Some(sequence.id)),
+                    None,
+                ),
             )
             .await
+            .unwrap_or_else(|_| panic!("action {index} did not finish: recovery made no progress"))
             .unwrap_or_else(|error| panic!("action {index} did not resolve: {error:#}"));
         }
 
