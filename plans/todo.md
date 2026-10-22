@@ -10,7 +10,7 @@ there yet". Remove and archive only verified completions.
   approvals, complete response scheduling/causal inspection, Interrupt/Never mind,
   perceived-event opportunities and tentative/committed intervention.
 - [Code quality checks](code-quality-checks.md): measure and enforce module
-  boundaries, function complexity and duplication; correct the reported problems.
+  boundaries, function complexity and duplication; correct the reported problems. DO NOT SKIP THIS - secodnd attempt after the first was "verified complete" spuriously.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and

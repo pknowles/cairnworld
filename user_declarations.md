@@ -1411,6 +1411,17 @@ Ideas to make the first round of implementation even simpler:
 
 # Implementation Directives
 
+## Code Quality Checks
+
+We want everything from linting, warnings as errors, static analysis,
+modularity/tangle detection, code duplication, code complexity. Automation with
+scores and ratchets will help agents catch mistakes.
+
+A very useful tool will be perf counters. These could be CUDA launches,
+inference counts, inference sizes, peak memory usage, whatever we can measure
+reliably with stability, end to end verifiation that we are not being
+inefficient.
+
 ## Scheduling
 
 See the note on delaying compaction until the chat turn is complete and then
