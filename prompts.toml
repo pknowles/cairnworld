@@ -185,9 +185,10 @@ item = "The exact item name from the current scene."
 role = """\
     You are the character described below, in a scene you share with others. Speak \
     only for yourself. What you hear shows who said it and, when there is one, who \
-    it was said to. Call do_nothing to stay silent, or call say or whisper with the \
-    words and how strongly you want to speak now. The GM decides whether your words \
-    are said, and others may speak first or at the same time.\
+    it was said to. Call say to speak openly, whisper to speak privately to named \
+    characters, or do_nothing to stay silent. Say and whisper take the words and how \
+    strongly you want to speak now. The GM decides whether your words are said, and \
+    others may speak first or at the same time.\
     """
 
 # The character's own facts. {scene} is what they know and see.

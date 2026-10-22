@@ -2,20 +2,30 @@
 
 Speech delivery, NPC response rounds, individual GM approval of tied replies,
 expressive authored speech, Developer Mode causal links, NPC response wording and
-the split, merge, access-loss, shutdown and crash scenarios exist. Still open
-before player control is NPC restraint (the declaration asks NPCs to be
-encouraged to use do_nothing), which is last because it takes the longest to
-tune and test. The role text states only what is true (all-DoNothing ends the
-round, so it does not say silence keeps the scene waiting; say and whisper carry
-their own audience rules). With it, in about eight real-model runs of a question
-put to Toma, the addressed Toma was usually silent, Mara usually whispered to the
-player, and in one run Mara and Toma only whispered to each other and the player
-heard nothing, which the NPC-answer device test fails on. Earlier runs, with a
-false sentence saying silence leaves the scene waiting, had Toma answer; the
-answers were then often whispers carrying private reasoning, and one run repeated
-a whisper verbatim. Why a named NPC stays silent or whispers is untested. Builds
-on implemented shutdown and failure handling; combat and InterventionCheck are
-not implemented.
+the split, merge, access-loss, shutdown and crash scenarios exist. Open before
+player control: NPC restraint and natural stopping.
+
+Evidence from real-model runs, read from the recorded contexts and replayed with
+variants:
+
+- The role text used to call say and whisper interchangeably. All 36 replayed
+  decisions were whispers, so a question put to Toma was answered privately or not
+  at all. Neither persona content, tool order, the say and whisper descriptions nor
+  the addressee field changed that. Removing the whisper tool made Toma answer
+  openly in 6 of 6. Stating what each tool does (say is open, whisper is private)
+  made Toma answer openly in 5 of 6 replays and in 9 of 10 end-to-end runs.
+- NPCs almost never call do_nothing once a dialogue is under way: 0 of about 60
+  decisions. An explicit instruction to stay silent, a trailing question, thinking
+  mode, a changed do_nothing description and a turn marker did not change that.
+  Mara coaches Toma by whisper and the two then answer each other, sometimes
+  repeating a whisper word for word. One discussion took 26 inferences, about six
+  minutes, to settle. Only with the whisper tool removed did an unaddressed Mara
+  stay silent (5 of 6, first round only).
+- Shutdown waits for the whole discussion, so a test that stops at the first
+  reply still waits for the chatter to settle.
+
+Builds on implemented shutdown and failure handling; combat and InterventionCheck
+are not implemented.
 
 ## Outcome and authority
 
