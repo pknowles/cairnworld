@@ -7862,9 +7862,10 @@ mod tests {
     /// tests cover an NPC choosing to stay silent.
     /// A scripted player puts a question to Toma through `player_message`; the
     /// GM and the NPCs are the real model. Delivery of the words is scripted
-    /// (other tests cover it); this proves the real NPC is asked whether to
-    /// respond and some NPC then speaks. What they say, and to whom, is the
-    /// model's roleplay and is not asserted.
+    /// (other tests cover it). The scenario is one where answering makes sense,
+    /// and the player must hear an NPC's reply: NPCs only whispering to each
+    /// other fails. This is one behavioural sample, not a guarantee, and the
+    /// conversation is cut off at the first reply that reaches the player.
     async fn real_model_npc_answers_a_question_put_to_it(model: &DeviceModel) {
         let (_, _model_path, _sampling, limits) = model.parts();
         let hybrid = ScriptedPlayerRealRest {
@@ -7885,23 +7886,37 @@ mod tests {
         game.player_message(first.clone(), "Ask Toma where the bread went.")
             .await
             .expect("the player's turn");
-        let mut spoke = false;
+        let mut reached_player = false;
         for _ in 0..1200 {
-            let npc_utterances: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM speech                  WHERE speaker_character_id IN (SELECT character_id FROM npc_agent)",
+            let heard_from_npcs: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM speech_message                  JOIN speech ON speech.action_id = speech_message.speech_action_id                  JOIN history_entry ON history_entry.id = speech_message.message_id                  JOIN agent_history ON agent_history.branch_id = history_entry.branch_id                  WHERE agent_history.agent_id = ?                    AND speech.speaker_character_id IN (SELECT character_id FROM npc_agent)",
             )
+            .bind(first.agent_id)
             .fetch_one(&store.pool())
             .await
             .unwrap();
-            if npc_utterances > 0 {
-                spoke = true;
+            if heard_from_npcs > 0 {
+                reached_player = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        let utterances: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT speaker_name, kind, addressed_name FROM speech ORDER BY action_id",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        println!(
+            "NPC utterances after the first reply or the wait: {utterances:?}; the player heard {:?}",
+            heard(&store, &first).await
+        );
         game.shutdown().await.unwrap();
 
-        assert!(spoke, "no NPC spoke within two minutes");
+        assert!(
+            reached_player,
+            "no NPC speech reached the player within two minutes; utterances: {utterances:?}"
+        );
         let asked: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM npc_candidate              JOIN character ON character.id = npc_candidate.character_id              WHERE character.name = 'Toma' AND npc_candidate.decision_invocation_id IS NOT NULL",
         )
@@ -7909,6 +7924,16 @@ mod tests {
         .await
         .unwrap();
         assert!(asked >= 1, "Toma was never asked whether to respond");
+        let failed: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM sequence WHERE error IS NOT NULL)                   + (SELECT COUNT(*) FROM npc_discussion WHERE state = 'failed')",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            failed, 0,
+            "the discussion failed; utterances: {utterances:?}"
+        );
     }
 
     /// What one player says is understood by the other player's own agent: the
@@ -7970,7 +7995,12 @@ mod tests {
         )
             .await
             .expect("first player message");
-        for prompt in ["Describe the room I'm in.", "What can I hear right now?"] {
+        // Plain chat that needs no scene tool, so the model answers directly
+        // instead of paying for a GM narration each turn.
+        for prompt in [
+            "In two sentences, tell me what a lighthouse keeper does.",
+            "In two sentences, tell me how a bell is cast.",
+        ] {
             game.player_message(member.clone(), prompt)
                 .await
                 .expect("later player message");
@@ -8027,24 +8057,26 @@ mod tests {
                 .request
                 .clone()
         };
-        let early = "My character's missing sister is named Maribel. Finding her is my reason for adventuring.";
+        // The summary rides in the leading system message; the retained raw
+        // messages (every other message) must not hold the fact, or recall
+        // would not prove the summary supplied it.
         let text_of = |message: &Message| match &message.content {
-            MessageContent::Text(text) => text.clone(),
-            _ => String::new(),
+            MessageContent::Text(text) => text.to_uppercase(),
+            other => format!("{other:?}").to_uppercase(),
         };
+        let (leading, raw) = shown
+            .messages
+            .split_first()
+            .expect("a request has messages");
         assert!(
-            !shown
-                .messages
-                .iter()
-                .any(|message| text_of(message) == early),
-            "the early message was still raw, so recall did not need the summary"
+            text_of(leading).contains("MARIBEL"),
+            "the summary in the leading message does not hold the fact: {}",
+            text_of(leading)
         );
         assert!(
-            shown
-                .messages
-                .iter()
-                .any(|message| text_of(message).to_uppercase().contains("MARIBEL")),
-            "the model was not shown the fact in any form"
+            !raw.iter()
+                .any(|message| text_of(message).contains("MARIBEL")),
+            "a retained raw message still held the fact, so recall did not need the summary: {raw:#?}"
         );
         game.shutdown().await.unwrap();
     }
