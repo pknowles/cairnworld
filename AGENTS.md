@@ -98,6 +98,10 @@ before making a commit. This is a hard gate and MUST be followed:
 
 All issues should be fixed appropriately before committing.
 
+## Testing budget
+
+After you change code, the complete test suite must not exceed 5 minutes. This limits the implementing agent, not the tests, so there is no total test suite timeout, and an unchanged tree that runs longer on another machine is not a failure. If a change needs more, shrink scenarios, merge tests, be more efficient.
+
 # Fixing Issues and Debugging
 
 Be cautious when making guesses speculations. These are fine, but DO NOT confuse
