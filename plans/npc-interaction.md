@@ -1,13 +1,18 @@
 # NPC speech, response selection and player interruption
 
 Speech delivery, NPC response rounds, individual GM approval of tied replies,
-expressive authored speech, Developer Mode causal links and the split, merge,
-access-loss, shutdown and crash scenarios exist. Still open before player
-control: repeated real-model conversations that confirm natural stopping, and
-NPC restraint wording (the declaration asks NPCs to be encouraged to use
-do_nothing; the prompt currently says nothing about it), which is last because
-it takes the longest to tune and test. Builds on implemented shutdown and
-failure handling; combat and InterventionCheck are not implemented.
+expressive authored speech, Developer Mode causal links, NPC response wording and
+the split, merge, access-loss, shutdown and crash scenarios exist. Still open
+before player control is NPC restraint (the declaration asks NPCs to be
+encouraged to use do_nothing), which is last because it takes the longest to
+tune and test. Evidence so far, from a real-model run: wording that says silence
+leaves the scene waiting and that speech may be answered made addressed NPCs
+respond, but in the run read in full the answers were whispers: an unaddressed
+Mara whispered "don't answer him" to Toma, Toma whispered his private reasoning
+back to Mara, then repeated it verbatim, and the player heard nothing. Cause
+untested; candidates are whisper being the only non-public output and Toma
+obeying Mara. Builds on implemented shutdown and failure handling; combat and
+InterventionCheck are not implemented.
 
 ## Outcome and authority
 
