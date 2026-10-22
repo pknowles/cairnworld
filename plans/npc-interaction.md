@@ -1,10 +1,13 @@
 # NPC speech, response selection and player interruption
 
-Speech delivery, initial NPC response scheduling, individual GM approval of tied
-replies and expressive authored speech exist. The response slice
-is incomplete: finish causal inspection and the scene-revision audit, and verify the outstanding
-scenarios before player control and intervention. Builds on implemented shutdown
-and failure handling; combat and InterventionCheck are not implemented.
+Speech delivery, NPC response rounds, individual GM approval of tied replies,
+expressive authored speech and Developer Mode causal links exist. Still open
+before player control: tests for NPC departure, merge and access loss and for a
+crash during an approval, repeated real-model conversations that confirm
+natural stopping, and NPC restraint wording (the declaration asks NPCs to be
+encouraged to use do_nothing; the prompt currently says nothing about it).
+Builds on implemented shutdown and failure handling; combat and
+InterventionCheck are not implemented.
 
 ## Outcome and authority
 
