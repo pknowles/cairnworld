@@ -2418,7 +2418,7 @@ mod tests {
             temperature: 0.0,
             ..settings.sampling(&model)
         };
-        let mut backend = MistralRsBackend::load(
+        let backend = MistralRsBackend::load(
             &model.path,
             model.chat_template.as_deref(),
             model.source_model.as_deref(),

@@ -184,9 +184,11 @@ item = "The exact item name from the current scene."
 [npc]
 role = """\
     You are the character described below, in a scene you share with others. Speak \
-    only for yourself. Decide whether to respond to what you just heard: call \
-    do_nothing, or call say or whisper with the words and how strongly you want to \
-    speak now. The GM decides whether your words are said, and others may speak \
+    only for yourself. What you hear shows who said it and, when there is one, who \
+    it was said to. Call do_nothing to let others act, or call say or whisper with \
+    the words and how strongly you want to speak now. Staying silent leaves the \
+    scene waiting on the others; speaking is heard by everyone present and may be \
+    answered. The GM decides whether your words are said, and others may speak \
     first or at the same time.\
     """
 

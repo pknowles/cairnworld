@@ -22,7 +22,7 @@ pub struct MistralRsBackend {
     max_context_tokens: usize,
     max_output_tokens: usize,
     #[cfg(test)]
-    observed_prompts: Option<Arc<Mutex<Vec<ObservedPrompt>>>>,
+    observed_prompts: Mutex<Option<Arc<Mutex<Vec<ObservedPrompt>>>>>,
 }
 
 /// A test-only capture at mistral.rs's formatting and tokenization boundary.
@@ -162,14 +162,14 @@ impl MistralRsBackend {
             max_context_tokens: limits.max_context_tokens,
             max_output_tokens: limits.max_output_tokens,
             #[cfg(test)]
-            observed_prompts: None,
+            observed_prompts: Mutex::new(None),
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn observe_prompts(&mut self) -> Arc<Mutex<Vec<ObservedPrompt>>> {
+    pub(crate) fn observe_prompts(&self) -> Arc<Mutex<Vec<ObservedPrompt>>> {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        self.observed_prompts = Some(Arc::clone(&observed));
+        *self.observed_prompts.lock().unwrap() = Some(Arc::clone(&observed));
         observed
     }
 }
@@ -302,7 +302,7 @@ impl Backend for MistralRsBackend {
     ) -> Result<Response> {
         let max_output_tokens = self.max_output_tokens;
         #[cfg(test)]
-        let observed_prompts = self.observed_prompts.clone();
+        let observed_prompts = self.observed_prompts.lock().unwrap().clone();
         #[cfg(test)]
         let observed_request = request.clone();
         let builder = request_builder(&request, max_output_tokens)?.with_prompt_observer({
@@ -570,43 +570,14 @@ fn append_tool_delta(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::llm::{Message, Sampling, ToolDefinition};
-    use crate::settings::Settings;
 
-    fn show_inference_lifecycle() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("cairnworld=info")
-            .with_test_writer()
-            .try_init();
-    }
-
-    /// A configured model resolved from checked-in `default.toml`, at a context
-    /// size that fits an 8 GB GPU. No `local.toml`.
-    fn device_test_model(name: &str) -> (crate::settings::Model, crate::settings::Limits) {
-        let settings = Settings::for_device_test(name).expect("default.toml should load");
-        let model = settings
-            .model(None)
-            .expect("default.toml should configure the device-test model");
-        (model, settings.limits)
-    }
-
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn generation_prompt_observation_matches_request_reconstruction() {
+    pub(crate) async fn generation_prompt_observation_matches_request_reconstruction(
+        backend: &MistralRsBackend,
+    ) {
         use std::sync::{Arc, Mutex};
-        show_inference_lifecycle();
-        let (model, limits) = device_test_model("dev-qwen35");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            limits,
-            false,
-        )
-        .await
-        .expect("model should load");
         let request = Request {
             messages: vec![
                 Message::text(Role::System, "Reply briefly."),
@@ -762,22 +733,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn configured_context_capacity_rejects_overflow_and_remains_usable() {
-        show_inference_lifecycle();
-        let settings = Settings::for_test("model = \"dev-qwen35\"").unwrap();
-        let model = settings.model(None).unwrap();
-        let limits = settings.limits;
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            limits,
-            false,
-        )
-        .await
-        .unwrap();
+    pub(crate) async fn configured_context_capacity_rejects_overflow_and_remains_usable(
+        backend: &MistralRsBackend,
+        limits: crate::settings::Limits,
+    ) {
         let request_for = |repetitions| Request {
             messages: vec![
                 Message::text(Role::System, "Reply with one short word."),
@@ -873,21 +832,9 @@ mod tests {
         log_gpu_memory("after fixed-cache rejection and recovery").unwrap();
     }
 
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn streaming_completion_leaves_the_model_available_for_the_next_turn() {
-        show_inference_lifecycle();
-        let (model, limits) = device_test_model("dev-qwen35");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            limits,
-            false,
-        )
-        .await
-        .expect("model should load");
-
+    pub(crate) async fn streaming_completion_leaves_the_model_available_for_the_next_turn(
+        backend: &MistralRsBackend,
+    ) {
         let request = Request {
             messages: vec![Message::text(
                 Role::User,
@@ -918,20 +865,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn opening_turn_with_tools_has_a_valid_chat_template_shape() {
-        show_inference_lifecycle();
-        let (model, limits) = device_test_model("dev-qwen35");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            limits,
-            false,
-        )
-        .await
-        .expect("model should load");
+    pub(crate) async fn opening_turn_with_tools_has_a_valid_chat_template_shape(
+        backend: &MistralRsBackend,
+    ) {
         let request = Request {
             messages: vec![
                 Message::text(Role::System, "You are the player's guide."),
@@ -955,20 +891,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn qwen_zero_argument_tool_cannot_emit_placeholder_arguments() {
-        show_inference_lifecycle();
-        let (model, limits) = device_test_model("dev-qwen3");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            limits,
-            false,
-        )
-        .await
-        .expect("model should load");
+    pub(crate) async fn a_zero_argument_tool_call_has_empty_arguments(backend: &MistralRsBackend) {
         let response = backend
             .complete(
                 Request {
@@ -1012,20 +935,9 @@ mod tests {
     /// back to the model. The chat template must render that stored call; the
     /// Qwen3.5 template iterates `arguments` as key/value pairs, so it must
     /// reach the template as a decoded object, not the OpenAI wire string.
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn a_prior_tool_call_message_renders_for_the_next_turn() {
-        show_inference_lifecycle();
-        let (model, limits) = device_test_model("dev-qwen35");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            limits,
-            false,
-        )
-        .await
-        .expect("model should load");
+    pub(crate) async fn a_prior_tool_call_message_renders_for_the_next_turn(
+        backend: &MistralRsBackend,
+    ) {
         let request = Request {
             messages: vec![
                 Message::text(Role::System, "You are the player's guide."),

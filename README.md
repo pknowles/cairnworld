@@ -100,6 +100,15 @@ Chat/Inspect tabs while chat stays usable. Scripted WebSocket events and stored
 inference fixtures avoid requiring OAuth or a model. Unexpected browser errors
 fail the command, and negative checks verify that behavior.
 
+The real-model tests share one model load in a single ignored test, `device_suite`,
+which prints each scenario's time; it needs a CUDA driver and the `dev-qwen35` model
+from `default.toml`. The whole test suite, including this and the browser test
+below, must stay under the five-minute budget in `AGENTS.md`:
+
+```sh
+cargo test device_suite -- --ignored --nocapture
+```
+
 The device-only acceptance test additionally drives a configured CUDA model
 through normal game play, then opens that exact recorded tool inference in the
 browser and compares its request, rendered prompt, token evidence, and tool
