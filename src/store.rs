@@ -739,6 +739,7 @@ struct RawSummaryRow {
     content: Option<String>,
     reason: String,
     retained_messages: i64,
+    cause_inference_id: Option<i64>,
 }
 
 #[derive(Debug, FromRow)]
@@ -839,10 +840,14 @@ pub struct PendingCompaction {
     /// The sequence whose final reply queued this job, carried onto the
     /// compaction inference. NULL for a fixed-KV recovery outside any sequence.
     pub sequence_id: Option<i64>,
-    /// The inference whose reply queued this job, carried onto the deferred
-    /// compaction invocation as its `cause_inference_id`. NULL for a fixed-KV
-    /// rejection, which has no settled inference to attribute it to.
+    /// The inference that made this job due, carried onto the deferred
+    /// compaction invocation as its `cause_inference_id`: the settled reply
+    /// that crossed the threshold, or the rejected request of a capacity
+    /// recovery. `None` for merge-time compaction, which no inference caused.
     pub cause_inference_id: Option<i64>,
+    /// Queued by a request that did not fit (or by a merge), not by the
+    /// lazy threshold.
+    pub capacity_recovery: bool,
     pub next_input_tokens: usize,
     pub sampling: Sampling,
     pub model: String,
@@ -872,6 +877,7 @@ struct PendingCompactionRow {
     position: i64,
     sequence_id: Option<i64>,
     cause_inference_id: Option<i64>,
+    reason: String,
     next_input_tokens: i64,
     sampling: String,
     model: String,
@@ -891,6 +897,7 @@ impl TryFrom<PendingCompactionRow> for PendingCompaction {
             position: row.position,
             sequence_id: row.sequence_id,
             cause_inference_id: row.cause_inference_id,
+            capacity_recovery: row.reason == "capacity_recovery",
             next_input_tokens: usize::try_from(row.next_input_tokens)
                 .context("pending compaction has a negative next-input token count")?,
             sampling: serde_json::from_str(&row.sampling)
@@ -4391,7 +4398,7 @@ impl Store {
         let rows = sqlx::query_as!(
             PendingCompactionRow,
             "SELECT agent.world_id, history_branch.agent_id, \
-                    pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
+                    pending_compaction.branch_id, position, sequence_id, cause_inference_id, pending_compaction.reason, \
                     next_input_tokens, sampling, model, static_segments \
              FROM pending_compaction \
              JOIN history_branch ON history_branch.id = pending_compaction.branch_id \
@@ -4423,7 +4430,7 @@ impl Store {
         sqlx::query_as!(
             PendingCompactionRow,
             "SELECT agent.world_id, history_branch.agent_id, \
-                    pending_compaction.branch_id, position, sequence_id, cause_inference_id, \
+                    pending_compaction.branch_id, position, sequence_id, cause_inference_id, pending_compaction.reason, \
                     next_input_tokens, sampling, model, static_segments \
              FROM pending_compaction \
              JOIN history_branch ON history_branch.id = pending_compaction.branch_id \
@@ -4443,10 +4450,13 @@ impl Store {
     /// to the compaction obligation `finish_chat_inference` enqueues for a
     /// settled reply: tool-loop history may have grown after the last
     /// completed inference, so there is no final reply to attach it to.
+    /// `rejected_inference_id` is the failed inference, recorded as the cause of
+    /// the compaction; `None` for a merge, which no inference caused.
     pub async fn enqueue_capacity_compaction(
         &self,
         branch: AgentBranch,
         requested_tokens: usize,
+        rejected_inference_id: Option<i64>,
         policy: CompactionPolicy<'_>,
     ) -> Result<()> {
         let branch_id = branch.branch_id();
@@ -4469,10 +4479,11 @@ impl Store {
         let requested_tokens = i64::try_from(requested_tokens)
             .context("capacity-rejected input token count is too large")?;
         sqlx::query!(
-            "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments) VALUES (?, ?, ?, NULL, ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
+            "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, reason, next_input_tokens, sampling, model, static_segments) VALUES (?, ?, ?, ?, 'capacity_recovery', ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
             branch_id,
             position,
             policy.sequence_id,
+            rejected_inference_id,
             requested_tokens,
             sampling_json,
             policy.model,
@@ -5839,6 +5850,9 @@ impl Store {
                 let row: RawSummaryRow = sqlx::query_as!(
                     RawSummaryRow,
                     "SELECT summary.id, summary.covered_ranges, summary.inference_id, summary.reason, summary.retained_messages, \
+                            (SELECT invocation.cause_inference_id FROM inference \
+                             JOIN invocation ON invocation.id = inference.invocation_id \
+                             WHERE inference.id = summary.inference_id) AS cause_inference_id, \
                             json_extract(summary.body, '$.content.value') AS \"content?: _\" \
                      FROM summary_content AS summary WHERE summary.history_entry_id = ?",
                     entry.id,
@@ -5856,6 +5870,7 @@ impl Store {
                         .with_context(|| format!("summary {} has no text content", row.id))?,
                     reason: row.reason,
                     retained_messages: row.retained_messages,
+                    cause_inference_id: row.cause_inference_id,
                 }
             }
             history::EntryKind::Inference => {
@@ -6298,6 +6313,7 @@ mod tests {
             .enqueue_capacity_compaction(
                 branch,
                 1,
+                None,
                 CompactionPolicy {
                     sequence_id: None,
                     compact_before_next_input_tokens: 1,
@@ -9863,6 +9879,7 @@ mod tests {
             .enqueue_capacity_compaction(
                 store.history_branch(branch_id).await.unwrap(),
                 1,
+                None,
                 CompactionPolicy {
                     sequence_id: None,
                     compact_before_next_input_tokens: 1,

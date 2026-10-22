@@ -98,6 +98,9 @@ pub async fn complete_recorded<B: Backend>(
                     .enqueue_capacity_compaction(
                         completion.branch,
                         *requested_tokens,
+                        error
+                            .downcast_ref::<RejectedInference>()
+                            .map(|rejected| rejected.0),
                         CompactionPolicy {
                             sequence_id: completion.sequence_id,
                             compact_before_next_input_tokens: completion
@@ -187,6 +190,17 @@ pub fn static_segments(segments: &[Segment]) -> Vec<Segment> {
         .filter(|segment| matches!(segment, Segment::Text { .. } | Segment::Tools { .. }))
         .cloned()
         .collect()
+}
+
+/// Carried by the error of a request the fixed context rejected: the recorded
+/// inference that did not run.
+#[derive(Debug)]
+struct RejectedInference(i64);
+
+impl std::fmt::Display for RejectedInference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "inference {} was rejected for its size", self.0)
+    }
 }
 
 #[derive(Debug)]
@@ -388,8 +402,17 @@ pub async fn complete_recipe<B: Backend>(
     policy: CompactionPolicy<'_>,
     on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
-    let run = run_recipe(store, backend, completion, on_token).await?;
+    let mut run = run_recipe(store, backend, completion, on_token).await?;
     let succeeded = run.result.is_ok();
+    // A request the fixed context rejected says which inference it was, so the
+    // compaction it causes can name its cause.
+    let inference_id = run.inference.id;
+    run.result = match run.result {
+        Err(error) if error.downcast_ref::<ContextCapacityExceeded>().is_some() => {
+            Err(error.context(RejectedInference(inference_id)))
+        }
+        other => other,
+    };
     let outcome = store
         .finish_chat_inference(
             run.inference.id,

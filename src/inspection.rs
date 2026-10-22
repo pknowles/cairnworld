@@ -410,6 +410,9 @@ pub enum RawHistoryEntry {
         text: String,
         reason: String,
         retained_messages: i64,
+        /// The inference that made this compaction due: the rejected request
+        /// of a capacity recovery, or the reply that crossed the threshold.
+        cause_inference_id: Option<i64>,
     },
     Inference {
         id: i64,

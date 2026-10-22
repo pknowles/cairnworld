@@ -520,6 +520,7 @@ async fn compact_merge_sources<B: Backend>(
                 .enqueue_capacity_compaction(
                     branch,
                     0,
+                    None,
                     CompactionPolicy {
                         sequence_id: None,
                         compact_before_next_input_tokens: 0,

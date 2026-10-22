@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT summary.id, summary.covered_ranges, summary.inference_id, summary.reason, summary.retained_messages, json_extract(summary.body, '$.content.value') AS \"content?: _\" FROM summary_content AS summary WHERE summary.history_entry_id = ?",
+  "query": "SELECT summary.id, summary.covered_ranges, summary.inference_id, summary.reason, summary.retained_messages, (SELECT invocation.cause_inference_id FROM inference JOIN invocation ON invocation.id = inference.invocation_id WHERE inference.id = summary.inference_id) AS cause_inference_id, json_extract(summary.body, '$.content.value') AS \"content?: _\" FROM summary_content AS summary WHERE summary.history_entry_id = ?",
   "describe": {
     "columns": [
       {
@@ -29,8 +29,13 @@
         "type_info": "Integer"
       },
       {
-        "name": "content?: _",
+        "name": "cause_inference_id",
         "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "content?: _",
+        "ordinal": 6,
         "type_info": "Null"
       }
     ],
@@ -43,8 +48,9 @@
       false,
       false,
       false,
+      true,
       null
     ]
   },
-  "hash": "3083881590bcdad92c196961a4e6e9645eb6dc060b825591fe523a3eed463341"
+  "hash": "02e8d7289a9b838fef6be5202466cdefb346799f12d1274dfdb6f273a0ecb2a8"
 }

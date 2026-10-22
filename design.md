@@ -1009,8 +1009,9 @@ same durable compaction job runs inline, with two separate fallbacks:
   that request cannot run, it retains one more raw message and tries again.
 
 Either fallback logs a warning with the configured and resulting counts, and the
-summary records `reason = capacity_recovery` and the count kept, which Developer
-Mode shows beside the rejected request that caused it. They should be rare;
+summary records `reason = capacity_recovery` and the count kept, and its
+compaction invocation names the rejected inference as its cause, which Developer
+Mode links from the compaction entry. They should be rare;
 frequent entries mean messages are too long or the configured count too high.
 No request is pre-tokenized or predicted. Only Mistral's explicit fixed-KV
 capacity rejection starts immediate compaction: it reports the exact requested

@@ -5722,6 +5722,18 @@ mod tests {
             summary.is_some_and(|summary| summary.reason == "capacity_recovery"),
             "the overflow was recovered by compaction"
         );
+        // The compaction names the request that did not fit as its cause.
+        let cause_error: Option<String> = sqlx::query_scalar(
+            "SELECT cause.error FROM summary              JOIN inference ON inference.id = summary.inference_id              JOIN invocation ON invocation.id = inference.invocation_id              JOIN inference AS cause ON cause.id = invocation.cause_inference_id              WHERE summary.reason = 'capacity_recovery' ORDER BY summary.id DESC LIMIT 1",
+        )
+        .fetch_optional(&store.pool())
+        .await
+        .unwrap()
+        .flatten();
+        assert!(
+            cause_error.is_some_and(|error| error.contains("fixed context capacity")),
+            "the summary does not point at the rejected request"
+        );
         // Every request the GM sent, accepted or not, kept each tool result
         // after the call that produced it.
         for request in requests.lock().unwrap().iter() {

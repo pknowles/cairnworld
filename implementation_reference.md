@@ -186,7 +186,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   queued by a fixed-KV rejection halves that (down to none, with a warning
   logged) when the raw rows alone overflowed. The cut never leaves a tool
   result without its call: results at the start of the raw rows are summarised
-  with the call (`Store::raw_split_for_branch`). The compaction inference and summary carry the job's `sequence_id`, so
+  with the call (`Store::raw_split_for_branch`). `pending_compaction.reason`
+  marks a capacity recovery, whose `cause_inference_id` is the rejected inference
+  (`context::RejectedInference`), shown as a link on the compaction entry. The compaction inference and summary carry the job's `sequence_id`, so
   a summary links back to the reply that queued it. The input
   is the previous summary and that raw range, closed by the compaction
   instruction as a user-role message. If that request is rejected for capacity,

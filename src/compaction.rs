@@ -63,8 +63,7 @@ async fn run_invocation<B: Backend>(
     events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
 ) -> Result<()> {
     let mut keep = limits.keep_raw_messages;
-    // A fixed-KV rejection queues a job with no cause inference.
-    let capacity_job = job.cause_inference_id.is_none();
+    let capacity_job = job.capacity_recovery;
     let mut recovering_capacity = capacity_job;
     // Set once a summary request has been too big, after which only a smaller
     // range may be compacted, never a larger one.
@@ -493,6 +492,7 @@ mod tests {
             .enqueue_capacity_compaction(
                 store.agent_branch(agent).await.unwrap(),
                 101,
+                None,
                 CompactionPolicy {
                     sequence_id: None,
                     compact_before_next_input_tokens: limits.compact_before_next_input_tokens,

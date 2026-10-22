@@ -1302,9 +1302,19 @@ fn CompactionCard(
     view! {
         <details class="rounded border border-warning bg-warning/20 p-2 text-sm">
             <summary class="cursor-pointer select-none font-medium">{label}</summary>
-            {cause_inference_id.map(|id| view! { <p class="mt-1 text-xs text-base-content/60">{format!("Deferred after inference {id}.")}</p> })}
+            {cause_inference_id.map(|id| {
+                let rejected = reason.as_deref() == Some("capacity_recovery");
+                view! {
+                    <p class="mt-1 text-xs text-base-content/60">
+                        {if rejected { format!("Caused by inference {id}, which did not fit.") } else { format!("Deferred after inference {id}.") }}
+                        {selection.map(|selection| view! {
+                            <button class="badge badge-outline badge-sm ml-1" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>"View it"</button>
+                        })}
+                    </p>
+                }
+            })}
             {reason.zip(retained_messages).map(|(reason, retained)| view! {
-                <p class="mt-1 text-xs text-base-content/60">{if reason == "capacity_recovery" { format!("Capacity recovery: the request before this did not fit in the context, so only the newest {retained} messages stayed raw and the rest were summarised. Frequent entries like this mean messages are too long or the configured raw-message count is too high.") } else { format!("Threshold compaction retained {retained} newest messages.") }}</p>
+                <p class="mt-1 text-xs text-base-content/60">{if reason == "capacity_recovery" { format!("Capacity recovery: the request that caused this did not fit in the context, so only the newest {retained} messages stayed raw and the rest were summarised. Frequent entries like this mean messages are too long or the configured raw-message count is too high.") } else { format!("Threshold compaction retained {retained} newest messages.") }}</p>
             })}
             <p class="mt-1 whitespace-pre-wrap">{text}</p>
             {selection.map(|selection| view! {
@@ -1706,9 +1716,9 @@ fn RawHistoryEntryRow(
             </li>
         }.into_any()
         },
-        RawHistoryEntry::Summary { id, covered_ranges, inference_id, text, reason, retained_messages } => view! {
+        RawHistoryEntry::Summary { id, covered_ranges, inference_id, text, reason, retained_messages, cause_inference_id } => view! {
             <li class=move || history_entry_class(id, selection)>
-                <CompactionCard inference_id cause_inference_id=None text covered_ranges selection reason retained_messages/>
+                <CompactionCard inference_id cause_inference_id text covered_ranges selection reason retained_messages/>
             </li>
         }.into_any(),
         RawHistoryEntry::Inference { id, history_entry_id, error } => {
