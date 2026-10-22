@@ -637,3 +637,20 @@ The declaration now allows individual GM approvals in any order for tied speech.
 Tentative means willing to pause for an objection; committed means proceeding
 despite objections, while actual prevention and ordinary action rules still
 apply. ConditionalApprove remains speculative, not an implementation requirement.
+
+## 2026-10-22 Code quality checks
+
+The user requested a new plan, retaining the old archived plan:
+
+> the first 3 sounds important. can you make a new code quality plan - leave the
+> old one - that adds modularity/arch checks, complexity and duplication?
+
+The scope clarification was:
+
+> no idea where tooling enforcement came from. perf measurements are useful but
+> I don't remember asking for it; same for many of the others
+
+This authorizes the three checks and the changes needed to satisfy them. The
+other removed architectural/performance proposals are not reinstated by this
+request. The new plan retains the recorded numerical limits; any proposed change
+to scope or limits must be presented to the user rather than made to obtain a pass.

@@ -35,6 +35,24 @@ from the store. This makes NPC "paging" a non-problem - inactive agents simply
 occupy no memory. Committed history and world effects survive restart; active
 turns finish during graceful shutdown, while a crash can interrupt a turn.
 
+# Code quality boundaries
+
+Architecture checks cover the runtime and UI/shared Rust module trees. Shared
+wire/model data stays independent of web and game execution; persistence does
+not depend on web/MCP or game orchestration, and game operations do not depend
+on their web/MCP transports. Modules group real feature responsibilities and data
+ownership. Static checks complement review of those responsibilities.
+
+Measure maintained source duplication and per-function cyclomatic/cognitive
+complexity, retaining tests in the analysis scope. The configured limits are 5%
+duplicated lines for fragments of at least 5 lines and 50 tokens, and 15 for each
+complexity measure. Correct violations through coherent ownership and behaviour
+preserving refactoring. Report tool coverage gaps and disputed findings rather
+than silently changing the scope or limits. The
+[code-quality checks plan](plans/code-quality-checks.md) specifies measurement,
+verification and implementation order, under the user's
+[scope clarification](user_exerpts.md#2026-10-22-code-quality-checks).
+
 # Inference layer
 
 ## Backend trait
