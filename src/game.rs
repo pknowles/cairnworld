@@ -7887,6 +7887,7 @@ mod tests {
             .await
             .expect("the player's turn");
         let mut reached_player = false;
+        let mut quiet_polls = 0;
         for _ in 0..1200 {
             let heard_from_npcs: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM speech_message                  JOIN speech ON speech.action_id = speech_message.speech_action_id                  JOIN history_entry ON history_entry.id = speech_message.message_id                  JOIN agent_history ON agent_history.branch_id = history_entry.branch_id                  WHERE agent_history.agent_id = ?                    AND speech.speaker_character_id IN (SELECT character_id FROM npc_agent)",
@@ -7897,6 +7898,18 @@ mod tests {
             .unwrap();
             if heard_from_npcs > 0 {
                 reached_player = true;
+                break;
+            }
+            // The discussion ending without a reply is a definite outcome:
+            // stop waiting instead of running out the clock.
+            let open_rounds: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
+            )
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+            quiet_polls = if open_rounds == 0 { quiet_polls + 1 } else { 0 };
+            if quiet_polls > 30 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
