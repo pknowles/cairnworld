@@ -664,6 +664,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   speaker. Startup recovery
   (`fail_interrupted_discussions`) fails a discussion with an interrupted step
   instead of replaying it.
+- Prompts (`prompts.toml`, `src/prompts.rs`). All model-facing roles,
+  per-event request templates, tool descriptions and tool-argument descriptions
+  are in `prompts.toml`, grouped by agent (`[gm]`, `[player]`, `[npc]`,
+  `[compaction]`, `[shared]` for the speech tools players and NPCs both call).
+  `prompts::current()` rereads it when its modification time changes;
+  `prompts::fill` fills `{placeholders}` and fails if the template and the game
+  disagree; `Tools::tool` builds a `ToolDefinition` from a schema, requiring
+  text for every argument and rejecting extras. Argument structs keep plain `//`
+  comments so no description is derived from code. Tool results and rejection
+  messages built from live data stay in code.
 - Presence (Developer Mode plan D2; design.md's Membership and presence).
   `world::World::load` constructs shared world values before model loading.
   Every `World` owns its action queue, Developer Mode/chat channels, opening

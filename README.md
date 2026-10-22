@@ -114,6 +114,17 @@ The Leptos configuration disables component erasure so `cargo leptos` frontend
 builds match ordinary `cargo run` and `cargo test` server rendering. Both sides
 must use the same rendering mode or hydration expects different HTML markers.
 
+## Editing prompts
+
+Everything the models are told lives in `prompts.toml` (roles, per-event
+requests, tool descriptions and tool-argument descriptions), grouped by agent:
+the GM, the player agent, NPCs, compaction, and the speech tools players and
+NPCs share. The server rereads the file whenever it changes, so an edit applies
+to the next model request with no rebuild or restart. A mistake (unknown key,
+missing argument text, wrong `{placeholder}`) fails the request that needs it
+and names the problem. `CAIRNWORLD_PROMPTS` selects another file. Text the game
+builds from live data, such as tool results, is still in code.
+
 ## Quality checks
 
 Run the reproducible Rust quality gate before committing:

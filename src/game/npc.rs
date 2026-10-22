@@ -9,19 +9,15 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use schemars::schema_for;
 
-use super::{Budget, CallContext, Game, no_argument_schema};
+use super::{Budget, CallContext, Game};
 use crate::{
     context::{self, RecordedCompletion},
     inspection::DevEvent,
-    llm::{Backend, Message, Role, ToolDefinition},
+    llm::{Backend, Message, Role},
+    prompts,
     store::{Decision, NpcRound, NpcStep, SayAction, WhisperAction, with_eagerness},
     world::{ChatChange, World},
 };
-
-const NPC_ROLE: &str = "You are the character described below, in a scene you share with others. Speak only for yourself. Decide whether to respond to what you just heard: call do_nothing, or call say or whisper with the words and how strongly you want to speak now. The GM decides whether your words are said, and others may speak first or at the same time.";
-
-/// Tells the GM why two replies in a row heard nothing of each other.
-const TIED_NOTE: &str = "This reply was composed at the same moment as others from the characters present, before anyone heard the others; they will be presented to you separately. You may describe the overlap in the prefix, but do not treat replies you have not approved as said.";
 
 impl<B> Game<B>
 where
@@ -83,29 +79,25 @@ where
                 .context("waiting for earlier deferred work for this NPC")?;
             let scene = serde_json::to_string(&self.store.npc_scene(character_id).await?)
                 .context("serializing the NPC's scene")?;
-            let facts = format!("Your situation:\n{scene}");
+            let prompts = prompts::current()?;
+            let facts = prompts::fill(&prompts.npc.situation, &[("scene", &scene)])?;
+            let speech = |name: &str, schema: serde_json::Value| -> Result<_> {
+                let mut definition = prompts.shared.tools.tool(name, schema)?;
+                definition.schema = with_eagerness(definition.schema, &prompts.npc.eagerness);
+                Ok(definition)
+            };
             let tools = [
-                ToolDefinition {
-                    name: "do_nothing".to_string(),
-                    description: "Stay silent for now.".to_string(),
-                    schema: no_argument_schema(),
-                },
-                ToolDefinition {
-                    name: "say".to_string(),
-                    description: super::SAY_DESCRIPTION.to_string(),
-                    schema: with_eagerness(
-                        serde_json::to_value(schema_for!(SayAction))
-                            .expect("say action schema should serialize"),
-                    ),
-                },
-                ToolDefinition {
-                    name: "whisper".to_string(),
-                    description: super::WHISPER_DESCRIPTION.to_string(),
-                    schema: with_eagerness(
-                        serde_json::to_value(schema_for!(WhisperAction))
-                            .expect("whisper action schema should serialize"),
-                    ),
-                },
+                prompts.npc.tools.tool("do_nothing", prompts::no_arguments())?,
+                speech(
+                    "say",
+                    serde_json::to_value(schema_for!(SayAction))
+                        .expect("say action schema should serialize"),
+                )?,
+                speech(
+                    "whisper",
+                    serde_json::to_value(schema_for!(WhisperAction))
+                        .expect("whisper action schema should serialize"),
+                )?,
             ];
             let completion = context::complete_recorded(
                 &self.store,
@@ -115,7 +107,7 @@ where
                     branch: claim.branch,
                     sequence_id: Some(claim.sequence_id),
                     invocation_id: claim.invocation_id,
-                    static_messages: &[Message::text(Role::System, NPC_ROLE)],
+                    static_messages: &[Message::text(Role::System, &prompts.npc.role)],
                     dynamic_context: &[facts.as_str()],
                     tools: &tools,
                     sampling: self.sampling.clone(),
@@ -195,7 +187,9 @@ where
                     claim.pending.clone(),
                     budget.clone(),
                     CallContext::root(Some(claim.sequence_id)),
-                    claim.tied.then_some(TIED_NOTE),
+                    claim
+                        .tied
+                        .then_some(prompts::current()?.gm.tied_note.as_str()),
                 )
                 .await?;
             self.deliver_narration(round.world_id, &narration).await?;

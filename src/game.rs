@@ -20,6 +20,7 @@ use crate::{
     agent::{self, Budget, CallContext},
     inference::ScheduledBackend,
     llm::{Backend, Content, Message, Response, Role, Sampling, ToolDefinition},
+    prompts,
     settings::Limits,
     store::{
         ActionOutcome, Hearing, InvalidHearing, MAX_PREFIX_CHARS, PendingAction, PlayerAgent,
@@ -28,13 +29,6 @@ use crate::{
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
 };
-
-/// Shared by the player and NPC speech tools.
-const SAY_DESCRIPTION: &str =
-    "Say words aloud. Everyone present hears them, even when you address one character.";
-const WHISPER_DESCRIPTION: &str = "Whisper words that only the named characters hear.";
-
-const GM_ROLE: &str = "You are the GM for the characters in this group. Ground narration in the scene packet and address the characters as a group. Use the available tools to resolve proposed actions before narrating their outcomes. Characters, including NPCs, speak for themselves: narrate what is seen and done, never put words in a character's mouth.";
 
 /// The one game service that a browser event will invoke. It derives the player
 /// history from a previously authenticated membership; no tool accepts a
@@ -618,10 +612,11 @@ where
         )
         .context("serializing group GM presence scene")?;
         let scene_packet = format!("Current scene packet:\n{scene}");
-        let role = Message::text(Role::System, GM_ROLE);
+        let prompts = prompts::current()?;
+        let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(
             Role::User,
-            format!("{change} Narrate this to the characters present."),
+            prompts::fill(&prompts.gm.presence_request, &[("change", &change)])?,
         );
         let sequence = self
             .store
@@ -726,9 +721,9 @@ where
                 .context("checking character creation state")?;
             let call = CallContext::root(Some(sequence.id));
             let tools = if ready {
-                self.action_tools(member.clone(), sequence.id, budget.clone(), call.clone())
+                self.action_tools(member.clone(), sequence.id, budget.clone(), call.clone())?
             } else {
-                self.creation_tools(member.clone(), sequence.id, budget.clone(), call.clone())
+                self.creation_tools(member.clone(), sequence.id, budget.clone(), call.clone())?
             };
             let prompt = self
                 .player_prompt(&member, ready)
@@ -821,7 +816,8 @@ where
             .await?;
         let budget = Budget::new(self.limits);
         let call = CallContext::root(Some(sequence.id));
-        let tools = self.creation_tools(member.clone(), sequence.id, budget.clone(), call.clone());
+        let tools =
+            self.creation_tools(member.clone(), sequence.id, budget.clone(), call.clone())?;
         // Everything from here on must finish the sequence on every exit,
         // including a failure building the prompt before the agent ever
         // runs - not only agent::complete_with_call_context's own result.
@@ -831,10 +827,7 @@ where
                 .player_prompt(&member, false)
                 .await
                 .context("building player prompt")?;
-            let entered = Message::text(
-                Role::User,
-                "The player has entered the world and has not chosen to roll yet. Speak directly to them.",
-            );
+            let entered = Message::text(Role::User, &prompts::current()?.player.entered);
             // This starts the conversation: later player turns and a
             // compaction summary need the same ordinary history event, while
             // inspection must distinguish it from human input.
@@ -927,6 +920,7 @@ where
     }
 
     async fn player_prompt(&self, member: &PlayerAgent, ready: bool) -> Result<Message> {
+        let prompts = prompts::current()?;
         let text = if ready {
             let scene = serde_json::to_string(
                 &self
@@ -936,16 +930,17 @@ where
                     .context("loading player scene for prompt")?,
             )
             .context("serializing player scene for prompt")?;
-            format!(
-                "Guide the player through the current scene. Use a declared action tool when the player asks their character to look or speak. The following is the current player-visible scene, derived from the world state; do not invent items, people, or facts outside it:\n{scene}"
-            )
+            prompts::fill(&prompts.player.scene, &[("scene", &scene)])?
         } else {
-            "Speak first and guide the player through their Adventurer's Cairn character creation. Character creation requires Hit Protection first, then attributes. Introduce the next required step in short thematic language. Use a roll tool only when the player explicitly asks to roll that exact step; asking to begin play does not substitute for an unfinished roll. The roll tools make the real, recorded results. Immediately after attributes are rolled, call ready_to_begin; do not invent, repeat, or paraphrase the opening scene, which the location GM narrates.".to_string()
+            prompts.player.creation.clone()
         };
         Ok(Message::text(
             Role::System,
             format!(
-                "{text}\n\nAn empty response ends the turn. Use it when a tool result or GM narration has already given the player the complete appropriate result; otherwise continue with another tool call or player-facing text."
+                "{text}
+
+{}",
+                prompts.player.turn_end
             ),
         ))
     }
@@ -975,15 +970,15 @@ where
         sequence_id: i64,
         budget: Budget,
         call: CallContext,
-    ) -> Vec<Tool> {
+    ) -> Result<Vec<Tool>> {
+        let prompts = prompts::current()?;
         let game = Arc::clone(self);
         let hp_member = member.clone();
         let hit_protection = Tool::new(
-            ToolDefinition {
-                name: "roll_hit_protection".to_string(),
-                description: "Roll the Adventurer's starting 1d6 Hit Protection.".to_string(),
-                schema: no_argument_schema(),
-            },
+            prompts
+                .player
+                .tools
+                .tool("roll_hit_protection", prompts::no_arguments())?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
@@ -1005,11 +1000,10 @@ where
         let game = Arc::clone(self);
         let attributes_member = member.clone();
         let attributes = Tool::new(
-            ToolDefinition {
-                name: "roll_attributes".to_string(),
-                description: "Roll the Adventurer's STR, DEX, and WIL as 3d6 each.".to_string(),
-                schema: no_argument_schema(),
-            },
+            prompts
+                .player
+                .tools
+                .tool("roll_attributes", prompts::no_arguments())?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
@@ -1034,12 +1028,10 @@ where
         let ready_budget = budget;
         let ready_call = call;
         let ready = Tool::new(
-            ToolDefinition {
-                name: "ready_to_begin".to_string(),
-                description: "Mark character creation complete after the required rolls."
-                    .to_string(),
-                schema: no_argument_schema(),
-            },
+            prompts
+                .player
+                .tools
+                .tool("ready_to_begin", prompts::no_arguments())?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
@@ -1074,7 +1066,7 @@ where
                 }) as ToolFuture
             },
         );
-        vec![hit_protection, attributes, ready]
+        Ok(vec![hit_protection, attributes, ready])
     }
 
     fn action_tools(
@@ -1083,16 +1075,15 @@ where
         sequence_id: i64,
         budget: Budget,
         call: CallContext,
-    ) -> Vec<Tool> {
+    ) -> Result<Vec<Tool>> {
+        let prompts = prompts::current()?;
         let game = Arc::clone(self);
         let presence_member = member.clone();
         let party_presence = Tool::new(
-            ToolDefinition {
-                name: "party_presence".to_string(),
-                description: "List your current group's characters and whether each is online."
-                    .to_string(),
-                schema: no_argument_schema(),
-            },
+            prompts
+                .player
+                .tools
+                .tool("party_presence", prompts::no_arguments())?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 let game = Arc::clone(&game);
@@ -1108,17 +1099,16 @@ where
                 }) as ToolFuture
             },
         );
-        vec![
+        Ok(vec![
             party_presence,
             self.action_tool(PlayerActionTool {
                 member: member.clone(),
                 sequence_id,
-                definition: ToolDefinition {
-                    name: "look".to_string(),
-                    description: "Examine or ask about something in the current scene.".to_string(),
-                    schema: serde_json::to_value(schema_for!(CharacterAction))
+                definition: prompts.player.tools.tool(
+                    "look",
+                    serde_json::to_value(schema_for!(CharacterAction))
                         .expect("character action schema should serialize"),
-                },
+                )?,
                 validate: validate_character_action,
                 budget: budget.clone(),
                 call: call.clone(),
@@ -1126,12 +1116,11 @@ where
             self.action_tool(PlayerActionTool {
                 member: member.clone(),
                 sequence_id,
-                definition: ToolDefinition {
-                    name: "say".to_string(),
-                    description: SAY_DESCRIPTION.to_string(),
-                    schema: serde_json::to_value(schema_for!(SayAction))
+                definition: prompts.shared.tools.tool(
+                    "say",
+                    serde_json::to_value(schema_for!(SayAction))
                         .expect("say action schema should serialize"),
-                },
+                )?,
                 validate: validate_say_action,
                 budget: budget.clone(),
                 call: call.clone(),
@@ -1139,12 +1128,11 @@ where
             self.action_tool(PlayerActionTool {
                 member: member.clone(),
                 sequence_id,
-                definition: ToolDefinition {
-                    name: "whisper".to_string(),
-                    description: WHISPER_DESCRIPTION.to_string(),
-                    schema: serde_json::to_value(schema_for!(WhisperAction))
+                definition: prompts.shared.tools.tool(
+                    "whisper",
+                    serde_json::to_value(schema_for!(WhisperAction))
                         .expect("whisper action schema should serialize"),
-                },
+                )?,
                 validate: validate_whisper_action,
                 budget: budget.clone(),
                 call: call.clone(),
@@ -1152,17 +1140,16 @@ where
             self.action_tool(PlayerActionTool {
                 member,
                 sequence_id,
-                definition: ToolDefinition {
-                    name: "take".to_string(),
-                    description: "Take one named item currently visible in the scene. The GM must approve it before Rust transfers the item.".to_string(),
-                    schema: serde_json::to_value(schema_for!(TakeAction))
+                definition: prompts.player.tools.tool(
+                    "take",
+                    serde_json::to_value(schema_for!(TakeAction))
                         .expect("take action schema should serialize"),
-                },
+                )?,
                 validate: validate_take_action,
                 budget,
                 call,
             }),
-        ]
+        ])
     }
 
     fn action_tool(self: &Arc<Self>, action: PlayerActionTool) -> Tool {
@@ -1268,11 +1255,9 @@ where
         )
         .context("serializing group GM opening scene")?;
         let scene_packet = format!("Current scene packet:\n{scene}");
-        let role = Message::text(Role::System, GM_ROLE);
-        let request = Message::text(
-            Role::User,
-            "A player character has just begun play here. Narrate the scene, surroundings, and plot-relevant details the characters present can perceive.",
-        );
+        let prompts = prompts::current()?;
+        let role = Message::text(Role::System, &prompts.gm.role);
+        let request = Message::text(Role::User, &prompts.gm.opening_request);
         self.store
             .append_instruction(branch, &request, sequence_id)
             .await
@@ -1340,17 +1325,15 @@ where
         // is an ordinary tool rejection describing the existing resolution,
         // not an error - a later rejection reason can never replace an
         // earlier approval's result, or vice versa.
+        let prompts = prompts::current()?;
         let game = Arc::clone(self);
         let approval_pending = pending.clone();
         let gm_tool = Tool::new(
-            ToolDefinition {
-                name: "approve_action".to_string(),
-                description:
-                    "Approve the presented action by its id after judging its visible arguments."
-                        .to_string(),
-                schema: serde_json::to_value(schema_for!(ApproveAction))
+            prompts.gm.tools.tool(
+                "approve_action",
+                serde_json::to_value(schema_for!(ApproveAction))
                     .expect("approval schema should serialize"),
-            },
+            )?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
@@ -1443,14 +1426,11 @@ where
         );
         let game = Arc::clone(self);
         let reject_tool = Tool::new(
-            ToolDefinition {
-                name: "reject_action".to_string(),
-                description:
-                    "Reject the presented action by its id and give the player a concise reason."
-                        .to_string(),
-                schema: serde_json::to_value(schema_for!(RejectAction))
+            prompts.gm.tools.tool(
+                "reject_action",
+                serde_json::to_value(schema_for!(RejectAction))
                     .expect("rejection schema should serialize"),
-            },
+            )?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
@@ -1506,12 +1486,11 @@ where
             },
         );
         let split_tool = Tool::new(
-            ToolDefinition {
-                name: "split_group".to_string(),
-                description: "Split this group into separate groups when characters go their own ways. Applies after every other call in this turn's batch has run, against the group the characters were in when this turn began; result is deferred and confirmed in the reply.".to_string(),
-                schema: serde_json::to_value(schema_for!(SplitGroup))
+            prompts.gm.tools.tool(
+                "split_group",
+                serde_json::to_value(schema_for!(SplitGroup))
                     .expect("split_group schema should serialize"),
-            },
+            )?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 Box::pin(async move {
@@ -1544,12 +1523,11 @@ where
             },
         );
         let merge_tool = Tool::new(
-            ToolDefinition {
-                name: "merge_groups".to_string(),
-                description: "Merge separate groups at one location back into a single group when characters reunite. Applies after every other call in this turn's batch has run; result is deferred and confirmed in the reply.".to_string(),
-                schema: serde_json::to_value(schema_for!(MergeGroups))
+            prompts.gm.tools.tool(
+                "merge_groups",
+                serde_json::to_value(schema_for!(MergeGroups))
                     .expect("merge_groups schema should serialize"),
-            },
+            )?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 Box::pin(async move {
@@ -1577,15 +1555,20 @@ where
         .context("serializing group GM scene for prompt")?;
         let actor = self.store.character_name(pending.character_id).await?;
         let scene_packet = format!("Current scene packet:\n{scene}");
-        let role = Message::text(Role::System, GM_ROLE);
+        let role = Message::text(Role::System, &prompts.gm.role);
+        let note = note.map(|note| format!(" {note}")).unwrap_or_default();
         let request = Message::text(
             Role::User,
-            format!(
-                "{actor} takes action {action_id}: a `{}` request with arguments {}. Judge it from the current scene. Call approve_action with action_id {action_id} if it can happen, or reject_action with action_id {action_id} and a concise reason.{}",
-                pending.tool,
-                pending.args,
-                note.map(|note| format!(" {note}")).unwrap_or_default(),
-            ),
+            prompts::fill(
+                &prompts.gm.action_request,
+                &[
+                    ("actor", &actor),
+                    ("action_id", &action_id.to_string()),
+                    ("tool", &pending.tool),
+                    ("arguments", &pending.args),
+                    ("note", &note),
+                ],
+            )?,
         );
         self.store
             .append_instruction(branch, &request, pending.sequence_id)
@@ -1661,14 +1644,14 @@ where
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CharacterAction {
-    /// What the character attempts or says.
+    // What the character attempts or says.
     description: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TakeAction {
-    /// The exact item name from the current scene.
+    // The exact item name from the current scene.
     item: String,
 }
 
@@ -1722,14 +1705,6 @@ fn validate_take_action(arguments: &str) -> Result<()> {
     Ok(())
 }
 
-fn no_argument_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {},
-    })
-}
-
 fn parse_no_arguments(arguments: &str) -> Result<()> {
     let arguments: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(arguments).context("parsing empty tool arguments")?;
@@ -1743,16 +1718,16 @@ fn parse_no_arguments(arguments: &str) -> Result<()> {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ApproveAction {
-    /// The visible action id to approve.
+    // The visible action id to approve.
     action_id: i64,
-    /// For speech: characters who also hear it, by name.
+    // For speech: characters who also hear it, by name.
     #[serde(default)]
     include: Vec<String>,
-    /// For speech: characters who must not hear it, by name.
+    // For speech: characters who must not hear it, by name.
     #[serde(default)]
     exclude: Vec<String>,
-    /// For speech: a short phrase every hearer is shown before the words, such
-    /// as how or why only some of them can hear.
+    // For speech: a short phrase every hearer is shown before the words, such
+    // as how or why only some of them can hear.
     #[serde(default)]
     #[schemars(length(max = MAX_PREFIX_CHARS))]
     prefix: Option<String>,
@@ -1761,36 +1736,36 @@ struct ApproveAction {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RejectAction {
-    /// The visible action id to reject.
+    // The visible action id to reject.
     action_id: i64,
-    /// Why the action cannot happen as requested.
+    // Why the action cannot happen as requested.
     reason: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SplitGroupPartition {
-    /// The character IDs going to this resulting group. Every currently
-    /// present character must appear in exactly one partition.
+    // The character IDs going to this resulting group. Every currently
+    // present character must appear in exactly one partition.
     character_ids: Vec<i64>,
-    /// A short name for the resulting group.
+    // A short name for the resulting group.
     name: String,
-    /// What distinguishes this resulting group's situation.
+    // What distinguishes this resulting group's situation.
     description: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SplitGroup {
-    /// The group id being split - the id of the group currently arbitrating.
+    // The group id being split - the id of the group currently arbitrating.
     group_id: i64,
-    /// A complete, nonempty, disjoint partition of the group's current
-    /// characters. Every character present must appear in exactly one
-    /// partition; none may be omitted or duplicated.
+    // A complete, nonempty, disjoint partition of the group's current
+    // characters. Every character present must appear in exactly one
+    // partition; none may be omitted or duplicated.
     partitions: Vec<SplitGroupPartition>,
-    /// Required when this call has no single triggering character (a GM
-    /// event, not a player action): which resulting group the next turn in
-    /// this same invocation continues as.
+    // Required when this call has no single triggering character (a GM
+    // event, not a player action): which resulting group the next turn in
+    // this same invocation continues as.
     #[serde(default)]
     continue_with_character_id: Option<i64>,
 }
@@ -1798,11 +1773,11 @@ struct SplitGroup {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MergeGroups {
-    /// At least two distinct group IDs at the same location to merge.
+    // At least two distinct group IDs at the same location to merge.
     group_ids: Vec<i64>,
-    /// A short name for the resulting merged group.
+    // A short name for the resulting merged group.
     name: String,
-    /// What distinguishes the merged group's situation.
+    // What distinguishes the merged group's situation.
     description: String,
 }
 
@@ -2337,7 +2312,7 @@ mod tests {
                 panic!("the GM request must begin with its role and scene packet");
             };
             assert!(
-                gm_packet.starts_with(GM_ROLE),
+                gm_packet.starts_with(&crate::prompts::current().unwrap().gm.role),
                 "the GM request must use the single GM role prompt: {gm_packet}"
             );
             for name in &player_names {
@@ -2958,7 +2933,7 @@ mod tests {
             );
             assert!(
                 matches!(request.messages.first().map(|message| &message.content),
-                    Some(MessageContent::Text(text)) if text.starts_with(GM_ROLE)),
+                    Some(MessageContent::Text(text)) if text.starts_with(&crate::prompts::current().unwrap().gm.role)),
                 "all GM turns must begin with the one GM role prompt"
             );
         }
@@ -3162,13 +3137,21 @@ mod tests {
                 .begin_sequence(first.world_id, "real GM speech run")
                 .await
                 .unwrap();
-            let arguments = serde_json::json!({"words": line, "to": "Toma"}).to_string();
+            // Every third action is the player examining the scene instead.
+            let (tool, arguments) = if index % 3 == 2 {
+                ("look", serde_json::json!({"description": line}).to_string())
+            } else {
+                (
+                    "say",
+                    serde_json::json!({"words": line, "to": "Toma"}).to_string(),
+                )
+            };
             let requesting = crate::store::record_tool_call_for_test(
                 &store,
                 store.agent_branch(first.agent_id).await.unwrap(),
                 Some(sequence.id),
-                &format!("say-{index}"),
-                "say",
+                &format!("{tool}-{index}"),
+                tool,
                 &arguments,
             )
             .await;
@@ -3177,7 +3160,7 @@ mod tests {
                     &store.player_actor(&first).await.unwrap(),
                     sequence.id,
                     requesting,
-                    "say",
+                    tool,
                     &arguments,
                 )
                 .await

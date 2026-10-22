@@ -29,9 +29,9 @@ pub enum Decision {
 }
 
 /// The action's own tool schema plus the NPC-only `eagerness` argument.
-pub fn with_eagerness(mut schema: serde_json::Value) -> serde_json::Value {
+pub fn with_eagerness(mut schema: serde_json::Value, description: &str) -> serde_json::Value {
     schema["properties"]["eagerness"] = serde_json::json!({
-        "description": "How strongly you want to act now: 1 mild, 2 moderate, 3 strong.",
+        "description": description,
         "type": "integer",
         "minimum": 1,
         "maximum": 3,

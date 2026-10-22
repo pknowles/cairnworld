@@ -10,6 +10,7 @@ mod inference;
 mod inspection;
 mod llm;
 mod mistralrs_backend;
+mod prompts;
 mod scenario;
 mod settings;
 mod store;

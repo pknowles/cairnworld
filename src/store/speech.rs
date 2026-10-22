@@ -15,27 +15,27 @@ use crate::{
     llm::{MessageContent, Role, SpeechContent},
 };
 
-/// What the model supplies to speak to the whole group.
+// What the model supplies to speak to the whole group.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SayAction {
-    /// Your character's speech as it should read in the chat: who speaks and
-    /// how it is said when that matters, e.g. `Mara says in a low voice: ...`.
+    // Your character's speech as it should read in the chat: who speaks and
+    // how it is said when that matters, e.g. `Mara says in a low voice: ...`.
     pub words: String,
-    /// The character you are speaking to. This does not make your words private:
-    /// everyone present still hears them.
+    // The character you are speaking to. This does not make your words private:
+    // everyone present still hears them.
     #[serde(default)]
     pub to: Option<String>,
 }
 
-/// What the model supplies to speak privately.
+// What the model supplies to speak privately.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WhisperAction {
-    /// Your character's whisper as it should read in the chat, with who speaks
-    /// and how it is said when that matters.
+    // Your character's whisper as it should read in the chat, with who speaks
+    // and how it is said when that matters.
     pub words: String,
-    /// The characters who hear the whisper. Nobody else does.
+    // The characters who hear the whisper. Nobody else does.
     pub to: Vec<String>,
 }
 
