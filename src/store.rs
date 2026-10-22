@@ -4573,16 +4573,17 @@ impl Store {
         .with_context(|| format!("counting uncovered messages for branch {branch_id}"))
     }
 
-    /// Find the newest raw suffix containing exactly `keep_tail_messages`
-    /// message entries, or every available one when there are fewer. Returns
+    /// Find the newest raw suffix containing exactly `keep_raw_messages`
+    /// message entries, or every available one when there are fewer (none
+    /// when it is zero, so everything uncovered is to be summarised). Returns
     /// the branch position just before that suffix starts (the new covered
     /// cut), or the already-covered position when there is nothing to split.
     /// Every caller already has an explicit branch_id (a world_gm agent has
     /// no single branch to resolve here - design.md's `GroupHistory`).
-    pub async fn tail_split_for_branch(
+    pub async fn raw_split_for_branch(
         &self,
         branch_id: i64,
-        keep_tail_messages: usize,
+        keep_raw_messages: usize,
     ) -> Result<i64> {
         let covered = self
             .latest_summary_for_branch(branch_id)
@@ -4593,8 +4594,21 @@ impl Store {
                     .last()
                     .map_or(-1, |range| range.last_position)
             });
-        let keep_tail_messages = i64::try_from(keep_tail_messages)
-            .context("raw tail message limit exceeds SQLite range")?;
+        let keep_raw_messages =
+            i64::try_from(keep_raw_messages).context("raw message limit exceeds SQLite range")?;
+        if keep_raw_messages == 0 {
+            let newest = sqlx::query_scalar!(
+                "SELECT MAX(history_entry.position) AS \"newest: i64\" FROM message \
+                 JOIN history_entry ON history_entry.id = message.id \
+                 WHERE history_entry.branch_id = ? AND history_entry.position > ?",
+                branch_id,
+                covered,
+            )
+            .fetch_one(&self.pool)
+            .await
+            .with_context(|| format!("finding the newest message of branch {branch_id}"))?;
+            return Ok(newest.unwrap_or(covered));
+        }
         let rows = sqlx::query_scalar!(
             "SELECT history_entry.position FROM message \
              JOIN history_entry ON history_entry.id = message.id \
@@ -4602,7 +4616,7 @@ impl Store {
              ORDER BY history_entry.position DESC LIMIT ?",
             branch_id,
             covered,
-            keep_tail_messages,
+            keep_raw_messages,
         )
         .fetch_all(&self.pool)
         .await

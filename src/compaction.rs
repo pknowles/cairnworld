@@ -7,11 +7,6 @@ use crate::{
     store::{PendingCompaction, PositionRange, Segment, Store},
 };
 
-/// This request only sees the material it replaces. Static role context and
-/// tools are deliberately absent: they are supplied to every normal inference
-/// and would waste both summary space and model attention.
-const PROMPT: &str = "The conversation above is your own history. Replace it with a summary your next turn will read in its place: keep the facts, decisions, open questions, and commitments that still matter, and drop small talk and anything your standing instructions or tools already provide.";
-
 /// Resolve one persisted compaction obligation. The normal path performs one
 /// ordinary deferred summary without tokenizing: the just-finished inference
 /// already reported its exact next-context size, and a second tokenization
@@ -25,8 +20,8 @@ pub async fn run<B: Backend>(
     events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
 ) -> Result<()> {
     ensure!(
-        limits.keep_tail_messages > 0,
-        "limits.keep_tail_messages must be greater than zero"
+        limits.keep_raw_messages > 0,
+        "limits.keep_raw_messages must be greater than zero"
     );
 
     // Deferred compaction is its own invocation, separate from the sequence
@@ -67,13 +62,44 @@ async fn run_invocation<B: Backend>(
     invocation_id: i64,
     events: tokio::sync::broadcast::Sender<crate::inspection::DevEvent>,
 ) -> Result<()> {
-    let mut keep = limits.keep_tail_messages;
+    let mut keep = limits.keep_raw_messages;
     // A fixed-KV rejection queues a job with no cause inference.
-    let mut recovering_capacity = job.cause_inference_id.is_none();
+    let capacity_job = job.cause_inference_id.is_none();
+    let mut recovering_capacity = capacity_job;
+    // Set once a summary request has been too big, after which only a smaller
+    // range may be compacted, never a larger one.
+    let mut summary_overflowed = false;
+    if capacity_job {
+        // The raw messages are what overflowed, so no more than they can be kept.
+        let raw = usize::try_from(
+            store
+                .uncovered_message_count(job.branch.branch_id())
+                .await?,
+        )
+        .context("raw message count exceeds usize")?;
+        keep = keep.min(raw);
+    }
     loop {
         let (segments, branch_id, split, covered) =
             summary_segments(store, job.branch.branch_id(), keep).await?;
         if split <= covered {
+            // Keeping this many raw messages did not fit, so keep half as many,
+            // down to none. The message count is a configured preference; the
+            // fixed context is not.
+            if capacity_job && !summary_overflowed && keep > 0 {
+                let halved = keep / 2;
+                tracing::warn!(
+                    agent_id = job.branch.agent_id(),
+                    branch_id = job.branch.branch_id(),
+                    requested_tokens = job.next_input_tokens,
+                    configured = limits.keep_raw_messages,
+                    was = keep,
+                    now = halved,
+                    "the raw messages alone overflowed the context; keeping fewer"
+                );
+                keep = halved;
+                continue;
+            }
             if recovering_capacity {
                 anyhow::bail!(
                     "compaction cannot reduce this context: retaining {keep} newest messages leaves no older history to summarize"
@@ -125,6 +151,7 @@ async fn run_invocation<B: Backend>(
             }
             Err(error) if error.downcast_ref::<ContextCapacityExceeded>().is_some() => {
                 recovering_capacity = true;
+                summary_overflowed = true;
                 keep += 1;
                 continue;
             }
@@ -136,7 +163,7 @@ async fn run_invocation<B: Backend>(
 async fn summary_segments(
     store: &Store,
     branch_id: i64,
-    keep_tail_messages: usize,
+    keep_raw_messages: usize,
 ) -> Result<(Vec<Segment>, i64, i64, i64)> {
     let previous = store.latest_summary_for_branch(branch_id).await?;
     let covered = previous.as_ref().map_or(-1, |summary| {
@@ -146,10 +173,10 @@ async fn summary_segments(
             .map_or(-1, |range| range.last_position)
     });
     let split = store
-        .tail_split_for_branch(branch_id, keep_tail_messages)
+        .raw_split_for_branch(branch_id, keep_raw_messages)
         .await?;
     let prompt = store
-        .store_prompt_text(PROMPT)
+        .store_prompt_text(&crate::prompts::current()?.compaction.summary_request)
         .await
         .context("storing compaction prompt")?;
     let mut segments = Vec::new();
@@ -183,7 +210,7 @@ mod tests {
     use super::*;
     use crate::{
         llm::{ContextCapacityExceeded, Message, MessageContent, Response, Sampling, Usage},
-        store::CompactionPolicy,
+        store::{CompactionPolicy, Summary},
     };
 
     struct ScriptedBackend {
@@ -337,7 +364,7 @@ mod tests {
         agent
     }
 
-    fn limits(keep_tail_messages: usize) -> Limits {
+    fn limits(keep_raw_messages: usize) -> Limits {
         Limits {
             max_concurrent_inferences: 4,
             max_inferences_per_chat: 8,
@@ -345,7 +372,7 @@ mod tests {
             max_context_tokens: 110,
             max_output_tokens: 10,
             compact_before_next_input_tokens: 100,
-            keep_tail_messages,
+            keep_raw_messages,
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         }
@@ -454,6 +481,99 @@ mod tests {
         assert_eq!(backend.requests.lock().unwrap().len(), 2);
         assert!(store.latest_summary(agent).await.unwrap().is_none());
         assert!(store.pending_compaction(agent).await.unwrap().is_some());
+    }
+
+    /// A job queued by a fixed-KV rejection of the agent's own request.
+    async fn rejected_request_job(store: &Store, agent: i64, limits: Limits) -> PendingCompaction {
+        let sampling = Sampling {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        store
+            .enqueue_capacity_compaction(
+                store.agent_branch(agent).await.unwrap(),
+                101,
+                CompactionPolicy {
+                    sequence_id: None,
+                    compact_before_next_input_tokens: limits.compact_before_next_input_tokens,
+                    sampling: &sampling,
+                    model: "scripted",
+                    static_segments: &[],
+                },
+            )
+            .await
+            .unwrap();
+        store.pending_compaction(agent).await.unwrap().unwrap()
+    }
+
+    async fn run_capacity_job(store: &Store, agent: i64, limits: Limits) -> Summary {
+        let job = rejected_request_job(store, agent, limits).await;
+        let backend = ScriptedBackend {
+            responses: Mutex::new(VecDeque::from([response("lasting fact")])),
+            requests: Mutex::new(Vec::new()),
+        };
+        run(
+            store,
+            &backend,
+            &job,
+            limits,
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .unwrap();
+        store.latest_summary(agent).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn raw_messages_that_alone_overflow_are_halved_until_the_request_fits() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let agent = agent_with_four_messages(&store).await;
+        let limits = limits(32);
+
+        // Four raw messages overflowed: keep two, summarise the older two.
+        let summary = run_capacity_job(&store, agent, limits).await;
+        assert_eq!(summary.covered_ranges.last().unwrap().last_position, 1);
+        assert_eq!(summary.retained_messages, 2);
+
+        // Still too big: keep one of the two.
+        let summary = run_capacity_job(&store, agent, limits).await;
+        assert_eq!(summary.covered_ranges.last().unwrap().last_position, 2);
+        assert_eq!(summary.retained_messages, 1);
+
+        // Still too big: keep none, so the summary stands alone.
+        let summary = run_capacity_job(&store, agent, limits).await;
+        assert_eq!(summary.covered_ranges.last().unwrap().last_position, 3);
+        assert_eq!(summary.retained_messages, 0);
+    }
+
+    #[tokio::test]
+    async fn a_request_that_still_overflows_with_no_raw_messages_left_is_an_error() {
+        let db = database();
+        let store = Store::open(db.path()).await.unwrap();
+        let agent = agent_with_four_messages(&store).await;
+        let limits = limits(1);
+        for _ in 0..2 {
+            run_capacity_job(&store, agent, limits).await;
+        }
+        let job = rejected_request_job(&store, agent, limits).await;
+        let backend = ScriptedBackend {
+            responses: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        };
+        let error = run(
+            &store,
+            &backend,
+            &job,
+            limits,
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .expect_err("nothing is left to summarise");
+        assert!(
+            error.to_string().contains("no older history to summarize"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]
@@ -597,7 +717,7 @@ mod tests {
             max_context_tokens: 110,
             max_output_tokens: 10,
             compact_before_next_input_tokens: 100,
-            keep_tail_messages: 1,
+            keep_raw_messages: 1,
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         };

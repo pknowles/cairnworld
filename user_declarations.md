@@ -97,6 +97,9 @@ trying to further consolidate too.
   - What questions determine whether the scenario is as small and simple as it can be without losing depth?
   - What questions provide the strongest adversarial review of an open-ended RPG scenario before play?
   - What questions should a designer ask to uncover categorical flaws in a small, open-ended RPG scenario, especially flaws involving dominant solutions, hidden assumptions, incoherent motivations, irrelevant costs, gated information, weak consequences, and illusory choice?
+  - How does the classic two-guards/two-doors logic puzzle work?
+  - What are the key components that make a good, interesting and satisfying logic puzzle and how do people go about designing them?
+  - Write a procedure to design something similar; would following it produce a similar result.
 
 - **More specific questions**
   - What will the conflict be between the players, their goal and other NPCs?
@@ -604,12 +607,19 @@ some threshold, a portion of the chat history must be summarized/compacted:
 - Before: [summary_0, chat_0, ..., chat_n, chat_n+1, ..., chat_n+k]
 - After: [summary_1, chat_n+1, ..., chat_n+k]
 
-Where the number of raw chat messages in front of the summary (k) must not
-exceed some threshold (message/token/character count, whatever's appropriate).
+Where the number of raw chat messages after the summary (k) must not exceed some
+threshold (message/token/character count). I.e. k is the number of messages to
+keep. We may need to reduce it, even to zero in extreme cases, to handle very
+large messages that would block future inference. Ideally k would be based off
+token count, but I don't think we can know that without wastefully tokenizing
+the messages. For now I think halving on failure is a simple solution, plus a
+log so we know when a misconfiguration has made failures too frequent.
+
 The ideas being:
 
 - Compaction is expensive, so do it infrequently
 - Keep some raw chat history after the summary as this is likely more important to keep accurate
+- Compact as much as we have to to stay under our memory constraints.
 
 This must be done with care so that the summary only summarises the portion of
 chats that are compacted (summary_0, chat_0 through chat_n). I.e. for the
@@ -653,14 +663,18 @@ before the player(s) see the final response.
 - If compaction has not completed before a chat needs another inference,
   compaction happens inline immediately.
 
-If the threshold is overshot by too much and we cannot fit the input anymore, we
-must reduce the amount we compact and summarise. For example, lets say we would
-like to compact [summary_1, chat_0, ..., chat_n-1] but it doesn't fit. We can
-instead keep chat_n-1 as raw history, or chat_n-2 or however many we need. As
-long as we can compact [summary_1, chat_0] we have shortened the input and can
-iterate until back under the compaction threshold. Slow, but at least doable in
-a fixed GPU allocation and it saves us from the occasional giant messages
-pushing us past both the threshold and input limit in one go.
+If the size of the messages are too large and we cannot inference anything with them, compaction should take care of it. However, compaction must reduce the total input such that we can inference successfully. If the number of raw messages kept is too high or the message size is too large, we must reduce the number of messages kept.
+
+If the threshold is overshot when compacting and we cannot even fit the input
+anymore, we must reduce the amount we compact and summarise. For example, lets
+say we would like to compact [summary_1, chat_0, ..., chat_n-1] but it doesn't
+fit. We can instead keep chat_n-1 as raw history, or chat_n-2 or however many we
+need. As long as we can compact [summary_1, chat_0] we have shortened the input
+and can iterate until back under the compaction threshold. Slow, but at least
+doable in a fixed GPU allocation and it saves us from the occasional giant
+messages pushing us past both the threshold and input limit in one go.
+
+Ideally compaction fallbacks are only needed in rare cases of very large messages, but a misconfiguration may also trigger it so we need logging for feedback and clear entries in developer mode for when it happens, directly linked to what caused it.
 
 ## Notes editing tools
 

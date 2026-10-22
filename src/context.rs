@@ -710,7 +710,7 @@ mod tests {
                 max_context_tokens: 100,
                 max_output_tokens: 10,
                 compact_before_next_input_tokens: 90,
-                keep_tail_messages: 1,
+                keep_raw_messages: 1,
                 merge_branch_messages: 64,
                 presence_departure_seconds: 60,
             },

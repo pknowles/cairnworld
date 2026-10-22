@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(history_entry.position) AS \"newest: i64\" FROM message JOIN history_entry ON history_entry.id = message.id WHERE history_entry.branch_id = ? AND history_entry.position > ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "newest: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "663d13ec470c0198327f65ffbd51c2325e0dab520c42747bc852fbe0c220b020"
+}

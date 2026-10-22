@@ -182,8 +182,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   trait's `before_agent`/`after_agent` take an explicit `branch_id:
   Option<i64>`, `None` for every non-GM agent kind.
 - `src/compaction.rs` - resolves a persisted compaction job as ordinary
-  recorded summarisation, preserving exactly `keep_tail_messages` newest raw
-  rows. The compaction inference and summary carry the job's `sequence_id`, so
+  recorded summarisation, preserving `keep_raw_messages` newest raw rows; a job
+  queued by a fixed-KV rejection halves that (down to none, with a warning
+  logged) when the raw rows alone overflowed. The compaction inference and summary carry the job's `sequence_id`, so
   a summary links back to the reply that queued it. The input
   is the previous summary and that raw range, closed by the compaction
   instruction as a user-role message. If that request is rejected for capacity,
@@ -194,7 +195,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   explicitly rather than falling back to `branch_for_agent(job.agent_id)`,
   which fails for a world_gm agent (no single `agent_history` row).
   `summary_segments`, `Store::latest_summary_for_branch` and
-  `Store::tail_split_for_branch` take that same explicit branch_id; the
+  `Store::raw_split_for_branch` take that same explicit branch_id; the
   agent_id-keyed `pending_compaction`/`latest_summary` remain only as thin
   wrappers (`latest_summary` is `#[cfg(test)]`-only) over
   `branch_for_agent` for the ordinary one-agent-one-branch case.
@@ -299,7 +300,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   covered range on that branch. Each merged parent contributes its own summary
   and uncovered tail; summary activation positions do not stand in for coverage.
   `Store::live_segments(AgentBranch)` delegates to this shared selector.
-  `tail_split_for_branch` and the compaction operations use the same branch
+  `raw_split_for_branch` and the compaction operations use the same branch
   position space. Pending compaction is keyed by branch, including each GM head.
   `check_message_range_ownership(agent_id, segments)` validates all referenced
   branches with one parameterized QueryBuilder query before assembling a request.
@@ -558,7 +559,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   described above, `model` naming the default among them, and `limits`,
   including `max_concurrent_inferences`, `max_context_tokens`,
   `max_output_tokens`, `compact_before_next_input_tokens`, and
-  `keep_tail_messages`. The fixed paged KV-cache reservation is
+  `keep_raw_messages`. The fixed paged KV-cache reservation is
   `max_context_tokens` per concurrently admitted inference. A completed turn
   queues compaction only when its measured input plus output would make the
   next input reach the lazy threshold; that agent's next inference waits for

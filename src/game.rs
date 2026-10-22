@@ -7222,7 +7222,7 @@ mod tests {
         // that the summary has real history to work from.
         let limits = Limits {
             compact_before_next_input_tokens: 700,
-            keep_tail_messages: 4,
+            keep_raw_messages: 4,
             ..base_limits
         };
         let (game, store, _db, member) =

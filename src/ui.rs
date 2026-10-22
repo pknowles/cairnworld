@@ -1304,7 +1304,7 @@ fn CompactionCard(
             <summary class="cursor-pointer select-none font-medium">{label}</summary>
             {cause_inference_id.map(|id| view! { <p class="mt-1 text-xs text-base-content/60">{format!("Deferred after inference {id}.")}</p> })}
             {reason.zip(retained_messages).map(|(reason, retained)| view! {
-                <p class="mt-1 text-xs text-base-content/60">{if reason == "capacity_recovery" { format!("Capacity recovery retained {retained} newest messages.") } else { format!("Threshold compaction retained {retained} newest messages.") }}</p>
+                <p class="mt-1 text-xs text-base-content/60">{if reason == "capacity_recovery" { format!("Capacity recovery: the request before this did not fit in the context, so only the newest {retained} messages stayed raw and the rest were summarised. Frequent entries like this mean messages are too long or the configured raw-message count is too high.") } else { format!("Threshold compaction retained {retained} newest messages.") }}</p>
             })}
             <p class="mt-1 whitespace-pre-wrap">{text}</p>
             {selection.map(|selection| view! {

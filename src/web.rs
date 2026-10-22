@@ -1917,7 +1917,7 @@ mod tests {
             // not, so this fixture is one complete turn rather than a chain
             // of summaries of summaries.
             compact_before_next_input_tokens: 700,
-            keep_tail_messages: 1,
+            keep_raw_messages: 1,
             ..Default::default()
         };
         let responses: Vec<Response> =

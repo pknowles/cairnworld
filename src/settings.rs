@@ -145,10 +145,10 @@ pub struct Limits {
     /// This is a lazy history-maintenance threshold, not a KV-cache size.
     pub compact_before_next_input_tokens: usize,
     /// Exact number of newest raw messages retained after a summary.
-    pub keep_tail_messages: usize,
+    pub keep_raw_messages: usize,
     /// Before committing a merge, a source branch's own unique suffix (not
     /// counting shared ancestors) is compacted first when it exceeds this
-    /// many raw messages, preserving `keep_tail_messages` at the end
+    /// many raw messages, preserving `keep_raw_messages` at the end
     /// (design.md's "Groups and shared GM history": "Before committing a
     /// merge, each incoming branch's unique suffix is eligible for
     /// compaction if its raw-message count exceeds `merge_branch_messages`").
@@ -168,7 +168,7 @@ impl Default for Limits {
             max_context_tokens: 16_384,
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 15_360,
-            keep_tail_messages: 32,
+            keep_raw_messages: 32,
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         }
@@ -214,8 +214,8 @@ impl Limits {
             "limits.compact_before_next_input_tokens must leave room for limits.max_output_tokens within limits.max_context_tokens"
         );
         ensure!(
-            self.keep_tail_messages > 0,
-            "limits.keep_tail_messages must be greater than zero"
+            self.keep_raw_messages > 0,
+            "limits.keep_raw_messages must be greater than zero"
         );
         ensure!(
             self.merge_branch_messages > 0,
@@ -270,7 +270,7 @@ impl Settings {
              [limits]\n\
              max_context_tokens = 4096\n\
              compact_before_next_input_tokens = 2048\n\
-             keep_tail_messages = 8\n"
+             keep_raw_messages = 8\n"
         ))
     }
 
@@ -301,7 +301,7 @@ mod tests {
 
         assert_eq!(overridden.max_context_tokens, 4096);
         assert_ne!(baseline.max_context_tokens, 4096); // the override actually changed it
-        assert_eq!(overridden.keep_tail_messages, baseline.keep_tail_messages);
+        assert_eq!(overridden.keep_raw_messages, baseline.keep_raw_messages);
         assert_eq!(
             overridden.compact_before_next_input_tokens,
             baseline.compact_before_next_input_tokens
@@ -389,7 +389,7 @@ mod tests {
             max_context_tokens: 2_048,
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 800,
-            keep_tail_messages: 1,
+            keep_raw_messages: 1,
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         };
@@ -407,7 +407,7 @@ mod tests {
             max_context_tokens: 1_000,
             max_output_tokens: 200,
             compact_before_next_input_tokens: 801,
-            keep_tail_messages: 1,
+            keep_raw_messages: 1,
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         };

@@ -66,10 +66,10 @@ max_output_tokens = 1024
 # history maintenance, independent of the fixed KV-cache capacity above.
 compact_before_next_input_tokens = 8000
 # Recent raw history is retained exactly; older history becomes a summary.
-keep_tail_messages = 32
+keep_raw_messages = 32
 # Before committing a merge, a source branch's own unique suffix (not
 # counting shared ancestors) is compacted first when it exceeds this many
-# raw messages, preserving keep_tail_messages at the end.
+# raw messages, preserving keep_raw_messages at the end.
 merge_branch_messages = 64
 # A group departure (or first arrival after an empty period) delays narration
 # this long so a brief reconnect never announces a departure that did not

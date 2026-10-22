@@ -1100,7 +1100,7 @@ mod tests {
             max_context_tokens: 33_792,
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 32_768,
-            keep_tail_messages: 32,
+            keep_raw_messages: 32,
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         };
@@ -1151,7 +1151,7 @@ mod tests {
             max_context_tokens: 33_792,
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 32_768,
-            keep_tail_messages: 32,
+            keep_raw_messages: 32,
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         });

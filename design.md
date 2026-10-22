@@ -466,7 +466,7 @@ the raw message. This same selector handles linear histories.
 Before committing a merge, each incoming branch's
 unique suffix is eligible for compaction if its raw-message count exceeds
 `merge_branch_messages` (default 64). Compact its oldest messages while preserving
-`keep_tail_messages` raw messages at the end; if no eligible prefix remains, use
+`keep_raw_messages` raw messages at the end; if no eligible prefix remains, use
 the raw suffix. The count is explicit message units; no
 estimated tokens or happy-path tokenization. Shared ancestor material is kept
 once. These summaries cover only that suffix through its last settled exchange;
@@ -974,12 +974,13 @@ navigates them; it never assembles an agent prompt.
 Config: `max_context_tokens` (fixed total input-plus-output capacity),
 `max_output_tokens` (the per-inference generated-token limit),
 `compact_before_next_input_tokens` (the lazy next-input trigger), and
-`keep_tail_messages` (exact newest raw rows preserved after the summary). A
+`keep_raw_messages` (the number of newest raw rows preserved after the summary;
+a preference, not a guarantee, as below). A
 completed turn's reported input plus output predicts its next input. When that
 prediction reaches the trigger, compaction is queued; it must complete before
 another inference for that agent, but does not delay the completed reply:
 
-1. Choose the cut point `n` so exactly `keep_tail_messages` raw messages after
+1. Choose the cut point `n` so exactly `keep_raw_messages` raw messages after
    `n` remain.
 2. Build a compaction input: previous summary + messages up to `n`, then the
    compaction instruction as the closing request (what will be lost, what
@@ -991,20 +992,33 @@ another inference for that agent, but does not delay the completed reply:
 The trigger uses the completed inference's model-reported `input_tokens` plus
 `output_tokens`; it adds no tokenization work. Those are measured units, not
 a claim that newly supplied text will fit. The durable background job begins after the
-completed reply is delivered. If only the retained tail remains, it retires the
+completed reply is delivered. If only the retained raw messages remain, it retires the
 job without a history event; a later turn can queue a new one. It never
 interrupts the completed game response for context pressure alone.
 
 If an ordinary inference or compaction request is rejected for capacity, the
-same durable compaction job runs inline. It tries the ordinary prefix summary;
-if that request cannot run, it retains one more raw message and tries again.
+same durable compaction job runs inline, with two separate fallbacks:
+
+- The agent's own request does not fit and nothing older than the raw messages
+  can be summarised, so the raw messages alone overflowed. The job keeps half as
+  many raw messages as it tried (down to none) and summarises the rest. Each
+  rejection that follows halves again, so a configured count of 32 reaches none in
+  at most six rejections. A message count is not a token size and measuring one
+  would mean tokenizing, so the rejection itself is the measurement.
+- The compaction request does not fit. It tries the ordinary prefix summary; if
+  that request cannot run, it retains one more raw message and tries again.
+
+Either fallback logs a warning with the configured and resulting counts, and the
+summary records `reason = capacity_recovery` and the count kept, which Developer
+Mode shows beside the rejected request that caused it. They should be rare;
+frequent entries mean messages are too long or the configured count too high.
 No request is pre-tokenized or predicted. Only Mistral's explicit fixed-KV
 capacity rejection starts immediate compaction: it reports the exact requested
 token count. A retry must report fewer required tokens than the previous
 rejection; otherwise it is a hard error. CUDA out-of-memory is a model/runtime
 failure, not evidence that history can be reduced, so it fails directly. If
-retaining the requested tail leaves no older history, compaction is also a hard
-error rather than a no-op retry.
+no raw messages remain to summarise, compaction is also a hard error rather than
+a no-op retry.
 
 # Dev CLI: chat, replay
 

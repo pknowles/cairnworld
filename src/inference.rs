@@ -554,7 +554,7 @@ mod tests {
             TestBackend,
             Limits {
                 max_concurrent_inferences: 1,
-                keep_tail_messages: 1,
+                keep_raw_messages: 1,
                 ..Limits::default()
             },
         )
