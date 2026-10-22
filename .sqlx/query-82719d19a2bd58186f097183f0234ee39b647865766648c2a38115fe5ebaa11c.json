@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(history_entry.position) AS \"position: i64\" FROM history_entry              WHERE history_entry.branch_id = ? AND history_entry.position > ?                AND NOT EXISTS (SELECT 1 FROM message                                WHERE message.id = history_entry.id AND message.role = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "position: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "82719d19a2bd58186f097183f0234ee39b647865766648c2a38115fe5ebaa11c"
+}

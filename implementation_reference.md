@@ -184,7 +184,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - `src/compaction.rs` - resolves a persisted compaction job as ordinary
   recorded summarisation, preserving `keep_raw_messages` newest raw rows; a job
   queued by a fixed-KV rejection halves that (down to none, with a warning
-  logged) when the raw rows alone overflowed. The compaction inference and summary carry the job's `sequence_id`, so
+  logged) when the raw rows alone overflowed. The cut never leaves a tool
+  result without its call: results at the start of the raw rows are summarised
+  with the call (`Store::raw_split_for_branch`). The compaction inference and summary carry the job's `sequence_id`, so
   a summary links back to the reply that queued it. The input
   is the previous summary and that raw range, closed by the compaction
   instruction as a user-role message. If that request is rejected for capacity,

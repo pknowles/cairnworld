@@ -90,9 +90,33 @@ struct ToolPrompt {
 
 /// The prompts as they are now: reread when the file has changed.
 pub fn current() -> Result<Arc<Prompts>> {
+    #[cfg(test)]
+    if let Some(path) = TEST_FILE.with(|file| file.borrow().clone()) {
+        return load(&path);
+    }
     load(&PathBuf::from(
         std::env::var(PATH_VARIABLE).unwrap_or_else(|_| DEFAULT_PATH.into()),
     ))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FILE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Make this test's thread read `path` instead of the checked-in file, until the
+/// returned guard is dropped. Tests run on one thread each, so others are
+/// unaffected.
+#[cfg(test)]
+pub fn use_file_in_this_test(path: PathBuf) -> impl Drop {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_FILE.with(|file| *file.borrow_mut() = None);
+        }
+    }
+    TEST_FILE.with(|file| *file.borrow_mut() = Some(path));
+    Guard
 }
 
 fn load(path: &Path) -> Result<Arc<Prompts>> {
@@ -124,33 +148,39 @@ fn load(path: &Path) -> Result<Arc<Prompts>> {
 }
 
 /// Fill the `{name}` placeholders of a template. A placeholder with no value,
-/// or a value with no placeholder, means the file and the game disagree.
+/// or a value with no placeholder, means the file and the game disagree. Only
+/// the template's own placeholders are filled: a value that happens to contain
+/// `{name}` (a character's speech, say) stays exactly as it is.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> Result<String> {
-    let mut placeholders = Vec::new();
+    let mut text = String::with_capacity(template.len());
+    let mut used = Vec::new();
     let mut rest = template;
     while let Some(start) = rest.find('{') {
         let Some(length) = rest[start..].find('}') else {
             break;
         };
         let name = &rest[start + 1..start + length];
+        text.push_str(&rest[..start]);
         if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
-            placeholders.push(name);
+            let (_, value) = values
+                .iter()
+                .find(|(given, _)| *given == name)
+                .with_context(|| {
+                    format!("the prompt has a {{{name}}} the game does not fill: {template}")
+                })?;
+            text.push_str(value);
+            used.push(name);
+        } else {
+            text.push_str(&rest[start..=start + length]);
         }
         rest = &rest[start + length + 1..];
     }
-    for name in &placeholders {
+    text.push_str(rest);
+    for (name, _) in values {
         ensure!(
-            values.iter().any(|(given, _)| given == name),
-            "the prompt has a {{{name}}} the game does not fill: {template}"
-        );
-    }
-    let mut text = template.to_string();
-    for (name, value) in values {
-        ensure!(
-            placeholders.contains(name),
+            used.contains(name),
             "the game fills a {{{name}}} the prompt does not have: {template}"
         );
-        text = text.replace(&format!("{{{name}}}"), value);
     }
     Ok(text)
 }
@@ -293,6 +323,15 @@ rolle = \"typo\"",
         assert_eq!(
             fill("{a} then {b}", &[("a", "1"), ("b", "{x}")]).unwrap(),
             "1 then {x}"
+        );
+        // Values are inserted literally, whatever they contain.
+        assert_eq!(
+            fill(
+                "{arguments} then {note}",
+                &[("arguments", "Repeat {note} exactly"), ("note", "!")]
+            )
+            .unwrap(),
+            "Repeat {note} exactly then !"
         );
         assert!(fill("{a}", &[]).is_err());
         assert!(fill("plain", &[("a", "1")]).is_err());

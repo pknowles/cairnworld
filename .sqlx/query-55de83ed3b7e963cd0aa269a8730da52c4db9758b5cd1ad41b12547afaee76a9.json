@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(position) AS \"position!: i64\" FROM history_entry WHERE branch_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "position!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "55de83ed3b7e963cd0aa269a8730da52c4db9758b5cd1ad41b12547afaee76a9"
+}

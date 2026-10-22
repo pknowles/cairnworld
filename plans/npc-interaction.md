@@ -1,13 +1,13 @@
 # NPC speech, response selection and player interruption
 
 Speech delivery, NPC response rounds, individual GM approval of tied replies,
-expressive authored speech and Developer Mode causal links exist. Still open
-before player control: tests for NPC departure, merge and access loss and for a
-crash during an approval, repeated real-model conversations that confirm
-natural stopping, and NPC restraint wording (the declaration asks NPCs to be
-encouraged to use do_nothing; the prompt currently says nothing about it).
-Builds on implemented shutdown and failure handling; combat and
-InterventionCheck are not implemented.
+expressive authored speech, Developer Mode causal links and the split, merge,
+access-loss, shutdown and crash scenarios exist. Still open before player
+control: repeated real-model conversations that confirm natural stopping, and
+NPC restraint wording (the declaration asks NPCs to be encouraged to use
+do_nothing; the prompt currently says nothing about it), which is last because
+it takes the longest to tune and test. Builds on implemented shutdown and
+failure handling; combat and InterventionCheck are not implemented.
 
 ## Outcome and authority
 

@@ -4621,7 +4621,34 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading raw tail for branch {branch_id}"))?;
-        Ok(rows.last().map_or(covered, |position| position - 1))
+        let split = rows.last().map_or(covered, |position| position - 1);
+        if split <= covered {
+            return Ok(split);
+        }
+        // A tool result is meaningless without the call it answers, so the cut
+        // moves later past any results it would have left at the start of the
+        // raw messages; they are summarised with their call.
+        let tool = serde_json::to_string(&Role::Tool).context("encoding the tool role")?;
+        let first_other = sqlx::query_scalar!(
+            "SELECT MIN(history_entry.position) AS \"position: i64\" FROM history_entry              WHERE history_entry.branch_id = ? AND history_entry.position > ?                AND NOT EXISTS (SELECT 1 FROM message                                WHERE message.id = history_entry.id AND message.role = ?)",
+            branch_id,
+            split,
+            tool,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("checking the cut of branch {branch_id} for tool results"))?;
+        match first_other {
+            Some(position) => Ok(position - 1),
+            // Nothing but tool results follows, so all of it goes with its calls.
+            None => sqlx::query_scalar!(
+                "SELECT MAX(position) AS \"position!: i64\" FROM history_entry WHERE branch_id = ?",
+                branch_id,
+            )
+            .fetch_one(&self.pool)
+            .await
+            .with_context(|| format!("finding the end of branch {branch_id}")),
+        }
     }
 
     /// Every `Segment::Messages` range's branch must belong to `agent_id` - a

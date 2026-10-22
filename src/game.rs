@@ -816,12 +816,12 @@ where
             .await?;
         let budget = Budget::new(self.limits);
         let call = CallContext::root(Some(sequence.id));
-        let tools =
-            self.creation_tools(member.clone(), sequence.id, budget.clone(), call.clone())?;
         // Everything from here on must finish the sequence on every exit,
-        // including a failure building the prompt before the agent ever
-        // runs - not only agent::complete_with_call_context's own result.
+        // including a failure building the tools or prompt before the agent
+        // ever runs - not only agent::complete_with_call_context's own result.
         let result: Result<Response> = async {
+            let tools =
+                self.creation_tools(member.clone(), sequence.id, budget.clone(), call.clone())?;
             let branch = self.store.agent_branch(member.agent_id).await?;
             let prompt = self
                 .player_prompt(&member, false)
@@ -1794,7 +1794,7 @@ mod tests {
     use super::*;
     use crate::{
         inference::InferenceScheduler,
-        llm::{MessageContent, Response, ToolCall, Usage},
+        llm::{ContextCapacityExceeded, MessageContent, Response, ToolCall, Usage},
         mistralrs_backend::MistralRsBackend,
         scenario::Scenario,
         settings::Settings,
@@ -1809,6 +1809,17 @@ mod tests {
         /// Holds the numbered (1-based) request until released, telling
         /// `reached` when it arrives.
         gate: Arc<Mutex<Option<Gate>>>,
+        /// Rejects a request over a size the way the fixed-size model does.
+        fixed_context: Arc<FixedContext>,
+    }
+
+    /// A stand-in for the model's fixed context: requests bigger than
+    /// `max_chars` (0 for no limit) are rejected as over capacity, and
+    /// compaction's summary request is answered without using the script.
+    #[derive(Default)]
+    struct FixedContext {
+        max_chars: AtomicUsize,
+        rejections: AtomicUsize,
     }
 
     struct Gate {
@@ -1828,6 +1839,7 @@ mod tests {
                     requests: Arc::clone(&requests),
                     hang_when_empty: Arc::new(AtomicBool::new(false)),
                     gate: Arc::new(Mutex::new(None)),
+                    fixed_context: Arc::new(FixedContext::default()),
                 },
                 requests,
             )
@@ -1840,6 +1852,48 @@ mod tests {
             request: crate::llm::Request,
             _on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
+            let max_chars = self.fixed_context.max_chars.load(Ordering::SeqCst);
+            if max_chars > 0 {
+                let text = |message: &Message| match &message.content {
+                    MessageContent::Text(text) => text.clone(),
+                    MessageContent::ToolCalls(calls) => {
+                        calls.iter().map(|call| call.arguments.as_str()).collect()
+                    }
+                    MessageContent::ToolResult { content, .. } => content.clone(),
+                    MessageContent::Speech(speech) => speech.text.clone(),
+                };
+                let size: usize = request
+                    .messages
+                    .iter()
+                    .map(|message| text(message).len())
+                    .sum();
+                let summary_request = crate::prompts::current()
+                    .unwrap()
+                    .compaction
+                    .summary_request
+                    .clone();
+                let asks_for_summary = request.messages.last().is_some_and(
+                    |message| matches!(&message.content, MessageContent::Text(text) if *text == summary_request),
+                );
+                self.requests.lock().unwrap().push(request);
+                if asks_for_summary {
+                    return Ok(response(Content::Text("Summary of earlier play.".into())));
+                }
+                if size > max_chars {
+                    self.fixed_context.rejections.fetch_add(1, Ordering::SeqCst);
+                    return Err(ContextCapacityExceeded::FixedKv {
+                        requested_tokens: size,
+                        max_context_tokens: max_chars,
+                    }
+                    .into());
+                }
+                return self
+                    .responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .context("scripted backend received an unexpected inference");
+            }
             let number = {
                 let mut requests = self.requests.lock().unwrap();
                 requests.push(request);
@@ -3471,6 +3525,45 @@ mod tests {
             "only the first split's partitioning must stand"
         );
         assert_ne!(adventurer_group, toma_group);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_prompt_file_fails_the_opening_turn_visibly_instead_of_leaving_it_open() {
+        let directory =
+            std::env::temp_dir().join(format!("prompts-opening-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("prompts.toml");
+        let original = std::fs::read_to_string("prompts.toml").unwrap();
+        // Describe a roll tool that does not exist so the creation tools cannot be built.
+        std::fs::write(
+            &path,
+            original.replace(
+                "[player.tools.roll_hit_protection]",
+                "[player.tools.roll_hit_protection_x]",
+            ),
+        )
+        .unwrap();
+        let _file = crate::prompts::use_file_in_this_test(path);
+        let (backend, _) = ScriptedBackend::recording([]);
+        let (game, store, _db, member) = blank_opening_game(backend).await;
+
+        game.enter(member.clone())
+            .await
+            .expect_err("the creation tools cannot be built from this prompt file");
+
+        let unfinished: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sequence WHERE finished_at IS NULL")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        assert_eq!(unfinished, 0, "the opening sequence must be finished");
+        let error: Option<String> =
+            sqlx::query_scalar("SELECT error FROM sequence WHERE trigger = 'player entered world'")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        assert!(error.is_some_and(|error| error.contains("roll_hit_protection")));
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test]
@@ -5207,6 +5300,274 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_player_who_loses_access_between_tied_replies_does_not_hear_the_second() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        // A guest who has joined the group, and will be removed from the world.
+        let owner = scene.first.user_id;
+        let world = scene.first.world_id;
+        let invitation = scene
+            .store
+            .create_invitation(owner, world, Some(1))
+            .await
+            .unwrap();
+        let guest_user = scene
+            .store
+            .find_or_create_user("guest@example.test", "Guest")
+            .await
+            .unwrap();
+        let guest = scene
+            .store
+            .accept_invitation(&guest_user, &invitation.token)
+            .await
+            .unwrap();
+        let (reached, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        *scene.gate.lock().unwrap() = Some(Gate {
+            request: 8,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(say_to_toma("Where is the flour?"));
+        scene.responses.lock().unwrap().extend([
+            propose("Ask the miller.", &speaker, 2),
+            propose("It is in the hut.", &speaker, 2),
+            approve(2),
+            response(Content::Text("Mara speaks.".into())),
+            approve(3),
+            response(Content::Text("Toma speaks.".into())),
+            do_nothing(),
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        reached.notified().await;
+        scene
+            .store
+            .remove_member(owner, world, guest_user.id)
+            .await
+            .unwrap();
+        release.notify_one();
+        wait_for_npc_work(&scene).await;
+
+        let first = heard(&scene.store, &scene.first).await;
+        assert!(
+            first.contains(&"It is in the hut.".to_string()),
+            "{first:?}"
+        );
+        let heard_by_guest = |speaker: &'static str| {
+            let pool = scene.store.pool();
+            let agent_id = guest.agent_id;
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM speech_message                      JOIN history_entry ON history_entry.id = speech_message.message_id                      JOIN agent_history ON agent_history.branch_id = history_entry.branch_id                      WHERE agent_history.agent_id = ? AND speech_message.speech_action_id IN                            (SELECT action_id FROM speech WHERE speaker_name = ?)",
+                )
+                .bind(agent_id)
+                .bind(speaker)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(
+            heard_by_guest("Mara").await,
+            1,
+            "the guest heard the first reply"
+        );
+        assert_eq!(
+            heard_by_guest("Toma").await,
+            0,
+            "the removed guest was given the second reply"
+        );
+        assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn merging_groups_drops_replies_chosen_for_the_group_that_no_longer_exists() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        let id_of = |name: &'static str| {
+            let pool = scene.store.pool();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT id FROM character WHERE name = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
+        let group = scene
+            .store
+            .character_group_id(scene.first.character_id)
+            .await
+            .unwrap();
+        let call = |name: &str, arguments: serde_json::Value| ToolCall {
+            id: name.into(),
+            name: name.into(),
+            arguments: arguments.to_string(),
+        };
+        // The second player parts from everyone else.
+        scene.responses.lock().unwrap().extend([
+            tool_call("look", serde_json::json!({"description": "the room"})),
+            response(Content::ToolCalls(vec![
+                call("approve_action", serde_json::json!({"action_id": 1})),
+                call(
+                    "split_group",
+                    serde_json::json!({
+                        "group_id": group,
+                        "partitions": [
+                            {"character_ids": [scene.first.character_id, mara, toma], "name": "hut", "description": "inside"},
+                            {"character_ids": [scene.second.character_id], "name": "yard", "description": "outside"},
+                        ],
+                    }),
+                ),
+            ])),
+            response(Content::Text("The group parts.".into())),
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Look around.")
+            .await
+            .unwrap();
+        let groups: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM \"group\" WHERE retired_at IS NULL ORDER BY id")
+                .fetch_all(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(groups.len(), 2);
+
+        // Tied replies in the hut; between them the other player merges the groups.
+        let (reached, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // Four requests for the speech turn, two decisions, then the GM turn
+        // narrating Mara's approved reply.
+        let held = scene.requests.lock().unwrap().len() + 8;
+        *scene.gate.lock().unwrap() = Some(Gate {
+            request: held,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        scene.responses.lock().unwrap().extend([
+            tool_call(
+                "say",
+                serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
+            ),
+            approve(2),
+            response(Content::Text("Toma looks up.".into())),
+            response(Content::Text(String::new())),
+            propose("Ask the miller.", &speaker, 2),
+            propose("It is in the hut.", &speaker, 2),
+            approve(3),
+            response(Content::Text("Mara speaks.".into())),
+            tool_call("look", serde_json::json!({"description": "the yard"})),
+            response(Content::ToolCalls(vec![
+                call("approve_action", serde_json::json!({"action_id": 4})),
+                call(
+                    "merge_groups",
+                    serde_json::json!({"group_ids": groups, "name": "everyone", "description": "together"}),
+                ),
+            ])),
+            response(Content::Text("They come together.".into())),
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        reached.notified().await;
+        let merging = {
+            let game = Arc::clone(&scene.game);
+            let member = scene.second.clone();
+            tokio::spawn(async move { game.player_message(member, "Look outside.").await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        release.notify_one();
+        merging.await.unwrap().unwrap();
+        wait_for_npc_work(&scene).await;
+
+        let chat = heard(&scene.store, &scene.first).await;
+        assert!(chat.contains(&"Ask the miller.".to_string()), "{chat:?}");
+        assert!(
+            !chat.iter().any(|line| line.contains("It is in the hut.")),
+            "a reply chosen for the group that no longer exists was said: {chat:?}"
+        );
+        assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_discussion_interrupted_during_an_approval_fails_visibly_and_never_replays() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        scene.hang_when_empty.store(true, Ordering::SeqCst);
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(say_to_toma("Where is the flour?"));
+        scene.responses.lock().unwrap().extend([
+            propose("Ask the miller.", &speaker, 2),
+            propose("It is in the hut.", &speaker, 2),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        // Four turn requests and two decisions, then the GM is asked to approve.
+        for _ in 0..200 {
+            if scene.requests.lock().unwrap().len() > 6 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(requests_made(&scene), 7, "the approval is in flight");
+
+        scene.store.close_interrupted_turns().await.unwrap();
+
+        let (state, pending): (String, i64) = sqlx::query_as(
+            "SELECT (SELECT state FROM npc_discussion), (SELECT COUNT(*) FROM pending_action)",
+        )
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(state, "failed");
+        assert_eq!(
+            pending, 0,
+            "the interrupted approval leaves nothing to approve later"
+        );
+        assert!(
+            scene
+                .store
+                .next_npc_step(scene.first.world_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "an interrupted step is never replayed"
+        );
+        let spoken = heard(&scene.store, &scene.first).await;
+        assert!(
+            !spoken.iter().any(|line| line.contains("Ask the miller.")),
+            "an unapproved reply was said: {spoken:?}"
+        );
+        let shown = scene.store.player_chat(&scene.first).await.unwrap();
+        assert!(shown.iter().any(|entry| entry.role == Role::System));
+    }
+
+    #[tokio::test]
     async fn speech_in_one_group_gives_the_other_group_no_opportunity() {
         let scene = speech_scene().await;
         let id_of = |name: &'static str| {
@@ -5282,6 +5643,105 @@ mod tests {
         let toma_heard = heard_by_npc(&scene.store, "Toma").await;
         assert!(toma_heard.is_empty(), "{toma_heard:?}");
         assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_gm_request_is_compacted_and_the_turn_continues_with_valid_history() {
+        // The cut between summarised and raw messages can fall anywhere,
+        // including between a tool call and its result.
+        for keep_raw_messages in [1, 2, 3, 4, 5, 6, 7] {
+            overflowing_gm_history_recovers(keep_raw_messages).await;
+        }
+    }
+
+    async fn overflowing_gm_history_recovers(keep_raw_messages: usize) {
+        let (backend, requests) = ScriptedBackend::recording([]);
+        let responses = Arc::clone(&backend.responses);
+        let fixed_context = Arc::clone(&backend.fixed_context);
+        let limits = Limits {
+            keep_raw_messages,
+            ..Limits::default()
+        };
+        let (game, store, _db, first, _second) =
+            two_player_bread_thief_game_with_limits(backend, limits).await;
+        fixed_context.max_chars.store(5000, Ordering::SeqCst);
+
+        let narration =
+            "The words hang in the smoky air of the hut while everyone waits. ".repeat(8);
+        let mut gm_branch = 0;
+        for index in 0..10 {
+            let sequence = store
+                .begin_sequence(first.world_id, "capacity scenario")
+                .await
+                .unwrap();
+            let arguments =
+                serde_json::json!({"words": format!("Line {index}."), "to": "Toma"}).to_string();
+            let requesting = crate::store::record_tool_call_for_test(
+                &store,
+                store.agent_branch(first.agent_id).await.unwrap(),
+                Some(sequence.id),
+                &format!("say-{index}"),
+                "say",
+                &arguments,
+            )
+            .await;
+            let pending = store
+                .create_pending_action(
+                    &store.player_actor(&first).await.unwrap(),
+                    sequence.id,
+                    requesting,
+                    "say",
+                    &arguments,
+                )
+                .await
+                .unwrap();
+            gm_branch = pending.gm_branch_id;
+            responses.lock().unwrap().extend([
+                tool_call(
+                    "approve_action",
+                    serde_json::json!({"action_id": pending.id}),
+                ),
+                response(Content::Text(narration.clone())),
+            ]);
+            game.arbitrate(
+                pending,
+                Budget::new(limits),
+                CallContext::root(Some(sequence.id)),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("action {index} did not resolve: {error:#}"));
+        }
+
+        assert!(
+            fixed_context.rejections.load(Ordering::SeqCst) >= 1,
+            "the scenario must overflow the context at least once"
+        );
+        let summary = store.latest_summary_for_branch(gm_branch).await.unwrap();
+        assert!(
+            summary.is_some_and(|summary| summary.reason == "capacity_recovery"),
+            "the overflow was recovered by compaction"
+        );
+        // Every request the GM sent, accepted or not, kept each tool result
+        // after the call that produced it.
+        for request in requests.lock().unwrap().iter() {
+            let mut open_calls: Vec<String> = Vec::new();
+            for message in &request.messages {
+                match &message.content {
+                    MessageContent::ToolCalls(calls) => {
+                        open_calls = calls.iter().map(|call| call.id.clone()).collect();
+                    }
+                    MessageContent::ToolResult { tool_call_id, .. } => {
+                        assert!(
+                            open_calls.contains(tool_call_id),
+                            "a tool result lost its call: {tool_call_id} in {:?}",
+                            request.messages
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     #[tokio::test]
