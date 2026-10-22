@@ -241,8 +241,25 @@ mod tests {
         std::fs::write(&path, &original).unwrap();
         let before = load(&path).unwrap().npc.role.clone();
 
+        // Replace the whole `role = ...` value of the [npc] section.
+        let section = original.find("[npc]").unwrap();
+        let start = section + original[section..].find("role = ").unwrap();
+        let end = start
+            + original[start..]
+                .find(
+                    "
+
+",
+                )
+                .unwrap();
+        let edited = format!(
+            "{}role = \"Changed role.\"{}",
+            &original[..start],
+            &original[end..]
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(&path, original.replace(&before, "Changed role.")).unwrap();
+        std::fs::write(&path, &edited).unwrap();
+        assert_ne!(before, "Changed role.");
         assert_eq!(load(&path).unwrap().npc.role, "Changed role.");
 
         std::thread::sleep(std::time::Duration::from_millis(50));
