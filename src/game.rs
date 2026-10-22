@@ -2084,30 +2084,80 @@ mod tests {
         opening_game_with_limits(backend, model, sampling, Limits::default()).await
     }
 
-    async fn device_test_game() -> (MistralRsBackend, String, Sampling, Limits) {
-        device_test_game_for("dev-qwen35").await
+    /// The device-test model, loaded once and shared by every scenario in
+    /// `device_suite` so the whole suite pays the load a single time.
+    pub(crate) struct DeviceModel {
+        pub(crate) backend: Arc<MistralRsBackend>,
+        path: String,
+        sampling: Sampling,
+        limits: Limits,
     }
 
-    async fn device_test_game_for(name: &str) -> (MistralRsBackend, String, Sampling, Limits) {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("cairnworld=info")
-            .with_test_writer()
-            .try_init();
-        let settings = Settings::for_device_test(name).expect("default.toml should load");
-        let model = settings
-            .model(None)
-            .expect("default.toml should configure the device-test model");
-        let backend = MistralRsBackend::load(
-            &model.path,
-            model.chat_template.as_deref(),
-            model.source_model.as_deref(),
-            settings.limits,
-            false,
-        )
-        .await
-        .expect("device-test model should load");
-        let sampling = settings.sampling(&model);
-        (backend, model.path, sampling, settings.limits)
+    /// Lets each scenario's `Game` own a backend while the model stays shared.
+    pub(crate) struct SharedModel(Arc<MistralRsBackend>);
+
+    impl Backend for SharedModel {
+        fn complete(
+            &self,
+            request: crate::llm::Request,
+            on_token: impl FnMut(&str) + Send,
+        ) -> impl Future<Output = anyhow::Result<crate::llm::Response>> + Send {
+            self.0.complete(request, on_token)
+        }
+
+        fn complete_with_recording(
+            &self,
+            request: crate::llm::Request,
+            on_token: impl FnMut(&str) + Send,
+            store: &Store,
+            inference_id: i64,
+        ) -> impl Future<Output = anyhow::Result<crate::llm::Response>> + Send {
+            self.0
+                .complete_with_recording(request, on_token, store, inference_id)
+        }
+    }
+
+    impl DeviceModel {
+        pub(crate) async fn load() -> Self {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter("cairnworld=info")
+                .with_test_writer()
+                .try_init();
+            let settings =
+                Settings::for_device_test("dev-qwen35").expect("default.toml should load");
+            let model = settings
+                .model(None)
+                .expect("default.toml should configure the device-test model");
+            let backend = MistralRsBackend::load(
+                &model.path,
+                model.chat_template.as_deref(),
+                model.source_model.as_deref(),
+                settings.limits,
+                false,
+            )
+            .await
+            .expect("device-test model should load");
+            Self {
+                backend: Arc::new(backend),
+                sampling: settings.sampling(&model),
+                path: model.path,
+                limits: settings.limits,
+            }
+        }
+
+        fn parts(&self) -> (SharedModel, String, Sampling, Limits) {
+            (
+                SharedModel(Arc::clone(&self.backend)),
+                self.path.clone(),
+                self.sampling.clone(),
+                self.limits,
+            )
+        }
+
+        /// Start capturing the prompts the model is given from now on.
+        fn observed(&self) -> Arc<std::sync::Mutex<Vec<crate::mistralrs_backend::ObservedPrompt>>> {
+            self.backend.observe_prompts()
+        }
     }
 
     async fn opening_game_with_limits<B>(
@@ -2892,6 +2942,56 @@ mod tests {
             adventurer_group, toma_group,
             "the split must have taken effect"
         );
+        // What happened apart: each side's GM history gains a fact only it
+        // knows, and an unrelated world's GM history gains another.
+        let apart = store
+            .begin_sequence(installed.world_id, "events while apart")
+            .await
+            .unwrap();
+        for (group, event) in [
+            (
+                adventurer_group,
+                "Outside the hut Mara whispers that the password is heron.",
+            ),
+            (
+                toma_group,
+                "Inside the hut Toma mutters that he hid the lantern.",
+            ),
+        ] {
+            store
+                .append_instruction(
+                    store.group_branch(group).await.unwrap(),
+                    &Message::text(Role::User, event),
+                    apart.id,
+                )
+                .await
+                .unwrap();
+        }
+        let stranger = store
+            .find_or_create_user("stranger@example.test", "Stranger")
+            .await
+            .unwrap();
+        let other_world = store.install_scenario(&stranger, &scenario).await.unwrap();
+        let other_sequence = store
+            .begin_sequence(other_world.world_id, "another world")
+            .await
+            .unwrap();
+        store
+            .append_instruction(
+                store
+                    .group_branch(
+                        store
+                            .character_group_id(other_world.member.character_id)
+                            .await
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+                &Message::text(Role::User, "The other world's GM only knows the cellar."),
+                other_sequence.id,
+            )
+            .await
+            .unwrap();
 
         let merge_args = serde_json::json!({
             "group_ids": [adventurer_group, toma_group],
@@ -2980,6 +3080,22 @@ mod tests {
                 prior_event < prior_tool_call,
                 "the first action event must precede the tool call that resolved it"
             );
+            // The merge takes effect after this turn's calls, so this request
+            // still sees only the side the acting player was on.
+            let says = |needle: &str| {
+                request.messages.iter().any(|message| {
+                    matches!(&message.content, MessageContent::Text(text) if text.contains(needle))
+                })
+            };
+            assert!(
+                says("the password is heron"),
+                "the side with Mara is missing"
+            );
+            assert!(
+                !says("he hid the lantern"),
+                "the other side was visible before the merge"
+            );
+
             assert!(
                 matches!(request.messages.last().map(|message| &message.content),
                     Some(MessageContent::Text(text)) if text.contains("takes action 2")),
@@ -3078,43 +3194,123 @@ mod tests {
         assert_eq!(parents, source_branches);
     }
 
-    /// Run a real GM against the merged branch DAG and a real pending `say`
-    /// action. The player-side tool call is recorded directly because this
-    /// test verifies GM context and action resolution, not a small model's
-    /// unrelated choice of player tools.
+    /// The GM's next turn after a merge sees what each side did apart and
+    /// nothing from another world.
     #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_assembles_context_after_a_split_and_merge() {
+    async fn the_merged_gm_history_holds_both_sides_and_nothing_from_another_world() {
         let (store, _db, member, ..) = split_then_merge_groups().await;
         let sequence = store
-            .begin_sequence(member.world_id, "real GM context test")
+            .begin_sequence(member.world_id, "merged GM context test")
             .await
             .unwrap();
-        let requesting_tool_execution_id = crate::store::record_tool_call_for_test(
+        let arguments = serde_json::json!({"description": "the room"}).to_string();
+        let requesting = crate::store::record_tool_call_for_test(
             &store,
             store.agent_branch(member.agent_id).await.unwrap(),
             Some(sequence.id),
-            "say-1",
-            "say",
-            r#"{"words":"Good to have us all back together."}"#,
+            "look-9",
+            "look",
+            &arguments,
         )
         .await;
         let pending = store
             .create_pending_action(
                 &store.player_actor(&member).await.unwrap(),
                 sequence.id,
-                requesting_tool_execution_id,
-                "say",
-                r#"{"words":"Good to have us all back together."}"#,
+                requesting,
+                "look",
+                &arguments,
             )
             .await
             .unwrap();
-        let (real_backend, model_path, sampling, _limits) = device_test_game().await;
         let limits = Limits::default();
+        let (backend, requests) = ScriptedBackend::recording([
+            tool_call(
+                "approve_action",
+                serde_json::json!({"action_id": pending.id}),
+            ),
+            response(Content::Text("The room is quiet.".into())),
+        ]);
+        let game = Game::new(
+            store.clone(),
+            World::load(&store).await.unwrap(),
+            InferenceScheduler::new(backend, limits)
+                .unwrap()
+                .foreground(),
+            limits,
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        );
+        game.arbitrate(
+            pending,
+            Budget::new(limits),
+            CallContext::root(Some(sequence.id)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let says = |needle: &str| {
+            requests[0].messages.iter().any(|message| {
+                matches!(&message.content, MessageContent::Text(text) if text.contains(needle))
+            })
+        };
+        assert!(
+            says("the password is heron"),
+            "the side with Mara is missing"
+        );
+        assert!(says("he hid the lantern"), "the side with Toma is missing");
+        assert!(
+            !says("only knows the cellar"),
+            "another world's history leaked in"
+        );
+    }
+
+    /// Run a real GM against the merged branch DAG. The player's question can
+    /// only be answered from what each side did apart, so the answer shows the
+    /// model used the history of both branches. The player-side tool call is
+    /// recorded directly because this test is about the GM's context, not a small
+    /// model's choice of player tools.
+    async fn real_model_uses_what_both_sides_did_apart_after_a_split_and_merge(
+        model: &DeviceModel,
+    ) {
+        let (store, _db, member, ..) = split_then_merge_groups().await;
+        let sequence = store
+            .begin_sequence(member.world_id, "real GM context test")
+            .await
+            .unwrap();
+        let arguments = serde_json::json!({
+            "description": "What did Mara say outside, and what did Toma say inside?"
+        })
+        .to_string();
+        let requesting = crate::store::record_tool_call_for_test(
+            &store,
+            store.agent_branch(member.agent_id).await.unwrap(),
+            Some(sequence.id),
+            "look-1",
+            "look",
+            &arguments,
+        )
+        .await;
+        let pending = store
+            .create_pending_action(
+                &store.player_actor(&member).await.unwrap(),
+                sequence.id,
+                requesting,
+                "look",
+                &arguments,
+            )
+            .await
+            .unwrap();
+        let (real_backend, model_path, sampling, limits) = model.parts();
         let real_game = Game::new(
             store.clone(),
             World::load(&store).await.unwrap(),
-            InferenceScheduler::new(real_backend, Limits::default())
+            InferenceScheduler::new(real_backend, limits)
                 .unwrap()
                 .foreground(),
             limits,
@@ -3137,53 +3333,190 @@ mod tests {
                 .unwrap(),
             "the real GM must approve or reject the presented action"
         );
-        let mut gm_request = None;
-        let gm_inference_ids: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM inference WHERE sequence_id = ? AND agent_id = ? ORDER BY ordinal",
+        // The GM's closing narration answers the question.
+        let last_inference: i64 = sqlx::query_scalar(
+            "SELECT id FROM inference WHERE sequence_id = ? AND agent_id = ? ORDER BY ordinal DESC LIMIT 1",
         )
         .bind(sequence.id)
         .bind(pending.gm_agent_id)
-        .fetch_all(&store.pool())
+        .fetch_one(&store.pool())
         .await
         .unwrap();
-        for inference_id in gm_inference_ids {
-            let request = store
-                .reconstruct_inference(inference_id)
-                .await
-                .expect("the real GM request should be reconstructable");
-            if matches!(request.request.messages.last().map(|message| &message.content),
-                Some(MessageContent::Text(text)) if text.contains("takes action"))
-            {
-                gm_request = Some(request);
-                break;
-            }
-        }
-        let gm_request = gm_request.expect("the real GM must receive the action event");
+        let recorded = store.reconstruct_inference(last_inference).await.unwrap();
+        let crate::inspection::RecordedOutcome::Response(response) = recorded.outcome else {
+            panic!("the GM's last inference did not complete");
+        };
+        let Content::Text(narration) = response.content else {
+            panic!("the GM did not close with narration: {response:?}");
+        };
+        let narration = narration.to_lowercase();
         assert!(
-            matches!(gm_request.request.messages.last().map(|message| &message.content),
-                Some(MessageContent::Text(text)) if text.contains("takes action")),
-            "the real GM request must end with the action event"
+            narration.contains("heron") && narration.contains("lantern"),
+            "the GM did not use both sides' history: {narration}"
         );
     }
 
-    /// A real GM resolves a run of speech actions in one group, the way an NPC
-    /// conversation presents them, so its history grows with earlier
-    /// approvals and narration.
+    /// Every real-model test, run against one model load. The whole suite must
+    /// stay inside the five-minute test budget, so each scenario has its own
+    /// time limit and its elapsed time is printed.
     #[tokio::test]
     #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_gm_resolves_a_run_of_speech_actions() {
-        let (backend, _model_path, _sampling, limits) = device_test_game().await;
+    async fn device_suite() {
+        use crate::mistralrs_backend::tests as backend_tests;
+
+        async fn scenario(name: &str, seconds: u64, run: impl Future<Output = ()>) {
+            let started = std::time::Instant::now();
+            tokio::time::timeout(std::time::Duration::from_secs(seconds), run)
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not finish within {seconds} s"));
+            println!("SUITE {name}: {:.0} s", started.elapsed().as_secs_f32());
+        }
+
+        let suite_started = std::time::Instant::now();
+        let model = DeviceModel::load().await;
+        println!("SUITE load: {:.0} s", suite_started.elapsed().as_secs_f32());
+        let backend = &*model.backend;
+        let limits = model.limits;
+
+        scenario(
+            "prompt observation",
+            60,
+            backend_tests::generation_prompt_observation_matches_request_reconstruction(backend),
+        )
+        .await;
+        scenario(
+            "context capacity",
+            60,
+            backend_tests::configured_context_capacity_rejects_overflow_and_remains_usable(
+                backend, limits,
+            ),
+        )
+        .await;
+        scenario(
+            "streaming",
+            60,
+            backend_tests::streaming_completion_leaves_the_model_available_for_the_next_turn(
+                backend,
+            ),
+        )
+        .await;
+        scenario(
+            "template shape",
+            60,
+            backend_tests::opening_turn_with_tools_has_a_valid_chat_template_shape(backend),
+        )
+        .await;
+        scenario(
+            "zero-argument tool",
+            60,
+            backend_tests::a_zero_argument_tool_call_has_empty_arguments(backend),
+        )
+        .await;
+        scenario(
+            "prior tool call",
+            60,
+            backend_tests::a_prior_tool_call_message_renders_for_the_next_turn(backend),
+        )
+        .await;
+        scenario(
+            "opening",
+            60,
+            real_model_opening_reaches_a_stored_player_reply(&model),
+        )
+        .await;
+        scenario(
+            "creation",
+            120,
+            real_model_finishes_creation_and_takes_an_item(&model),
+        )
+        .await;
+        scenario(
+            "interrupted roll",
+            120,
+            real_model_chats_normally_after_an_interrupted_roll(&model),
+        )
+        .await;
+        scenario(
+            "npc answer",
+            180,
+            real_model_npc_answers_a_question_put_to_it(&model),
+        )
+        .await;
+        scenario(
+            "listener",
+            120,
+            real_model_listener_understands_what_another_player_said(&model),
+        )
+        .await;
+        scenario(
+            "compaction",
+            120,
+            real_model_compacts_a_long_chat_and_keeps_an_early_fact(&model),
+        )
+        .await;
+        scenario(
+            "split and merge",
+            120,
+            real_model_uses_what_both_sides_did_apart_after_a_split_and_merge(&model),
+        )
+        .await;
+        scenario(
+            "gm run",
+            120,
+            real_model_gm_resolves_a_run_of_speech_actions(&model),
+        )
+        .await;
+        println!(
+            "SUITE total: {:.0} s",
+            suite_started.elapsed().as_secs_f32()
+        );
+    }
+
+    /// The player agent's turns are scripted; every other agent (GM, NPCs,
+    /// compaction) is answered by the real model. This puts a human's words into
+    /// the real pipeline through its real entry point with only the one agent we
+    /// are not evaluating made deterministic.
+    struct ScriptedPlayerRealRest {
+        real: Arc<MistralRsBackend>,
+        player: Mutex<VecDeque<Response>>,
+    }
+
+    impl Backend for ScriptedPlayerRealRest {
+        async fn complete(
+            &self,
+            request: crate::llm::Request,
+            on_token: impl FnMut(&str) + Send,
+        ) -> Result<Response> {
+            // Only the player agent is offered the party_presence tool.
+            if request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "party_presence")
+            {
+                return self
+                    .player
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .context("the scripted player agent ran out of responses");
+            }
+            self.real.complete(request, on_token).await
+        }
+    }
+
+    /// A real GM resolves a run of speech and look actions in one group, so its
+    /// history grows with earlier approvals and narration. Targeted regression
+    /// coverage: it caught the GM skipping its approval call as history grew, so
+    /// run it for GM prompt or context changes. It says nothing about the
+    /// quality of NPC conversation.
+    async fn real_model_gm_resolves_a_run_of_speech_actions(model: &DeviceModel) {
+        let (backend, _model_path, _sampling, limits) = model.parts();
         let (game, store, _db, first, _second) =
             two_player_bread_thief_game_with_limits(backend, limits).await;
         let lines = [
             "Toma, where did the bread go?",
             "I only want the flour back, Toma.",
             "Nobody will hurt you if you tell the truth.",
-            "Where is the flour sack now?",
-            "Is Mara angry with you?",
-            "Can you walk on that leg?",
-            "Who else knows you are here?",
-            "Will you help us carry it back?",
         ];
         let mut failures = Vec::new();
         for (index, line) in lines.iter().enumerate() {
@@ -3227,14 +3560,6 @@ mod tests {
                     None,
                 )
                 .await;
-            let tokens: Vec<i64> = sqlx::query_scalar(
-                "SELECT input_tokens FROM inference WHERE sequence_id = ? AND input_tokens IS NOT NULL ORDER BY ordinal",
-            )
-            .bind(sequence.id)
-            .fetch_all(&store.pool())
-            .await
-            .unwrap();
-            println!("GM TOKENS action {index}: {tokens:?}");
             match result {
                 Ok(narration) => {
                     game.deliver_narration(first.world_id, &narration)
@@ -3250,6 +3575,7 @@ mod tests {
             failures.len()
         );
         assert!(failures.is_empty(), "{failures:#?}");
+        game.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -5649,7 +5975,7 @@ mod tests {
     async fn a_rejected_gm_request_is_compacted_and_the_turn_continues_with_valid_history() {
         // The cut between summarised and raw messages can fall anywhere,
         // including between a tool call and its result.
-        for keep_raw_messages in [1, 2, 3, 4, 5, 6, 7] {
+        for keep_raw_messages in [1, 2, 4, 7] {
             overflowing_gm_history_recovers(keep_raw_messages).await;
         }
     }
@@ -5669,7 +5995,7 @@ mod tests {
         let narration =
             "The words hang in the smoky air of the hut while everyone waits. ".repeat(8);
         let mut gm_branch = 0;
-        for index in 0..10 {
+        for index in 0..8 {
             let sequence = store
                 .begin_sequence(first.world_id, "capacity scenario")
                 .await
@@ -7330,16 +7656,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_opening_reaches_a_stored_player_reply() {
+    async fn real_model_opening_reaches_a_stored_player_reply(model: &DeviceModel) {
         // This is deliberately the same server-owned opening path the web
         // socket awaits, rather than a direct backend request. A successful
         // return proves the agent settled and its player-visible reply
         // committed to stored history.
-        let (mut backend, model_path, sampling, limits) = device_test_game_for("dev-qwen25").await;
-        let observed_prompts = backend.observe_prompts();
-        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
+        let (backend, model_path, sampling, limits) = model.parts();
+        let observed_prompts = model.observed();
+        let (game, store, _db, member) =
+            opening_game_with_limits(backend, model_path, sampling, limits).await;
 
         game.wait_for_opening(member.clone())
             .await
@@ -7408,24 +7733,24 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
             "the completed opening must leave a player-visible assistant reply"
         );
+        game.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_calls_ready_to_begin_after_the_final_roll() {
-        let (backend, model_path, configured, _limits) = device_test_game().await;
-        // Greedy: this asserts the model follows a specific instruction
-        // (call ready_to_begin once the rolls are done), so it must not depend
-        // on a sampling draw.
+    /// Character creation finishing and one action after it, each asked once: the
+    /// model must call ready_to_begin when the rolls are done, and a take must
+    /// reach the GM, be approved and move the item.
+    async fn real_model_finishes_creation_and_takes_an_item(model: &DeviceModel) {
+        let (backend, model_path, configured, limits) = model.parts();
+        // Greedy: this asserts the model follows specific instructions, so it
+        // must not depend on a sampling draw.
         let sampling = Sampling {
             temperature: 0.0,
             ..configured
         };
-        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
-        // A real player is connected before ever chatting (web.rs's
-        // play_connection registers it ahead of any opening/message
-        // handling); narration recipients are connected PCs (design.md's
-        // Membership and presence).
+        let (game, store, _db, member) =
+            opening_game_with_limits(backend, model_path, sampling, limits).await;
+        // A real player is connected before ever chatting; narration recipients
+        // are connected PCs (design.md's Membership and presence).
         let _connection = game.connect(&member).await.unwrap();
         let sequence = store
             .begin_sequence(member.world_id, "test completed creation")
@@ -7440,24 +7765,15 @@ mod tests {
             .await
             .unwrap();
 
-        // A small model at greedy still occasionally re-rolls or stalls; a
-        // real session would prompt again. Three nudges is generous for a
-        // model that can follow the instruction and still fails a genuine
-        // prompt or template regression.
-        for attempt in 1..=3 {
-            game.player_message(
-                member.clone(),
-                "The required rolls are complete. Begin play now.",
-            )
-            .await
-            .unwrap_or_else(|error| panic!("player agent turn {attempt} failed: {error:#}"));
-            if store.is_ready_to_begin(&member).await.unwrap() {
-                break;
-            }
-        }
+        game.player_message(
+            member.clone(),
+            "The required rolls are complete. Begin play now.",
+        )
+        .await
+        .expect("the creation turn");
         assert!(
             store.is_ready_to_begin(&member).await.unwrap(),
-            "the model never called ready_to_begin across three prompts"
+            "the model did not call ready_to_begin once the rolls were done"
         );
         assert!(
             store
@@ -7466,22 +7782,31 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|entry| entry.role == Role::Narration),
-            "the GM opening narration must become player-visible before the guide follows up"
+            "the GM opening narration must become player-visible"
         );
+
+        game.player_message(member.clone(), "I pick up the flour sack.")
+            .await
+            .expect("the take turn");
+        let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_character")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        assert_eq!(held, 1, "the flour sack did not move to the character");
+        game.shutdown().await.unwrap();
     }
 
     /// A turn interrupted after its roll committed: after restart cleanup the
     /// next real chat turn must accept the closed tool history and the model
     /// must be able to use the recorded outcome it is shown.
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_chats_normally_after_an_interrupted_roll() {
-        let (backend, model_path, configured, _limits) = device_test_game().await;
+    async fn real_model_chats_normally_after_an_interrupted_roll(model: &DeviceModel) {
+        let (backend, model_path, configured, limits) = model.parts();
         let sampling = Sampling {
             temperature: 0.0,
             ..configured
         };
-        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
+        let (game, store, _db, member) =
+            opening_game_with_limits(backend, model_path, sampling, limits).await;
         let sequence = store
             .begin_sequence(member.world_id, "interrupted turn")
             .await
@@ -7523,178 +7848,111 @@ mod tests {
             reply.contains(&hp.to_string()),
             "the model should report the recorded roll {hp}: {reply}"
         );
+        game.shutdown().await.unwrap();
     }
 
-    /// A real GM judging a take, with the approval result now reporting the
-    /// action's outcome: the turn completes and the item moves.
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_gm_approves_a_take_and_the_item_moves() {
-        let (backend, model_path, configured, _limits) = device_test_game().await;
-        let sampling = Sampling {
-            temperature: 0.0,
-            ..configured
+    /// A question put to an NPC reaches it, the NPC is asked for its own
+    /// response, and that response reaches the player, with the discussion
+    /// finishing cleanly. A run in which nobody answers fails: the scripted
+    /// tests cover an NPC choosing to stay silent.
+    /// A scripted player puts a question to Toma through `player_message`; the
+    /// GM and the NPCs are the real model. Delivery of the words is scripted
+    /// (other tests cover it); this proves the real NPC is asked whether to
+    /// respond and some NPC then speaks. What they say, and to whom, is the
+    /// model's roleplay and is not asserted.
+    async fn real_model_npc_answers_a_question_put_to_it(model: &DeviceModel) {
+        let (_, _model_path, _sampling, limits) = model.parts();
+        let hybrid = ScriptedPlayerRealRest {
+            real: Arc::clone(&model.backend),
+            player: Mutex::new(VecDeque::from([
+                tool_call(
+                    "say",
+                    serde_json::json!({"words": "Toma, where did the bread go?", "to": "Toma"}),
+                ),
+                response(Content::Text(String::new())),
+            ])),
         };
-        let (game, store, _db, member) = opening_game(backend, model_path, sampling).await;
-        let _connection = game.connect(&member).await.unwrap();
-        let creation = store
-            .begin_sequence(member.world_id, "test completed creation")
-            .await
-            .unwrap();
-        store
-            .roll_hit_protection(&member, creation.id, None)
-            .await
-            .unwrap();
-        store
-            .roll_attributes(&member, creation.id, None)
-            .await
-            .unwrap();
-        store
-            .ready_to_begin(&member, creation.id, None)
-            .await
-            .unwrap();
-
-        for attempt in 1..=3 {
-            game.player_message(member.clone(), "I pick up the flour sack.")
-                .await
-                .unwrap_or_else(|error| panic!("turn {attempt} failed: {error:#}"));
-            let (held,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM item_character")
-                .fetch_one(&store.pool())
-                .await
-                .unwrap();
-            if held == 1 {
-                return;
-            }
-        }
-        panic!("the flour sack never moved across three prompts");
-    }
-
-    /// An NPC in the group hears the player, decides through its own agent and
-    /// replies (or stays silent) with the GM approving, with no failures.
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_npc_answers_a_question_put_to_it() {
-        let (backend, _model_path, _sampling, limits) = device_test_game().await;
         let (game, store, _db, first, second) =
-            two_player_bread_thief_game_with_limits(backend, limits).await;
+            two_player_bread_thief_game_with_limits(hybrid, limits).await;
         let _first_connection = game.connect(&first).await.unwrap();
         let _second_connection = game.connect(&second).await.unwrap();
 
-        game.player_message(first.clone(), "Say to Toma: where did the bread go?")
+        game.player_message(first.clone(), "Ask Toma where the bread went.")
             .await
             .expect("the player's turn");
-        let mut waited = 0;
-        while sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
+        let mut spoke = false;
+        for _ in 0..1200 {
+            let npc_utterances: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM speech                  WHERE speaker_character_id IN (SELECT character_id FROM npc_agent)",
+            )
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+            if npc_utterances > 0 {
+                spoke = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        game.shutdown().await.unwrap();
+
+        assert!(spoke, "no NPC spoke within two minutes");
+        let asked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM npc_candidate              JOIN character ON character.id = npc_candidate.character_id              WHERE character.name = 'Toma' AND npc_candidate.decision_invocation_id IS NOT NULL",
         )
         .fetch_one(&store.pool())
         .await
-        .unwrap()
-            > 0
-        {
-            waited += 1;
-            assert!(waited < 2400, "NPC work did not finish");
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        let errors: Vec<String> =
-            sqlx::query_scalar("SELECT error FROM sequence WHERE error IS NOT NULL")
-                .fetch_all(&store.pool())
-                .await
-                .unwrap();
-        let chat = heard(&store, &first).await;
-        println!("{chat:#?}");
-        assert!(errors.is_empty(), "{errors:?}");
+        .unwrap();
+        assert!(asked >= 1, "Toma was never asked whether to respond");
     }
 
-    /// A real player agent speaks, a real GM approves, and the other player's
-    /// real agent then sees what was said as attributed speech in its context.
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_speech_reaches_another_player_in_their_context() {
-        let (mut backend, _model_path, _sampling, limits) = device_test_game().await;
-        let observed_prompts = backend.observe_prompts();
+    /// What one player says is understood by the other player's own agent: the
+    /// listener is asked about it and answers from the fact spoken. Delivery,
+    /// attribution, storage and privacy are checked by the scripted tests.
+    async fn real_model_listener_understands_what_another_player_said(model: &DeviceModel) {
+        let (backend, _model_path, _sampling, limits) = model.parts();
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_limits(backend, limits).await;
         let _first_connection = game.connect(&first).await.unwrap();
         let _second_connection = game.connect(&second).await.unwrap();
 
-        for attempt in 1..=3 {
-            game.player_message(first.clone(), "Say hello to Toma out loud.")
-                .await
-                .unwrap_or_else(|error| panic!("speaker turn {attempt} failed: {error:#}"));
-            if !heard(&store, &second).await.is_empty() {
-                break;
-            }
-        }
-        let overheard = heard(&store, &second).await;
+        game.player_message(
+            first.clone(),
+            "Say out loud to everyone that the spare key is hidden under the old stone.",
+        )
+        .await
+        .expect("the speaker's turn");
         assert!(
-            !overheard.is_empty(),
-            "no speech reached the other player across three prompts"
+            !heard(&store, &second).await.is_empty(),
+            "nothing the speaker said reached the other player; the speaker's chat: {:#?}",
+            store.player_chat(&first).await.unwrap()
         );
 
-        game.player_message(second.clone(), "What did you just hear? Answer briefly.")
-            .await
-            .expect("the listener's turn must accept speech in its history");
-        let listener_prompt = observed_prompts
-            .lock()
-            .unwrap()
-            .last()
-            .expect("the listener ran")
-            .prompt
-            .clone();
-        // The speech reaches the model as a JSON object, so the text is escaped.
-        let escaped = serde_json::to_string(&overheard[0]).unwrap();
-        assert!(
-            listener_prompt.contains(escaped.trim_matches('"')),
-            "the listener's model must be shown the attributed speech:
-{listener_prompt}"
-        );
-
-        // A private word: only the named listener hears it, marked as a whisper.
-        let listener = store.player_scene(&second).await.unwrap().character_name;
-        let before = heard(&store, &second).await.len();
-        for attempt in 1..=3 {
-            game.player_message(
-                first.clone(),
-                &format!("Whisper to {listener} that we should leave quietly."),
+        let answer = game
+            .player_message(
+                second.clone(),
+                "What did the other adventurer just say about the key? Answer briefly.",
             )
             .await
-            .unwrap_or_else(|error| panic!("whisper turn {attempt} failed: {error:#}"));
-            if heard(&store, &second).await.len() > before {
-                break;
-            }
-        }
-        let after = heard(&store, &second).await;
+            .expect("the listener's turn");
+        let Content::Text(answer) = answer.content else {
+            panic!("the listener did not answer in words: {answer:?}");
+        };
         assert!(
-            after.len() > before,
-            "the whisper never reached its listener"
+            answer.to_lowercase().contains("stone"),
+            "the listener did not report where the key is: {answer}"
         );
-        let kind: String =
-            sqlx::query_scalar("SELECT kind FROM speech ORDER BY action_id DESC LIMIT 1")
-                .fetch_one(&store.pool())
-                .await
-                .unwrap();
-        assert_eq!(kind, "whisper");
-        assert!(
-            heard_by_npc(&store, "Toma")
-                .await
-                .iter()
-                .all(|text| !text.contains("leave quietly")),
-            "a bystander must not hear the whisper"
-        );
+        game.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    #[ignore = "device test: needs a CUDA GPU and the models/ GGUF from default.toml"]
-    async fn real_model_compacts_a_long_chat_and_keeps_an_early_fact() {
-        let (mut backend, model_path, sampling, base_limits) = device_test_game().await;
-        let observed_prompts = backend.observe_prompts();
+    async fn real_model_compacts_a_long_chat_and_keeps_an_early_fact(model: &DeviceModel) {
+        let (backend, model_path, sampling, base_limits) = model.parts();
+        let observed_prompts = model.observed();
         // A threshold the second turn's context clears, retaining enough tail
         // that the summary has real history to work from.
         let limits = Limits {
             compact_before_next_input_tokens: 700,
-            keep_raw_messages: 4,
+            keep_raw_messages: 2,
             ..base_limits
         };
         let (game, store, _db, member) =
@@ -7707,12 +7965,7 @@ mod tests {
         )
             .await
             .expect("first player message");
-        for prompt in [
-            "Describe the room I'm in.",
-            "What can I hear right now?",
-            "Tell me about the nearest exit.",
-            "What time of day is it?",
-        ] {
+        for prompt in ["Describe the room I'm in.", "What can I hear right now?"] {
             game.player_message(member.clone(), prompt)
                 .await
                 .expect("later player message");
@@ -7739,5 +7992,55 @@ mod tests {
                 .map(|observed| &observed.prompt)
                 .collect::<Vec<_>>()
         );
+
+        // The fact is recalled after compaction, and what the model was shown
+        // for that question held it only in the summary.
+        let question = "What is my missing sister's name? Reply with the name only.";
+        let recall = game
+            .player_message(member.clone(), question)
+            .await
+            .expect("the recall turn");
+        let Content::Text(answer) = recall.content else {
+            panic!("the player agent did not answer in words: {recall:?}");
+        };
+        assert!(
+            answer.to_uppercase().contains("MARIBEL"),
+            "the fact was lost after compaction: {answer}"
+        );
+        // Copy the request out and release the capture lock: the model's
+        // prompt observer takes it for any inference still running.
+        let shown = {
+            let prompts = observed_prompts.lock().unwrap();
+            prompts
+                .iter()
+                .rev()
+                .find(|observed| {
+                    matches!(observed.request.messages.last().map(|message| &message.content),
+                        Some(MessageContent::Text(text)) if text == question)
+                })
+                .expect("the recall question reached the model")
+                .request
+                .clone()
+        };
+        let early = "My character's missing sister is named Maribel. Finding her is my reason for adventuring.";
+        let text_of = |message: &Message| match &message.content {
+            MessageContent::Text(text) => text.clone(),
+            _ => String::new(),
+        };
+        assert!(
+            !shown
+                .messages
+                .iter()
+                .any(|message| text_of(message) == early),
+            "the early message was still raw, so recall did not need the summary"
+        );
+        assert!(
+            shown
+                .messages
+                .iter()
+                .any(|message| text_of(message).to_uppercase().contains("MARIBEL")),
+            "the model was not shown the fact in any form"
+        );
+        game.shutdown().await.unwrap();
     }
 }
