@@ -98,6 +98,8 @@ trying to further consolidate too.
   - What questions provide the strongest adversarial review of an open-ended RPG scenario before play?
   - What questions should a designer ask to uncover categorical flaws in a small, open-ended RPG scenario, especially flaws involving dominant solutions, hidden assumptions, incoherent motivations, irrelevant costs, gated information, weak consequences, and illusory choice?
   - How does the classic two-guards/two-doors logic puzzle work?
+  - What is the River Crossing Puzzle (Wolf, Goat, and Cabbage)?
+  - What is the solution to The Water Jug Measurement Puzzle with 5 and 3 litre jugs?
   - What are the key components that make a good, interesting and satisfying logic puzzle and how do people go about designing them?
   - Write a procedure to design something similar; would following it produce a similar result.
 
@@ -1028,13 +1030,15 @@ the case may be.
   errors, as it may affect future decisions. If rejecting, the GM must give a reason so that the caller may try something else.
 - InterventionCheck - called with an action ID and character(s) as arguments,
   who are then each requested if they wish to intervene before the character
-  makes this action. Specifically for when an action may be tentative. E.g. if
-  the situation implies the player may stop if requested. If NPCs are in no
-  position to prevent an action and the player has made it clear they're going
-  through with it then the GM would call Approve/Reject. The GM may call this
-  before approving actions. Depending on how reliable the GM is, we may tie it
-  explicitly to Approve and auto-deny if any character intervenes. Needs play
-  testing.
+  makes this action. Regardless of whether the action is committed (not
+  tentative) or not. E.g. if the situation implies the character may stop if
+  requested their agent should not set "committed" and the GM may reject the
+  action if another character intervenes. If characters are in no position to
+  prevent an action and the player has made it clear they're going through with
+  it then the GM would Approve the action and possibly Reject the reaction (e.g.
+  if it were an invalid physical attempt). The GM may call this before approving
+  actions. Depending on how reliable the GM is, we may tie it explicitly to
+  Approve and auto-deny if any character intervenes. Needs play testing.
 - Save - makes a character roll a given stat to pass a check, defend against
   something etc. For example when the player wants to look for something, the GM
   may make them save to find it. The save roll should take a very short string
