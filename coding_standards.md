@@ -152,3 +152,9 @@ Review before and after implementing.
 10. Do your tests test real project code? I.e. you're not reimplementing anything.
 11. Do your tests verify meaningful output and results? I.e. they are not verifying implementation details and are not just touching code for "coverage".
 12. Do you have a broad sampling of input data to pipeclean all the code paths, both common and edge cases?
+
+## Manual Mutation Testing
+
+A useful experiment is to break the code at random to see if tests catch it.
+Also to break behaviour without breaking tests and see how easy it is. Always
+review for practicality/usefulness before acting on the results.
