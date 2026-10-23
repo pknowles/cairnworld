@@ -103,6 +103,37 @@ pub(crate) fn test_scratch_dir() -> std::path::PathBuf {
         .join("tmp")
 }
 
+/// A scratch directory removed when dropped, including when its test fails, so
+/// failed runs do not leave files behind.
+#[cfg(test)]
+pub(crate) struct ScratchDir(std::path::PathBuf);
+
+#[cfg(test)]
+impl ScratchDir {
+    pub(crate) fn new(prefix: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = test_scratch_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("creating scratch directory");
+        Self(path)
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct TestDatabase {
     path: std::path::PathBuf,
@@ -6377,16 +6408,8 @@ mod tests {
     /// taken) must not be mistaken for an exited run by a concurrent one.
     #[test]
     fn claiming_a_run_directory_never_deletes_one_still_being_set_up() {
-        let root = super::test_scratch_dir().join(format!(
-            "cairnworld-claim-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let _cleanup = scopeguard_remove(root.clone());
+        let scratch = super::ScratchDir::new("cairnworld-claim-test");
+        let root = scratch.path().to_path_buf();
         // A creator mid-setup holds the claim guard, as claim_run_directory does.
         let guard = std::fs::File::create(root.join(super::CLAIM_GUARD)).unwrap();
         guard.lock().unwrap();
@@ -6407,16 +6430,6 @@ mod tests {
         drop(guard);
         let (claimed, _lock) = claim.join().unwrap();
         assert!(setting_up.exists() && claimed.exists());
-    }
-
-    struct RemoveOnDrop(std::path::PathBuf);
-    impl Drop for RemoveOnDrop {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    fn scopeguard_remove(path: std::path::PathBuf) -> RemoveOnDrop {
-        RemoveOnDrop(path)
     }
 
     fn database() -> super::TestDatabase {

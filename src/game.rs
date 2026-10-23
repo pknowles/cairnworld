@@ -3987,10 +3987,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unusable_prompt_file_fails_the_opening_turn_visibly_instead_of_leaving_it_open() {
-        let directory = crate::store::test_scratch_dir()
-            .join(format!("prompts-opening-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("prompts.toml");
+        let scratch = crate::store::ScratchDir::new("prompts-opening");
+        let path = scratch.path().join("prompts.toml");
         let original = std::fs::read_to_string("prompts.toml").unwrap();
         // Describe a roll tool that does not exist so the creation tools cannot be built.
         std::fs::write(
@@ -4021,7 +4019,6 @@ mod tests {
                 .await
                 .unwrap();
         assert!(error.is_some_and(|error| error.contains("roll_hit_protection")));
-        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test]

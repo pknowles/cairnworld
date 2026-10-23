@@ -264,10 +264,8 @@ mod tests {
 
     #[test]
     fn an_edit_to_the_file_applies_to_the_next_request_and_a_mistake_names_itself() {
-        let directory =
-            crate::store::test_scratch_dir().join(format!("prompts-test-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("prompts.toml");
+        let scratch = crate::store::ScratchDir::new("prompts-test");
+        let path = scratch.path().join("prompts.toml");
         let original = std::fs::read_to_string(DEFAULT_PATH).unwrap();
         std::fs::write(&path, &original).unwrap();
         let before = load(&path).unwrap().npc.role.clone();
@@ -305,19 +303,15 @@ rolle = \"typo\"",
         .unwrap();
         let error = format!("{:#}", load(&path).unwrap_err());
         assert!(error.contains("rolle"), "{error}");
-        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
     fn a_byte_order_mark_from_an_editor_is_ignored() {
-        let directory =
-            crate::store::test_scratch_dir().join(format!("prompts-bom-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("prompts.toml");
+        let scratch = crate::store::ScratchDir::new("prompts-bom");
+        let path = scratch.path().join("prompts.toml");
         let original = std::fs::read_to_string(DEFAULT_PATH).unwrap();
         std::fs::write(&path, format!("\u{feff}{original}")).unwrap();
         load(&path).unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
