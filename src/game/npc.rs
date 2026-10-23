@@ -27,11 +27,12 @@ where
     /// discussion, announced to the players it concerns and logged; it is
     /// never retried, and the world stays usable.
     pub(super) async fn run_npc_step_logged(self: &Arc<Self>, world: &Arc<World>, step: NpcStep) {
-        let round = match &step {
-            NpcStep::Decide { round, .. }
-            | NpcStep::Refresh(round)
-            | NpcStep::Select(round)
-            | NpcStep::Execute(round) => *round,
+        let round = *step.round();
+        // An Interrupt that arrived since this step was chosen holds it back;
+        // it stays pending and the worker picks it up after Never mind.
+        let Some(_activity) = world.begin_npc(round.group_id, matches!(step, NpcStep::Execute(_)))
+        else {
+            return;
         };
         let result = match step {
             NpcStep::Refresh(round) => self.store.refresh_round(&round).await,

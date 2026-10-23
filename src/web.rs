@@ -1243,6 +1243,14 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
         user_id = member.user_id,
         "player chat is ready for input"
     );
+    // The turn this connection submitted, polled alongside the socket so a
+    // control event (Interrupt) is read while the turn is still running.
+    let mut turn: Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::llm::Response>> + Send>>,
+    > = None;
+    let mut control_changes = game.control_changes(member)?;
+    let mut shown_control = game.control_view(member).await?;
+    send_event(socket, &control_event(shown_control)).await?;
     loop {
         tokio::select! {
             // Checked between messages: a turn this connection already
@@ -1259,7 +1267,7 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                 let WebSocketMessage::Text(text) = incoming.context("receiving browser websocket message")? else {
                     continue;
                 };
-                let ClientEvent::Message { text } = match serde_json::from_str(&text) {
+                let event = match serde_json::from_str(&text) {
                     Ok(event) => event,
                     Err(error) => {
                         send_event(socket, &ServerEvent::Error {
@@ -1268,6 +1276,27 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                         continue;
                     }
                 };
+                let text = match event {
+                    ClientEvent::Interrupt => {
+                        if let Err(error) = game.interrupt(member).await {
+                            send_event(socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
+                        }
+                        continue;
+                    }
+                    ClientEvent::NeverMind => {
+                        if let Err(error) = game.never_mind(member) {
+                            send_event(socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
+                        }
+                        continue;
+                    }
+                    ClientEvent::Message { text } => text,
+                };
+                if turn.is_some() {
+                    send_event(socket, &ServerEvent::Error {
+                        message: "wait for the current reply before sending another message".into(),
+                    }).await?;
+                    continue;
+                }
                 if text.trim().is_empty() {
                     send_event(socket, &ServerEvent::Error {
                         message: "browser chat message cannot be empty".into(),
@@ -1278,7 +1307,11 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                     activity: ChatActivity::Responding,
                 }).await?;
                 send_event(socket, &ServerEvent::CanAct { value: false }).await?;
-                let result = game.player_message(member.clone(), &text).await;
+                let (game, member) = (Arc::clone(game), member.clone());
+                turn = Some(Box::pin(async move { game.player_message(member, &text).await }));
+            }
+            result = async { turn.as_mut().expect("guarded by the branch condition").await }, if turn.is_some() => {
+                turn = None;
                 cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
                 if let Err(error) = result {
                     // A recorded failure was just delivered from storage with the
@@ -1290,10 +1323,18 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                     if !delivered {
                         send_event(socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
                     }
-                    send_event(socket, &ServerEvent::CanAct { value: true }).await?;
-                    continue;
                 }
                 send_event(socket, &ServerEvent::CanAct { value: true }).await?;
+            }
+            changed = control_changes.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                let view = game.control_view(member).await?;
+                if view != shown_control {
+                    shown_control = view;
+                    send_event(socket, &control_event(view)).await?;
+                }
             }
             narration = broadcasts.recv() => match narration {
                 Ok(change) => {
@@ -1410,6 +1451,13 @@ async fn send_chat_failure<B: Backend + Send + Sync + 'static>(
         .await?;
     }
     Ok(())
+}
+
+fn control_event(view: crate::world::ControlView) -> ServerEvent {
+    ServerEvent::Control {
+        own_hold: view.own_hold,
+        paused: view.paused,
+    }
 }
 
 async fn send_event(socket: &mut WebSocket, event: &ServerEvent) -> Result<()> {
@@ -2330,6 +2378,8 @@ mod tests {
             "check_world_detail.cjs",
             "check_presence_chat.cjs",
             "check_failed_turn_chat.cjs",
+            "check_interrupt_chat.cjs",
+            "check_interrupt_server.cjs",
             // Last: it stops the fixture's chat sockets for good.
             "check_shutdown_chat.cjs",
         ] {

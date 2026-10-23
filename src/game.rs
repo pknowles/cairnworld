@@ -187,6 +187,54 @@ where
         World::get(&self.worlds, id)
     }
 
+    /// Drop holds whose character has left the group they were taken in, or
+    /// whose group is gone.
+    async fn drop_stale_holds(store: &Store, world: &World) -> Result<()> {
+        let mut stale = Vec::new();
+        for (group_id, character_id) in world.holds() {
+            if store.character_group_id(character_id).await.ok() != Some(group_id) {
+                stale.push((group_id, character_id));
+            }
+        }
+        world.drop_holds(&stale);
+        Ok(())
+    }
+
+    /// Interrupt: pause future NPC work in the character's group while the
+    /// player types. Accepted even during the character's own turn; nothing
+    /// running is cancelled.
+    pub async fn interrupt(&self, member: &PlayerAgent) -> Result<()> {
+        ensure!(
+            !*self.stopping.borrow(),
+            "world {} is no longer accepting input because the server is stopping",
+            member.world_id
+        );
+        let world = self.world(member.world_id)?;
+        let group_id = self.store.character_group_id(member.character_id).await?;
+        world.hold(group_id, member.character_id);
+        Ok(())
+    }
+
+    /// Never mind: release this character's hold. It runs no inference, and
+    /// without a hold it does nothing.
+    pub fn never_mind(&self, member: &PlayerAgent) -> Result<()> {
+        self.world(member.world_id)?.release(member.character_id);
+        Ok(())
+    }
+
+    /// What this player's controls show now.
+    pub async fn control_view(&self, member: &PlayerAgent) -> Result<world::ControlView> {
+        let group_id = self.store.character_group_id(member.character_id).await?;
+        Ok(self
+            .world(member.world_id)?
+            .control_view(group_id, member.character_id))
+    }
+
+    /// Wakes whenever any player's controls in this world may have changed.
+    pub fn control_changes(&self, member: &PlayerAgent) -> Result<watch::Receiver<u64>> {
+        Ok(self.world(member.world_id)?.control_changes())
+    }
+
     /// Queue a player message behind all earlier events in this world.
     pub async fn player_message(
         self: &Arc<Self>,
@@ -195,16 +243,29 @@ where
     ) -> Result<Response> {
         let world = self.world(member.world_id)?;
         let (reply, receive) = oneshot::channel();
-        self.admit(
-            &world,
+        // Sending queues the message and releases this character's pause hold
+        // in one step, so NPC work cannot overtake the input.
+        ensure!(
+            !*self.stopping.borrow(),
+            "world {} is no longer accepting input because the server is stopping",
+            world.id
+        );
+        let permit = world
+            .sender
+            .reserve()
+            .await
+            .with_context(|| format!("world {} is not accepting input", world.id))
+            .context("queueing player message")?;
+        let character_id = member.character_id;
+        world.send_releasing(
+            permit,
             WorldEvent::PlayerMessage {
                 member,
                 text: text.to_string(),
                 reply,
             },
-        )
-        .await
-        .context("queueing player message")?;
+            character_id,
+        );
         receive
             .await
             .context("world stopped processing player message")?
@@ -353,6 +414,7 @@ where
             presence.connections.remove(&member.character_id);
             presence.changed.insert(member.character_id);
             world.changed.notify_one();
+            world.release(member.character_id);
         } else {
             presence
                 .connections
@@ -393,12 +455,16 @@ where
             };
             // NPC replies are finite steps that wait their turn: foreground
             // input and presence handling above take priority, and none start
-            // once stopping.
+            // once stopping or while their group is held by an Interrupt.
             let mut npc_step = if draining {
                 None
             } else {
+                if let Err(error) = Self::drop_stale_holds(&store, &state).await {
+                    tracing::error!(world_id, error = %format!("{error:#}"), "checking pause holds");
+                    break;
+                }
                 match store.next_npc_step(world_id).await {
-                    Ok(step) => step,
+                    Ok(step) => step.filter(|step| !state.group_held(step.round().group_id)),
                     Err(error) => {
                         tracing::error!(world_id, error = %format!("{error:#}"), "looking for NPC work");
                         break;
@@ -445,6 +511,7 @@ where
                     }
                     continue;
                 }
+                _ = state.released.notified(), if !draining => continue,
                 event = deadline, if !draining => event,
                 event = events.recv() => match event { Some(event) => event, None => break },
                 _ = std::future::ready(()), if npc_step.is_some() => {
@@ -463,6 +530,13 @@ where
                     reply,
                 } => {
                     let character_id = member.character_id;
+                    let _foreground = match store.character_group_id(character_id).await {
+                        Ok(group_id) => Some(state.begin_foreground(group_id)),
+                        Err(error) => {
+                            tracing::error!(world_id, character_id, error = %format!("{error:#}"), "finding the group of a player message");
+                            None
+                        }
+                    };
                     let result = game.resolve_player_message(member, &text).await;
                     if let Err(error) = &result {
                         tracing::error!(world_id, character_id, error = %format!("{error:#}"), "processing player message");
@@ -471,6 +545,13 @@ where
                 }
                 WorldEvent::Enter { member, reply } => {
                     let character_id = member.character_id;
+                    let _foreground = match store.character_group_id(character_id).await {
+                        Ok(group_id) => Some(state.begin_foreground(group_id)),
+                        Err(error) => {
+                            tracing::error!(world_id, character_id, error = %format!("{error:#}"), "finding the group of a world entry");
+                            None
+                        }
+                    };
                     let result = game.resolve_enter(member).await;
                     if let Err(error) = &result {
                         tracing::error!(world_id, character_id, error = %format!("{error:#}"), "processing world entry");
@@ -5293,6 +5374,190 @@ mod tests {
             "two GM turns, each with a tool and a narration request"
         );
         assert_eq!(requests.len(), 12);
+    }
+
+    /// The scripted answers of a talk where Toma replies and Mara has nothing to
+    /// add, after the player's own turn.
+    fn toma_replies_then_the_talk_ends(speaker: &str) -> Vec<Response> {
+        let mut script = say_to_toma("Where is the flour?");
+        script.extend([
+            do_nothing(),
+            propose("In the hut.", speaker, 2),
+            approve(2),
+            response(Content::Text("The hut is quiet.".into())),
+            do_nothing(),
+        ]);
+        script
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_during_an_npc_decision_is_acknowledged_at_once_and_holds_the_rest() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        let (reached, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // Request 5 is the first NPC's decision, after the player's own four.
+        *scene.gate.lock().unwrap() = Some(Gate {
+            request: 5,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(toma_replies_then_the_talk_ends(&speaker));
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        reached.notified().await;
+
+        scene.game.interrupt(&scene.first).await.unwrap();
+        let view = scene.game.control_view(&scene.first).await.unwrap();
+        assert!(
+            view.own_hold && view.paused,
+            "a decision publishes nothing, so the pause is acknowledged at once: {view:?}"
+        );
+        release.notify_one();
+
+        // The decision in flight finishes; nothing else starts.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(requests_made(&scene), 5);
+        scene.game.never_mind(&scene.first).unwrap();
+        wait_for_npc_work(&scene).await;
+        assert!(
+            heard(&scene.store, &scene.first)
+                .await
+                .contains(&"In the hut.".to_string())
+        );
+        assert_eq!(requests_made(&scene), 9);
+    }
+
+    #[tokio::test]
+    async fn sending_releases_the_hold_and_npc_work_follows_the_input() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(toma_replies_then_the_talk_ends(&speaker));
+        scene.game.interrupt(&scene.first).await.unwrap();
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        // No Never mind: sending was enough.
+        wait_for_npc_work(&scene).await;
+        assert!(
+            heard(&scene.store, &scene.first)
+                .await
+                .contains(&"In the hut.".to_string())
+        );
+        assert!(
+            !scene
+                .game
+                .control_view(&scene.first)
+                .await
+                .unwrap()
+                .own_hold
+        );
+    }
+
+    #[tokio::test]
+    async fn never_mind_without_an_interrupt_changes_nothing() {
+        let scene = speech_scene().await;
+        let mut changes = scene.game.control_changes(&scene.first).unwrap();
+        changes.mark_unchanged();
+        scene.game.never_mind(&scene.first).unwrap();
+        assert!(!changes.has_changed().unwrap(), "nothing was released");
+        assert_eq!(
+            scene.game.control_view(&scene.first).await.unwrap(),
+            world::ControlView::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_during_the_players_own_turn_is_accepted_and_paused_after_it() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        let (reached, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // Request 2 is the GM judging the player's own speech.
+        *scene.gate.lock().unwrap() = Some(Gate {
+            request: 2,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(toma_replies_then_the_talk_ends(&speaker));
+        let speaking = {
+            let game = Arc::clone(&scene.game);
+            let member = scene.first.clone();
+            tokio::spawn(async move { game.player_message(member, "Ask Toma.").await })
+        };
+        reached.notified().await;
+
+        scene.game.interrupt(&scene.first).await.unwrap();
+        let during = scene.game.control_view(&scene.first).await.unwrap();
+        assert!(
+            during.own_hold && !during.paused,
+            "the hold is accepted at once but the turn is still running: {during:?}"
+        );
+
+        release.notify_one();
+        speaking.await.unwrap().unwrap();
+        let after = scene.game.control_view(&scene.first).await.unwrap();
+        assert!(
+            after.paused,
+            "once the turn unwinds the group is paused: {after:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(requests_made(&scene), 4, "no NPC work started while held");
+        scene.game.never_mind(&scene.first).unwrap();
+        wait_for_npc_work(&scene).await;
+    }
+
+    #[tokio::test]
+    async fn a_hold_ends_when_its_player_disconnects_and_others_keep_theirs() {
+        let scene = speech_scene().await;
+        let first = scene.game.connect(&scene.first).await.unwrap();
+        let _second = scene.game.connect(&scene.second).await.unwrap();
+        scene.game.interrupt(&scene.first).await.unwrap();
+        scene.game.interrupt(&scene.second).await.unwrap();
+        assert!(
+            scene
+                .game
+                .control_view(&scene.first)
+                .await
+                .unwrap()
+                .own_hold
+        );
+
+        scene.game.disconnect(&scene.first, first).await.unwrap();
+        assert!(
+            !scene
+                .game
+                .control_view(&scene.first)
+                .await
+                .unwrap()
+                .own_hold
+        );
+        let second = scene.game.control_view(&scene.second).await.unwrap();
+        assert!(
+            second.own_hold && second.paused,
+            "the other player's hold stands: {second:?}"
+        );
     }
 
     #[tokio::test]

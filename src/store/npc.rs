@@ -131,6 +131,17 @@ pub enum NpcStep {
     Execute(NpcRound),
 }
 
+impl NpcStep {
+    pub fn round(&self) -> &NpcRound {
+        match self {
+            Self::Decide { round, .. }
+            | Self::Refresh(round)
+            | Self::Select(round)
+            | Self::Execute(round) => round,
+        }
+    }
+}
+
 /// A started decision: its own sequence and invocation, claimed before inference.
 pub struct DecisionClaim {
     pub root_sequence_id: i64,

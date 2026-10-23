@@ -800,6 +800,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `tool_execution.status = 'rejected'`, flagged `tool_call_rejected` on the raw
   history entry with a red badge in Developer Mode, and every real-model device
   scenario fails if one occurred.
+- Player control (design.md NPC speech and response rounds): `World` owns live pause
+  holds per (group, character) and a watched worker activity (`world::Control`);
+  `Game::interrupt` / `never_mind` / `control_view` expose them. NPC steps do not start
+  in a held group; a step in flight finishes. A pause is reached at once during an NPC
+  decision (it publishes nothing) and after a running turn or NPC action unwinds.
+  Sending queues the message and releases the sender's hold together; a final
+  disconnect or leaving the group releases it too. Never mind without a hold does
+  nothing. The player-chat socket reads `interrupt` / `never_mind` while a turn runs and
+  reports `control { own_hold, paused }`; the page turns Interrupt into Never mind only
+  while the player holds a pause.
 - `game::tests::device_suite` (ignored) loads the CUDA model once (`DeviceModel`,
   shared by each scenario's `Game` through `SharedModel`) and runs the real-model
   scenarios from `mistralrs_backend::tests` and `game::tests` in turn, each with

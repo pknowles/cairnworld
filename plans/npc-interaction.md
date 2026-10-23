@@ -2,8 +2,9 @@
 
 Speech delivery, NPC response rounds, individual GM approval of tied replies,
 expressive authored speech, Developer Mode causal links, NPC response wording and
-the split, merge, access-loss, shutdown and crash scenarios exist. Open before
-player control: NPC restraint and natural stopping.
+the split, merge, access-loss, shutdown and crash scenarios exist, and so does player
+control (Interrupt and Never mind). Open: NPC restraint and natural stopping, then
+tentative/committed intervention.
 
 Evidence from real-model runs, read from the recorded contexts and replayed with
 variants:
@@ -27,7 +28,8 @@ variants:
   removed did an unaddressed Mara stay silent (5 of 6, first round only).
 
 Builds on implemented shutdown and failure handling; combat and InterventionCheck
-are not implemented.
+are not implemented. Pause holds for a character who loses access are released by
+their disconnect; a split or merge drops holds whose character left the group.
 
 ## Outcome and authority
 

@@ -24,7 +24,13 @@ use {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientEvent {
-    Message { text: String },
+    Message {
+        text: String,
+    },
+    /// Pause NPC work in the character's group while the player types.
+    Interrupt,
+    /// Release this player's own pause; does nothing without one.
+    NeverMind,
 }
 
 /// Player-visible events emitted by the server's player-chat transport.
@@ -51,6 +57,15 @@ pub enum ServerEvent {
     },
     CanAct {
         value: bool,
+    },
+    /// What the Interrupt / Never mind controls show.
+    Control {
+        /// This player interrupted and has not sent or said Never mind.
+        own_hold: bool,
+        /// NPCs are paused: some player holds the group and nothing that can
+        /// publish is still running. While `own_hold` and not `paused`, the
+        /// page shows that the pause is still being reached.
+        paused: bool,
     },
     Error {
         message: String,
@@ -2015,6 +2030,8 @@ pub fn PlayerChat(
     let entries = RwSignal::new(Vec::<ChatEntry>::new());
     let can_act = RwSignal::new(false);
     let activity = RwSignal::new(None::<ChatActivity>);
+    // (own_hold, paused) as the server last reported them.
+    let control = RwSignal::new((false, false));
     let disconnected = RwSignal::new(false);
     let chat = NodeRef::<leptos::html::Ol>::new();
     let inspect_scroll = NodeRef::<leptos::html::Aside>::new();
@@ -2054,11 +2071,19 @@ pub fn PlayerChat(
         world_id,
         character_id,
         after_message_id,
-        entries,
-        can_act,
-        activity,
-        disconnected,
+        ChatSignals {
+            entries,
+            can_act,
+            activity,
+            control,
+            disconnected,
+        },
     );
+
+    #[cfg(feature = "hydrate")]
+    let interrupt_socket = socket.clone();
+    #[cfg(feature = "hydrate")]
+    let never_mind_socket = socket.clone();
 
     #[cfg(feature = "hydrate")]
     connect_dev_events(
@@ -2198,6 +2223,17 @@ pub fn PlayerChat(
         }
     };
 
+    // Interrupt and Never mind are control messages with no model work; the
+    // server decides what they do and reports the result back.
+    let on_interrupt = move |_| {
+        #[cfg(feature = "hydrate")]
+        send_control(&interrupt_socket, entries, &ClientEvent::Interrupt);
+    };
+    let on_never_mind = move |_| {
+        #[cfg(feature = "hydrate")]
+        send_control(&never_mind_socket, entries, &ClientEvent::NeverMind);
+    };
+
     #[cfg(feature = "hydrate")]
     watch_inspect_clicks(chat, inspecting, developer_mode, dev_error);
 
@@ -2213,9 +2249,17 @@ pub fn PlayerChat(
                         }).collect_view()
                     }}
                 </ol>
-                {chat_status_line(activity, disconnected)}
+                {chat_status_line(activity, control, disconnected)}
                 <form id="message" class="join w-full" on:submit=on_submit>
                     <input class="input join-item min-w-0 flex-1" node_ref=input name="text" autocomplete="off" placeholder="Write a message…" disabled=move || disconnected.get()/>
+                    // Interrupt turns into Never mind while this player holds a pause,
+                    // and Never mind is not shown at all otherwise.
+                    <button id="interrupt" class="btn join-item" type="button"
+                        hidden=move || control.get().0 disabled=move || disconnected.get()
+                        on:click=on_interrupt>"Interrupt"</button>
+                    <button id="never-mind" class="btn join-item" type="button"
+                        hidden=move || !control.get().0 disabled=move || disconnected.get()
+                        on:click=on_never_mind>"Never mind"</button>
                     <button class="btn btn-primary join-item" type="submit" disabled=move || !can_act.get() || disconnected.get()>"Send"</button>
                 </form>
             </div>
@@ -2323,13 +2367,31 @@ fn watch_inspect_clicks(
 
 fn chat_status_line(
     activity: RwSignal<Option<ChatActivity>>,
+    control: RwSignal<(bool, bool)>,
     disconnected: RwSignal<bool>,
 ) -> AnyView {
     (move || {
+        let (own_hold, paused) = control.get();
         if disconnected.get() {
             view! {
                 <p id="chat-status" class="px-2 pb-2 text-sm text-base-content/60" role="status">
                     "Connection lost. Reload to reconnect."
+                </p>
+            }
+            .into_any()
+        } else if own_hold && !paused {
+            // The pause is accepted; something already running must finish first.
+            view! {
+                <p id="chat-status" class="flex items-center gap-2 px-2 pb-2 text-sm text-base-content/60" role="status">
+                    <span class="loading loading-dots loading-xs" aria-hidden="true"></span>
+                    "Pausing…"
+                </p>
+            }
+            .into_any()
+        } else if paused {
+            view! {
+                <p id="chat-status" class="px-2 pb-2 text-sm text-base-content/60" role="status">
+                    {if own_hold { "Paused. Send a message, or Never mind to resume." } else { "Paused by another player." }}
                 </p>
             }
             .into_any()
@@ -2447,16 +2509,32 @@ pub fn chat_role_name(role: ChatRole) -> &'static str {
     }
 }
 
+/// The page state the chat socket updates.
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Copy)]
+struct ChatSignals {
+    entries: RwSignal<Vec<ChatEntry>>,
+    can_act: RwSignal<bool>,
+    activity: RwSignal<Option<ChatActivity>>,
+    /// (own_hold, paused) as the server last reported them.
+    control: RwSignal<(bool, bool)>,
+    disconnected: RwSignal<bool>,
+}
+
 #[cfg(feature = "hydrate")]
 fn connect_player_chat(
     world_id: i64,
     character_id: i64,
     after_message_id: Option<i64>,
-    entries: RwSignal<Vec<ChatEntry>>,
-    can_act: RwSignal<bool>,
-    activity: RwSignal<Option<ChatActivity>>,
-    disconnected: RwSignal<bool>,
+    signals: ChatSignals,
 ) -> Rc<RefCell<Option<WebSocket>>> {
+    let ChatSignals {
+        entries,
+        can_act,
+        activity,
+        control,
+        disconnected,
+    } = signals;
     let socket = Rc::new(RefCell::new(None));
     let socket_for_connection = socket.clone();
     let Some(window) = web_sys::window() else {
@@ -2547,6 +2625,7 @@ fn connect_player_chat(
                     on_message_activity.set(None);
                 }
             }
+            Ok(ServerEvent::Control { own_hold, paused }) => control.set((own_hold, paused)),
             Ok(ServerEvent::Error { message }) => add_notice(on_message_entries, message),
             Ok(ServerEvent::Stopping) => add_notice(
                 on_message_entries,
@@ -2569,6 +2648,7 @@ fn connect_player_chat(
     let on_close = Closure::<dyn FnMut(Event)>::new(move |_| {
         on_close_can_act.set(false);
         on_close_activity.set(None);
+        control.set((false, false));
         on_close_disconnected.set(true);
     });
     websocket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
@@ -2576,6 +2656,32 @@ fn connect_player_chat(
 
     *socket_for_connection.borrow_mut() = Some(websocket);
     socket
+}
+
+/// Send a control message that carries no text. The server decides what it does.
+#[cfg(feature = "hydrate")]
+fn send_control(
+    socket: &Rc<RefCell<Option<WebSocket>>>,
+    entries: RwSignal<Vec<ChatEntry>>,
+    event: &ClientEvent,
+) {
+    let socket = socket.borrow();
+    let Some(socket) = socket.as_ref() else {
+        return;
+    };
+    if socket.ready_state() != WebSocket::OPEN {
+        return;
+    }
+    let sent = serde_json::to_string(event)
+        .map_err(|error| error.to_string())
+        .and_then(|event| {
+            socket
+                .send_with_str(&event)
+                .map_err(|error| format!("{error:?}"))
+        });
+    if let Err(error) = sent {
+        add_notice(entries, format!("Could not send the control: {error}"));
+    }
 }
 
 /// A submitted player message is shown immediately, then the server sends the
