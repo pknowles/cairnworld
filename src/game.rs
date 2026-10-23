@@ -3463,7 +3463,7 @@ mod tests {
         scenario(
             "gm run",
             120,
-            real_model_gm_resolves_a_run_of_speech_actions(&model),
+            real_model_gm_resolves_a_run_of_actions(&model),
         )
         .await;
         println!(
@@ -3543,14 +3543,16 @@ mod tests {
     /// coverage: it caught the GM skipping its approval call as history grew, so
     /// run it for GM prompt or context changes. It says nothing about the
     /// quality of NPC conversation.
-    async fn real_model_gm_resolves_a_run_of_speech_actions(model: &DeviceModel) {
+    async fn real_model_gm_resolves_a_run_of_actions(model: &DeviceModel) {
         let (backend, _model_path, _sampling, limits) = model.parts();
         let (game, store, _db, first, _second) =
             two_player_bread_thief_game_with_limits(backend, limits).await;
+        // The speech comes last: it starts NPC replies, which would otherwise
+        // compete for the model with the actions still to be judged.
         let lines = [
+            "Look closely at the rear window.",
+            "Look closely at the floor by the fire.",
             "Toma, where did the bread go?",
-            "I only want the flour back, Toma.",
-            "Nobody will hurt you if you tell the truth.",
         ];
         let mut failures = Vec::new();
         for (index, line) in lines.iter().enumerate() {
@@ -3558,8 +3560,7 @@ mod tests {
                 .begin_sequence(first.world_id, "real GM speech run")
                 .await
                 .unwrap();
-            // Every third action is the player examining the scene instead.
-            let (tool, arguments) = if index % 3 == 2 {
+            let (tool, arguments) = if index < 2 {
                 ("look", serde_json::json!({"description": line}).to_string())
             } else {
                 (
