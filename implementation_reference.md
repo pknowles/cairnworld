@@ -799,8 +799,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   shared by each scenario's `Game` through `SharedModel`) and runs the real-model
   scenarios from `mistralrs_backend::tests` and `game::tests` in turn, each with
   its own time limit and printed elapsed time, to keep the full test suite inside
-  the `AGENTS.md` five-minute budget. NPC scenarios use `ScriptedPlayerRealRest`:
-  the player agent is scripted, the GM and NPCs are the real model.
+  the `AGENTS.md` five-minute budget. NPC scenarios use `RealNpcsOnly`:
+  the player agent and the GM are scripted, the NPCs are the real model.
 - `src/lib.rs` exports Leptos's required islands `hydrate()` entrypoint, which
   initializes the island hydrator before the generated loader invokes each
   island. `npm run test:hydration` builds the frontend and explicitly runs

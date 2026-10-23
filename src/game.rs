@@ -3472,16 +3472,18 @@ mod tests {
         );
     }
 
-    /// The player agent's turns are scripted; every other agent (GM, NPCs,
-    /// compaction) is answered by the real model. This puts a human's words into
-    /// the real pipeline through its real entry point with only the one agent we
-    /// are not evaluating made deterministic.
-    struct ScriptedPlayerRealRest {
+    /// The player agent and the GM are scripted; the NPCs (and anything else
+    /// asked) are answered by the real model. The player's words enter the real
+    /// pipeline through its real entry point and the GM approves each presented
+    /// action and narrates it, so what is exercised is the NPCs' own decisions
+    /// without paying for the GM's narration (the GM has its own real-model
+    /// scenario).
+    struct RealNpcsOnly {
         real: Arc<MistralRsBackend>,
         player: Mutex<VecDeque<Response>>,
     }
 
-    impl Backend for ScriptedPlayerRealRest {
+    impl Backend for RealNpcsOnly {
         async fn complete(
             &self,
             request: crate::llm::Request,
@@ -3499,6 +3501,38 @@ mod tests {
                     .unwrap()
                     .pop_front()
                     .context("the scripted player agent ran out of responses");
+            }
+            // Only the GM is offered approve_action: approve the action it was
+            // just presented, then narrate once the tool result is back.
+            if request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "approve_action")
+            {
+                return Ok(
+                    match &request
+                        .messages
+                        .last()
+                        .context("an empty GM request")?
+                        .content
+                    {
+                        MessageContent::Text(text) => {
+                            let action_id: i64 = text
+                                .split("takes action ")
+                                .nth(1)
+                                .and_then(|rest| rest.split(':').next())
+                                .and_then(|id| id.trim().parse().ok())
+                                .with_context(|| {
+                                    format!("no action id in the GM request: {text}")
+                                })?;
+                            tool_call(
+                                "approve_action",
+                                serde_json::json!({"action_id": action_id}),
+                            )
+                        }
+                        _ => response(Content::Text("It is said.".to_string())),
+                    },
+                );
             }
             self.real.complete(request, on_token).await
         }
@@ -7793,6 +7827,15 @@ mod tests {
         game.player_message(member.clone(), "I pick up the flour sack.")
             .await
             .expect("the take turn");
+        // The flour sack is Toma's, so a GM may fairly refuse the take. What the
+        // real model must do is resolve the action with a tool, and Rust moves
+        // the item exactly when the GM approved (the transfer itself is covered
+        // by the scripted take test).
+        let approved: bool =
+            sqlx::query_scalar("SELECT approved FROM action ORDER BY id DESC LIMIT 1")
+                .fetch_one(&store.pool())
+                .await
+                .expect("the GM never resolved the take");
         let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_character")
             .fetch_one(&store.pool())
             .await
@@ -7831,15 +7874,6 @@ mod tests {
         let branch = store.agent_branch(member.agent_id).await.unwrap();
         let (_, executions) = crate::store::record_tool_batch_for_test(
             &store,
-        // The flour sack is Toma's, so a GM may fairly refuse the take. What the
-        // real model must do is resolve the action with a tool, and Rust moves
-        // the item exactly when the GM approved (the transfer itself is covered
-        // by the scripted take test).
-        let approved: bool =
-            sqlx::query_scalar("SELECT approved FROM action ORDER BY id DESC LIMIT 1")
-                .fetch_one(&store.pool())
-                .await
-                .expect("the GM never resolved the take");
             branch,
             sequence.id,
             &["roll_hit_protection"],
@@ -7874,14 +7908,14 @@ mod tests {
     /// finishing cleanly. A run in which nobody answers fails: the scripted
     /// tests cover an NPC choosing to stay silent.
     /// A scripted player puts a question to Toma through `player_message`; the
-    /// GM and the NPCs are the real model. Delivery of the words is scripted
-    /// (other tests cover it). The scenario is one where answering makes sense,
+    /// NPCs are the real model and the GM is scripted (it has its own real-model
+    /// scenario). Delivery of the words is scripted too (other tests cover it). The scenario is one where answering makes sense,
     /// and the player must hear an NPC's reply: NPCs only whispering to each
     /// other fails. This is one behavioural sample, not a guarantee, and the
     /// conversation is cut off at the first reply that reaches the player.
     async fn real_model_npc_answers_a_question_put_to_it(model: &DeviceModel) {
         let (_, _model_path, _sampling, limits) = model.parts();
-        let hybrid = ScriptedPlayerRealRest {
+        let hybrid = RealNpcsOnly {
             real: Arc::clone(&model.backend),
             player: Mutex::new(VecDeque::from([
                 tool_call(

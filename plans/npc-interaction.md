@@ -21,8 +21,6 @@ variants:
   repeating a whisper word for word. One discussion took 26 inferences, about six
   minutes, to settle. Only with the whisper tool removed did an unaddressed Mara
   stay silent (5 of 6, first round only).
-- Shutdown waits for the whole discussion, so a test that stops at the first
-  reply still waits for the chatter to settle.
 
 Builds on implemented shutdown and failure handling; combat and InterventionCheck
 are not implemented.
