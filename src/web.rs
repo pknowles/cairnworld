@@ -1740,6 +1740,21 @@ impl IntoResponse for WebError {
 mod tests {
     use super::*;
 
+    /// A Node script run for a browser check. Its temporary files (Chrome's
+    /// profile) go under the project's scratch directory, not the system's.
+    fn node_command(script: &str) -> tokio::process::Command {
+        let scratch = crate::store::test_scratch_dir().join("browser-tests");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let mut command = tokio::process::Command::new("node");
+        command
+            .arg(script)
+            .env("TMPDIR", &scratch)
+            .env("TEMP", &scratch)
+            .env("TMP", &scratch)
+            .kill_on_drop(true);
+        command
+    }
+
     /// Browser fixtures use the production page shell, GamePage, generated
     /// island loader, assets, and authorized inspection routes. Only model/chat
     /// events are scripted in Node, so these UI checks need neither GPU nor OAuth.
@@ -2383,10 +2398,8 @@ mod tests {
             // Last: it stops the fixture's chat sockets for good.
             "check_shutdown_chat.cjs",
         ] {
-            let output = tokio::process::Command::new("node")
-                .arg(format!("scripts/{script}"))
+            let output = node_command(&format!("scripts/{script}"))
                 .env("CAIRNWORLD_BROWSER_FIXTURE", &fixture)
-                .kill_on_drop(true)
                 .output()
                 .await
                 .unwrap();
@@ -2401,11 +2414,9 @@ mod tests {
         }
         let mut negatives = Vec::new();
         for kind in ["exception", "console", "resource"] {
-            let output = tokio::process::Command::new("node")
-                .arg("scripts/check_hydration.cjs")
+            let output = node_command("scripts/check_hydration.cjs")
                 .env("CAIRNWORLD_BROWSER_FIXTURE", &fixture)
                 .env("CAIRNWORLD_INJECT_BROWSER_ERROR", kind)
-                .kill_on_drop(true)
                 .output()
                 .await
                 .unwrap();
@@ -2690,10 +2701,8 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let output = tokio::process::Command::new("node")
-            .arg("scripts/check_real_model_developer_evidence.cjs")
+        let output = node_command("scripts/check_real_model_developer_evidence.cjs")
             .env("CAIRNWORLD_BROWSER_FIXTURE", fixture)
-            .kill_on_drop(true)
             .output()
             .await
             .unwrap();

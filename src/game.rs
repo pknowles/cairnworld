@@ -3987,8 +3987,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unusable_prompt_file_fails_the_opening_turn_visibly_instead_of_leaving_it_open() {
-        let directory =
-            std::env::temp_dir().join(format!("prompts-opening-{}", std::process::id()));
+        let directory = crate::store::test_scratch_dir()
+            .join(format!("prompts-opening-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("prompts.toml");
         let original = std::fs::read_to_string("prompts.toml").unwrap();
@@ -5526,6 +5526,84 @@ mod tests {
         assert_eq!(requests_made(&scene), 4, "no NPC work started while held");
         scene.game.never_mind(&scene.first).unwrap();
         wait_for_npc_work(&scene).await;
+    }
+
+    #[tokio::test]
+    async fn a_hold_does_not_survive_its_group_being_split() {
+        let scene = speech_scene().await;
+        let id_of = |name: &'static str| {
+            let pool = scene.store.pool();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT id FROM character WHERE name = ?")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
+        let group = scene
+            .store
+            .character_group_id(scene.first.character_id)
+            .await
+            .unwrap();
+        scene.responses.lock().unwrap().extend([
+            tool_call("look", serde_json::json!({"description": "the room"})),
+            response(Content::ToolCalls(vec![
+                ToolCall {
+                    id: "approve".into(),
+                    name: "approve_action".into(),
+                    arguments: serde_json::json!({"action_id": 1}).to_string(),
+                },
+                ToolCall {
+                    id: "split".into(),
+                    name: "split_group".into(),
+                    arguments: serde_json::json!({
+                        "group_id": group,
+                        "partitions": [
+                            {"character_ids": [scene.first.character_id, mara], "name": "outside", "description": "with Mara"},
+                            {"character_ids": [scene.second.character_id, toma], "name": "inside", "description": "with Toma"},
+                        ],
+                    })
+                    .to_string(),
+                },
+            ])),
+            response(Content::Text("The group parts.".into())),
+            response(Content::Text(String::new())),
+        ]);
+        scene.game.interrupt(&scene.first).await.unwrap();
+        let world = scene.game.world(scene.first.world_id).unwrap();
+        assert_eq!(world.holds(), [(group, scene.first.character_id)]);
+
+        // The other player splits the group, so the first player's character
+        // is no longer in the group they paused.
+        scene
+            .game
+            .player_message(scene.second.clone(), "Look around.")
+            .await
+            .unwrap();
+
+        let mut released = false;
+        for _ in 0..200 {
+            if world.holds().is_empty() {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(released, "the hold on the retired group is still kept");
+        let now = scene
+            .store
+            .character_group_id(scene.first.character_id)
+            .await
+            .unwrap();
+        assert_ne!(now, group, "the group was split");
+        assert!(!world.group_held(now), "the new group is not paused");
+        assert_eq!(
+            scene.game.control_view(&scene.first).await.unwrap(),
+            world::ControlView::default(),
+            "the controls show no pause"
+        );
     }
 
     #[tokio::test]

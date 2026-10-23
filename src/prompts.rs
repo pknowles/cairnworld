@@ -264,7 +264,8 @@ mod tests {
 
     #[test]
     fn an_edit_to_the_file_applies_to_the_next_request_and_a_mistake_names_itself() {
-        let directory = std::env::temp_dir().join(format!("prompts-test-{}", std::process::id()));
+        let directory =
+            crate::store::test_scratch_dir().join(format!("prompts-test-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("prompts.toml");
         let original = std::fs::read_to_string(DEFAULT_PATH).unwrap();
@@ -309,7 +310,8 @@ rolle = \"typo\"",
 
     #[test]
     fn a_byte_order_mark_from_an_editor_is_ignored() {
-        let directory = std::env::temp_dir().join(format!("prompts-bom-{}", std::process::id()));
+        let directory =
+            crate::store::test_scratch_dir().join(format!("prompts-bom-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("prompts.toml");
         let original = std::fs::read_to_string(DEFAULT_PATH).unwrap();

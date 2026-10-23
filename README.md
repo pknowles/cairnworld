@@ -90,7 +90,7 @@ checked-in landing artwork at `/media`.
 `npm run test:hydration` builds the frontend and runs Rust's browser-test fixture
 server with Playwright driving installed Chrome (`CHROME` can select its
 executable). It needs permission to listen on loopback. Test databases and browser
-profiles stay under `target/browser-tests`.
+profiles stay under `target/tmp` (the tests set it for the browser themselves).
 
 The checks use the production page renderer, generated hydration loader, and
 authorized inspection routes. They cover loading-page reload, chat interaction

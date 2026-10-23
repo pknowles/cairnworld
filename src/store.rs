@@ -93,6 +93,16 @@ fn inference_input_hash(request: &Request) -> Result<String> {
 /// `target/tmp` and holds a lock on it until it exits; the next run deletes
 /// every directory whose owner has exited, so at most one finished run's files
 /// remain and nothing can collide with a previous run's leftovers.
+/// Where tests keep their scratch files: inside the project, not the system
+/// temporary directory, so nothing depends on the environment and a reboot
+/// cannot delete a run's files.
+#[cfg(test)]
+pub(crate) fn test_scratch_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("tmp")
+}
+
 #[cfg(test)]
 pub(crate) struct TestDatabase {
     path: std::path::PathBuf,
@@ -107,14 +117,8 @@ impl TestDatabase {
         };
         static RUN_DIRECTORY: OnceLock<(std::path::PathBuf, std::fs::File)> = OnceLock::new();
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let (directory, _owner_lock) = RUN_DIRECTORY.get_or_init(|| {
-            claim_run_directory(
-                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("target")
-                    .join("tmp")
-                    .join("test-databases"),
-            )
-        });
+        let (directory, _owner_lock) = RUN_DIRECTORY
+            .get_or_init(|| claim_run_directory(&test_scratch_dir().join("test-databases")));
         Self {
             path: directory.join(format!(
                 "{prefix}-{}.sqlite",
@@ -6373,7 +6377,7 @@ mod tests {
     /// taken) must not be mistaken for an exited run by a concurrent one.
     #[test]
     fn claiming_a_run_directory_never_deletes_one_still_being_set_up() {
-        let root = std::env::temp_dir().join(format!(
+        let root = super::test_scratch_dir().join(format!(
             "cairnworld-claim-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
