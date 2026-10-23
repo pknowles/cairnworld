@@ -222,12 +222,27 @@ where
         Ok(self.world(member.world_id)?.hands_changed())
     }
 
-    /// Queue a player message behind all earlier events in this world.
+    /// Queue a player's message and wait for the turn's result.
+    #[cfg(test)]
     pub async fn player_message(
         self: &Arc<Self>,
         member: PlayerAgent,
         text: &str,
     ) -> Result<Response> {
+        self.queue_player_message(member, text)
+            .await?
+            .await
+            .context("world stopped processing player message")?
+    }
+
+    /// Queue a player message behind all earlier events in this world, returning
+    /// where the turn's result will arrive. From here the worker owns the turn: a caller that
+    /// stops waiting, such as a closed browser connection, cancels nothing.
+    pub async fn queue_player_message(
+        self: &Arc<Self>,
+        member: PlayerAgent,
+        text: &str,
+    ) -> Result<oneshot::Receiver<Result<Response>>> {
         let world = self.world(member.world_id)?;
         let (reply, receive) = oneshot::channel();
         // The message is queued first and the hands lowered after, so NPC work
@@ -252,9 +267,7 @@ where
         // The player has spoken, so every hand in the group comes down: the
         // sender's own, and anyone else's, since the conversation has moved on.
         world.lower_hands_in(group_id);
-        receive
-            .await
-            .context("world stopped processing player message")?
+        Ok(receive)
     }
 
     /// Queue opening a world behind all earlier events in that world.
@@ -5449,6 +5462,50 @@ mod tests {
                 .await
                 .contains(&"In the hut.".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn a_queued_message_runs_once_even_if_nobody_waits_for_it() {
+        let scene = speech_scene().await;
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(response(Content::Text("Hello.".into())));
+
+        // The caller, for instance a browser connection, goes away at once.
+        drop(
+            scene
+                .game
+                .queue_player_message(scene.first.clone(), "Sent and forgotten.")
+                .await
+                .unwrap(),
+        );
+
+        let mut finished = 0;
+        for _ in 0..200 {
+            finished = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sequence                  WHERE trigger = 'player message' AND finished_at IS NOT NULL",
+            )
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+            if finished > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(finished, 1, "the queued turn did not run");
+        let sent = scene
+            .store
+            .player_chat(&scene.first)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.text == "Sent and forgotten.")
+            .count();
+        assert_eq!(sent, 1, "the message was stored once");
+        assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
     }
 
     #[tokio::test]

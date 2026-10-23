@@ -64,7 +64,11 @@ async function submittedMessageSurvivesDisconnect(url) {
   const deadline = Date.now() + 5000;
   for (;;) {
     const page = await fetch(`${fixture.base}/browser/chat/0`, { headers: { cookie: fixture.cookie } });
-    if ((await page.text()).includes(text)) return;
+    const shown = (await page.text()).split(text).length - 1;
+    if (shown >= 1) {
+      assert.equal(shown, 1, "the message sent just before the connection closed ran more than once");
+      return;
+    }
     if (Date.now() > deadline) throw new Error("the message sent just before the connection closed was lost");
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

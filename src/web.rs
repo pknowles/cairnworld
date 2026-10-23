@@ -1243,10 +1243,11 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
         user_id = member.user_id,
         "player chat is ready for input"
     );
-    // The turn this connection submitted, awaited alongside the socket so a
-    // control event (Interrupt) is read while the turn is still running. It is
-    // its own task: an accepted turn never depends on this connection staying open.
-    let mut turn: Option<tokio::task::JoinHandle<Result<crate::llm::Response>>> = None;
+    // Where the result of the turn this connection submitted will arrive,
+    // awaited alongside the socket so a control event (Interrupt) is read while
+    // the turn runs. The world's worker owns the turn: closing this connection
+    // drops only the wait.
+    let mut turn: Option<tokio::sync::oneshot::Receiver<Result<crate::llm::Response>>> = None;
     let mut hands_changed = game.hands_changed(member)?;
     let mut shown_hand = game.hand_raised(member).await?;
     send_event(
@@ -1308,16 +1309,23 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                     }).await?;
                     continue;
                 }
-                send_event(socket, &ServerEvent::Activity {
-                    activity: ChatActivity::Responding,
-                }).await?;
-                send_event(socket, &ServerEvent::CanAct { value: false }).await?;
-                let (game, member) = (Arc::clone(game), member.clone());
-                turn = Some(tokio::spawn(async move { game.player_message(member, &text).await }));
+                match game.queue_player_message(member.clone(), &text).await {
+                    Ok(receiver) => {
+                        turn = Some(receiver);
+                        send_event(socket, &ServerEvent::Activity {
+                            activity: ChatActivity::Responding,
+                        }).await?;
+                        send_event(socket, &ServerEvent::CanAct { value: false }).await?;
+                    }
+                    Err(error) => {
+                        send_event(socket, &ServerEvent::Error { message: format!("{error:#}") }).await?;
+                        send_event(socket, &ServerEvent::CanAct { value: true }).await?;
+                    }
+                }
             }
             result = async { turn.as_mut().expect("guarded by the branch condition").await }, if turn.is_some() => {
                 turn = None;
-                let result = result.context("the player's turn task failed")?;
+                let result = result.context("world stopped processing player message")?;
                 cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
                 if let Err(error) = result {
                     // A recorded failure was just delivered from storage with the
