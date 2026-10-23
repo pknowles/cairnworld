@@ -1248,9 +1248,15 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
     let mut turn: Option<
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::llm::Response>> + Send>>,
     > = None;
-    let mut control_changes = game.control_changes(member)?;
-    let mut shown_control = game.control_view(member).await?;
-    send_event(socket, &control_event(shown_control)).await?;
+    let mut hands_changed = game.hands_changed(member)?;
+    let mut shown_hand = game.hand_raised(member).await?;
+    send_event(
+        socket,
+        &ServerEvent::Control {
+            hand_raised: shown_hand,
+        },
+    )
+    .await?;
     loop {
         tokio::select! {
             // Checked between messages: a turn this connection already
@@ -1326,14 +1332,14 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                 }
                 send_event(socket, &ServerEvent::CanAct { value: true }).await?;
             }
-            changed = control_changes.changed() => {
+            changed = hands_changed.changed() => {
                 if changed.is_err() {
                     return Ok(());
                 }
-                let view = game.control_view(member).await?;
-                if view != shown_control {
-                    shown_control = view;
-                    send_event(socket, &control_event(view)).await?;
+                let raised = game.hand_raised(member).await?;
+                if raised != shown_hand {
+                    shown_hand = raised;
+                    send_event(socket, &ServerEvent::Control { hand_raised: raised }).await?;
                 }
             }
             narration = broadcasts.recv() => match narration {
@@ -1451,13 +1457,6 @@ async fn send_chat_failure<B: Backend + Send + Sync + 'static>(
         .await?;
     }
     Ok(())
-}
-
-fn control_event(view: crate::world::ControlView) -> ServerEvent {
-    ServerEvent::Control {
-        own_hold: view.own_hold,
-        paused: view.paused,
-    }
 }
 
 async fn send_event(socket: &mut WebSocket, event: &ServerEvent) -> Result<()> {

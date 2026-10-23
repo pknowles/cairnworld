@@ -468,7 +468,14 @@ impl Store {
     }
 
     /// The next finite NPC step for this world, if any work is eligible.
-    pub async fn next_npc_step(&self, world_id: i64) -> Result<Option<NpcStep>> {
+    /// The next step of NPC work, leaving out groups where a player has a hand
+    /// raised, so one held group never blocks another group's turn.
+    pub async fn next_npc_step(
+        &self,
+        world_id: i64,
+        held_groups: &[i64],
+    ) -> Result<Option<NpcStep>> {
+        let held_groups = serde_json::to_string(held_groups).context("encoding held groups")?;
         let Some(row) = sqlx::query!(
             "SELECT npc_round.id, npc_round.root_sequence_id, npc_round.group_id, \
                     npc_round.state, npc_round.scene_revision, \
@@ -477,6 +484,7 @@ impl Store {
              JOIN \"group\" ON \"group\".id = npc_round.group_id \
              JOIN npc_discussion ON npc_discussion.root_sequence_id = npc_round.root_sequence_id \
              WHERE \"group\".world_id = ? AND \"group\".retired_at IS NULL \
+               AND npc_round.group_id NOT IN (SELECT value FROM json_each(?)) \
                AND npc_round.state IN ('collecting', 'selected') \
                AND npc_discussion.state = 'ready'                AND (npc_round.state = 'selected' OR NOT EXISTS (                    SELECT 1 FROM npc_round AS earlier                    WHERE earlier.group_id = npc_round.group_id                      AND earlier.state IN ('selected', 'executing'))) \
                AND NOT EXISTS ( \
@@ -489,6 +497,7 @@ impl Store {
                      AND (sequence.finished_at IS NULL OR sequence.error IS NOT NULL)) \
              ORDER BY npc_round.id LIMIT 1",
             world_id,
+            held_groups,
         )
         .fetch_optional(&self.pool)
         .await

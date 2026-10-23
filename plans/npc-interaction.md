@@ -28,14 +28,13 @@ variants:
   removed did an unaddressed Mara stay silent (5 of 6, first round only).
 
 Builds on implemented shutdown and failure handling; combat and InterventionCheck
-are not implemented. Pause holds for a character who loses access are released by
-their disconnect; a split or merge drops holds whose character left the group.
+are not implemented. A raised hand is released by its player's disconnect.
 
 ## Outcome and authority
 
 Players hear one another's actual speech, NPC agents decide their own responses,
-and a conversation can continue without nesting Say calls. Players can pause
-future NPC replies and either send input or choose Never mind. GM-selected
+and a conversation can continue without nesting Say calls. A player can raise a
+hand to hold NPC replies until they send input or choose Never mind. GM-selected
 intervention can resolve a tentative Take before a separate discussion begins.
 
 Authority: [NPC Interaction](../user_declarations.md#npc-interaction),
@@ -84,10 +83,9 @@ GM/Storyteller-only notes.
 - Human input runs between finite NPC steps. Follow-ups use fresh call stacks,
   one causal budget and links to original events in Developer Mode. World state,
   privacy and action authority remain enforced by the existing production paths.
-- Interrupt pauses future NPC actions while the human types; Never mind releases
-  that character's hold without inference or changing game-turn allowance.
-  Completed effects stand. The pause protocol below defines admission, multiple
-  holds, disconnect and topology behavior.
+- Interrupt raises the player's hand and Never mind lowers it, without inference
+  or changing game-turn allowance. Completed effects stand. The hand protocol
+  below defines when a hand is lowered.
 - Clean shutdown saves complete-step progress; a crash fails its active discussion
   visibly without replay. The worker section defines transaction/restart boundaries.
 
@@ -110,12 +108,11 @@ policy and automatic denial remain the user's playtesting decisions.
 | Speech storage | Copy text to every recipient: easy but duplicates history. Point into arbitrary JSON tool output: avoids a text row but couples readers to proposal layout. Share one committed action-result body and retain speech metadata: small explicit schema and existing content reconstruction. | Shared action-result body; event words are stored once for delivery. The original model arguments remain original inference evidence, not another recipient transcript. |
 | Stale decisions | Compare every live field/hash: expensive and easy to omit. Use the GM branch head: existing value, but inference bookkeeping would invalidate its own round. Use a group scene revision: one explicit semantic counter, requiring an audited write boundary. | Group scene revision, changed only by committed fiction/state changes. |
 | NPC decision protocol | Reuse the full agent loop: familiar, but permits extra tool batches and adds settling calls. Free text plus parsing: fewer schemas, unreliable control. One constrained terminal decision: one call per NPC, explicit failure on malformed output. | One recorded inference returning exactly one do_nothing, say or whisper call; no second tool executor or text parser. |
-| Tied speech approval | A batch tool couples outcomes and mixed private audiences. One shared GM turn with individual tools saves inference but still needs separate delivery and pause handling. One ordinary GM turn per selected utterance reuses single-action arbitration and isolates delivery. | Individual GM turns in any order. Extra GM calls on ties are accepted for simpler ownership, privacy and pause boundaries. No batch tool or atomic multi-utterance write. |
-| Pause handling | Queue the control behind NPC work: cannot interrupt promptly. Cancel arbitrary futures: risks half-completed tools. Direct live control with boundary acknowledgement: permits typing while retaining committed work, but acknowledgement can wait for an active action. | Direct pause holds and a watched worker activity value; never cancel a running action. |
+| Tied speech approval | A batch tool couples outcomes and mixed private audiences. One shared GM turn with individual tools saves inference but still needs separate delivery handling. One ordinary GM turn per selected utterance reuses single-action arbitration and isolates delivery. | Individual GM turns in any order. Extra GM calls on ties are accepted for simpler ownership, privacy and pause boundaries. No batch tool or atomic multi-utterance write. |
+| Interrupt | Queue the control behind NPC work: cannot interrupt promptly. Cancel arbitrary futures: risks half-completed tools. A raised hand per player that the worker consults before starting each NPC step: nothing to wait for or cancel, at the cost of one step already running finishing. | A raised hand per player, held in memory by the world; an NPC step already running finishes. |
 | Budgets and restart | Memory-only counters grant a fresh budget after restart. Arbitrary crash continuation requires durable nested-call progress and inference admission. Saving counters between complete steps permits clean restarts with smaller changes, while crashes fail active discussions. | Finish steps on planned shutdown and checkpoint the existing Budget between them; use shared crash cleanup for exceptional interruptions. |
 | Shared actions | Fake PlayerAgent for NPCs breaks ownership. A parallel NPC executor duplicates rules. A private resolved character actor plus existing action execution shares rules without giving browser callers NPC authority. | Resolved character actor; player authorization remains at the browser boundary. |
 | Intervention lifetime | Schedule the reaction after the original turn: reuses rounds but cannot affect the unresolved action. Suspend and persist the GM stack: supports long waits but adds unnecessary continuation state. Collect child decisions and approve reactions in the active GM turn: reuses invocations and pending actions, with bounded work sharing its budget. | Child decisions in the current turn; only subsequent dialogue uses scheduled rounds. Preserve applied effects on failure, without replay. |
-| Interrupt during the caller's turn | Reject: simple but contradicts the declaration. Cancel or suspend the turn: responsive but risks incomplete tools and agent re-entry. Record a hold while the current action finishes: permits immediate input control without cancelling accepted work. | Accept the hold at any time; acknowledge a safe pause after active action work finishes. New input still uses ordinary foreground admission. |
 | Speech attribution | Put names into authored prose: no representation change but loses reliable attribution and constrains expression. Preformat metadata into ordinary text: fewer match arms but makes consumers parse presentation. Add a typed speech content variant: touches existing message consumers but keeps identity and authored prose together without conflating them. | Typed speech content, serialized as a compact JSON object for model input and rendered as authored prose in chat. Preserve legacy text messages and their exact reconstruction. |
 
 ## Data model and invariants
@@ -275,7 +272,7 @@ utterance's actual hearers, including rejection handling: no broad-audience
 fallback for a rejected whisper, and no combined narration of private replies.
 Finish the current GM invocation and its deliveries before the worker boundary.
 Only after all chosen replies settle may NPCs reconsider the resulting speech.
-Human input, pause, access loss or topology changes can intervene between steps
+Human input, a raised hand, access loss or topology changes can intervene between steps
 and invalidate remaining stale work; earlier committed speech stands.
 
 This removes special NPC approval batching, not the ordinary agent loop's
@@ -298,7 +295,7 @@ One world worker owns execution. Do not spawn per-NPC world mutation tasks or
 send NPC work into its own bounded WorldEvent channel. SQLite is the pending
 round source; the existing Notify wakes the worker when work becomes eligible.
 At a boundary, handle presence deadlines and queued foreground events first,
-then the lowest-ID eligible unpaused round. Within a collection choose the
+then the lowest-ID eligible round in a group with no raised hand. Within a collection choose the
 lowest character ID still waiting; this is collection order, not eagerness.
 Wait on channel/Notify/deadline when no work is eligible, with no timer polling.
 
@@ -308,7 +305,7 @@ Wait on channel/Notify/deadline when no work is eligible, with no timer polling.
 | New heard input while a round is collecting/selected | Supersede its unexecuted proposals and create a round at the current revision, carrying unconsumed heard source references. A new human root owns the new budget; NPC-only follow-ups keep the same discussion root. Never merge budgets by taking a larger allowance. |
 | Collect one waiting candidate | Start a fresh causally linked sequence and attach its decision invocation to the candidate in a transaction. Run one inference outside transactions using the shared in-memory Budget, then atomically finish the decision result, invocation, sequence and budget checkpoint. Return to the worker boundary. Intervention collection instead uses child invocations inside its existing foreground sequence. |
 | All decisions ready | Validate group/revision, persist selected winners and the round phase, including the random tie result. DoNothing and losers need no additional status writes. All-DoNothing settles without another job. Speech-only highest ties select the whole cohort; mixed/non-speech ties select one. |
-| Execute selected work | Admit one selected action under the pause protocol, then attach a fresh execution sequence to that candidate and set the round executing, rechecking scene and ownership. Run ordinary GM arbitration and delivery. Save its sequence outcome/budget and return the round to selected if chosen actions remain, or settled otherwise, before yielding. |
+| Execute selected work | Attach a fresh execution sequence to that candidate and set the round executing, rechecking scene and ownership. Run ordinary GM arbitration and delivery. Save its sequence outcome/budget and return the round to selected if chosen actions remain, or settled otherwise, before yielding. |
 | Revision/group changed before execution | Mark superseded, not failed. Start a fresh round only for still-relevant unconsumed heard input in that group; departed actors keep heard history but do not act in their former group. |
 | Selected action rejected | Preserve its recorded rejection; do not try the losing candidates as fallbacks. A new actual event may create a new round. |
 | Inference/action failure or budget exhaustion | Preserve original error and committed effects, fail that discussion and its remaining rounds, and notify its actual participant PCs through the existing authorized failure path. Unrelated groups remain usable. |
@@ -353,51 +350,32 @@ Intervention intentions instead belong to child invocations in the active GM
 turn, as specified below. They are not pending response rounds and never become
 eligible worker jobs after the original action has resolved.
 
-## Pause protocol
+## Raised hands (Interrupt)
 
-World owns live pause holds keyed by (group_id, character_id), plus a watched
-activity enum: Idle, Foreground(group_id, character_id),
-NpcDecision(group_id, round_id), or NpcAction(group_id, round_id).
-Use a short synchronous mutex to change this state and
-claim work; release it before any await. A guard restores activity on every
-success/error exit. The durable round remains the recovery record, not a second
-live queue. Controls carry no prompts or model work.
+Interrupt is a hand raised in a meeting: the player wants the next opening to speak
+and keeps the hand up until they speak or lower it. The world keeps, in memory
+only, the set of (group, character) pairs with a raised hand. It is the player's
+own state and neither a pause of the group nor a lock: humans, other groups and
+every action keep working, and nothing is ever cancelled.
 
-- Interrupt authenticates the character/group and accepts the hold even while
-  that character's own foreground chat-turn is active. Under the live mutex it
-  inserts the hold. During an NPC decision it acknowledges immediately: the
-  inference may finish, but execution is gated. If an NPC action is already
-  active, or a foreground turn is active in the held group, it waits on the
-  watched activity until that complete action/turn unwinds
-  before acknowledging. Activity in another group does not delay this group's
-  acknowledgement. Show "Pausing" while waiting; never claim it is paused
-  while an already-active action in this group can still publish.
-  Waiting does not block the worker or hold
-  a mutex/connection. The current turn continues normally; the hold gates future
-  NPC actions, not tools required to finish that turn. Send cannot re-enter an
-  active player agent and retains existing foreground admission. Recheck access
-  and that the hold still exists before acknowledging a paused state; Never mind,
-  Send or disconnect may have released it while waiting.
-- Claiming another NPC action checks holds under the same mutex that records
-  active work, eliminating the check/start race. If held, leave work selected
-  and unclaimed. Otherwise set NpcAction with its activity guard, release the
-  mutex, then claim the SQL execution. A pause arriving during that SQL claim
-  waits for the activity to unwind; a failed claim drops the guard. Never hold
-  the live mutex across a database await. NPC-origin topology changes
-  also reject changes affecting a paused group; a different group's work cannot
-  bypass the hold by merging it. Foreground human actions use ordinary admission.
-- Never mind clears only the caller character's hold and wakes the worker.
-  Any of that character's tabs can do this; another player's hold remains.
-  A duplicate clear is harmless. Release a character's hold on final disconnect,
-  access loss or leaving that group; retired-group holds cannot survive.
-- Send reserves a foreground channel slot without holding the live mutex, then
-  enqueues the message and clears its own hold together under that mutex. The
-  worker sees the queued human input before admitting more NPC work. Do not
-  clear first and leave a race where an NPC speaks before the input is queued.
-- Controls return authenticated can_interrupt/own_hold/group_paused state to all
-  affected tabs via the existing wake-up/read path. The acknowledgement includes
-  the committed chat cursor; catch up earlier committed speech before showing
-  the paused state. This is a scheduling pause, not an action-allowance reset.
+- While any hand is raised in a group, no NPC step starts in that group. A step
+  already running finishes, so one more NPC line can still arrive after Interrupt.
+  Other groups' NPC work continues: excluded groups are left out of the query that
+  picks the next step, so they never block another group's turn.
+- Interrupt raises the hand at any time, including during the player's own turn,
+  and shows the player that NPCs are waiting for them. Never mind lowers only the
+  caller's hand and wakes the worker; without a raised hand it does nothing and
+  the page does not show it.
+- The hand comes down when its player sends a message, says Never mind or
+  disconnects for the last time. A message from another player in the group also
+  lowers every hand in it: the conversation has moved on, and the player may
+  Interrupt again. Queueing the message comes first, then the hands are lowered,
+  so NPC work cannot overtake the input.
+- Hands are keyed by group. When a group is split or merged away its hands no
+  longer match any character's group, so they have no effect; no cleanup is needed.
+  Splits and merges are not otherwise restricted by a raised hand.
+- The control state sent to a player is just whether their own hand is up. There
+  is no "paused" acknowledgement to wait for, so nothing waits on running work.
 
 ## Intervention lifecycle
 
@@ -462,7 +440,7 @@ rules, preserving ordinary no-reentry and authorization checks.
 | --- | --- |
 | Speech text and individual NPC approval | Preserve expressive authored text with source metadata and historical reconstruction compatibility. Replace batch approval with ordinary single-action GM turns; each utterance owns its recipients/prefix/narration. Preserve tied intentions, yield between approvals, and remove unused batch code. Verify disjoint whispers, rejection, partial failure, order and unchanged style. |
 | Complete NPC response rounds | Finish Developer Mode links to original events and distinguish decision intent from applied action. Audit every fiction/context writer for scene revisions. Finish split/merge/departure/access loss, private-speech, clean-shutdown, other-group and repeated-real-model scenarios; investigate the unused-query warning and GM approval flakes rather than count them as clean gates. No generic continuation engine. |
-| Player control | Add watched activity/holds, Interrupt/Never mind, ordered Send release and multi-tab control state. Test real inference-in-progress and action-in-progress barriers, other groups, disconnect and access revocation. No future combat state is fabricated. |
+| Player control | Raised hands, Interrupt/Never mind, hands lowered by Send, another player's message and disconnect, multi-tab state. Test that other groups continue. No future combat state is fabricated. |
 | Perceived-event opportunities | Extend source-linked response opportunities to delivered world events, using existing history/delivery paths and authorized perception. Verify one event causes one opportunity, bookkeeping causes none, and private events remain private. Combat events follow their later rules implementation. |
 | Tentative/committed intervention | Add committed intent and InterventionCheck; resolve bounded reaction results before the original decision, then schedule dialogue. Verify warning versus committed retry, correct source/actor authority, no GM re-entry, budget sharing and retained effects on failure. Physical combat reactions remain with the combat rules. |
 
@@ -477,7 +455,7 @@ must each pass the repository's complete-slice gate.
 
 Interrupt changes scheduling, never character eligibility or allowance. Route
 all resulting requests through the existing shared action admission boundary;
-do not grant a turn because a pause is held or because an action flag is unused.
+do not grant a turn because a hand is raised or because an action flag is unused.
 Combat order/flags, Move, Wait and damage are not implemented in the current
 runtime. Their complete implementation remains in [Rules and travel](playable-rules.md),
 with the accepted rule that closing a game-turn consumes remaining allowance and
@@ -529,11 +507,11 @@ not after every state transition or cosmetic edit.
 | E6: Individual rejection/failure | Rejection of one tied utterance leaves earlier approvals intact and allows remaining selected actions, not losing alternatives. A system failure ends the discussion, retains prior effects and closes unanswered history. No approvals/no new event ends work. | A tests sequential outcomes and partial delivery; C checks effects and valid tool history. |
 | E7: Bad/repeated action approval | Foreign, wrong-actor or unselected action IDs and invalid hearing adjustments are refused through existing approval validation. A repeated approval returns that action's recorded outcome without another delivery. | Extend existing action-path tests for NPC callers; C checks words/recipients, not a new batch invariant suite. |
 | E8: Clean shutdown or crash | Clean shutdown finishes/saves the current utterance; restart continues remaining selected actions without replaying earlier ones. A crash fails its active discussion, retains speech and closes unanswered history without replay. | A plus process stop/restart between tied utterances and during approval; C compares effects, IDs and budget. |
-| E9: Another group | It is not paused, superseded or given private speech by this discussion. Its accepted input uses the ordinary serialized world worker between finite steps, not concurrent world mutation. | A submits input in both groups; C checks isolation and ordering. |
+| E9: Another group | It is not held back, superseded or given private speech by this discussion. Its accepted input uses the ordinary serialized world worker between finite steps, not concurrent world mutation. | A submits input in both groups; C checks isolation and ordering. |
 
-Later increments retain their own verification: Interrupt/Never mind and multiple
-holds, including Interrupt during the caller's active turn followed by release
-before acknowledgement (no cancellation, re-entry or false Paused state);
+Later increments retain their own verification: Interrupt/Never mind and several
+raised hands, including Interrupt during the caller's active turn (no cancellation
+or re-entry);
 perceived-event delivery without bookkeeping-triggered loops, then
 tentative/committed Take and intervention. The prisoner's warning must not veto
 a committed retry forever; approved reactions precede the original decision and

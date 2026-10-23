@@ -41,11 +41,11 @@ pub struct World {
     pub presence: Mutex<Presence>,
     pub changed: Notify,
     pub openings: Mutex<HashMap<i64, watch::Receiver<OpeningState>>>,
-    /// Live pause holds and what the worker is doing; see `Control`.
-    control: StdMutex<Control>,
-    /// Changes whenever the control state does, for every viewer to re-read it.
-    control_changes: watch::Sender<u64>,
-    /// Wakes the worker when a hold is released.
+    /// Raised hands (Interrupt), as (group, character). In memory only.
+    hands: StdMutex<BTreeSet<(i64, i64)>>,
+    /// Changes whenever a hand goes up or down, for viewers to re-read it.
+    hands_changed: watch::Sender<u64>,
+    /// Wakes the worker when a hand is lowered.
     pub released: Notify,
 }
 
@@ -61,8 +61,8 @@ impl World {
             presence: Mutex::new(Presence::default()),
             changed: Notify::new(),
             openings: Mutex::new(HashMap::new()),
-            control: StdMutex::new(Control::default()),
-            control_changes: watch::channel(0).0,
+            hands: StdMutex::new(BTreeSet::new()),
+            hands_changed: watch::channel(0).0,
             released: Notify::new(),
         }
     }
@@ -121,194 +121,66 @@ impl World {
     }
 }
 
-/// What the world worker is doing, for acknowledging a pause: a pause is only
-/// reached once nothing that can publish is running in the held group.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Activity {
-    #[default]
-    Idle,
-    /// A human's chat-turn (or world entry) in the group.
-    Foreground { group_id: i64 },
-    /// An NPC step that only records intentions; it publishes nothing.
-    NpcDecision { group_id: i64 },
-    /// An NPC action: it may publish speech, so a pause waits for it.
-    NpcAction { group_id: i64 },
-}
-
-/// Live, process-local pause state. Never held across an await.
-#[derive(Default)]
-struct Control {
-    /// (group, character) pairs whose player pressed Interrupt.
-    holds: BTreeSet<(i64, i64)>,
-    activity: Activity,
-}
-
-impl Control {
-    /// Nothing that can publish is running in this group.
-    fn quiescent(&self, group_id: i64) -> bool {
-        !matches!(
-            self.activity,
-            Activity::Foreground { group_id: g } | Activity::NpcAction { group_id: g } if g == group_id
-        )
-    }
-}
-
-/// What one player's controls show.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ControlView {
-    /// This character pressed Interrupt and has not sent or said Never mind.
-    pub own_hold: bool,
-    /// Some player holds the character's group and nothing is still running
-    /// that could publish: NPCs are paused.
-    pub paused: bool,
-}
-
-/// Restores the worker to idle however the work it covers ends.
-pub struct ActivityGuard<'a> {
-    world: &'a World,
-}
-
-impl Drop for ActivityGuard<'_> {
-    fn drop(&mut self) {
-        self.world
-            .control
-            .lock()
-            .expect("control lock poisoned")
-            .activity = Activity::Idle;
-        self.world.changed_control();
-    }
-}
-
 impl World {
-    fn changed_control(&self) {
-        self.control_changes.send_modify(|version| *version += 1);
+    fn changed_hands(&self) {
+        self.hands_changed.send_modify(|version| *version += 1);
     }
 
-    /// Subscribe to control changes; the value only says that something changed.
-    pub fn control_changes(&self) -> watch::Receiver<u64> {
-        self.control_changes.subscribe()
+    /// Subscribe to raised-hand changes; the value only says that something changed.
+    pub fn hands_changed(&self) -> watch::Receiver<u64> {
+        self.hands_changed.subscribe()
     }
 
-    /// Accept an Interrupt at any time, even during the character's own turn.
-    pub fn hold(&self, group_id: i64, character_id: i64) {
-        let inserted = self
-            .control
+    /// Interrupt: this character raises a hand in their group. Accepted at any
+    /// time; nothing running is cancelled.
+    pub fn raise_hand(&self, group_id: i64, character_id: i64) {
+        let raised = self
+            .hands
             .lock()
-            .expect("control lock poisoned")
-            .holds
+            .expect("hands lock poisoned")
             .insert((group_id, character_id));
-        if inserted {
-            self.changed_control();
+        if raised {
+            self.changed_hands();
         }
     }
 
-    /// Never mind: release this character's hold and wake the worker. Without a
-    /// hold this does nothing at all, so it cannot trigger execution.
-    pub fn release(&self, character_id: i64) {
-        let released = {
-            let mut control = self.control.lock().expect("control lock poisoned");
-            let before = control.holds.len();
-            control
-                .holds
-                .retain(|(_, held_by)| *held_by != character_id);
-            control.holds.len() != before
+    /// Never mind, or the player sending or leaving: lower this character's hand
+    /// and wake the worker. Without a raised hand this does nothing at all.
+    pub fn lower_hand(&self, character_id: i64) {
+        self.lower(|(_, hand)| *hand == character_id);
+    }
+
+    /// The conversation has moved on: lower every hand in the group.
+    pub fn lower_hands_in(&self, group_id: i64) {
+        self.lower(|(group, _)| *group == group_id);
+    }
+
+    fn lower(&self, matches: impl Fn(&(i64, i64)) -> bool) {
+        let lowered = {
+            let mut hands = self.hands.lock().expect("hands lock poisoned");
+            let before = hands.len();
+            hands.retain(|hand| !matches(hand));
+            hands.len() != before
         };
-        if released {
-            self.changed_control();
+        if lowered {
+            self.changed_hands();
             self.released.notify_one();
         }
     }
 
-    /// Queue the character's input and release its hold together, so NPC work
-    /// can never overtake input the player has just sent.
-    pub fn send_releasing(
-        &self,
-        permit: mpsc::Permit<'_, WorldEvent>,
-        event: WorldEvent,
-        character_id: i64,
-    ) {
-        let released = {
-            let mut control = self.control.lock().expect("control lock poisoned");
-            permit.send(event);
-            let before = control.holds.len();
-            control
-                .holds
-                .retain(|(_, held_by)| *held_by != character_id);
-            control.holds.len() != before
-        };
-        if released {
-            self.changed_control();
-        }
-    }
-
-    /// Every live hold, for checking that each still belongs to its group.
-    pub fn holds(&self) -> Vec<(i64, i64)> {
-        self.control
+    pub fn hand_raised(&self, group_id: i64, character_id: i64) -> bool {
+        self.hands
             .lock()
-            .expect("control lock poisoned")
-            .holds
-            .iter()
-            .copied()
-            .collect()
+            .expect("hands lock poisoned")
+            .contains(&(group_id, character_id))
     }
 
-    /// Holds whose character has left the group, or whose group no longer
-    /// exists, cannot outlive that.
-    pub fn drop_holds(&self, stale: &[(i64, i64)]) {
-        let dropped = {
-            let mut control = self.control.lock().expect("control lock poisoned");
-            let before = control.holds.len();
-            control.holds.retain(|hold| !stale.contains(hold));
-            control.holds.len() != before
-        };
-        if dropped {
-            self.changed_control();
-            self.released.notify_one();
-        }
-    }
-
-    pub fn group_held(&self, group_id: i64) -> bool {
-        self.control
-            .lock()
-            .expect("control lock poisoned")
-            .holds
-            .iter()
-            .any(|(group, _)| *group == group_id)
-    }
-
-    /// What this player's controls show for their current group.
-    pub fn control_view(&self, group_id: i64, character_id: i64) -> ControlView {
-        let control = self.control.lock().expect("control lock poisoned");
-        let held = control.holds.iter().any(|(group, _)| *group == group_id);
-        ControlView {
-            own_hold: control.holds.contains(&(group_id, character_id)),
-            paused: held && control.quiescent(group_id),
-        }
-    }
-
-    /// Start NPC work in a group unless it is held. The check and the claim
-    /// share one lock, so an Interrupt cannot slip in between them.
-    pub fn begin_npc(&self, group_id: i64, publishes: bool) -> Option<ActivityGuard<'_>> {
-        let mut control = self.control.lock().expect("control lock poisoned");
-        if control.holds.iter().any(|(group, _)| *group == group_id) {
-            return None;
-        }
-        control.activity = if publishes {
-            Activity::NpcAction { group_id }
-        } else {
-            Activity::NpcDecision { group_id }
-        };
-        drop(control);
-        self.changed_control();
-        Some(ActivityGuard { world: self })
-    }
-
-    /// Mark a human's turn in this group as running.
-    pub fn begin_foreground(&self, group_id: i64) -> ActivityGuard<'_> {
-        self.control.lock().expect("control lock poisoned").activity =
-            Activity::Foreground { group_id };
-        self.changed_control();
-        ActivityGuard { world: self }
+    /// The groups in which NPC work waits for a raised hand.
+    pub fn held_groups(&self) -> Vec<i64> {
+        let hands = self.hands.lock().expect("hands lock poisoned");
+        let mut groups: Vec<i64> = hands.iter().map(|(group, _)| *group).collect();
+        groups.dedup();
+        groups
     }
 }
 

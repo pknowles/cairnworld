@@ -654,3 +654,19 @@ This authorizes the three checks and the changes needed to satisfy them. The
 other removed architectural/performance proposals are not reinstated by this
 request. The new plan retains the recorded numerical limits; any proposed change
 to scope or limits must be presented to the user rather than made to obtain a pass.
+
+## 2026-10-23 Interrupt is a raised hand
+
+The user simplified the pause design and said what Interrupt means:
+
+> it should be like putting your hand up in a teams meeting because you want to
+> say something at the very next available opportunity. the interrupt button is
+> toggled on
+>
+> it is tied to the player who interrupted. if another player says something
+> before the interrupting player, inference moves on and the interrupting player
+> may need to re-interrupt
+
+and asked for no "paused group" concept, group lock or world lock: Interrupt only
+stops NPC responses for now, and Never mind lets them continue. This replaces the
+earlier per-character hold protocol with live pause acknowledgement.

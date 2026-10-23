@@ -1197,9 +1197,12 @@ This is the main page where the game is actually played. It is simple: one big
 chat history, a box at the bottom to enter text and a send button. Also an
 interrupt button that may be used to pause NPC discussions or say something
 mid-combat - specifically, prevent future NPC replies until the player(s) acts.
-It should change into a "Nvermind" button to resume execution if there was an
-interruption. If the interruption was not triggered then "Nevermind" should not
-trigger execution or even show.
+Like a toggle to put your hand up in a teams meeting. NPCs have the ability to
+respond to observed events and this is just the same, except for players.
+Interrupt should change into a "Nvermind" button to resume execution if there
+was an interruption. If the interruption was not triggered then "Nevermind"
+should not trigger execution or be shown. If other players act while paused, the
+game moves on and the original interrupter may need to re-interrupt.
 
 When players join, the GM agent narrates their entry, e.g. entering the
 camp/walking up to the party from along the path/through the tavern

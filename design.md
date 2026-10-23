@@ -1388,30 +1388,17 @@ saved agent call stack or per-inference durable budget system.
 | Concrete response rounds in the world loop | Supports eagerness, stale-proposal cancellation, player input and restart between saved steps | Persist round progress and causal links; selected. |
 | New generic workflow engine | Could schedule arbitrary future jobs | Adds an unneeded framework alongside the world loop; reject. |
 
-Interrupt pauses future NPC actions in the character's group at a safe boundary.
-Accept the hold even during the requesting character's own foreground turn;
-finish that turn normally before acknowledging the safe pause. The hold does
-not suspend tools inside that turn or permit re-entry into the player agent.
-An in-flight proposal inference may finish recording; it must not publish an
-action after the pause is acknowledged. Completed speech/actions remain intact.
-The control path can request the pause while the world worker awaits inference;
-it cannot merely enqueue a command behind the entire discussion. Active tool
-execution commits or fails before acknowledging a safe pause. Human input and
-other groups continue through the ordinary world loop. Pause ownership belongs
-to each requesting character: Send or Never mind releases that character's hold,
-as does its final disconnect or loss of access; other players' holds remain.
-Release holds in a retired group or whose character has left that group, and
-publish the changed pause state to its viewers. Never mind is an
-authenticated button action with no model inference. A pause neither restores
-allowance nor authorizes an out-of-turn action. Existing action checks remain
-mandatory; full combat enforcement is implemented with the combat rules,
-not simulated by a disabled Send button in the NPC experiment.
-World owns live per-character holds and watched worker activity. Pause admission
-and action-start admission share a short synchronous mutex, released before any
-await; acknowledgements wait for an already-active NPC action to unwind. Show
-Pausing until then, and catch up the committed chat cursor before showing Paused.
-Send reserves a foreground queue slot before atomically enqueueing input and
-releasing its character's hold, so NPC work cannot overtake that input.
+Interrupt raises the player's hand, as in a meeting: they want the next opening
+to speak and keep the hand up until they send a message or say Never mind. While
+any hand is raised in a group, no NPC step starts there; a step already running
+finishes and nothing is cancelled, so humans, other groups and every action keep
+working. A hand is the player's own state, kept in memory by the world. It comes
+down when its player sends, says Never mind or disconnects, and a message from
+another player in the group lowers every hand: the conversation has moved on and
+they may Interrupt again. Never mind does nothing, and is not shown, without a
+raised hand. Interrupt and Never mind run no inference and never reset or grant
+game-turn allowance. Queue the message first, then lower the hands, so NPC work
+cannot overtake the input.
 
 InterventionCheck collects reaction intentions before an action resolves. NPC
 decision calls do not invoke the already-active GM. The GM may approve a proposed
@@ -1442,7 +1429,7 @@ perceptions. Expanded action sets and physical/combat reactions follow the
 implemented rules; they are not simulated by speech-only tools.
 
 The [NPC interaction plan](plans/npc-interaction.md#design-choices) compares the
-alternatives and specifies schema, transaction boundaries, pause protocol,
+alternatives and specifies schema, transaction boundaries, raised hands,
 recovery and complete implementation slices. Full combat remains a separate
 rules increment; scheduling controls confer no action allowance.
 

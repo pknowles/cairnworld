@@ -800,16 +800,15 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `tool_execution.status = 'rejected'`, flagged `tool_call_rejected` on the raw
   history entry with a red badge in Developer Mode, and every real-model device
   scenario fails if one occurred.
-- Player control (design.md NPC speech and response rounds): `World` owns live pause
-  holds per (group, character) and a watched worker activity (`world::Control`);
-  `Game::interrupt` / `never_mind` / `control_view` expose them. NPC steps do not start
-  in a held group; a step in flight finishes. A pause is reached at once during an NPC
-  decision (it publishes nothing) and after a running turn or NPC action unwinds.
-  Sending queues the message and releases the sender's hold together; a final
-  disconnect or leaving the group releases it too. Never mind without a hold does
-  nothing. The player-chat socket reads `interrupt` / `never_mind` while a turn runs and
-  reports `control { own_hold, paused }`; the page turns Interrupt into Never mind only
-  while the player holds a pause.
+- Player control (design.md NPC speech and response rounds): Interrupt raises the
+  player's hand. `World` keeps the raised hands as (group, character) pairs in memory;
+  `Game::interrupt` / `never_mind` / `hand_raised` expose them. `next_npc_step` leaves
+  out groups with a hand raised, so a step already running finishes, nothing is
+  cancelled and other groups' NPCs continue. A hand comes down when its player sends,
+  says Never mind or disconnects for the last time, and any message in the group lowers
+  every hand in it. Never mind without a hand does nothing. The player-chat socket reads
+  `interrupt` / `never_mind` while a turn runs and reports `control { hand_raised }`; the
+  page swaps Interrupt for Never mind only while the hand is up.
 - `game::tests::device_suite` (ignored) loads the CUDA model once (`DeviceModel`,
   shared by each scenario's `Game` through `SharedModel`) and runs the real-model
   scenarios from `mistralrs_backend::tests` and `game::tests` in turn, each with

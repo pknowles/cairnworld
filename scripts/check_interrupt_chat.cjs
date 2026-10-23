@@ -3,7 +3,7 @@ const { createServer } = require("node:http");
 const { fixture, forward, checkBrowser } = require("./browser_check.cjs");
 const { WebSocketServer } = require("ws");
 
-// What the page sends when the player uses the pause controls, and how the
+// What the page sends when the player uses the Interrupt controls, and how the
 // controls follow what the server reports back. The server side of the
 // protocol is covered by Rust tests; this checks the page.
 const history = [{ role: "assistant", text: "The kettle whistles." }];
@@ -15,9 +15,9 @@ const server = createServer((request, response) => {
     return forward(request, response, "/browser/render", { world_id: fixture.world_id, developer_mode: false, history })
       .catch(error => server.emit("error", error));
   }
-  const control = /^\/control\/(true|false)\/(true|false)$/.exec(request.url);
+  const control = /^\/control\/(true|false)$/.exec(request.url);
   if (control) {
-    socket.send(JSON.stringify({ type: "control", own_hold: control[1] === "true", paused: control[2] === "true" }));
+    socket.send(JSON.stringify({ type: "control", hand_raised: control[1] === "true" }));
     response.writeHead(204);
     return response.end();
   }
@@ -68,26 +68,24 @@ checkBrowser(server, async (tab, port) => {
   assert.deepEqual(received, ["interrupt"]);
   // The page changes only when the server says the hold exists.
   assert.equal(await tab.locator("#never-mind").isVisible(), false);
-  await get("/control/true/false");
+  await get("/control/true");
   await tab.locator("#never-mind").waitFor({ state: "visible" });
   assert.equal(await tab.locator("#interrupt").isVisible(), false);
-  await tab.locator("#chat-status").getByText("Pausing…").waitFor();
-
-  await get("/control/true/true");
-  await tab.locator("#chat-status").getByText("Paused. Send a message, or Never mind to resume.").waitFor();
+  await tab.locator("#chat-status").getByText("Your hand is up. NPCs wait for you: send a message, or Never mind to continue.").waitFor();
 
   await tab.locator("#never-mind").click();
   await until(() => received.length === 2, "the Never mind message");
   assert.deepEqual(received, ["interrupt", "never_mind"]);
-  await get("/control/false/false");
+  await get("/control/false");
   await tab.locator("#interrupt").waitFor({ state: "visible" });
   assert.equal(await tab.locator("#never-mind").isVisible(), false);
   assert.equal(await tab.locator("#chat-status").count(), 0);
 
-  // Another player's pause is shown, but is not this player's to release.
-  await get("/control/false/true");
-  await tab.locator("#chat-status").getByText("Paused by another player.").waitFor();
-  assert.equal(await tab.locator("#interrupt").isVisible(), true);
+  // Another player speaking lowers the hand without this page doing anything.
+  await get("/control/true");
+  await tab.locator("#never-mind").waitFor({ state: "visible" });
+  await get("/control/false");
+  await tab.locator("#interrupt").waitFor({ state: "visible" });
   assert.equal(await tab.locator("#never-mind").isVisible(), false);
   assert.deepEqual(received, ["interrupt", "never_mind"], "nothing else was sent");
 }).catch((error) => {

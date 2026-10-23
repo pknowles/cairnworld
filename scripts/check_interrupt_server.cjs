@@ -2,8 +2,8 @@ const assert = require("node:assert/strict");
 const { WebSocket } = require("ws");
 const { fixture } = require("./browser_check.cjs");
 
-// The real player-chat socket and the pause controls: what the server reports
-// for Interrupt and Never mind, with no page involved. The pause rules are
+// The real player-chat socket and the Interrupt controls: what the server reports
+// for Interrupt and Never mind, with no page involved. The raised-hand rules are
 // covered by Rust tests; this checks they reach a connected player.
 async function run() {
   const url = fixture.base.replace(/^http/, "ws") + "/browser/chat/0/ws";
@@ -24,28 +24,27 @@ async function run() {
       await Promise.race([failure, new Promise((resolve) => { wake = resolve; setTimeout(resolve, 50); })]);
     }
   };
-  const isControl = (own_hold, paused) => (event) =>
-    event.type === "control" && event.own_hold === own_hold && event.paused === paused;
+  const isControl = (hand_raised) => (event) =>
+    event.type === "control" && event.hand_raised === hand_raised;
 
   await next((event) => event.type === "can_act" && event.value === true, "the chat to be ready");
-  // Nothing is held when the page opens.
-  await next(isControl(false, false), "the initial control state");
+  // No hand is raised when the page opens.
+  await next(isControl(false), "the initial control state");
 
   socket.send(JSON.stringify({ type: "interrupt" }));
-  // Nothing is running in the group, so the pause is reached at once.
-  await next(isControl(true, true), "the pause to be acknowledged");
+  await next(isControl(true), "the hand to go up");
 
   socket.send(JSON.stringify({ type: "never_mind" }));
-  await next(isControl(false, false), "the pause to be released");
+  await next(isControl(false), "the hand to come down");
 
-  // Never mind without a pause changes nothing, so nothing is reported.
+  // Never mind without a raised hand changes nothing, so nothing is reported.
   socket.send(JSON.stringify({ type: "never_mind" }));
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.deepEqual(events.filter((event) => event.type === "control"), [], "a Never mind without an Interrupt reported a change");
 
-  // A pause the player still holds ends when they disconnect.
+  // A hand still raised comes down when the player disconnects.
   socket.send(JSON.stringify({ type: "interrupt" }));
-  await next(isControl(true, true), "the second pause");
+  await next(isControl(true), "the second raised hand");
   return socket;
 }
 
