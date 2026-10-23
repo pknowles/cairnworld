@@ -5252,6 +5252,30 @@ mod tests {
         // Each approval was a separate GM turn that knew the replies overlapped,
         // and each reconsideration came after both were said.
         let requests = scene.requests.lock().unwrap();
+        // The tied replies were composed at the same moment: neither NPC's
+        // first decision shows the other's reply, and both saw the same
+        // history after their own role and situation.
+        let decisions: Vec<_> = requests
+            .iter()
+            .filter(|request| request.tools.iter().any(|tool| tool.name == "do_nothing"))
+            .take(2)
+            .collect();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions[0].messages.len() > 1,
+            "the decision has heard history"
+        );
+        assert_eq!(
+            decisions[0].messages[1..],
+            decisions[1].messages[1..],
+            "both NPCs decide against the same heard history"
+        );
+        for decision in &decisions {
+            assert!(
+                !format!("{:?}", decision.messages).contains("It is in the hut."),
+                "a first decision already showed another NPC's reply"
+            );
+        }
         let gm_requests = requests
             .iter()
             .filter(|request| {
