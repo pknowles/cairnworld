@@ -1243,11 +1243,10 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
         user_id = member.user_id,
         "player chat is ready for input"
     );
-    // The turn this connection submitted, polled alongside the socket so a
-    // control event (Interrupt) is read while the turn is still running.
-    let mut turn: Option<
-        std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::llm::Response>> + Send>>,
-    > = None;
+    // The turn this connection submitted, awaited alongside the socket so a
+    // control event (Interrupt) is read while the turn is still running. It is
+    // its own task: an accepted turn never depends on this connection staying open.
+    let mut turn: Option<tokio::task::JoinHandle<Result<crate::llm::Response>>> = None;
     let mut hands_changed = game.hands_changed(member)?;
     let mut shown_hand = game.hand_raised(member).await?;
     send_event(
@@ -1314,10 +1313,11 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                 }).await?;
                 send_event(socket, &ServerEvent::CanAct { value: false }).await?;
                 let (game, member) = (Arc::clone(game), member.clone());
-                turn = Some(Box::pin(async move { game.player_message(member, &text).await }));
+                turn = Some(tokio::spawn(async move { game.player_message(member, &text).await }));
             }
             result = async { turn.as_mut().expect("guarded by the branch condition").await }, if turn.is_some() => {
                 turn = None;
+                let result = result.context("the player's turn task failed")?;
                 cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
                 if let Err(error) = result {
                     // A recorded failure was just delivered from storage with the

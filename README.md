@@ -94,7 +94,7 @@ profiles stay under `target/tmp` (the tests set it for the browser themselves).
 
 The checks use the production page renderer, generated hydration loader, and
 authorized inspection routes. They cover loading-page reload, chat interaction
-and reconnect, URL-backed Developer Mode navigation, raw-history/object paging,
+and reconnect, the Interrupt and Never mind buttons, URL-backed Developer Mode navigation, raw-history/object paging,
 object search and typed relationship links, Close/reopen, and narrow-screen
 Chat/Inspect tabs while chat stays usable. Scripted WebSocket events and stored
 inference fixtures avoid requiring OAuth or a model. Unexpected browser errors

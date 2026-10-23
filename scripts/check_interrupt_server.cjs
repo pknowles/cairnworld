@@ -45,11 +45,32 @@ async function run() {
   // A hand still raised comes down when the player disconnects.
   socket.send(JSON.stringify({ type: "interrupt" }));
   await next(isControl(true), "the second raised hand");
-  return socket;
+  socket.close();
+  await new Promise((resolve) => socket.once("close", resolve));
+  await submittedMessageSurvivesDisconnect(url);
+}
+
+// A message the player has sent is accepted even if the connection closes at
+// once: the turn belongs to the game, not to the socket.
+async function submittedMessageSurvivesDisconnect(url) {
+  const text = "Sent just before the connection closed.";
+  const sender = new WebSocket(url, { headers: { cookie: fixture.cookie } });
+  await new Promise((resolve, reject) => {
+    sender.on("error", reject);
+    sender.on("message", (raw) => JSON.parse(raw).type === "can_act" && resolve());
+  });
+  sender.send(JSON.stringify({ type: "message", text }));
+  sender.close();
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const page = await fetch(`${fixture.base}/browser/chat/0`, { headers: { cookie: fixture.cookie } });
+    if ((await page.text()).includes(text)) return;
+    if (Date.now() > deadline) throw new Error("the message sent just before the connection closed was lost");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 run()
-  .then((socket) => socket.close())
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;
