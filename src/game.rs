@@ -1357,7 +1357,7 @@ where
                         && !matches!(approval_pending.tool.as_str(), "say" | "whisper")
                     {
                         return Ok(ToolOutcome::Rejected(format!(
-                            "Nothing was approved. include, exclude and prefix apply only to speech, and action {action_id} is not speech. Call approve_action again with action_id only."
+                            "Tool arguments were rejected: include, exclude and prefix shape how speech is heard, and action {action_id} is not speech"
                         )));
                     }
                     let resolved = match game
@@ -2082,6 +2082,21 @@ mod tests {
         B: Backend + Send + Sync + 'static,
     {
         opening_game_with_limits(backend, model, sampling, Limits::default()).await
+    }
+
+    /// A rejected tool call is the model producing an invalid call: an error to
+    /// investigate, never a path the real-model scenarios may rely on.
+    async fn assert_no_rejected_tool_calls(store: &Store) {
+        let inferences: Vec<i64> = sqlx::query_scalar(
+            "SELECT inference_id FROM tool_execution WHERE status = 'rejected' ORDER BY id",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        assert!(
+            inferences.is_empty(),
+            "the model made invalid tool calls in inferences {inferences:?}; open them in Developer Mode"
+        );
     }
 
     /// The device-test model, loaded once and shared by every scenario in
@@ -3610,6 +3625,7 @@ mod tests {
             failures.len()
         );
         assert!(failures.is_empty(), "{failures:#?}");
+        assert_no_rejected_tool_calls(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -4849,6 +4865,52 @@ mod tests {
             .pop()
             .unwrap();
         assert!(refusal.contains("is not speech"), "{refusal}");
+
+        // The invalid call is an error, not a normal path: it is recorded as
+        // rejected and Developer Mode flags the tool result it produced.
+        let owner = scene
+            .store
+            .find_or_create_user("warden@example.test", "Warden")
+            .await
+            .unwrap();
+        scene
+            .store
+            .set_developer_mode(owner.id, scene.first.world_id, true)
+            .await
+            .unwrap();
+        let gm_history = scene
+            .store
+            .player_group_history(&scene.first)
+            .await
+            .unwrap();
+        let cursor = scene
+            .store
+            .first_raw_history_cursor(
+                owner.id,
+                scene.first.world_id,
+                gm_history.agent_id,
+                Some(gm_history.branch_id),
+            )
+            .await
+            .unwrap();
+        let (entries, _) = scene
+            .store
+            .agent_raw_history(owner.id, cursor, 200)
+            .await
+            .unwrap();
+        let flagged: Vec<_> = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    crate::store::RawHistoryEntry::Message {
+                        tool_call_rejected: true,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(flagged.len(), 1, "{entries:#?}");
     }
 
     #[tokio::test]
@@ -7773,6 +7835,7 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
             "the completed opening must leave a player-visible assistant reply"
         );
+        assert_no_rejected_tool_calls(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -7846,6 +7909,7 @@ mod tests {
             i64::from(approved),
             "the item did not follow the GM's decision"
         );
+        assert_no_rejected_tool_calls(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -7901,6 +7965,7 @@ mod tests {
             reply.contains(&hp.to_string()),
             "the model should report the recorded roll {hp}: {reply}"
         );
+        assert_no_rejected_tool_calls(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -7972,6 +8037,7 @@ mod tests {
             "NPC utterances after the first reply or the wait: {utterances:?}; the player heard {:?}",
             heard(&store, &first).await
         );
+        assert_no_rejected_tool_calls(&store).await;
         game.shutdown().await.unwrap();
 
         assert!(
@@ -8033,6 +8099,7 @@ mod tests {
             answer.to_lowercase().contains("stone"),
             "the listener did not report where the key is: {answer}"
         );
+        assert_no_rejected_tool_calls(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -8139,6 +8206,7 @@ mod tests {
                 .any(|message| text_of(message).contains("MARIBEL")),
             "a retained raw message still held the fact, so recall did not need the summary: {raw:#?}"
         );
+        assert_no_rejected_tool_calls(&store).await;
         game.shutdown().await.unwrap();
     }
 }

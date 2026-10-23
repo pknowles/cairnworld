@@ -1683,7 +1683,7 @@ fn RawHistoryEntryRow(
     selection: RwSignal<Option<InspectSelection>>,
 ) -> impl IntoView {
     match entry {
-        RawHistoryEntry::Message { id, role, origin, content, reasoning, source_inference_id, answers_tool_execution_id } => {
+        RawHistoryEntry::Message { id, role, origin, content, reasoning, source_inference_id, answers_tool_execution_id, tool_call_rejected } => {
             let silent_assistant_response = role == Role::Assistant
                 && matches!(&content, MessageContent::Text(text) if text.is_empty());
             let empty_tool_result = matches!(&content, MessageContent::ToolResult { content, .. } if content.is_empty());
@@ -1696,6 +1696,7 @@ fn RawHistoryEntryRow(
                     <span class="badge badge-ghost badge-sm">{format!("message {id}")}</span>
                     <span class="font-semibold">{if origin == MessageOrigin::Instruction { "instruction" } else { role.as_str() }}</span>
                     {answers_tool_execution_id.map(|_| view! { <span class="badge badge-ghost badge-sm">"Tool result"</span> })}
+                    {tool_call_rejected.then(|| view! { <span class="badge badge-error badge-sm">"Invalid tool call rejected - investigate"</span> })}
                     {source_inference_id.filter(|_| answers_tool_execution_id.is_none()).map(|inference_id| view! {
                         <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>
                             "View inference"

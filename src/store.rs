@@ -729,6 +729,7 @@ struct RawMessageRow {
     content: i64,
     source_inference_id: Option<i64>,
     source_tool_execution_id: Option<i64>,
+    tool_call_rejected: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -5820,7 +5821,7 @@ impl Store {
             history::EntryKind::Message => {
                 let row: RawMessageRow = sqlx::query_as!(
                     RawMessageRow,
-                    "SELECT id, role, origin, content, source_inference_id, source_tool_execution_id FROM message WHERE id = ?",
+                    "SELECT message.id, message.role, message.origin, message.content, message.source_inference_id, message.source_tool_execution_id,                             COALESCE(tool_execution.status = 'rejected', 0) AS \"tool_call_rejected!: bool\"                      FROM message LEFT JOIN tool_execution ON tool_execution.id = message.source_tool_execution_id                      WHERE message.id = ?",
                     entry.id,
                 )
                 .fetch_one(&self.pool)
@@ -5844,6 +5845,7 @@ impl Store {
                     reasoning,
                     source_inference_id: row.source_inference_id,
                     answers_tool_execution_id: row.source_tool_execution_id,
+                    tool_call_rejected: row.tool_call_rejected,
                 }
             }
             history::EntryKind::Summary => {

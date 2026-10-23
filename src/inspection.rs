@@ -402,6 +402,9 @@ pub enum RawHistoryEntry {
         reasoning: String,
         source_inference_id: Option<i64>,
         answers_tool_execution_id: Option<i64>,
+        /// The tool result answers a call whose arguments Rust rejected: the
+        /// model produced an invalid call. Never normal; worth investigating.
+        tool_call_rejected: bool,
     },
     Summary {
         id: i64,

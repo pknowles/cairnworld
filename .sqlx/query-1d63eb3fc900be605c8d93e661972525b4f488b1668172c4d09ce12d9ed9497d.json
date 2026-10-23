@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, role, origin, content, source_inference_id, source_tool_execution_id FROM message WHERE id = ?",
+  "query": "SELECT message.id, message.role, message.origin, message.content, message.source_inference_id, message.source_tool_execution_id,                             COALESCE(tool_execution.status = 'rejected', 0) AS \"tool_call_rejected!: bool\"                      FROM message LEFT JOIN tool_execution ON tool_execution.id = message.source_tool_execution_id                      WHERE message.id = ?",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,11 @@
         "name": "source_tool_execution_id",
         "ordinal": 5,
         "type_info": "Integer"
+      },
+      {
+        "name": "tool_call_rejected!: bool",
+        "ordinal": 6,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -43,8 +48,9 @@
       false,
       false,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "f40b88472750fb6d46709d21d614f8eed68c6e42773c5ec5a070cd8224ae6af6"
+  "hash": "1d63eb3fc900be605c8d93e661972525b4f488b1668172c4d09ce12d9ed9497d"
 }

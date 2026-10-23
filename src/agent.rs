@@ -367,7 +367,18 @@ pub async fn complete_with_call_context<B: Backend>(
                             content,
                             after_result,
                         } => ("completed", content, Some(after_result)),
-                        tools::ToolOutcome::Rejected(content) => ("rejected", content, None),
+                        tools::ToolOutcome::Rejected(content) => {
+                            // The model produced an invalid call. Never normal:
+                            // it is an error to investigate, not a path to rely on.
+                            tracing::error!(
+                                agent_id = turn.branch.agent_id(),
+                                tool = %tool_call.name,
+                                call_id = %tool_call.id,
+                                reason = %content,
+                                "tool call rejected: the model produced an invalid call"
+                            );
+                            ("rejected", content, None)
+                        }
                         tools::ToolOutcome::PendingTopologyChange(change) => {
                             pending_changes.push((
                                 tool_call.id.clone(),
