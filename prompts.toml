@@ -54,11 +54,11 @@ description = """\
 
 [gm.tools.approve_action.arguments]
 action_id = "The visible action id to approve."
-include = "For speech: characters who also hear it, by name."
-exclude = "For speech: characters who must not hear it, by name."
+include = "Only for a say or whisper; leave out for any other action. Characters who also hear it, by name."
+exclude = "Only for a say or whisper; leave out for any other action. Characters who must not hear it, by name."
 prefix = """\
-    For speech: a short phrase every hearer is shown before the words, such as how \
-    or why only some of them can hear.\
+    Only for a say or whisper; leave out for any other action. A short phrase every \
+    hearer is shown before the words, such as how or why only some of them can hear.\
     """
 
 [gm.tools.reject_action]

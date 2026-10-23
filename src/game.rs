@@ -1357,7 +1357,7 @@ where
                         && !matches!(approval_pending.tool.as_str(), "say" | "whisper")
                     {
                         return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: include, exclude and prefix shape how speech is heard, and action {action_id} is not speech"
+                            "Nothing was approved. include, exclude and prefix apply only to speech, and action {action_id} is not speech. Call approve_action again with action_id only."
                         )));
                     }
                     let resolved = match game
@@ -3427,7 +3427,7 @@ mod tests {
         scenario(
             "creation",
             120,
-            real_model_finishes_creation_and_takes_an_item(&model),
+            real_model_finishes_creation_and_the_gm_resolves_a_take(&model),
         )
         .await;
         scenario(
@@ -7744,7 +7744,7 @@ mod tests {
     /// Character creation finishing and one action after it, each asked once: the
     /// model must call ready_to_begin when the rolls are done, and a take must
     /// reach the GM, be approved and move the item.
-    async fn real_model_finishes_creation_and_takes_an_item(model: &DeviceModel) {
+    async fn real_model_finishes_creation_and_the_gm_resolves_a_take(model: &DeviceModel) {
         let (backend, model_path, configured, limits) = model.parts();
         // Greedy: this asserts the model follows specific instructions, so it
         // must not depend on a sampling draw.
@@ -7797,7 +7797,11 @@ mod tests {
             .fetch_one(&store.pool())
             .await
             .unwrap();
-        assert_eq!(held, 1, "the flour sack did not move to the character");
+        assert_eq!(
+            held,
+            i64::from(approved),
+            "the item did not follow the GM's decision"
+        );
         game.shutdown().await.unwrap();
     }
 
@@ -7827,6 +7831,15 @@ mod tests {
         let branch = store.agent_branch(member.agent_id).await.unwrap();
         let (_, executions) = crate::store::record_tool_batch_for_test(
             &store,
+        // The flour sack is Toma's, so a GM may fairly refuse the take. What the
+        // real model must do is resolve the action with a tool, and Rust moves
+        // the item exactly when the GM approved (the transfer itself is covered
+        // by the scripted take test).
+        let approved: bool =
+            sqlx::query_scalar("SELECT approved FROM action ORDER BY id DESC LIMIT 1")
+                .fetch_one(&store.pool())
+                .await
+                .expect("the GM never resolved the take");
             branch,
             sequence.id,
             &["roll_hit_protection"],
