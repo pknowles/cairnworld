@@ -7,8 +7,9 @@ of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
 - [NPC interaction](npc-interaction.md): expressive speech and individual GM
-  approvals, complete response scheduling/causal inspection, Interrupt/Never mind,
-  perceived-event opportunities and tentative/committed intervention.
+  approvals, complete response scheduling/causal inspection (Interrupt and
+  Never mind are done), NPC restraint and natural stopping, perceived-event
+  opportunities and tentative/committed intervention.
 - [Code quality checks](code-quality-checks.md): measure and enforce module
   boundaries, function complexity and duplication; correct the reported problems. DO NOT SKIP THIS - secodnd attempt after the first was "verified complete" spuriously.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to

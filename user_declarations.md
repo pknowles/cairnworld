@@ -100,8 +100,15 @@ trying to further consolidate too.
   - How does the classic two-guards/two-doors logic puzzle work?
   - What is the River Crossing Puzzle (Wolf, Goat, and Cabbage)?
   - What is the solution to The Water Jug Measurement Puzzle with 5 and 3 litre jugs?
+  - What makes Outer Wilds and The Witness truly unique compared to many games before them? 
+  - What are the core techniques in Mike Selinker & Thomas Snyder's Puzzlecraft?
   - What are the key components that make a good, interesting and satisfying logic puzzle and how do people go about designing them?
   - Write a procedure to design something similar; would following it produce a similar result.
+  - What does Justin Alexander have to say in So You Want to Be a Game Master about scenario design, meaningful choices, investigations, clues and avoiding situations where players get stuck?
+  - What is Justin Alexander's Three Clue Rule? How would you design challenges and mysteries without creating bottlenecks.
+  - How can you build nonlinear adventures where players discover their own way forward? What is Node-Based Scenario Design?
+  - What are the core points of Robin D. Laws's GUMSHOE System Reference Document? 
+
 
 - **More specific questions**
   - What will the conflict be between the players, their goal and other NPCs?
@@ -1194,15 +1201,19 @@ agents - the Storyteller, GM and NPCs.
 ## World game page
 
 This is the main page where the game is actually played. It is simple: one big
-chat history, a box at the bottom to enter text and a send button. Also an
-interrupt button that may be used to pause NPC discussions or say something
-mid-combat - specifically, prevent future NPC replies until the player(s) acts.
-Like a toggle to put your hand up in a teams meeting. NPCs have the ability to
-respond to observed events and this is just the same, except for players.
-Interrupt should change into a "Nvermind" button to resume execution if there
-was an interruption. If the interruption was not triggered then "Nevermind"
-should not trigger execution or be shown. If other players act while paused, the
-game moves on and the original interrupter may need to re-interrupt.
+chat history, a box at the bottom to enter text and a send button.
+
+There needs to be an interrupt button that may be used to pause NPC discussions
+or say something mid-combat - specifically, prevent future NPC replies until the
+player(s) acts. Like a toggle to put your hand up in a teams meeting. NPCs have
+the ability to respond to observed events and this is just the same, except for
+players. Interrupt should change into a "Nvermind" button to resume execution if
+there was an interruption. If the interruption was not triggered then
+"Nevermind" should not trigger execution or be shown. If other players act while
+paused, the game moves on. I'm not sure yet if this should cancel the original
+interrupter's interrupt - it could be frustrating if it's accidentally left on,
+but also frustrating if you can't finish typing your message quickly enough
+before the conversation takes off again.  
 
 When players join, the GM agent narrates their entry, e.g. entering the
 camp/walking up to the party from along the path/through the tavern
