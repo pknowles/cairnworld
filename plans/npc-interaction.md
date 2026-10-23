@@ -14,13 +14,17 @@ variants:
   the addressee field changed that. Removing the whisper tool made Toma answer
   openly in 6 of 6. Stating what each tool does (say is open, whisper is private)
   made Toma answer openly in 5 of 6 replays and in 9 of 10 end-to-end runs.
-- NPCs almost never call do_nothing once a dialogue is under way: 0 of about 60
-  decisions. An explicit instruction to stay silent, a trailing question, thinking
-  mode, a changed do_nothing description and a turn marker did not change that.
-  Mara coaches Toma by whisper and the two then answer each other, sometimes
-  repeating a whisper word for word. One discussion took 26 inferences, about six
-  minutes, to settle. Only with the whisper tool removed did an unaddressed Mara
-  stay silent (5 of 6, first round only).
+- NPCs never call do_nothing once a dialogue is under way: 0 of 105 decisions in
+  five complete discussions between Mara and Toma. Each discussion ran 21
+  utterances (about 2.3 minutes with a scripted GM) and ended by exhausting the
+  shared budget of 64 inferences, so the discussion is marked failed. The
+  NPC-answer device test passes because it stops at the first reply. About ten
+  context and wording variants, replayed on recorded late-round contexts, did
+  not produce a single do_nothing: an instruction to stay silent, a trailing
+  question, thinking mode, a different do_nothing description, a turn marker,
+  merging recent speech into one message, a note that characters talk in turns,
+  and removing the character's own earlier calls. Only with the whisper tool
+  removed did an unaddressed Mara stay silent (5 of 6, first round only).
 
 Builds on implemented shutdown and failure handling; combat and InterventionCheck
 are not implemented.
