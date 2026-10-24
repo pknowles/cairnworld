@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT message_id FROM npc_round_source WHERE round_id = ?",
+  "query": "SELECT message_id FROM npc_response_source WHERE collection_id = ?",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "0444c111a3d9d923e607beb8ce2be978035d0c294d5b10b5a09e1b2683bc25f3"
+  "hash": "993b0d2ef4d61a26654843f97e67d05571b7772f8e0d579040fa67b9c2142358"
 }

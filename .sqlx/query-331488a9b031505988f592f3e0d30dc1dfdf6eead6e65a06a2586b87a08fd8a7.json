@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO npc_discussion (root_sequence_id, spent_total, state) SELECT ?1, ?2, 'ready' WHERE EXISTS (SELECT 1 FROM npc_response_collection WHERE root_sequence_id = ?1) ON CONFLICT(root_sequence_id) DO UPDATE SET spent_total = excluded.spent_total",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "331488a9b031505988f592f3e0d30dc1dfdf6eead6e65a06a2586b87a08fd8a7"
+}

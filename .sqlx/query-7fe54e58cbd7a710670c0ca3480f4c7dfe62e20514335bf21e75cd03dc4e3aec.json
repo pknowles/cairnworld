@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_response_collection SET scene_revision = ?1 WHERE id = ?2 AND scene_revision = ?1 - 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7fe54e58cbd7a710670c0ca3480f4c7dfe62e20514335bf21e75cd03dc4e3aec"
+}

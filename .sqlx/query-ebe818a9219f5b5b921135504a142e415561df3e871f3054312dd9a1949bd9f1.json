@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT npc_response_source.message_id FROM npc_response_source JOIN history_entry ON history_entry.id = npc_response_source.message_id JOIN agent_history ON agent_history.branch_id = history_entry.branch_id JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id WHERE npc_response_source.collection_id = ?1 AND (?2 IS NULL OR npc_agent.character_id = ?2)",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ebe818a9219f5b5b921135504a142e415561df3e871f3054312dd9a1949bd9f1"
+}

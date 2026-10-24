@@ -415,7 +415,7 @@ rename-only checkpoint is needed.
   originating discussion's root and spent budget when registering narration
   sources; do not grant a new budget because a source is narration instead of
   speech. Standalone presence work uses its own recorded originating sequence.
-- Rename misleading `round`/`reopen_round` terms while updating their actual
+- (Done: collections, migration 0014.) Rename misleading `round`/`reopen_round` terms while updating their actual
   operations, schema and readers. Name stored data for pending NPC responses;
   names such as `replace_pending_npc_responses` must describe the function body.
   Do not split a function merely to satisfy a naming rule or perform a broad
@@ -485,7 +485,7 @@ original intent is already available. Human non-intervention remains the default
 blocking for human consent belongs to the later explicit-consent protocol.
 Use the existing child invocation/tool records and pending actions for these
 intentions, applying the same decision validation and eagerness selection rules
-as responses. No npc_discussion/npc_round/npc_candidate rows are needed to hold
+as responses. No npc_discussion/npc_response_collection/npc_candidate rows are needed to hold
 an unresolved InterventionCheck. Collect against the pre-reaction histories,
 return selected intentions, and close that child collection before GM approval.
 
@@ -557,10 +557,10 @@ not after every state transition or cosmetic edit.
 | U1: Say addresses one NPC | All actual NPC hearers get an opportunity; an addressed NPC may choose DoNothing. Selected speech retains the actor's authored style, without a fixed reader-added sentence, and gets ordinary GM approval. | A/B compare authored text through live/reload/context paths; C links speaker and source. Include text that omits the speaker's name: the captured backend input must still identify the speaker and addressee. Verify historical request reconstruction remains unchanged. |
 | U2: Different eagerness | Highest wins; losing proposals are superseded and their actors reconsider newly heard speech. | A contrasts 1/2/3; C checks only the winner acted. |
 | U3: Tied speech | Highest ties composed from the same history get separate single-action GM turns in any order. Earlier tied speech does not regenerate/invalidate the remaining chosen words. Approved words arrive once before collecting follow-up responses; prefix is optional. | A/C check original decisions, individual approvals and deliveries; B checks intelligible overlap/style. |
-| U4: All DoNothing | No GM approval or follow-up inference after collection completes. | A counts model work; C shows a settled round without actions. |
+| U4: All DoNothing | No GM approval or follow-up inference after collection completes. | A counts model work; C shows a settled collection without actions. |
 | U5: NPC conversation | Fresh follow-up turns share one budget; NPCs own dialogue and the GM owns approval/consequences. Evaluate natural stopping over repeated conversations. | B inspects actual prompts and play; A/C verify budget sharing and causal order. |
 | U6: Private speech | Only actual hearers other than a self-only speaker get opportunities. Two selected whispers to disjoint audiences have independent words, prefixes and narration. Excluded histories/prompts reveal no private words, style or unseen participants, including when a whisper is rejected. | A includes connected bystanders and revealing GM narration; B/C inspect captured inputs and delivered histories. |
-| E1: Human input mid-round | Input runs between finite steps and supersedes stale unexecuted work; committed words stay. | A controls inference boundaries; C confirms no stale action. |
+| E1: Human input mid-collection | Input runs between finite steps and supersedes stale unexecuted work; committed words stay. | A controls inference boundaries; C confirms no stale action. |
 | E2: Split, merge, departure or access loss | Revalidate selection, actor authority and recipients before execution; no actor acts in a retired/wrong group. | A exercises actual mutations; C checks resulting action ownership and deliveries. |
 | E3: No NPC hearer or self-only speech | No opportunity or inference is created. In a tied set, hearing another speaker still allows a later opportunity. | A/C inspect work and heard source references. |
 | E4: Malformed decision | Free text, multiple calls, noninteger eagerness, 0 or 4 fail visibly and leave valid answered tool history, without a correction loop. 1 and 3 are valid boundary values. | A checks errors and subsequent chat assembly; C checks original output and closed executions. |

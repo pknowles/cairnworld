@@ -5772,7 +5772,7 @@ mod tests {
     }
 
     /// Wait until the world has no NPC work left, as seen through its
-    /// completed steps' notifications and the stored rounds.
+    /// completed steps' notifications and the stored response collections.
     async fn wait_for_npc_work(scene: &SpeechScene) {
         wait_for_npc_work_of(&scene.game, &scene.store, &scene.first).await;
     }
@@ -5784,7 +5784,7 @@ mod tests {
         let mut notices = game.subscribe(watcher).await.unwrap();
         for _ in 0..400 {
             let open: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
+                "SELECT COUNT(*) FROM npc_response_collection WHERE state IN ('collecting', 'selected', 'executing')",
             )
             .fetch_one(&store.pool())
             .await
@@ -6247,7 +6247,7 @@ mod tests {
     }
 
     /// One group's raised hand must not stop another group's NPCs, even when the
-    /// held group's round is the older one.
+    /// held group's collection is the older one.
     #[tokio::test]
     async fn a_raised_hand_does_not_hold_back_another_group() {
         let scene = speech_scene().await;
@@ -6353,7 +6353,7 @@ mod tests {
         release.notify_one();
         asking.await.unwrap().unwrap();
 
-        // The outside group's NPC answers although the older inside round waits.
+        // The outside group's NPC answers although the older inside collection waits.
         let mut answered = false;
         for _ in 0..200 {
             if heard(&scene.store, &scene.first)
@@ -6366,14 +6366,14 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        let rounds: Vec<(i64, i64, String)> =
-            sqlx::query_as("SELECT id, group_id, state FROM npc_round ORDER BY id")
+        let collections: Vec<(i64, i64, String)> =
+            sqlx::query_as("SELECT id, group_id, state FROM npc_response_collection ORDER BY id")
                 .fetch_all(&scene.store.pool())
                 .await
                 .unwrap();
         assert!(
             answered,
-            "the held group stopped the other group's NPCs; requests {} rounds {rounds:?} first heard {:?} failed {:?}",
+            "the held group stopped the other group's NPCs; requests {} collections {collections:?} first heard {:?} failed {:?}",
             requests_made(&scene),
             heard(&scene.store, &scene.first).await,
             failed_sequences(&scene).await
@@ -6422,7 +6422,7 @@ mod tests {
         shutdown.await.unwrap().unwrap();
 
         let (executed, state): (i64, String) = sqlx::query_as(
-            "SELECT COUNT(execution_sequence_id), (SELECT state FROM npc_round WHERE state <> 'superseded' ORDER BY id LIMIT 1)              FROM npc_candidate WHERE selected = 1",
+            "SELECT COUNT(execution_sequence_id), (SELECT state FROM npc_response_collection WHERE state <> 'superseded' ORDER BY id LIMIT 1)              FROM npc_candidate WHERE selected = 1",
         )
         .fetch_one(&scene.store.pool())
         .await
@@ -6454,7 +6454,7 @@ mod tests {
         );
         for _ in 0..400 {
             let open: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
+                "SELECT COUNT(*) FROM npc_response_collection WHERE state IN ('collecting', 'selected', 'executing')",
             )
             .fetch_one(&scene.store.pool())
             .await
@@ -6825,7 +6825,7 @@ mod tests {
             "a reply chosen for the group that no longer exists was said: {chat:?}"
         );
         let open: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
+            "SELECT COUNT(*) FROM npc_response_collection WHERE state IN ('collecting', 'selected', 'executing')",
         )
         .fetch_one(&scene.store.pool())
         .await
@@ -7480,11 +7480,11 @@ mod tests {
             .await
             .unwrap();
 
-        let rounds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM npc_round")
+        let collections: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM npc_response_collection")
             .fetch_one(&scene.store.pool())
             .await
             .unwrap();
-        assert_eq!(rounds, 0);
+        assert_eq!(collections, 0);
         assert_eq!(scene.requests.lock().unwrap().len(), 4);
     }
 
@@ -9166,13 +9166,17 @@ mod tests {
             }
             // The discussion ending without a reply is a definite outcome:
             // stop waiting instead of running out the clock.
-            let open_rounds: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
+            let open_collections: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM npc_response_collection WHERE state IN ('collecting', 'selected', 'executing')",
             )
             .fetch_one(&store.pool())
             .await
             .unwrap();
-            quiet_polls = if open_rounds == 0 { quiet_polls + 1 } else { 0 };
+            quiet_polls = if open_collections == 0 {
+                quiet_polls + 1
+            } else {
+                0
+            };
             if quiet_polls > 30 {
                 break;
             }

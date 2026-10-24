@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT character_id FROM npc_candidate WHERE round_id = ? AND selected = 1              ORDER BY character_id",
+  "query": "SELECT character_id FROM npc_candidate WHERE collection_id = ? AND decision_invocation_id IS NULL ORDER BY character_id LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "d5c20ec7af344dadac62e88a41c41e16b98199421ad89b9dd4782bf6bc52bb04"
+  "hash": "fde8532bb7823fdaf178a5d4acdfeb92b4b276b7de3e37c761fa5e98796cbc22"
 }

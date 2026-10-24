@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_response_collection SET state = 'superseded' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "95f412ed238b745f420f5b056c588a9394e8719f44219f7b0f06db08d912aa96"
+}

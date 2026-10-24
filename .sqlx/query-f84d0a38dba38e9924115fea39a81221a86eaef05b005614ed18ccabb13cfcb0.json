@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_discussion SET state = 'settled' WHERE root_sequence_id = ?1 AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM npc_response_collection WHERE root_sequence_id = ?1 AND state IN ('collecting', 'selected', 'executing'))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f84d0a38dba38e9924115fea39a81221a86eaef05b005614ed18ccabb13cfcb0"
+}

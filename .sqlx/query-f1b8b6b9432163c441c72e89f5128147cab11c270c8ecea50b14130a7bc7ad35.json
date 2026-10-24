@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO npc_candidate (collection_id, character_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f1b8b6b9432163c441c72e89f5128147cab11c270c8ecea50b14130a7bc7ad35"
+}

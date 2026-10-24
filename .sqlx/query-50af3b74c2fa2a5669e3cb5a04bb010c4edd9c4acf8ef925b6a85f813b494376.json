@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_response_collection SET state = 'executing' WHERE id = ? AND state = 'selected'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "50af3b74c2fa2a5669e3cb5a04bb010c4edd9c4acf8ef925b6a85f813b494376"
+}

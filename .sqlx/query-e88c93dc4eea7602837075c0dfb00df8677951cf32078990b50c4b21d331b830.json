@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character_id FROM npc_candidate              WHERE collection_id = ? AND selected = 1 AND execution_sequence_id IS NULL              ORDER BY character_id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e88c93dc4eea7602837075c0dfb00df8677951cf32078990b50c4b21d331b830"
+}

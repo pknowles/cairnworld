@@ -6,7 +6,7 @@ mod prompt;
 mod speech;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
-pub use npc::{Decision, NpcRound, NpcStep, with_eagerness};
+pub use npc::{Decision, NpcStep, ResponseCollection, with_eagerness};
 pub use prompt::PromptEvidence;
 pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SayAction, WhisperAction};
 
@@ -2461,7 +2461,7 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("retiring split group {group_id}"))?;
-        Self::retire_group_rounds(transaction, group_id).await?;
+        Self::supersede_group_collections(transaction, group_id).await?;
         Ok(Ok(format!(
             "Group {group_id} split into groups {}.",
             result_group_ids
@@ -2555,7 +2555,7 @@ impl Store {
             .execute(&mut **transaction)
             .await
             .with_context(|| format!("retiring merged group {group_id}"))?;
-            Self::retire_group_rounds(transaction, group_id).await?;
+            Self::supersede_group_collections(transaction, group_id).await?;
         }
         Self::transfer_presence(
             transaction,
@@ -6768,6 +6768,63 @@ mod tests {
             .is_err(),
             "a cause is a tool call or a message, never both"
         );
+    }
+
+    #[tokio::test]
+    async fn the_collection_rename_keeps_pending_npc_work() {
+        let db = database();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(db.path())
+                    .create_if_missing(true)
+                    .foreign_keys(false),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../migrations/0001_recording.sql"),
+            include_str!("../migrations/0002_consolidate_compaction.sql"),
+            include_str!("../migrations/0003_presence_return.sql"),
+            include_str!("../migrations/0004_speech.sql"),
+            include_str!("../migrations/0005_npc_rounds.sql"),
+            include_str!("../migrations/0006_individual_speech_approval.sql"),
+            include_str!("../migrations/0007_authored_speech.sql"),
+            include_str!("../migrations/0008_compaction_cause.sql"),
+            include_str!("../migrations/0009_message_action.sql"),
+            include_str!("../migrations/0010_rejected_reply.sql"),
+            include_str!("../migrations/0011_response_sources_are_messages.sql"),
+            include_str!("../migrations/0012_group_scene_narrated.sql"),
+            include_str!("../migrations/0013_speech_without_batches.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        for statement in [
+            "INSERT INTO npc_round (id, root_sequence_id, group_id, scene_revision, state) VALUES (4, 1, 2, 0, 'collecting')",
+            "INSERT INTO npc_round_source (round_id, message_id) VALUES (4, 11)",
+            "INSERT INTO npc_candidate (round_id, character_id) VALUES (4, 5)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0014_npc_response_collections.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let kept: (i64, String, i64, i64) = sqlx::query_as(
+            "SELECT npc_response_collection.id, npc_response_collection.state, npc_response_source.message_id, npc_candidate.character_id \
+             FROM npc_response_collection \
+             JOIN npc_response_source ON npc_response_source.collection_id = npc_response_collection.id \
+             JOIN npc_candidate ON npc_candidate.collection_id = npc_response_collection.id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kept, (4, "collecting".to_string(), 11, 5));
     }
 
     #[tokio::test]

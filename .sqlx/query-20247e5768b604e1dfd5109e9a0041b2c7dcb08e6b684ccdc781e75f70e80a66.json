@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT npc_candidate.character_id, inference.output AS \"output!: i64\" FROM npc_candidate JOIN inference ON inference.invocation_id = npc_candidate.decision_invocation_id AND inference.ordinal = 0 WHERE npc_candidate.round_id = ? ORDER BY npc_candidate.character_id",
+  "query": "SELECT npc_candidate.character_id, inference.output AS \"output!: i64\" FROM npc_candidate JOIN inference ON inference.invocation_id = npc_candidate.decision_invocation_id AND inference.ordinal = 0 WHERE npc_candidate.collection_id = ? ORDER BY npc_candidate.character_id",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       true
     ]
   },
-  "hash": "6c17454b2a450574156bb89c139593bd0a6b372e1d103d8f2cf9cd9730f8b428"
+  "hash": "20247e5768b604e1dfd5109e9a0041b2c7dcb08e6b684ccdc781e75f70e80a66"
 }

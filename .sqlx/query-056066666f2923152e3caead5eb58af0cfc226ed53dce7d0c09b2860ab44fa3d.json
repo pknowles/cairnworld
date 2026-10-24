@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_candidate SET decision_invocation_id = ? WHERE collection_id = ? AND character_id = ? AND decision_invocation_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "056066666f2923152e3caead5eb58af0cfc226ed53dce7d0c09b2860ab44fa3d"
+}

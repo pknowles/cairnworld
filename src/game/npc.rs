@@ -1,4 +1,4 @@
-//! NPC response steps (design.md's NPC speech and response rounds). The world
+//! NPC response steps (design.md's NPC speech and responses). The world
 //! worker runs one finite step at a time between foreground events: collect one
 //! NPC's decision, select the winners, or take their words to the GM. Each step
 //! shares the discussion's budget and either completes whole or fails the
@@ -15,7 +15,7 @@ use crate::{
     inspection::DevEvent,
     llm::{Backend, Message, Role},
     prompts,
-    store::{Decision, NpcRound, NpcStep, SayAction, WhisperAction, with_eagerness},
+    store::{Decision, NpcStep, ResponseCollection, SayAction, WhisperAction, with_eagerness},
     world::{ChatChange, World},
 };
 
@@ -27,23 +27,27 @@ where
     /// discussion, announced to the players it concerns and logged; it is
     /// never retried, and the world stays usable.
     pub(super) async fn run_npc_step_logged(self: &Arc<Self>, world: &Arc<World>, step: NpcStep) {
-        let round = *step.round();
+        let collection = *step.collection();
         let result = match step {
-            NpcStep::Refresh(round) => self.store.refresh_round(&round).await,
-            NpcStep::Select(round) => self.store.select_round(&round).await,
+            NpcStep::Refresh(collection) => self.store.recollect_responses(&collection).await,
+            NpcStep::Select(collection) => self.store.select_winning_responses(&collection).await,
             NpcStep::Decide {
-                round,
+                collection,
                 character_id,
-            } => self.decide(world, round, character_id).await,
-            NpcStep::Execute(round) => self.execute_round(world, round).await,
+            } => self.decide(world, collection, character_id).await,
+            NpcStep::Execute(collection) => self.execute_selected_response(world, collection).await,
         };
         let Err(error) = result else { return };
         let message = format!("{error:#}");
-        tracing::error!(world_id = world.id, round_id = round.id, group_id = round.group_id, error = %message, "NPC step failed");
+        tracing::error!(world_id = world.id, collection_id = collection.id, group_id = collection.group_id, error = %message, "NPC step failed");
         // A step that failed before it had a sequence of its own (or whose
         // own failure could not be recorded) must still stop the discussion,
         // or the same step would run again.
-        match self.store.ensure_discussion_failed(&round, &message).await {
+        match self
+            .store
+            .ensure_discussion_failed(&collection, &message)
+            .await
+        {
             Ok(Some(sequence_id)) => {
                 let _no_live_viewers = world.broadcasts.send(ChatChange::Failed { sequence_id });
             }
@@ -57,13 +61,18 @@ where
     async fn decide(
         self: &Arc<Self>,
         world: &Arc<World>,
-        round: NpcRound,
+        collection: ResponseCollection,
         character_id: i64,
     ) -> Result<()> {
-        let claim = self.store.claim_npc_decision(&round, character_id).await?;
+        let claim = self
+            .store
+            .claim_npc_decision(&collection, character_id)
+            .await?;
         let budget = Budget::restore(
             self.limits,
-            self.store.discussion_spent(round.root_sequence_id).await?,
+            self.store
+                .discussion_spent(collection.root_sequence_id)
+                .await?,
         );
         let mut inference_id = None;
         let result: Result<()> = async {
@@ -171,11 +180,17 @@ where
         }
     }
 
-    async fn execute_round(self: &Arc<Self>, world: &Arc<World>, round: NpcRound) -> Result<()> {
-        let claim = self.store.claim_npc_execution(&round).await?;
+    async fn execute_selected_response(
+        self: &Arc<Self>,
+        world: &Arc<World>,
+        collection: ResponseCollection,
+    ) -> Result<()> {
+        let claim = self.store.claim_npc_execution(&collection).await?;
         let budget = Budget::restore(
             self.limits,
-            self.store.discussion_spent(round.root_sequence_id).await?,
+            self.store
+                .discussion_spent(collection.root_sequence_id)
+                .await?,
         );
         let result = async {
             let narration = self
@@ -188,7 +203,8 @@ where
                         .then_some(prompts::current()?.gm.tied_note.as_str()),
                 )
                 .await?;
-            self.deliver_narration(round.world_id, &narration).await?;
+            self.deliver_narration(collection.world_id, &narration)
+                .await?;
             self.store
                 .finish_npc_execution(&claim, budget.spent())
                 .await

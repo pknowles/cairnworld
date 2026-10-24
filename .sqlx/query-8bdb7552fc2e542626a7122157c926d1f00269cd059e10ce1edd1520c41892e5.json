@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE npc_candidate SET execution_sequence_id = ? WHERE collection_id = ? AND character_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "8bdb7552fc2e542626a7122157c926d1f00269cd059e10ce1edd1520c41892e5"
+}

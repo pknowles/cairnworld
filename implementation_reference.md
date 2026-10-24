@@ -458,7 +458,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   request, prompt and evidence with those independently observed values. It
   then changes the current world notes and proves the saved inference still
   reconstructs identically before reopening it in the browser. The
-  regular browser fixture replays a reviewed response round captured from the
+  regular browser fixture replays a reviewed response collection captured from the
   configured local model through the same Game-recorded tool/reply/
   deferred-compaction sequence and compares its raw request with the backend
   capture; its separately seeded history is only for live websocket events.
@@ -649,7 +649,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   connected-PC audience.
 - NPC speech responses (design.md: Character perceptions and NPC responses; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
-  (`commit_speech`) opens an `npc_round` whose candidates are the NPCs who heard
+  (`commit_speech`) opens an `npc_response_collection` whose candidates are the NPCs who heard
   it. The world worker runs one `NpcStep` at a time at lowest priority
   (`Store::next_npc_step`, none while draining): Refresh (stale
   `group.scene_revision`), Decide (one recorded inference per NPC, exactly one
@@ -663,11 +663,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   (`Budget::restore`/`spent`) and fail visibly through a failure sequence
   (`ensure_discussion_failed`; `sequence_cause` links it to the human turn so
   `player_chat_errors` shows it there). A round answers the messages that reached
-  NPC histories (`npc_round_source.message_id`, migration 0011), added by
+  NPC histories (`npc_response_source.message_id`, migration 0011), added by
   `offer_npc_responses` when something is delivered; the speaker's own copy is
   never a source. A sequence's cause (`sequence_cause`) is either a tool call
   (an NPC's proposal) or a message, and an NPC's decision names only messages
-  that NPC received. A round runs once the sequence that produced each source
+  that NPC received. A collection runs once the sequence that produced each source
   message has finished. Developer Mode shows the links:
   `Store::sequence_inspection` returns `SequenceInspection { caused_by, nodes }`
   and the turn view lists "Caused by" turns. `group.scene_revision` advances in

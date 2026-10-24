@@ -226,7 +226,7 @@ impl Store {
     ) -> Result<()> {
         let interrupted = INTERRUPTED_SEQUENCE_ERROR;
         let roots = sqlx::query_scalar!(
-            "SELECT DISTINCT npc_round.root_sequence_id FROM npc_round              WHERE npc_round.state IN ('collecting', 'selected', 'executing') AND (                  EXISTS (SELECT 1 FROM npc_candidate                          JOIN invocation ON invocation.id = npc_candidate.decision_invocation_id                          WHERE npc_candidate.round_id = npc_round.id AND invocation.outcome = 'interrupted')                  OR EXISTS (SELECT 1 FROM npc_candidate                             JOIN sequence ON sequence.id = npc_candidate.execution_sequence_id                             WHERE npc_candidate.round_id = npc_round.id AND sequence.error = ?1)                  OR EXISTS (SELECT 1 FROM npc_round_source                             JOIN message ON message.id = npc_round_source.message_id                             LEFT JOIN inference ON inference.id = message.source_inference_id                             JOIN sequence ON sequence.id = COALESCE(message.trigger_sequence_id, inference.sequence_id)                             WHERE npc_round_source.round_id = npc_round.id AND sequence.error = ?1))",
+            "SELECT DISTINCT npc_response_collection.root_sequence_id FROM npc_response_collection              WHERE npc_response_collection.state IN ('collecting', 'selected', 'executing') AND (                  EXISTS (SELECT 1 FROM npc_candidate                          JOIN invocation ON invocation.id = npc_candidate.decision_invocation_id                          WHERE npc_candidate.collection_id = npc_response_collection.id AND invocation.outcome = 'interrupted')                  OR EXISTS (SELECT 1 FROM npc_candidate                             JOIN sequence ON sequence.id = npc_candidate.execution_sequence_id                             WHERE npc_candidate.collection_id = npc_response_collection.id AND sequence.error = ?1)                  OR EXISTS (SELECT 1 FROM npc_response_source                             JOIN message ON message.id = npc_response_source.message_id                             LEFT JOIN inference ON inference.id = message.source_inference_id                             JOIN sequence ON sequence.id = COALESCE(message.trigger_sequence_id, inference.sequence_id)                             WHERE npc_response_source.collection_id = npc_response_collection.id AND sequence.error = ?1))",
             interrupted,
         )
         .fetch_all(&mut **transaction)
@@ -241,12 +241,12 @@ impl Store {
             .await
             .context("failing an interrupted discussion")?;
             sqlx::query!(
-                "UPDATE npc_round SET state = 'failed'                  WHERE root_sequence_id = ? AND state IN ('collecting', 'selected', 'executing')",
+                "UPDATE npc_response_collection SET state = 'failed'                  WHERE root_sequence_id = ? AND state IN ('collecting', 'selected', 'executing')",
                 root,
             )
             .execute(&mut **transaction)
             .await
-            .context("failing an interrupted discussion's rounds")?;
+            .context("failing an interrupted discussion's collections")?;
         }
         Ok(())
     }
