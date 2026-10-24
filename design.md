@@ -1273,6 +1273,11 @@ fiction rather than substituting for mechanical state.
 | InterventionCheck/Approve/Reject | GM consults selected characters about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may pause for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Give/take/drop/place | One holder change after arbitration/consent; no duplicate item on repeated approval. |
+| Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
+| Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
+| BeginCombat/endCombat | GM identifies combatants and state boundary; Rust stores turn order and flags and determines eligibility. |
+| SpawnItem/SpawnNPC | GM submits a typed proposal to Storyteller; its approval creates the object through the same validated constructors and records the source. |
+| Edit notes | GM/Storyteller tools replace one named JSON value on an authorized object; Storyteller reads its own notes, GM reads both but edits only GM notes. |
 
 Expose `look`, `investigate`, `open` and `ask` as distinct character tools with
 one shared description-argument schema and GM request implementation. Their names
@@ -1284,11 +1289,6 @@ authorization and arbitration do not imply identical fictional effects or four
 separate executors. Ask addresses the GM; spoken questions to characters still
 use Say/Whisper. Existing action rules and world-state operations determine what
 can actually happen; a new tool name does not itself implement missing mechanics.
-| Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
-| Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
-| BeginCombat/endCombat | GM identifies combatants and state boundary; Rust stores turn order and flags and determines eligibility. |
-| SpawnItem/SpawnNPC | GM submits a typed proposal to Storyteller; its approval creates the object through the same validated constructors and records the source. |
-| Edit notes | GM/Storyteller tools replace one named JSON value on an authorized object; Storyteller reads its own notes, GM reads both but edits only GM notes. |
 
 `combat(id, group_id, round, current_character_id)` and
 `combat_participant(combat_id, character_id, initiative_order)` own the stable

@@ -174,13 +174,18 @@ The Interrupt choice remains open as described above.
 
 | Slice | Production change and finish line |
 | --- | --- |
-| Shared perception delivery and NPC responses | Generalize the existing speech delivery/selection path and complete NPC narration delivery. Deliver Say/Whisper and the GM's Take narration through the shared path; derive response recipients from actual received messages, retain exact causes and preserve historical reconstruction. Complete the schema/refactoring and both action paths together, rather than a rename-only prerequisite. |
+| Structured final narration and shared delivery | Replace plain-text GM completion across action/opening/presence paths with the final narration batch. Complete recipient validation, per-entry provenance, shared-detail configuration and shared history delivery together. Actor-only, group and addressed narration work through live/reload/context/inspection paths; invalid batches deliver nothing. Existing speech responses keep working; general NPC response eligibility remains pending until the next checkpoint. |
+| Message-driven NPC responses | Complete narration delivery to NPC histories and generalize pending response sources/causal inspection to received messages. Verify Say/Whisper and Take together, including standalone narration, own-action exclusion, privacy, stale decisions and lifecycle/budget boundaries. Include necessary migrations and terminology cleanup with this behaviour; no rename-only prerequisite or new scheduler. |
+| Distinct GM request tools | Expose Look/Investigate/Open/Ask through the shared action path, retaining actual intent in recorded requests. Verify real-model routing and ordinary GM approval/results without adding unsupported world mechanics. |
 | Tentative/committed intervention | Add committed intent and InterventionCheck. Resolve bounded reaction results before the original decision, then schedule dialogue. Verify warning versus committed retry, source/actor authority, no GM re-entry, shared budget and retained effects on failure. Physical reactions remain with combat rules. |
 
 The following sections specify these pending increments. Reuse existing
 Store/Game/worker operations and checked SQL with forward migrations; no generic
 workflow engine, parallel executor or file-movement prerequisite is needed.
-Keep todo.md's overall order; this cleanup does not defer unfinished scope.
+Keep todo.md's overall order; these are checkpoints within the same NPC work,
+not deferred items. Each is a coherent end-to-end change with its applicable
+acceptance checks and AGENTS.md self-review. Schema/reader refactors belong with
+the first checkpoint that needs them, not in separate scaffolding commits.
 
 ## Shared perception delivery and NPC responses
 
@@ -220,24 +225,14 @@ earlier action. Publish wake-ups only after commit.
 The worker processes the pending response work, not a repeated scan of delivered
 messages. No new message-reprocessing or deduplication layer is required.
 
-### Implementation work, in dependency order
+### Implementation detail for the checkpoints
 
-Implement this as one complete behaviour-preserving consolidation plus Take
-coverage. Internal development steps need not become separate public features
-or rename-only commits.
+Use the checkpoints above to bound commits. The detailed work below specifies
+their common end state, not one mandatory giant commit. Preserve existing speech
+behaviour while adding final narration, then verify speech and Take through the
+same message-driven response mechanism. No temporary alternate delivery path or
+rename-only checkpoint is needed.
 
-- Expose `look`, `investigate`, `open` and `ask` with distinct model-facing names
-  and concise descriptions, sharing the existing description-argument schema,
-  character-action submission and GM arbitration implementation. Look means
-  observation, not arbitrary actions/questions; Ask requests information or
-  clarification from the GM, while speaking to a character uses Say/Whisper.
-  Preserve each actual tool name and arguments through validation, pending and
-  resolved action handling, model context and inspection. Do not silently alias
-  everything to Look or duplicate the executor. Apply the same shared path when
-  these actions are offered to NPCs; do not add separate NPC variants. This
-  interface change does not invent unsupported state mutations, saves or time
-  mechanics. Review descriptions under prompt_standards.md and exercise routing
-  through the real chat path rather than checking only generated schemas.
 - Replace the speech-only message-to-action join with an optional action
   reference on the existing message record. Keep its meaning distinct from
   `source_tool_execution_id`, which answers a tool call. Retain producing
@@ -394,6 +389,18 @@ or rename-only commits.
   Do not split a function merely to satisfy a naming rule or perform a broad
   mechanical rename before the structure is settled. There are no combat-style
   turns granting each NPC a slot to speak.
+- Expose `look`, `investigate`, `open` and `ask` with distinct model-facing names
+  and concise descriptions, sharing the existing description-argument schema,
+  character-action submission and GM arbitration implementation. Look means
+  observation, not arbitrary actions/questions; Ask requests information or
+  clarification from the GM, while speaking to a character uses Say/Whisper.
+  Preserve each actual tool name and arguments through validation, pending and
+  resolved action handling, model context and inspection. Do not silently alias
+  everything to Look or duplicate the executor. Apply the same shared path when
+  these actions are offered to NPCs; do not add separate NPC variants. This
+  interface change does not invent unsupported state mutations, saves or time
+  mechanics. Review descriptions under prompt_standards.md and exercise routing
+  through the real chat path rather than checking only generated schemas.
 
 Review remaining scheduling fields and branches against the retained behaviours
 above; remove unused state and duplicate paths. Preserve progress at completed
@@ -412,7 +419,7 @@ separate suite for every delivery kind:
 | Distinct general GM requests share implementation | Observe surroundings, investigate a clue, attempt to open something and ask for clarification use the appropriately named tools. Scripted production-path checks verify all four reach ordinary GM arbitration with their actual names/arguments and normal authorization; a representative real chat checks that Look is not presented as the generic action. Narration audiences depend on what is perceived, not which name was used. Do not claim unsupported world changes occurred. |
 | Requester and observers see different information | Exercise the worked actor-plus-group batch: the actor receives only detailed text; other eligible members receive only the brief text; an additional excluded character receives neither. Check history, captured prompts, reload and pending NPC work. Omitting group exclusions includes the actor normally. Foreign exclusions fail the batch before any delivery. Shared-detail on/off guides routine narration, but explicit private delivery stays private in both modes. Cover player, NPC and reaction actors and narration-only invocations without inventing a requester. |
 | Eligibility is independent of tool kind | An actually delivered perception offers its NPC recipient a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. Speech's prefix remains available without imposing it on other action kinds. |
-| Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
+| Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid final narration audiences visibly fail the turn before batch delivery; they are not tool-call rejection records. Invalid speech approval arguments remain recorded rejected tool calls. |
 | Final batch and narration without a character action | Group/presence uses the group final form and links replies to received messages and the actual producing inference/entry. Exercise a standard single group narration, actor-only description, mixed private/addressed batch and an empty batch. Malformed entries, unresolved actions or foreign recipients fail before any narration is delivered; prior action effects remain. Final output needs no closing inference or synthetic action/tool record. No narration-only opportunity is stranded by speech-only queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |
 | Migration and all readers | Existing speech, IDs/frozen names, prefixes, authored/legacy rendering and historical request reconstruction survive migration. Model context, live chat, reload, compaction and Developer Mode show the same received content and its true cause. |
@@ -424,7 +431,9 @@ with captured backend input, reviewing the cases with the user first as required
 by coding_standards.md. Do not start conversational tuning or require a specific
 NPC to reply. Keep the five-minute test budget; use existing lifecycle checks
 rather than repeated GPU scenarios. Finish the AGENTS.md self-review before
-committing this complete slice, then proceed to intervention.
+committing each checkpoint. Complete the shared-delivery, response and tool-name
+checkpoints before proceeding to intervention; do not mark the overall increment
+complete while any of its acceptance requirements remain pending.
 
 ## Intervention lifecycle
 
