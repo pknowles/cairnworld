@@ -21,6 +21,16 @@ role = """\
     themselves: narrate what is seen and done, never put words in a character's mouth.\
     """
 
+# Which of these follows the scene, by the game setting that players share narration.
+narration_shared = """\
+    Players receive the same detailed narration of an event unless you narrate \
+    something privately.\
+    """
+narration_separate = """\
+    Narrate each event to the acting player in detail and to the others more \
+    briefly, as they would perceive it.\
+    """
+
 # Told when the GM answers in plain text. {tools} lists the narrate tools it has.
 narrate_reminder = "End your turn by calling one of: {tools}."
 

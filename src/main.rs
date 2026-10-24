@@ -199,6 +199,7 @@ async fn main() -> Result<()> {
                 .context("opening web database")?;
             let model = resolve_model(model.as_deref(), None, &settings)?;
             let sampling = settings.sampling(&model);
+            let rules = settings.game;
             store
                 .recover_presence()
                 .await
@@ -215,13 +216,14 @@ async fn main() -> Result<()> {
                 loading_game
                     .finish(|| {
                         let result = result.map(|backend| {
-                            game::Game::new(
+                            game::Game::with_rules(
                                 loading_store,
                                 worlds,
                                 backend,
                                 limits,
                                 model.path,
                                 sampling,
+                                rules,
                             )
                         });
                         match &result {

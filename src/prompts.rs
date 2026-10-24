@@ -34,6 +34,8 @@ pub struct Prompts {
 pub struct Gm {
     pub role: String,
     pub narrate_reminder: String,
+    pub narration_shared: String,
+    pub narration_separate: String,
     pub action_request: String,
     pub tied_note: String,
     pub scene_request: String,

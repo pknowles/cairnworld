@@ -17,7 +17,25 @@ pub struct Settings {
     /// field by field.
     #[serde(default)]
     pub sampling: SamplingConfig,
+    #[serde(default)]
+    pub game: GameSettings,
     pub web: Option<Web>,
+}
+
+/// Rules of play that apply to every world.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct GameSettings {
+    /// Whether every player receives the same detailed narration of an event,
+    /// for a shared experience, unless the GM narrates something privately.
+    pub players_share_narration: bool,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            players_share_narration: true,
+        }
+    }
 }
 
 /// Every sampling knob is optional so a common `[sampling]` block and a

@@ -748,7 +748,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   before the action is approved or rejected. A valid call is captured in
   `NarrationTools` and delivered after the player agent settles as `NarrationText`
   entries (`only` / `except` recipients); `Narration::restrict_to` keeps speech
-  privacy. The GM scene packet carries character ids. Compaction obligations also
+  privacy. The GM scene packet carries character ids, and ends with the global
+  `[game] players_share_narration` rule (`Game::gm_packet`, `GameSettings`, on by
+  default) stated as a fact for the GM's choice of narrate tool. Compaction obligations also
   arise from a lone terminal call (`CompactionPolicy::ending_tools`).
 - Group-scoped narration. `Store::append_group_narration` selects connected
   active PCs inside one transaction and commits every recipient reference together.

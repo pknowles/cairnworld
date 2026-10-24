@@ -24,7 +24,7 @@ use crate::{
     inference::ScheduledBackend,
     llm::{Backend, Content, Message, Response, Role, Sampling, ToolDefinition},
     prompts,
-    settings::Limits,
+    settings::{GameSettings, Limits},
     store::{
         ActionOutcome, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration, PendingAction,
         PlayerAgent, PresenceNarration, SayAction, Store, WhisperAction,
@@ -42,6 +42,7 @@ pub struct Game<B> {
     limits: Limits,
     model: String,
     sampling: Sampling,
+    rules: GameSettings,
     worlds: Worlds,
     /// One worker per world, each returning its world id. Dropping the set
     /// aborts them: the last resort for abnormal teardown, since `shutdown`
@@ -86,6 +87,8 @@ impl<B> Game<B>
 where
     B: Backend + Send + Sync + 'static,
 {
+    /// A game with the default rules of play.
+    #[cfg(test)]
     pub fn new(
         store: Store,
         worlds: Worlds,
@@ -94,12 +97,34 @@ where
         model: String,
         sampling: Sampling,
     ) -> Arc<Self> {
+        Self::with_rules(
+            store,
+            worlds,
+            backend,
+            limits,
+            model,
+            sampling,
+            GameSettings::default(),
+        )
+    }
+
+    /// As `new`, with the rules of play configured for this deployment.
+    pub fn with_rules(
+        store: Store,
+        worlds: Worlds,
+        backend: ScheduledBackend<B>,
+        limits: Limits,
+        model: String,
+        sampling: Sampling,
+        rules: GameSettings,
+    ) -> Arc<Self> {
         let game = Arc::new(Self {
             store,
             backend,
             limits,
             model,
             sampling,
+            rules,
             worlds,
             tasks: Mutex::new(JoinSet::new()),
             stopping: watch::channel(false).0,
@@ -663,7 +688,7 @@ where
                 .context("loading group GM scene for presence narration")?,
         )
         .context("serializing group GM presence scene")?;
-        let scene_packet = format!("Current scene packet:\n{scene}");
+        let scene_packet = self.gm_packet(&scene)?;
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(
@@ -1305,6 +1330,18 @@ where
         })
     }
 
+    /// What the GM is shown of the scene it judges and narrates, with the
+    /// rule on whether players share the same narration.
+    fn gm_packet(&self, scene: &str) -> Result<String> {
+        let prompts = prompts::current()?;
+        let narration = if self.rules.players_share_narration {
+            &prompts.gm.narration_shared
+        } else {
+            &prompts.gm.narration_separate
+        };
+        Ok(format!("Current scene packet:\n{scene}\n\n{narration}"))
+    }
+
     /// The location GM, not the player agent, introduces a character who has
     /// just completed creation. The opening is a world transition, so it runs
     /// immediately from ready_to_begin instead of waiting for another player
@@ -1374,7 +1411,7 @@ where
                 .context("loading group GM scene for the opening")?,
         )
         .context("serializing group GM opening scene")?;
-        let scene_packet = format!("Current scene packet:\n{scene}");
+        let scene_packet = self.gm_packet(&scene)?;
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(Role::User, request);
@@ -1693,7 +1730,7 @@ where
         )
         .context("serializing group GM scene for prompt")?;
         let actor = self.store.character_name(pending.character_id).await?;
-        let scene_packet = format!("Current scene packet:\n{scene}");
+        let scene_packet = self.gm_packet(&scene)?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let note = note.map(|note| format!(" {note}")).unwrap_or_default();
         let request = Message::text(
@@ -2159,6 +2196,50 @@ mod tests {
         assert!(
             game.opening_complete(&member).await.unwrap(),
             "a durable silent completion must prevent reopening character creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gm_is_told_whether_players_share_the_same_narration() {
+        let prompts = prompts::current().unwrap();
+        for (shares, told, not_told) in [
+            (
+                true,
+                &prompts.gm.narration_shared,
+                &prompts.gm.narration_separate,
+            ),
+            (
+                false,
+                &prompts.gm.narration_separate,
+                &prompts.gm.narration_shared,
+            ),
+        ] {
+            let db = crate::store::TestDatabase::new("game-test");
+            let store = Store::open(db.path()).await.unwrap();
+            let (backend, _) = ScriptedBackend::recording([]);
+            let game = Game::with_rules(
+                store.clone(),
+                World::load(&store).await.unwrap(),
+                InferenceScheduler::new(backend, Limits::default())
+                    .unwrap()
+                    .foreground(),
+                Limits::default(),
+                "scripted".into(),
+                Sampling::default(),
+                GameSettings {
+                    players_share_narration: shares,
+                },
+            );
+            let packet = game.gm_packet("{}").unwrap();
+            assert!(packet.contains(told.as_str()), "{packet}");
+            assert!(!packet.contains(not_told.as_str()), "{packet}");
+        }
+        assert!(
+            crate::settings::Settings::load()
+                .unwrap()
+                .game
+                .players_share_narration,
+            "players share the narration unless configured otherwise"
         );
     }
 

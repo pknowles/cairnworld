@@ -84,3 +84,10 @@ presence_departure_seconds = 60
 # google_client_id = "..."
 # google_client_secret = "..."
 # google_redirect_url = "http://localhost:3000/auth/google/callback"
+
+# Rules of play for every world.
+[game]
+# Every player receives the same detailed narration of an event, for a shared
+# experience, unless the GM narrates something privately. When off, the GM
+# narrates each event to the acting player in detail and others more briefly.
+players_share_narration = true
