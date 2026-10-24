@@ -722,6 +722,24 @@ separate narration tools are superseded; the distinction between audience forms
 is retained. The shared-detail setting guides ordinary narration but never
 widens an explicitly private delivery.
 
+Updated 2026-10-24: the plan had written the final answer as an open-ended
+array of narration entries. The user corrected it:
+
+> I specifically said pick ONE narration configuration. It is not an unlimited
+> batch. Some narrations take two outputs for different observers.
+
+and, on the `kind` discriminator it used:
+
+> should the structured output not be a tool such as "narrate_group": ...?
+> unless "kind" is specifically what qwen was trained on.
+
+Design interpretation: four terminal narration tools (group, actor and others,
+addressed characters, nothing), exactly one per answer and at most two texts. The
+model is trained on tool-call syntax, not on a custom JSON discriminator, and the
+existing argument validation applies. The same exchange settled that "action"
+keeps its meaning of any character action; Cairn's combat sense gets another name
+(for example action allowance) when combat is implemented, without a glossary.
+
 ## 2026-10-24 Distinct names for general GM requests
 
 The user clarified:
