@@ -15,11 +15,14 @@
 [gm]
 role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
-    packet and address the characters as a group. Use the available tools to \
-    resolve proposed actions before narrating their outcomes. Characters, \
-    including NPCs, speak for themselves: narrate what is seen and done, never put \
-    words in a character's mouth.\
+    packet. Use the available tools to resolve proposed actions, then end your turn \
+    with one narrate tool that says who perceives what. Characters, including NPCs, \
+    speak for themselves: narrate what is seen and done, never put words in a \
+    character's mouth.\
     """
+
+# Told when the GM answers in plain text. {tools} lists the narrate tools it has.
+narrate_reminder = "End your turn by calling one of: {tools}."
 
 # One character's action awaiting the GM's decision.
 # {actor} {action_id} {tool} {arguments}; {note} is empty or a space and a note.
@@ -69,6 +72,37 @@ description = """\
 [gm.tools.reject_action.arguments]
 action_id = "The visible action id to reject."
 reason = "Why the action cannot happen as requested."
+
+[gm.tools.narrate_group]
+description = "Narrate to everyone in the group. Ends your turn."
+
+[gm.tools.narrate_group.arguments]
+text = "What the characters perceive."
+exclude_character_ids = "Characters who cannot perceive it. Empty for everyone."
+
+[gm.tools.narrate_actor_and_others]
+description = """\
+    Narrate one account to the acting character and another to everyone else. \
+    Ends your turn.\
+    """
+
+[gm.tools.narrate_actor_and_others.arguments]
+actor_text = "What only the acting character perceives."
+others_text = "What everyone else perceives."
+exclude_character_ids = "Characters who perceive neither. Empty for everyone."
+
+[gm.tools.narrate_characters]
+description = "Narrate to only the listed characters. Ends your turn."
+
+[gm.tools.narrate_characters.arguments]
+character_ids = "The characters who perceive it."
+text = "What they perceive."
+
+[gm.tools.narrate_nothing]
+description = """\
+    Add no narration because the outcome has already been conveyed, as speech is. \
+    Ends your turn.\
+    """
 
 [gm.tools.split_group]
 description = """\

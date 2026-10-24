@@ -105,6 +105,7 @@ where
                     static_messages: &[Message::text(Role::System, &prompts.npc.role)],
                     dynamic_context: &[facts.as_str()],
                     tools: &tools,
+                    ending_tools: &[],
                     sampling: self.sampling.clone(),
                     model: &self.model,
                     compact_before_next_input_tokens: self.limits.compact_before_next_input_tokens,

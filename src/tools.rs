@@ -67,9 +67,13 @@ impl ToolOutcome {
     }
 }
 
+#[derive(Clone)]
 pub struct Tool {
     definition: ToolDefinition,
     execute: Arc<ToolExecution>,
+    /// A completed call to this tool ends the agent's turn: the model is not
+    /// run again to read its result.
+    terminal: bool,
 }
 
 pub type ToolFuture = Pin<Box<dyn Future<Output = Result<ToolOutcome>> + Send>>;
@@ -82,6 +86,10 @@ impl Tool {
     pub async fn execute(&self, context: ToolCallContext<'_>) -> Result<ToolOutcome> {
         (self.execute)(context).await
     }
+
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
 }
 
 impl Tool {
@@ -92,6 +100,19 @@ impl Tool {
         Self {
             definition,
             execute: Arc::new(execute),
+            terminal: false,
+        }
+    }
+
+    /// A tool whose completed call ends the turn. It must be the only call in
+    /// its response, made once the results it needs have been read.
+    pub fn terminal(
+        definition: ToolDefinition,
+        execute: impl Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            terminal: true,
+            ..Self::new(definition, execute)
         }
     }
 }
@@ -104,6 +125,28 @@ pub fn test_echo() -> Tool {
         ToolDefinition {
             name: "test_echo".to_string(),
             description: "Return the supplied test text.".to_string(),
+            schema: serde_json::to_value(schema_for!(TestEcho))
+                .expect("test echo schema should serialize"),
+        },
+        |context| {
+            let arguments = context.arguments.to_string();
+            Box::pin(async move {
+                match test_echo_arguments(&arguments) {
+                    Ok(content) => Ok(ToolOutcome::Completed(content)),
+                    Err(error) => Ok(ToolOutcome::rejected(error)),
+                }
+            })
+        },
+    )
+}
+
+/// A test fixture: a terminal tool that returns its supplied text.
+#[cfg(test)]
+pub fn test_finish() -> Tool {
+    Tool::terminal(
+        ToolDefinition {
+            name: "test_finish".to_string(),
+            description: "Return the supplied test text and end the turn.".to_string(),
             schema: serde_json::to_value(schema_for!(TestEcho))
                 .expect("test echo schema should serialize"),
         },
@@ -154,10 +197,20 @@ pub fn definitions(tools: &[Tool]) -> Result<Vec<ToolDefinition>> {
         .collect()
 }
 
+/// Whether a call to this tool ends the turn once it completes.
+pub fn is_terminal(tools: &[Tool], name: &str) -> bool {
+    tools
+        .iter()
+        .any(|tool| tool.terminal && tool.definition.name == name)
+}
+
+/// Run one call. `alone` says whether it is the only call in its response,
+/// which a terminal tool requires.
 pub async fn execute(
     tools: &[Tool],
     call: &ToolCall,
     tool_execution_id: i64,
+    alone: bool,
 ) -> Result<ToolOutcome> {
     let Some(tool) = tools.iter().find(|tool| tool.definition.name == call.name) else {
         return Ok(ToolOutcome::Rejected(format!(
@@ -165,6 +218,12 @@ pub async fn execute(
             call.name
         )));
     };
+    if tool.terminal && !alone {
+        return Ok(ToolOutcome::Rejected(format!(
+            "`{}` ends your turn, so it must be your only call in a response, made after you have the results you need. Call it again on its own.",
+            call.name
+        )));
+    }
     tool.execute(ToolCallContext {
         arguments: &call.arguments,
         tool_execution_id,

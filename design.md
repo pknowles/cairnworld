@@ -1404,9 +1404,9 @@ and a brief account for the rest, use `narrate_actor_and_others` and exclude
 anyone who cannot perceive the observable behaviour. Without an explicit
 exclusion, `narrate_group` includes the actor. The actor is the character whose action or arrival the request describes: the
 requester of a presented action, including NPC and reaction actors, or the
-character entering a scene. The actor tool requires one and the context states
-that binding; a request that names none, such as scene-setting, uses the group
-or addressed tools.
+character entering a scene. The actor tool is offered only when there is one
+and the context states that binding; a request that names none, such as
+scene-setting, has only the group and addressed tools.
 
 The initial scene is narrated to the group before any player is in it, so NPCs
 hold it in their histories. A player character joining the group is then

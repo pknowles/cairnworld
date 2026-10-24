@@ -367,17 +367,12 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   are bare recorded_content IDs. No
   producer needs a typed sub-selection of a content row, since reasoning is
   always read alongside its own content (never referenced independently by a
-  different history entry) and GM narration is the GM's own settled text
-  reply, not a dedicated narration tool call - design.md's Chat schema and
-  Agent syntax and tool calls sections were corrected to match (an earlier
-  draft paragraph describing a `ContentRef`/typed-selection type for a
-  hypothetical narration tool was speculative and never had a real producer;
-  removed rather than kept unused, per coding_standards.md). `insert_message`
-  and the new `insert_message_with_content` (store.rs) are the two ways a
+  different history entry). `insert_message`
+  and `insert_message_with_content` (store.rs) are the two ways a
   message row is written - the latter takes an already-resolved content id
   directly rather than re-interning, used by `append_group_narration` so
-  every present character's delivered copy shares the GM inference output row
-  and carries that output's `source_inference_id` back to its producing Turn
+  every recipient of one narrated text shares one `recorded_content` row
+  and carries the narrating GM inference as `source_inference_id`
   (verified by `narration_delivered_to_several_recipients_shares_one_content_row`
   and `player_take_is_approved_by_its_location_gm_and_transferred_by_rust`).
   `branch_for_agent_tx`/`recorded_content_tx` are transaction-scoped
@@ -387,8 +382,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   a connection the open transaction holds.
 - Message, action and notice provenance. `message.source_inference_id` and
   `source_tool_execution_id` name the inference and, for a tool result, the
-  `tool_execution` row that produced an entry; delivered narration carries
-  neither. Player input carries `trigger_sequence_id` instead - the sequence
+  `tool_execution` row that produced an entry; delivered narration carries the
+  narrating inference but no tool execution. Player input carries `trigger_sequence_id` instead - the sequence
   it began, named directly since no inference exists yet at that point to
   resolve it through. `action` references `requesting_tool_execution_id` (the
   player call, nullable only for the server-driven test path with no
@@ -712,8 +707,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   with an unchanged online set clears the transition without inference.
   `handle_presence_deadline` consumes the matching generation before inference,
   preventing automatic retries on failure. Presence
-  narration uses an ordinary recorded GM turn and delivers one content reference
-  to connected active PCs in the group. Only creation-ready PCs participate.
+  narration uses an ordinary recorded GM turn ending in a narrate tool and delivers
+  it to connected active PCs in the group. Only creation-ready PCs participate.
   `party_presence()` returns group membership and current connection presence.
   `serve` calls `Store::recover_presence` before accepting connections, releasing
   former process connections while preserving narrated sets and pending deadlines.
@@ -721,12 +716,28 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   membership, and returns start a shared window even for the same returning set.
   Split partitions snapshots and copies deadlines; merge unions snapshots and
   keeps the earliest deadline, all within the topology transaction.
+- GM narration tools (`src/game/narration.rs`, `[gm.tools.narrate_*]` in
+  `prompts.toml`). Every GM turn (action arbitration, opening, presence) ends with
+  exactly one terminal tool: `narrate_group`, `narrate_actor_and_others` (offered
+  only when the turn has an actor), `narrate_characters` or `narrate_nothing`.
+  `Tool::terminal` marks a tool whose completed call ends the turn with no closing
+  inference; `tools::execute` rejects it unless it is the only call in its
+  response, and `Turn::terminal_reminder` makes a plain-text answer an error: it is
+  logged, flagged (`message.reply_rejected`, migration 0010, shown with rejected
+  tool calls as `output_rejected` in Developer Mode) and answered with the
+  `narrate_reminder` instruction. The tool validates the call against the group
+  read from the acting character when the call is made, and rejects narrating
+  before the action is approved or rejected. A valid call is captured in
+  `NarrationTools` and delivered after the player agent settles as `NarrationText`
+  entries (`only` / `except` recipients); `Narration::restrict_to` keeps speech
+  privacy. The GM scene packet carries character ids. Compaction obligations also
+  arise from a lone terminal call (`CompactionPolicy::ending_tools`).
 - Group-scoped narration. `Store::append_group_narration` selects connected
   active PCs inside one transaction and commits every recipient reference together.
   `append_presence_narration` also advances the narrated snapshot in that transaction.
   Delivery rollback retains generated inference and completed actions. Thus
   sharing a physical location cannot leak narration on reload. After a topology
-  tool batch, the GM's settled reply is delivered to the triggering character's
+  tool batch, the GM's narration is delivered to the triggering character's
   resulting group. The isolation test performs real split/action/GM tool rounds
   and checks both live delivery and reloaded histories; it no longer inserts
   group state or sends test narration directly. Presence tests observe an

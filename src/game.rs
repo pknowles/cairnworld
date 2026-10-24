@@ -6,7 +6,10 @@ use std::{
     },
 };
 
+mod narration;
 mod npc;
+
+use narration::{Narration, NarrationScope, NarrationTools};
 
 use anyhow::{Context, Result, ensure};
 use schemars::{JsonSchema, schema_for};
@@ -66,19 +69,6 @@ impl std::fmt::Display for FailedTurn {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "turn {} failed", self.sequence_id)
     }
-}
-
-struct Narration {
-    group_id: i64,
-    /// The recorded_content row the GM's own settled reply message already
-    /// references. Every present character's delivered copy points at this
-    /// same reference rather than re-recording the narration text once per
-    /// recipient (design.md's Chat schema: "every recipient references that
-    /// same selection").
-    content_id: i64,
-    /// The characters who may be shown it when it describes private speech;
-    /// `None` for narration to the whole group.
-    audience: Option<Vec<i64>>,
 }
 
 /// Everything a player-facing action tool needs to submit one action to its
@@ -680,6 +670,16 @@ where
             Role::User,
             prompts::fill(&prompts.gm.presence_request, &[("change", &change)])?,
         );
+        let narrate = NarrationTools::new(
+            self,
+            NarrationScope {
+                world_id,
+                in_group: online[0],
+                actor: None,
+                unresolved_action: None,
+            },
+        )?;
+        let reminder = narrate.reminder()?;
         let sequence = self
             .store
             .begin_sequence(world_id, "presence transition")
@@ -702,7 +702,8 @@ where
                     branch,
                     static_messages: &[role],
                     dynamic_context: &[scene_packet.as_str()],
-                    tools: &[],
+                    tools: &narrate.tools,
+                    terminal_reminder: Some(&reminder),
                     sampling: self.sampling.clone(),
                     model: &self.model,
                 },
@@ -712,12 +713,15 @@ where
             )
             .await
             .context("asking group GM for presence narration")?;
-            ensure!(
-                matches!(settled.response.content, Content::Text(_)),
-                "group GM did not settle while narrating presence"
-            );
+            let spoken = narrate.finish(group_id, settled.inference_id)?;
             self.store
-                .append_presence_narration(world_id, narration, online, settled.output_content_id)
+                .append_presence_narration(
+                    world_id,
+                    narration,
+                    online,
+                    spoken.inference_id,
+                    &spoken.texts,
+                )
                 .await
                 .context("storing presence narration")?;
             let _no_live_viewers = world.broadcasts.send(ChatChange::Entries);
@@ -801,6 +805,7 @@ where
                     static_messages: &[prompt],
                     dynamic_context: &[],
                     tools: &tools,
+                    terminal_reminder: None,
                     sampling: self.sampling.clone(),
                     model: &self.model,
                 },
@@ -907,6 +912,7 @@ where
                     static_messages: &[prompt],
                     dynamic_context: &[],
                     tools: &tools,
+                    terminal_reminder: None,
                     sampling: self.sampling.clone(),
                     model: &self.model,
                 },
@@ -1320,6 +1326,16 @@ where
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(Role::User, &prompts.gm.opening_request);
+        let narrate = NarrationTools::new(
+            self,
+            NarrationScope {
+                world_id: member.world_id,
+                in_group: member.character_id,
+                actor: None,
+                unresolved_action: None,
+            },
+        )?;
+        let reminder = narrate.reminder()?;
         self.store
             .append_instruction(branch, &request, sequence_id)
             .await
@@ -1333,7 +1349,8 @@ where
                 branch,
                 static_messages: &[role],
                 dynamic_context: &[scene_packet.as_str()],
-                tools: &[],
+                tools: &narrate.tools,
+                terminal_reminder: Some(&reminder),
                 sampling: self.sampling.clone(),
                 model: &self.model,
             },
@@ -1343,14 +1360,7 @@ where
         )
         .await
         .context("asking group GM for opening narration")?;
-        let Content::Text(_) = settled.response.content else {
-            anyhow::bail!("group GM did not settle while opening play");
-        };
-        Ok(Narration {
-            group_id,
-            content_id: settled.output_content_id,
-            audience: None,
-        })
+        narrate.finish(group_id, settled.inference_id)
     }
 
     /// `note` adds circumstances the GM should weigh, such as replies composed
@@ -1607,6 +1617,20 @@ where
                 }) as ToolFuture
             },
         );
+        let narrate = NarrationTools::new(
+            self,
+            NarrationScope {
+                world_id: pending.world_id,
+                in_group: pending.character_id,
+                actor: Some(pending.character_id),
+                unresolved_action: Some(action_id),
+            },
+        )?;
+        let reminder = narrate.reminder()?;
+        let tools: Vec<Tool> = [gm_tool, reject_tool, split_tool, merge_tool]
+            .into_iter()
+            .chain(narrate.tools.iter().cloned())
+            .collect();
         let scene = serde_json::to_string(
             &self
                 .store
@@ -1645,7 +1669,8 @@ where
                 branch,
                 static_messages: &[role],
                 dynamic_context: &[scene_packet.as_str()],
-                tools: &[gm_tool, reject_tool, split_tool, merge_tool],
+                tools: &tools,
+                terminal_reminder: Some(&reminder),
                 sampling: self.sampling.clone(),
                 model: &self.model,
             },
@@ -1655,51 +1680,27 @@ where
         )
         .await
         .with_context(|| format!("arbitrating action {action_id}"))?;
-        let Content::Text(_) = settled.response.content else {
-            anyhow::bail!("GM did not settle after action {action_id}");
-        };
-        ensure!(
-            !self
-                .store
-                .has_pending_action(pending.world_id, action_id)
-                .await
-                .context("checking GM action resolution")?,
-            "GM narrated action {action_id} without approving or rejecting it"
-        );
-        Ok(Narration {
-            group_id: self.store.character_group_id(pending.character_id).await?,
-            content_id: settled.output_content_id,
-            // The GM saw what was said; only those who heard it are told how
-            // the GM describes it. Speech that was not delivered was heard by
-            // no one, so only its speaker is told what became of it.
-            audience: match self
-                .store
-                .speech_audience(pending.requesting_tool_execution_id)
-                .await?
-            {
-                None if matches!(pending.tool.as_str(), "say" | "whisper") => {
-                    Some(vec![pending.character_id])
-                }
-                audience => audience,
-            },
-        })
-    }
-
-    async fn deliver_narration(&self, world_id: i64, narration: &Narration) -> Result<()> {
-        let world = self.world(world_id)?;
-        self.store
-            .append_group_narration(
-                world_id,
-                narration.group_id,
-                narration.content_id,
-                narration.audience.as_deref(),
-            )
-            .await
-            .context("storing GM narration before the player agent follows up")?;
-        // A player may disconnect while the GM resolves. The narration remains
-        // stored for reload; active viewers receive this exact same text.
-        let _no_live_viewers = world.broadcasts.send(ChatChange::Entries);
-        Ok(())
+        // A split or merge in this turn may have moved the actor, and the
+        // narration describes where they now are.
+        let mut narration = narrate.finish(
+            self.store.character_group_id(pending.character_id).await?,
+            settled.inference_id,
+        )?;
+        // The GM saw what was said; only those who heard it are told how the
+        // GM describes it. Speech that was not delivered was heard by no one,
+        // so only its speaker is told what became of it.
+        match self
+            .store
+            .speech_audience(pending.requesting_tool_execution_id)
+            .await?
+        {
+            None if matches!(pending.tool.as_str(), "say" | "whisper") => {
+                narration.restrict_to(vec![pending.character_id]);
+            }
+            Some(audience) => narration.restrict_to(audience),
+            None => {}
+        }
+        Ok(narration)
     }
 }
 
@@ -2021,7 +2022,7 @@ mod tests {
                 name: "ready_to_begin".into(),
                 arguments: "{}".into(),
             }])),
-            response(Content::Text("The charcoal hut is quiet.".into())),
+            narrate("The charcoal hut is quiet."),
             response(Content::Text(String::new())),
         ]);
         let (game, store, _db, member) = blank_opening_game(backend).await;
@@ -2108,12 +2109,20 @@ mod tests {
     impl Backend for DelayedBackend {
         async fn complete(
             &self,
-            _request: crate::llm::Request,
+            request: crate::llm::Request,
             _on_token: impl FnMut(&str) + Send,
         ) -> Result<Response> {
             self.requests.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             self.release.notified().await;
+            // The GM must end its turn with a narrate tool; others reply in text.
+            if request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "narrate_group")
+            {
+                return Ok(narrate("Welcome."));
+            }
             Ok(response(Content::Text("Welcome.".into())))
         }
     }
@@ -2146,18 +2155,20 @@ mod tests {
         opening_game_with_limits(backend, model, sampling, Limits::default()).await
     }
 
-    /// A rejected tool call is the model producing an invalid call: an error to
-    /// investigate, never a path the real-model scenarios may rely on.
-    async fn assert_no_rejected_tool_calls(store: &Store) {
+    /// A rejected tool call or refused plain-text reply is the model producing
+    /// invalid output: an error to investigate, never a path the real-model
+    /// scenarios may rely on.
+    async fn assert_no_rejected_output(store: &Store) {
         let inferences: Vec<i64> = sqlx::query_scalar(
-            "SELECT inference_id FROM tool_execution WHERE status = 'rejected' ORDER BY id",
+            "SELECT inference_id FROM tool_execution WHERE status = 'rejected' \
+             UNION SELECT source_inference_id FROM message WHERE reply_rejected = 1 ORDER BY 1",
         )
         .fetch_all(&store.pool())
         .await
         .unwrap();
         assert!(
             inferences.is_empty(),
-            "the model made invalid tool calls in inferences {inferences:?}; open them in Developer Mode"
+            "the model produced invalid output in inferences {inferences:?}; open them in Developer Mode"
         );
     }
 
@@ -2333,9 +2344,7 @@ mod tests {
                 name: "approve_action".into(),
                 arguments: r#"{"action_id":1}"#.into(),
             }])),
-            response(Content::Text(
-                "You lift the flour sack while Toma watches.".into(),
-            )),
+            narrate("You lift the flour sack while Toma watches."),
             response(Content::Text(String::new())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
@@ -2541,10 +2550,11 @@ mod tests {
             gm_history.iter().any(|entry| matches!(entry,
                 crate::store::RawHistoryEntry::Message {
                     role: Role::Assistant,
-                    content: MessageContent::Text(text),
+                    content: MessageContent::ToolCalls(calls),
                     ..
-                } if text == "You lift the flour sack while Toma watches.")),
-            "Developer Mode must show the GM's response after its action event"
+                } if calls.iter().any(|call| call.name == "narrate_group"
+                    && call.arguments.contains("You lift the flour sack while Toma watches.")))),
+            "Developer Mode must show the GM's narrate call after its action event"
         );
 
         // Provenance: the take action links to the player call that submitted
@@ -2665,9 +2675,7 @@ mod tests {
                     arguments: r#"{"action_id":1,"reason":"changed my mind"}"#.into(),
                 },
             ])),
-            response(Content::Text(
-                "You lift the flour sack while Toma watches.".into(),
-            )),
+            narrate("You lift the flour sack while Toma watches."),
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
@@ -2801,9 +2809,7 @@ mod tests {
                     arguments: split_args,
                 },
             ])),
-            response(Content::Text(
-                "Toma watches as you step outside with Mara.".into(),
-            )),
+            narrate("Toma watches as you step outside with Mara."),
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
@@ -2990,7 +2996,7 @@ mod tests {
                     arguments: split_args,
                 },
             ])),
-            response(Content::Text("You step outside with Mara.".into())),
+            narrate("You step outside with Mara."),
             response(Content::Text("What do you do next?".into())),
         ]);
         let split_backend = InferenceScheduler::new(split_backend, Limits::default()).unwrap();
@@ -3094,7 +3100,7 @@ mod tests {
                     arguments: merge_args,
                 },
             ])),
-            response(Content::Text("You and Mara rejoin Toma.".into())),
+            narrate("You and Mara rejoin Toma."),
             response(Content::Text("What do you do next?".into())),
         ]);
         let merge_backend = InferenceScheduler::new(merge_backend, Limits::default()).unwrap();
@@ -3306,7 +3312,7 @@ mod tests {
                 "approve_action",
                 serde_json::json!({"action_id": pending.id}),
             ),
-            response(Content::Text("The room is quiet.".into())),
+            narrate("The room is quiet."),
         ]);
         let game = Game::new(
             store.clone(),
@@ -3423,14 +3429,20 @@ mod tests {
         let crate::inspection::RecordedOutcome::Response(response) = recorded.outcome else {
             panic!("the GM's last inference did not complete");
         };
-        let Content::Text(narration) = response.content else {
-            panic!("the GM did not close with narration: {response:?}");
+        let Content::ToolCalls(calls) = response.content else {
+            panic!("the GM did not close with a narrate call: {response:?}");
         };
-        let narration = narration.to_lowercase();
+        let narration = calls
+            .iter()
+            .find(|call| call.name == "narrate_group")
+            .unwrap_or_else(|| panic!("the GM did not narrate to the group: {calls:?}"))
+            .arguments
+            .to_lowercase();
         assert!(
             narration.contains("heron") && narration.contains("lantern"),
             "the GM did not use both sides' history: {narration}"
         );
+        assert_no_rejected_output(&store).await;
     }
 
     /// Every real-model test, run against one model load. The whole suite must
@@ -3607,7 +3619,7 @@ mod tests {
                                 serde_json::json!({"action_id": action_id}),
                             )
                         }
-                        _ => response(Content::Text("It is said.".to_string())),
+                        _ => narrate("It is said."),
                     },
                 );
             }
@@ -3687,7 +3699,7 @@ mod tests {
             failures.len()
         );
         assert!(failures.is_empty(), "{failures:#?}");
-        assert_no_rejected_tool_calls(&store).await;
+        assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -3756,7 +3768,7 @@ mod tests {
                     arguments: incomplete_split,
                 },
             ])),
-            response(Content::Text("You step outside alone.".into())),
+            narrate("You step outside alone."),
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(backend, Limits::default()).unwrap();
@@ -3904,7 +3916,7 @@ mod tests {
                     arguments: second_split,
                 },
             ])),
-            response(Content::Text("You step outside with Mara.".into())),
+            narrate("You step outside with Mara."),
             response(Content::Text("What do you do next?".into())),
         ]);
         let backend = InferenceScheduler::new(backend, Limits::default()).unwrap();
@@ -4423,7 +4435,7 @@ mod tests {
                 name: "approve_action".into(),
                 arguments: r#"{"action_id":1}"#.into(),
             }])),
-            response(Content::Text("The shelf is bare.".into())),
+            narrate("The shelf is bare."),
             response(Content::Text(String::new())),
         ]);
         let (game, store, _db, member) = blank_opening_game(backend).await;
@@ -4555,6 +4567,11 @@ mod tests {
         }]))
     }
 
+    /// The GM ending its turn by narrating `text` to the whole group.
+    fn narrate(text: &str) -> Response {
+        tool_call("narrate_group", serde_json::json!({ "text": text }))
+    }
+
     /// The text of each speech entry in a player's chat.
     async fn heard(store: &Store, member: &PlayerAgent) -> Vec<String> {
         store
@@ -4668,7 +4685,7 @@ mod tests {
             self.responses.lock().unwrap().extend([
                 speech,
                 tool_call("approve_action", approval),
-                response(Content::Text("The room goes quiet.".into())),
+                narrate("The room goes quiet."),
                 response(Content::Text(String::new())),
             ]);
             self.game
@@ -4817,7 +4834,7 @@ mod tests {
                 serde_json::json!({"action_id": 1, "include": ["Nobody"]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("A greeting.".into())),
+            narrate("A greeting."),
             response(Content::Text(String::new())),
         ]);
 
@@ -4857,7 +4874,7 @@ mod tests {
                 serde_json::json!({"action_id": 1, "exclude": [speaker]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("A greeting.".into())),
+            narrate("A greeting."),
             response(Content::Text(String::new())),
         ]);
 
@@ -4909,7 +4926,7 @@ mod tests {
                 serde_json::json!({"action_id": 1, "prefix": "(Quietly)"}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("A bare room.".into())),
+            narrate("A bare room."),
             response(Content::Text(String::new())),
         ]);
 
@@ -4962,7 +4979,7 @@ mod tests {
                 matches!(
                     entry,
                     crate::store::RawHistoryEntry::Message {
-                        tool_call_rejected: true,
+                        output_rejected: true,
                         ..
                     }
                 )
@@ -4981,7 +4998,7 @@ mod tests {
                 serde_json::json!({"action_id": 1, "prefix": "x".repeat(300)}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("A greeting.".into())),
+            narrate("A greeting."),
             response(Content::Text(String::new())),
         ]);
 
@@ -5057,6 +5074,200 @@ mod tests {
         );
     }
 
+    /// What each narration entry in a player's chat says.
+    async fn narrations(store: &Store, member: &PlayerAgent) -> Vec<String> {
+        store
+            .player_chat(member)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.role == Role::Narration)
+            .map(|entry| entry.text)
+            .collect()
+    }
+
+    /// `first` looks around, the GM approves and ends its turn with `narration`.
+    /// Both players are connected so each can receive narration.
+    async fn look_and_narrate(scene: &SpeechScene, narration: Response) {
+        for member in [&scene.first, &scene.second] {
+            scene
+                .store
+                .mark_character_present(member.character_id)
+                .await
+                .unwrap();
+        }
+        scene.responses.lock().unwrap().extend([
+            tool_call("look", serde_json::json!({"description": "the room"})),
+            approve(1),
+            narration,
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Look around.")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_and_others_narration_gives_each_audience_only_its_own_text() {
+        let scene = speech_scene().await;
+        look_and_narrate(
+            &scene,
+            tool_call(
+                "narrate_actor_and_others",
+                serde_json::json!({
+                    "actor_text": "From the rock you see three guards.",
+                    "others_text": "The adventurer climbs the rock.",
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            narrations(&scene.store, &scene.first).await,
+            ["From the rock you see three guards."]
+        );
+        assert_eq!(
+            narrations(&scene.store, &scene.second).await,
+            ["The adventurer climbs the rock."]
+        );
+        // The GM's turn ended with its narration: no closing inference.
+        assert_eq!(scene.requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn excluded_and_unnamed_characters_receive_no_narration() {
+        let scene = speech_scene().await;
+        look_and_narrate(
+            &scene,
+            tool_call(
+                "narrate_actor_and_others",
+                serde_json::json!({
+                    "actor_text": "You see the guards.",
+                    "others_text": "The adventurer looks over the wall.",
+                    "exclude_character_ids": [scene.second.character_id],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            narrations(&scene.store, &scene.first).await,
+            ["You see the guards."]
+        );
+        assert!(narrations(&scene.store, &scene.second).await.is_empty());
+
+        scene.responses.lock().unwrap().extend([
+            tool_call("look", serde_json::json!({"description": "the sky"})),
+            approve(2),
+            tool_call(
+                "narrate_characters",
+                serde_json::json!({
+                    "character_ids": [scene.second.character_id],
+                    "text": "A cold wind touches only you.",
+                }),
+            ),
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Look up.")
+            .await
+            .unwrap();
+        assert_eq!(
+            narrations(&scene.store, &scene.second).await,
+            ["A cold wind touches only you."]
+        );
+        assert_eq!(narrations(&scene.store, &scene.first).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn narrating_nothing_ends_the_turn_and_delivers_nothing() {
+        let scene = speech_scene().await;
+        look_and_narrate(&scene, tool_call("narrate_nothing", serde_json::json!({}))).await;
+
+        assert!(narrations(&scene.store, &scene.first).await.is_empty());
+        assert!(narrations(&scene.store, &scene.second).await.is_empty());
+        assert_eq!(scene.requests.lock().unwrap().len(), 4);
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_narration_is_answered_to_the_gm_flagged_and_delivers_nothing() {
+        let scene = speech_scene().await;
+        for member in [&scene.first, &scene.second] {
+            scene
+                .store
+                .mark_character_present(member.character_id)
+                .await
+                .unwrap();
+        }
+        scene.responses.lock().unwrap().extend([
+            tool_call("look", serde_json::json!({"description": "the room"})),
+            // Narrating before the action is decided.
+            tool_call("narrate_group", serde_json::json!({"text": "Too early."})),
+            approve(1),
+            // A character who is not in the group.
+            tool_call(
+                "narrate_characters",
+                serde_json::json!({"character_ids": [999_999], "text": "To a stranger."}),
+            ),
+            // More than one narration in a response.
+            response(Content::ToolCalls(vec![
+                ToolCall {
+                    id: "one".into(),
+                    name: "narrate_group".into(),
+                    arguments: serde_json::json!({"text": "First."}).to_string(),
+                },
+                ToolCall {
+                    id: "two".into(),
+                    name: "narrate_nothing".into(),
+                    arguments: "{}".into(),
+                },
+            ])),
+            // Plain text instead of a narrate tool.
+            response(Content::Text("The room is empty.".into())),
+            narrate("The room is bare."),
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Look around.")
+            .await
+            .unwrap();
+
+        for member in [&scene.first, &scene.second] {
+            assert_eq!(
+                narrations(&scene.store, member).await,
+                ["The room is bare."],
+                "only the valid narration is delivered"
+            );
+        }
+        let rejected: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tool_execution WHERE status = 'rejected'")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            rejected, 4,
+            "early, foreign, and both calls of the mixed response"
+        );
+        let refused: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message WHERE reply_rejected = 1")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(refused, 1, "the plain-text reply is flagged");
+        let last_gm_request = scene.requests.lock().unwrap()[6].clone();
+        assert!(
+            matches!(&last_gm_request.messages.last().unwrap().content,
+                MessageContent::Text(text) if text.contains("narrate_group")),
+            "the GM is told how to end its turn: {:?}",
+            last_gm_request.messages.last()
+        );
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
     #[tokio::test]
     async fn a_batch_of_two_speech_calls_keeps_each_result_directly_after_the_calls() {
         let scene = speech_scene().await;
@@ -5074,9 +5285,9 @@ mod tests {
                 },
             ])),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("The first lands.".into())),
+            narrate("The first lands."),
             tool_call("approve_action", serde_json::json!({"action_id": 2})),
-            response(Content::Text("The second lands.".into())),
+            narrate("The second lands."),
             response(Content::Text(String::new())),
         ]);
 
@@ -5142,14 +5353,14 @@ mod tests {
                 serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("Toma looks up.".into())),
+            narrate("Toma looks up."),
             response(Content::Text(String::new())),
             // Mara, then Toma, each decide for themselves.
             tool_call("do_nothing", serde_json::json!({})),
             propose("In the hut.", &speaker, 2),
             // The GM judges Toma's reply.
             approve(2),
-            response(Content::Text("The hut is quiet.".into())),
+            narrate("The hut is quiet."),
             // Mara hears Toma and has nothing to add: the talk ends.
             tool_call("do_nothing", serde_json::json!({})),
         ]);
@@ -5200,7 +5411,7 @@ mod tests {
         vec![
             tool_call("say", serde_json::json!({"words": words, "to": "Toma"})),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("Toma looks up.".into())),
+            narrate("Toma looks up."),
             response(Content::Text(String::new())),
         ]
     }
@@ -5254,7 +5465,7 @@ mod tests {
                 propose("It is in the hut.", &speaker, 3),
                 // Only the winner reaches the GM.
                 approve(2),
-                response(Content::Text("The hut is quiet.".into())),
+                narrate("The hut is quiet."),
                 // Mara heard Toma and reconsiders instead of playing her stale reply.
                 do_nothing(),
             ],
@@ -5280,12 +5491,12 @@ mod tests {
                 propose("Ask the miller.", &speaker, 2),
                 propose("It is in the hut.", &speaker, 2),
                 approve(2),
-                response(Content::Text("Mara speaks over Toma.".into())),
+                narrate("Mara speaks over Toma."),
                 tool_call(
                     "approve_action",
                     serde_json::json!({"action_id": 3, "prefix": "(Together)"}),
                 ),
-                response(Content::Text("Toma speaks over Mara.".into())),
+                narrate("Toma speaks over Mara."),
                 // Only now does each hear the other's reply, and have nothing to add.
                 do_nothing(),
                 do_nothing(),
@@ -5361,7 +5572,7 @@ mod tests {
             do_nothing(),
             propose("In the hut.", speaker, 2),
             approve(2),
-            response(Content::Text("The hut is quiet.".into())),
+            narrate("The hut is quiet."),
             do_nothing(),
         ]);
         script
@@ -5621,7 +5832,7 @@ mod tests {
                     .to_string(),
                 },
             ])),
-            response(Content::Text("The group parts.".into())),
+            narrate("The group parts."),
             response(Content::Text(String::new())),
         ]);
         scene
@@ -5644,7 +5855,7 @@ mod tests {
                 serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
             ),
             approve(2),
-            response(Content::Text("Toma looks up.".into())),
+            narrate("Toma looks up."),
             response(Content::Text(String::new())),
             // Toma decides (held in flight below), and has nothing to say.
             do_nothing(),
@@ -5664,12 +5875,12 @@ mod tests {
                 serde_json::json!({"words": "Where is the flour?", "to": "Mara"}),
             ),
             approve(3),
-            response(Content::Text("Mara looks up.".into())),
+            narrate("Mara looks up."),
             response(Content::Text(String::new())),
             // Mara, outside, answers; nobody else is left to react.
             propose("It is in the hut.", &outside_speaker, 2),
             approve(4),
-            response(Content::Text("Mara speaks.".into())),
+            narrate("Mara speaks."),
         ]);
         let asking = {
             let game = Arc::clone(&scene.game);
@@ -5733,7 +5944,7 @@ mod tests {
             propose("Ask the miller.", &speaker, 2),
             propose("It is in the hut.", &speaker, 2),
             approve(2),
-            response(Content::Text("Mara speaks.".into())),
+            narrate("Mara speaks."),
         ]);
         scene
             .game
@@ -5761,7 +5972,7 @@ mod tests {
         scene.store.close_interrupted_turns().await.unwrap();
         let (backend, requests) = ScriptedBackend::recording([
             approve(3),
-            response(Content::Text("Toma speaks.".into())),
+            narrate("Toma speaks."),
             do_nothing(),
             do_nothing(),
         ]);
@@ -5834,11 +6045,11 @@ mod tests {
             propose("Ask the miller.", &speaker, 2),
             propose("It is in the hut.", &speaker, 2),
             approve(2),
-            response(Content::Text("Mara speaks.".into())),
+            narrate("Mara speaks."),
             // The other player interrupts before Toma's reply is taken to the GM.
             tool_call("say", serde_json::json!({"words": "Hold on."})),
             approve(3),
-            response(Content::Text("The room stills.".into())),
+            narrate("The room stills."),
             response(Content::Text(String::new())),
             do_nothing(),
             do_nothing(),
@@ -5886,9 +6097,9 @@ mod tests {
                     serde_json::json!({"words": "Toma whispers: not him.", "to": [second_name], "eagerness": 2}),
                 ),
                 approve(2),
-                response(Content::Text("Mara leans toward the first adventurer.".into())),
+                narrate("Mara leans toward the first adventurer."),
                 approve(3),
-                response(Content::Text("Toma leans toward the second adventurer.".into())),
+                narrate("Toma leans toward the second adventurer."),
             ],
         )
         .await;
@@ -5938,9 +6149,7 @@ mod tests {
                 "reject_action",
                 serde_json::json!({"action_id": 1, "reason": "Toma cannot hear over the noise."}),
             ),
-            response(Content::Text(
-                "You whisper about the key under the stone, but Toma cannot hear you.".into(),
-            )),
+            narrate("You whisper about the key under the stone, but Toma cannot hear you."),
             response(Content::Text(String::new())),
         ]);
         scene
@@ -6006,7 +6215,7 @@ mod tests {
                 do_nothing(),
                 propose("In the hut.", &speaker, 2),
                 approve(2),
-                response(Content::Text("The hut is quiet.".into())),
+                narrate("The hut is quiet."),
                 do_nothing(),
             ],
         )
@@ -6105,7 +6314,7 @@ mod tests {
             propose("Ask the miller.", &speaker, 2),
             propose("It is in the hut.", &speaker, 2),
             approve(2),
-            response(Content::Text("Mara speaks.".into())),
+            narrate("Mara speaks."),
             // While Toma's chosen reply waits, the other player splits the group.
             tool_call("look", serde_json::json!({"description": "the room"})),
             response(Content::ToolCalls(vec![
@@ -6127,7 +6336,7 @@ mod tests {
                     .to_string(),
                 },
             ])),
-            response(Content::Text("The group parts.".into())),
+            narrate("The group parts."),
             response(Content::Text(String::new())),
         ]);
         scene
@@ -6201,9 +6410,9 @@ mod tests {
             propose("Ask the miller.", &speaker, 2),
             propose("It is in the hut.", &speaker, 2),
             approve(2),
-            response(Content::Text("Mara speaks.".into())),
+            narrate("Mara speaks."),
             approve(3),
-            response(Content::Text("Toma speaks.".into())),
+            narrate("Toma speaks."),
             do_nothing(),
             do_nothing(),
         ]);
@@ -6294,7 +6503,7 @@ mod tests {
                     }),
                 ),
             ])),
-            response(Content::Text("The group parts.".into())),
+            narrate("The group parts."),
             response(Content::Text(String::new())),
         ]);
         scene
@@ -6328,12 +6537,12 @@ mod tests {
                 serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
             ),
             approve(2),
-            response(Content::Text("Toma looks up.".into())),
+            narrate("Toma looks up."),
             response(Content::Text(String::new())),
             propose("Ask the miller.", &speaker, 2),
             propose("It is in the hut.", &speaker, 2),
             approve(3),
-            response(Content::Text("Mara speaks.".into())),
+            narrate("Mara speaks."),
             tool_call("look", serde_json::json!({"description": "the yard"})),
             response(Content::ToolCalls(vec![
                 call("approve_action", serde_json::json!({"action_id": 4})),
@@ -6342,7 +6551,7 @@ mod tests {
                     serde_json::json!({"group_ids": groups, "name": "everyone", "description": "together"}),
                 ),
             ])),
-            response(Content::Text("They come together.".into())),
+            narrate("They come together."),
             response(Content::Text(String::new())),
         ]);
         scene
@@ -6470,7 +6679,7 @@ mod tests {
                     .to_string(),
                 },
             ])),
-            response(Content::Text("The group parts.".into())),
+            narrate("The group parts."),
             response(Content::Text(String::new())),
         ]);
         scene
@@ -6485,7 +6694,7 @@ mod tests {
                 serde_json::json!({"words": "Is Toma well?", "to": "Mara"}),
             ),
             approve(2),
-            response(Content::Text("Mara listens.".into())),
+            narrate("Mara listens."),
             response(Content::Text(String::new())),
             do_nothing(),
         ]);
@@ -6563,7 +6772,7 @@ mod tests {
                     "approve_action",
                     serde_json::json!({"action_id": pending.id}),
                 ),
-                response(Content::Text(narration.clone())),
+                narrate(&narration),
             ]);
             // Recovery that stops making progress loops forever; fail instead.
             tokio::time::timeout(
@@ -6701,9 +6910,9 @@ mod tests {
                     "reject_action",
                     serde_json::json!({"action_id": 2, "reason": "Mara is gagged."}),
                 ),
-                response(Content::Text("Mara strains against the gag.".into())),
+                narrate("Mara strains against the gag."),
                 approve(3),
-                response(Content::Text("Only Toma speaks.".into())),
+                narrate("Only Toma speaks."),
                 // Mara reconsiders after hearing Toma.
                 do_nothing(),
             ],
@@ -6730,7 +6939,7 @@ mod tests {
                 // Not the presented action.
                 approve(99),
                 approve(2),
-                response(Content::Text("Toma answers.".into())),
+                narrate("Toma answers."),
                 do_nothing(),
             ],
         )
@@ -6761,7 +6970,7 @@ mod tests {
                 serde_json::json!({"words": "Keep this quiet.", "to": ["Toma"]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("Toma leans in.".into())),
+            narrate("Toma leans in."),
             response(Content::Text(String::new())),
             // Only Toma heard it, so only Toma decides.
             do_nothing(),
@@ -6790,7 +6999,7 @@ mod tests {
                 serde_json::json!({"words": "Psst.", "to": [scene.names[1]]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
-            response(Content::Text("A quiet word.".into())),
+            narrate("A quiet word."),
             response(Content::Text(String::new())),
         ]);
         scene
@@ -6823,13 +7032,13 @@ mod tests {
                 serde_json::json!({"words": "Second point.", "to": "Toma"}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 2})),
-            response(Content::Text("Toma listens.".into())),
+            narrate("Toma listens."),
             response(Content::Text(String::new())),
             // One decision each for Mara and Toma, about both things said.
             do_nothing(),
             propose("Fine, I will answer.", &first_name, 1),
             approve(3),
-            response(Content::Text("Toma answers.".into())),
+            narrate("Toma answers."),
             do_nothing(),
         ]);
         let first = {
@@ -7094,8 +7303,7 @@ mod tests {
 
     #[tokio::test]
     async fn group_changes_preserve_presence_and_wake_existing_viewers() {
-        let (backend, _) =
-            ScriptedBackend::recording([response(Content::Text("Both arrive.".into()))]);
+        let (backend, _) = ScriptedBackend::recording([narrate("Both arrive.")]);
         let responses = Arc::clone(&backend.responses);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 3600).await;
@@ -7151,7 +7359,7 @@ mod tests {
                     .to_string(),
                 },
             ])),
-            response(Content::Text("Split narration.".into())),
+            narrate("Split narration."),
             response(Content::Text("Done.".into())),
         ]);
         game.player_message(first.clone(), "Look and split.")
@@ -7207,7 +7415,7 @@ mod tests {
                     .to_string(),
                 },
             ])),
-            response(Content::Text("Merge narration.".into())),
+            narrate("Merge narration."),
             response(Content::Text("Done.".into())),
         ]);
         game.player_message(first.clone(), "Look and merge.")
@@ -7255,7 +7463,7 @@ mod tests {
                 name: "approve_action".into(),
                 arguments: r#"{"action_id":1}"#.into(),
             }])),
-            response(Content::Text("Atomic delivery probe.".into())),
+            narrate("Atomic delivery probe."),
         ]);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 3600).await;
@@ -7448,7 +7656,7 @@ mod tests {
     #[tokio::test]
     async fn first_arrival_after_an_empty_period_narrates_after_its_deadline() {
         let (backend, recorded_requests) =
-            ScriptedBackend::recording([response(Content::Text("Someone arrives.".into()))]);
+            ScriptedBackend::recording([narrate("Someone arrives.")]);
         let (game, _store, _db, first, _second) = two_player_bread_thief_game(backend).await;
 
         // The group has never been announced online before: this is "first
@@ -7463,8 +7671,8 @@ mod tests {
     async fn restart_recovers_connections_and_durable_windows() {
         for returning in 0..=2 {
             let (backend, requests) = ScriptedBackend::recording([
-                response(Content::Text("Both arrive.".into())),
-                response(Content::Text("One returns, one remains away.".into())),
+                narrate("Both arrive."),
+                narrate("One returns, one remains away."),
             ]);
             let (game, store, db, first, second) =
                 two_player_bread_thief_game_with_deadline(backend, 3600).await;
@@ -7575,8 +7783,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_presence_delivery_preserves_snapshot_and_reports_once() {
-        let (backend, requests) =
-            ScriptedBackend::recording([response(Content::Text("Undelivered arrival.".into()))]);
+        let (backend, requests) = ScriptedBackend::recording([narrate("Undelivered arrival.")]);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 3600).await;
         game.connect(&first).await.unwrap();
@@ -7671,8 +7878,8 @@ mod tests {
     #[tokio::test]
     async fn arrival_into_an_already_announced_occupied_group_narrates_immediately() {
         let (backend, recorded_requests) = ScriptedBackend::recording([
-            response(Content::Text("Someone arrives.".into())),
-            response(Content::Text("Someone else arrives.".into())),
+            narrate("Someone arrives."),
+            narrate("Someone else arrives."),
         ]);
         let (game, _store, _db, first, second) = two_player_bread_thief_game(backend).await;
 
@@ -7696,9 +7903,9 @@ mod tests {
     #[tokio::test]
     async fn departure_narrates_after_its_deadline() {
         let (backend, recorded_requests) = ScriptedBackend::recording([
-            response(Content::Text("Someone arrives.".into())),
-            response(Content::Text("Someone else arrives.".into())),
-            response(Content::Text("Someone leaves.".into())),
+            narrate("Someone arrives."),
+            narrate("Someone else arrives."),
+            narrate("Someone leaves."),
         ]);
         let (game, _store, _db, first, second) = two_player_bread_thief_game(backend).await;
         let first_connection = game.connect(&first).await.unwrap();
@@ -7723,8 +7930,8 @@ mod tests {
     #[tokio::test]
     async fn returning_before_the_deadline_cancels_the_departure() {
         let (backend, recorded_requests) = ScriptedBackend::recording([
-            response(Content::Text("Someone arrives.".into())),
-            response(Content::Text("Someone else arrives.".into())),
+            narrate("Someone arrives."),
+            narrate("Someone else arrives."),
         ]);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 60).await;
@@ -7756,8 +7963,8 @@ mod tests {
     #[tokio::test]
     async fn an_empty_group_narrates_nothing_on_the_deadline() {
         let (backend, recorded_requests) = ScriptedBackend::recording([
-            response(Content::Text("Someone arrives.".into())),
-            response(Content::Text("Someone else arrives.".into())),
+            narrate("Someone arrives."),
+            narrate("Someone else arrives."),
         ]);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 60).await;
@@ -7909,7 +8116,7 @@ mod tests {
                         arguments: r#"{"action_id":1}"#.into(),
                     },
                 ])),
-                response(Content::Text("The scene is unchanged.".into())),
+                narrate("The scene is unchanged."),
                 response(Content::Text("Done.".into())),
             ]);
             game.player_message(member.clone(), "Look around.")
@@ -7953,7 +8160,8 @@ mod tests {
                 .fetch_all(&store.pool()).await.unwrap();
             assert_eq!(
                 statuses,
-                ["rejected", "completed"],
+                // The invalid change, its approval sibling, then the narration.
+                ["rejected", "completed", "completed"],
                 "case {case} lost the ordinary sibling result"
             );
         }
@@ -8034,7 +8242,7 @@ mod tests {
                     arguments: split,
                 },
             ])),
-            response(Content::Text("The group splits up.".into())),
+            narrate("The group splits up."),
             response(Content::Text(String::new())),
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-2".into(),
@@ -8046,9 +8254,7 @@ mod tests {
                 name: "approve_action".into(),
                 arguments: r#"{"action_id":2}"#.into(),
             }])),
-            response(Content::Text(
-                "Only the first group should see this.".into(),
-            )),
+            narrate("Only the first group should see this."),
             response(Content::Text(String::new())),
         ]);
         store
@@ -8274,7 +8480,7 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant && !entry.text.trim().is_empty()),
             "the completed opening must leave a player-visible assistant reply"
         );
-        assert_no_rejected_tool_calls(&store).await;
+        assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -8348,7 +8554,7 @@ mod tests {
             i64::from(approved),
             "the item did not follow the GM's decision"
         );
-        assert_no_rejected_tool_calls(&store).await;
+        assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -8404,7 +8610,7 @@ mod tests {
             reply.contains(&hp.to_string()),
             "the model should report the recorded roll {hp}: {reply}"
         );
-        assert_no_rejected_tool_calls(&store).await;
+        assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -8476,7 +8682,7 @@ mod tests {
             "NPC utterances after the first reply or the wait: {utterances:?}; the player heard {:?}",
             heard(&store, &first).await
         );
-        assert_no_rejected_tool_calls(&store).await;
+        assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
 
         assert!(
@@ -8538,7 +8744,7 @@ mod tests {
             answer.to_lowercase().contains("stone"),
             "the listener did not report where the key is: {answer}"
         );
-        assert_no_rejected_tool_calls(&store).await;
+        assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
     }
 
@@ -8645,7 +8851,7 @@ mod tests {
                 .any(|message| text_of(message).contains("MARIBEL")),
             "a retained raw message still held the fact, so recall did not need the summary: {raw:#?}"
         );
-        assert_no_rejected_tool_calls(&store).await;
+        assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
     }
 }

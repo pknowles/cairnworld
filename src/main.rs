@@ -422,6 +422,7 @@ async fn run_chat(
                 static_messages: &static_messages,
                 dynamic_context: &[],
                 tools: &tools,
+                terminal_reminder: None,
                 sampling: sampling.clone(),
                 model: &model.path,
             },

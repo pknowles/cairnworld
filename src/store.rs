@@ -288,6 +288,14 @@ pub struct PresenceNarration {
     pub waiting_for_return: bool,
 }
 
+/// One text of a GM narration and the characters of the group who may receive
+/// it: `only` limits it to those characters when set, `except` removes some.
+pub struct NarrationText {
+    pub text: String,
+    pub only: Option<Vec<i64>>,
+    pub except: Vec<i64>,
+}
+
 #[derive(FromRow)]
 struct PresenceNarrationRow {
     group_id: i64,
@@ -516,6 +524,7 @@ pub struct GmScene {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GmSceneNpc {
+    pub id: i64,
     pub name: String,
     pub description: String,
     pub background: String,
@@ -529,6 +538,7 @@ pub struct GmSceneNpc {
 /// narrate and arbitrate a shared scene consistently.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GmScenePlayer {
+    pub id: i64,
     pub name: String,
     pub description: String,
     pub background: String,
@@ -539,6 +549,7 @@ pub struct GmScenePlayer {
 
 #[derive(FromRow)]
 struct GmSceneNpcRow {
+    id: i64,
     name: String,
     description: String,
     background: String,
@@ -549,6 +560,7 @@ struct GmSceneNpcRow {
 
 #[derive(FromRow)]
 struct GmScenePlayerRow {
+    id: i64,
     name: String,
     description: String,
     background: String,
@@ -628,14 +640,6 @@ fn decode_notes(gm: &str, storyteller: &str) -> Result<Notes> {
 pub enum InferenceOutcome {
     Response(Response),
     Error(String),
-}
-
-/// What `finish_chat_inference` produced: the shared content reference a
-/// caller can pass to other recipients (e.g. GM narration delivered to every
-/// present character) without re-recording the same text.
-#[derive(Debug, Clone, Copy)]
-pub struct ChatInferenceOutcome {
-    pub output_content_id: Option<i64>,
 }
 
 /// Immutable input identity exists before execution, including failed attempts.
@@ -764,7 +768,7 @@ struct RawMessageRow {
     content: i64,
     source_inference_id: Option<i64>,
     source_tool_execution_id: Option<i64>,
-    tool_call_rejected: bool,
+    output_rejected: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -892,10 +896,10 @@ pub struct PendingCompaction {
     pub static_segments: Vec<Segment>,
 }
 
-/// The compaction policy `finish_chat_inference` checks a settled (non-tool-
-/// call) reply against. Whether the outcome actually was a settled reply -
-/// the only case that can enqueue compaction - is decided from the outcome
-/// itself (`Content::Text`, not `ToolCalls`), not by the caller.
+/// The compaction policy `finish_chat_inference` checks a turn-ending reply
+/// against. Whether the outcome actually ended the turn - the only case that
+/// can enqueue compaction - is decided from the outcome itself: a text reply,
+/// or a lone call to one of `ending_tools`.
 #[derive(Clone, Copy)]
 pub struct CompactionPolicy<'a> {
     pub sequence_id: Option<i64>,
@@ -903,6 +907,8 @@ pub struct CompactionPolicy<'a> {
     pub sampling: &'a Sampling,
     pub model: &'a str,
     pub static_segments: &'a [Segment],
+    /// Names of the tools whose completed call ends an agent's turn.
+    pub ending_tools: &'a [String],
 }
 
 #[derive(Debug, FromRow)]
@@ -3059,25 +3065,24 @@ impl Store {
         Ok(entries)
     }
 
-    /// Persist a resolved group narration in every connected player-agent
-    /// history currently in that group, all referencing the one
-    /// `recorded_content` row the narrating GM's own reply already wrote -
-    /// not a fresh copy of the text per recipient. Call this only after the
-    /// triggering player agent has settled, so its tool-call/result sequence
-    /// stays intact.
+    /// Persist the texts of one GM narration in the histories of the connected
+    /// player agents in that group who are meant to receive them, all of a
+    /// text's recipients referencing one `recorded_content` row - not a fresh
+    /// copy of the text per recipient. Call this only after the triggering
+    /// player agent has settled, so its tool-call/result sequence stays intact.
     pub async fn append_group_narration(
         &self,
         world_id: i64,
         group_id: i64,
-        content_id: i64,
-        audience: Option<&[i64]>,
+        inference_id: i64,
+        texts: &[NarrationText],
     ) -> Result<()> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .context("starting group narration delivery")?;
-        Self::append_group_narration_in(&mut transaction, world_id, group_id, content_id, audience)
+        Self::append_group_narration_in(&mut transaction, world_id, group_id, inference_id, texts)
             .await?;
         transaction
             .commit()
@@ -3090,7 +3095,8 @@ impl Store {
         world_id: i64,
         narration: &PresenceNarration,
         character_ids: &[i64],
-        content_id: i64,
+        inference_id: i64,
+        texts: &[NarrationText],
     ) -> Result<()> {
         let mut transaction = self
             .pool
@@ -3101,8 +3107,8 @@ impl Store {
             &mut transaction,
             world_id,
             narration.group_id,
-            content_id,
-            None,
+            inference_id,
+            texts,
         )
         .await?;
         Self::announce_presence_in(
@@ -3122,16 +3128,16 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
         group_id: i64,
-        content_id: i64,
-        audience: Option<&[i64]>,
+        inference_id: i64,
+        texts: &[NarrationText],
     ) -> Result<()> {
         // Recipients are connected PCs in the interacting group (design.md's
         // Membership and presence: "Narration recipients are NPCs and
         // connected PCs in the interacting group; offline PCs do not receive
         // it"). NPCs have no player-agent history to append to here; their
-        // own narration delivery is not yet implemented. Narration of private
-        // speech passes `audience`, the characters who heard it, so it cannot
-        // describe the speech to anyone else.
+        // own narration delivery is not yet implemented. Each text names who
+        // may receive it, so narration of private speech cannot describe the
+        // speech to anyone else.
         let recipients = sqlx::query!(
             "SELECT player_character.agent_id, player_character.character_id FROM world_member \
              JOIN player_character ON player_character.member_id = world_member.id \
@@ -3147,29 +3153,66 @@ impl Store {
         .fetch_all(&mut **transaction)
         .await
         .context("finding connected player agents in narrated group")?;
-        let agents = recipients
-            .into_iter()
-            .filter(|row| audience.is_none_or(|audience| audience.contains(&row.character_id)))
-            .map(|row| row.agent_id);
-        let source_inference_id: Option<i64> =
-            sqlx::query_scalar!("SELECT id FROM inference WHERE output = ?", content_id,)
-                .fetch_optional(&mut **transaction)
-                .await
-                .context("resolving GM narration's producing inference")?;
-        for agent_id in agents {
-            let branch_id = history::branch_for_agent(transaction, agent_id).await?;
-            Self::insert_message_with_content(
+        for narration in texts {
+            let agents: Vec<i64> = recipients
+                .iter()
+                .filter(|row| {
+                    narration
+                        .only
+                        .as_ref()
+                        .is_none_or(|only| only.contains(&row.character_id))
+                        && !narration.except.contains(&row.character_id)
+                })
+                .map(|row| row.agent_id)
+                .collect();
+            if agents.is_empty() {
+                continue;
+            }
+            let content_id = Self::content_in(
                 transaction,
-                branch_id,
-                (Role::Narration, MessageOrigin::Conversation),
-                content_id,
-                source_inference_id,
-                None,
-                None,
+                &MessageContent::Text(narration.text.clone()),
+                "",
             )
-            .await
-            .with_context(|| format!("storing group narration for player agent {agent_id}"))?;
+            .await?;
+            for agent_id in agents {
+                let branch_id = history::branch_for_agent(transaction, agent_id).await?;
+                Self::insert_message_with_content(
+                    transaction,
+                    branch_id,
+                    (Role::Narration, MessageOrigin::Conversation),
+                    content_id,
+                    Some(inference_id),
+                    None,
+                    None,
+                )
+                .await
+                .with_context(|| format!("storing group narration for player agent {agent_id}"))?;
+            }
         }
+        Ok(())
+    }
+
+    /// The characters currently in a group, players and NPCs.
+    pub async fn group_character_ids(&self, group_id: i64) -> Result<Vec<i64>> {
+        sqlx::query_scalar!(
+            "SELECT character_id FROM character_group WHERE group_id = ? ORDER BY character_id",
+            group_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading the characters in group {group_id}"))
+    }
+
+    /// Mark an agent's plain-text reply as refused, so Developer Mode flags it.
+    pub async fn reject_reply(&self, inference_id: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE message SET reply_rejected = 1 \
+             WHERE source_inference_id = ? AND source_tool_execution_id IS NULL",
+            inference_id,
+        )
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("flagging the reply of inference {inference_id} as rejected"))?;
         Ok(())
     }
 
@@ -3254,7 +3297,7 @@ impl Store {
     async fn group_gm_npcs(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmSceneNpc>> {
         let rows: Vec<GmSceneNpcRow> = sqlx::query_as!(
             GmSceneNpcRow,
-            "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.gm_notes \
+            "SELECT character.id, character.name, character.description, character.background, character.motive, character.ambition, character.gm_notes \
              FROM character_group JOIN character ON character.id = character_group.character_id \
              WHERE character_group.group_id = ? AND character.role = 'npc' ORDER BY character.id",
             group_id,
@@ -3265,6 +3308,7 @@ impl Store {
         rows.into_iter()
             .map(|row| {
                 Ok(GmSceneNpc {
+                    id: row.id,
                     name: row.name,
                     description: row.description,
                     background: row.background,
@@ -3280,7 +3324,7 @@ impl Store {
     async fn group_gm_players(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmScenePlayer>> {
         let rows: Vec<GmScenePlayerRow> = sqlx::query_as!(
             GmScenePlayerRow,
-            "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.sheet \
+            "SELECT character.id, character.name, character.description, character.background, character.motive, character.ambition, character.sheet \
              FROM character_group \
              JOIN player_character ON player_character.character_id = character_group.character_id \
              JOIN character ON character.id = player_character.character_id \
@@ -3295,6 +3339,7 @@ impl Store {
                 let sheet = serde_json::from_str(&row.sheet)
                     .context("decoding player character sheet for GM")?;
                 Ok(GmScenePlayer {
+                    id: row.id,
                     name: row.name,
                     description: row.description,
                     background: row.background,
@@ -5163,7 +5208,7 @@ impl Store {
         outcome: InferenceOutcome,
         duration_ms: u64,
         policy: CompactionPolicy<'_>,
-    ) -> Result<ChatInferenceOutcome> {
+    ) -> Result<()> {
         let duration_ms =
             i64::try_from(duration_ms).context("inference duration exceeds SQLite range")?;
         let mut transaction = self
@@ -5173,7 +5218,12 @@ impl Store {
             .context("starting chat inference completion")?;
         let next_input_tokens = match &outcome {
             InferenceOutcome::Response(response)
-                if matches!(response.content, Content::Text(_)) =>
+                if match &response.content {
+                    Content::Text(_) => true,
+                    Content::ToolCalls(calls) => {
+                        matches!(calls.as_slice(), [call] if policy.ending_tools.contains(&call.name))
+                    }
+                } =>
             {
                 Some(
                     response
@@ -5257,16 +5307,7 @@ impl Store {
             .commit()
             .await
             .context("committing chat inference completion")?;
-        Ok(ChatInferenceOutcome {
-            // The same recorded_content row this reply's own message
-            // references, so a caller (e.g. GM narration, once it settles)
-            // can deliver that exact reference to other recipients instead
-            // of re-recording the same text - design.md: "The same output
-            // reference supplies any assistant message, summary or
-            // narration delivery derived from that inference." None only
-            // for a failed inference, which produced no message at all.
-            output_content_id: output,
-        })
+        Ok(())
     }
 
     /// Complete a compaction inference: the outcome, its summary activation
@@ -5856,7 +5897,7 @@ impl Store {
             history::EntryKind::Message => {
                 let row: RawMessageRow = sqlx::query_as!(
                     RawMessageRow,
-                    "SELECT message.id, message.role, message.origin, message.content, message.source_inference_id, message.source_tool_execution_id,                             COALESCE(tool_execution.status = 'rejected', 0) AS \"tool_call_rejected!: bool\"                      FROM message LEFT JOIN tool_execution ON tool_execution.id = message.source_tool_execution_id                      WHERE message.id = ?",
+                    "SELECT message.id, message.role, message.origin, message.content, message.source_inference_id, message.source_tool_execution_id,                             (COALESCE(tool_execution.status = 'rejected', 0) OR message.reply_rejected) AS \"output_rejected!: bool\"                      FROM message LEFT JOIN tool_execution ON tool_execution.id = message.source_tool_execution_id                      WHERE message.id = ?",
                     entry.id,
                 )
                 .fetch_one(&self.pool)
@@ -5880,7 +5921,7 @@ impl Store {
                     reasoning,
                     source_inference_id: row.source_inference_id,
                     answers_tool_execution_id: row.source_tool_execution_id,
-                    tool_call_rejected: row.tool_call_rejected,
+                    output_rejected: row.output_rejected,
                 }
             }
             history::EntryKind::Summary => {
@@ -6287,6 +6328,7 @@ pub(crate) async fn record_tool_batch_for_test(
                 sampling: &sampling,
                 model: "scripted",
                 static_segments: &[],
+                ending_tools: &[],
             },
         )
         .await
@@ -6357,6 +6399,7 @@ mod tests {
                     sampling: &sampling,
                     model: "test-model",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await?;
@@ -8104,6 +8147,7 @@ mod tests {
                     sampling: &Sampling::default(),
                     model: "test-model",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await
@@ -8161,6 +8205,7 @@ mod tests {
                     sampling: &Sampling::default(),
                     model: "test-model",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await
@@ -8212,18 +8257,23 @@ mod tests {
             .await
             .unwrap();
 
-        // The narrating GM's own reply, whose recorded_content row delivery
-        // must reference rather than copy.
-        let mut transaction = store.pool.begin().await.unwrap();
-        let content_id = Store::content_in(
-            &mut transaction,
-            &MessageContent::Text("A shadow crosses the doorway.".to_string()),
-            "",
+        let inference_id = record_inference(
+            &store,
+            installed.member.agent_id,
+            &[],
+            &Request {
+                messages: vec![],
+                tools: vec![],
+                sampling: Sampling::default(),
+            },
+            InferenceOutcome::Response(response()),
+            "test-model",
+            1,
         )
         .await
         .unwrap();
-        transaction.commit().await.unwrap();
 
+        // One text for the whole group, one only for the first character.
         store
             .append_group_narration(
                 installed.world_id,
@@ -8231,18 +8281,29 @@ mod tests {
                     .character_group_id(installed.member.character_id)
                     .await
                     .unwrap(),
-                content_id,
-                None,
+                inference_id,
+                &[
+                    NarrationText {
+                        text: "A shadow crosses the doorway.".to_string(),
+                        only: None,
+                        except: vec![],
+                    },
+                    NarrationText {
+                        text: "It is your own shadow.".to_string(),
+                        only: Some(vec![installed.member.character_id]),
+                        except: vec![],
+                    },
+                ],
             )
             .await
             .unwrap();
 
-        let contents: Vec<(i64,)> = sqlx::query_as(
-            "SELECT message.content FROM message \
+        let delivered: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT agent_history.agent_id, message.content FROM message \
              JOIN history_entry ON history_entry.id = message.id \
              JOIN agent_history ON agent_history.branch_id = history_entry.branch_id \
              WHERE agent_history.agent_id IN (?, ?) AND message.role = ? \
-             ORDER BY agent_history.agent_id",
+             ORDER BY message.id",
         )
         .bind(installed.member.agent_id)
         .bind(second.agent_id)
@@ -8250,19 +8311,20 @@ mod tests {
         .fetch_all(&store.pool)
         .await
         .unwrap();
+        let first = installed.member.agent_id;
         assert_eq!(
-            contents.len(),
-            2,
-            "both present characters must receive the narration"
+            delivered
+                .iter()
+                .map(|(agent, _)| *agent)
+                .collect::<Vec<_>>(),
+            [first, second.agent_id, first],
+            "the group text reaches both characters; the private one only the first"
         );
         assert_eq!(
-            contents[0].0, content_id,
-            "delivered narration must reference the GM's own content row"
+            delivered[0].1, delivered[1].1,
+            "every recipient of a text must reference the same content row, not a copy"
         );
-        assert_eq!(
-            contents[0].0, contents[1].0,
-            "every recipient must reference the same content row, not a copy"
-        );
+        assert_ne!(delivered[0].1, delivered[2].1);
     }
 
     #[tokio::test]
@@ -8628,6 +8690,7 @@ mod tests {
                     sampling: &Sampling::default(),
                     model: "test-model",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await
@@ -8791,6 +8854,7 @@ mod tests {
                     sampling: &Sampling::default(),
                     model: "test-model",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await
@@ -8856,6 +8920,7 @@ mod tests {
                     sampling: &Sampling::default(),
                     model: "test-model",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await
@@ -9015,6 +9080,7 @@ mod tests {
                         sampling: &Sampling::default(),
                         model: "test-model",
                         static_segments: &[],
+                        ending_tools: &[],
                     },
                 )
                 .await
@@ -9964,6 +10030,7 @@ mod tests {
                     sampling: &Sampling::default(),
                     model: "test",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await

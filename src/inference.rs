@@ -534,6 +534,7 @@ mod tests {
                     },
                     model: "test",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await

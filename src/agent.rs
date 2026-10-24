@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
     context,
-    llm::{Backend, Content, Message, Response, Sampling},
+    llm::{Backend, Content, Message, Response, Role, Sampling},
     settings::Limits,
     store::{AgentBranch, CompactionPolicy, Store},
     tools::{self, Tool},
@@ -144,20 +144,21 @@ pub struct Turn<'a> {
     pub static_messages: &'a [Message],
     pub dynamic_context: &'a [&'a str],
     pub tools: &'a [Tool],
+    /// Set exactly when `tools` holds a terminal tool: the turn then ends only
+    /// through one, and an agent that answers in plain text is told this and
+    /// run again. That is an error to investigate, not a path to rely on.
+    pub terminal_reminder: Option<&'a str>,
     pub sampling: Sampling,
     pub model: &'a str,
 }
 
-/// A settled turn's final non-tool completion and the recorded_content reference its
-/// own message already stores - so a caller (e.g. GM narration) can deliver
-/// that exact reference to other recipients instead of re-recording the same
-/// completion. Only returned once the loop has actually settled, not for an
-/// intermediate tool-calling turn.
+/// A settled turn's final completion: a plain-text reply, or the tool calls
+/// that ended it through a terminal tool. Only returned once the loop has
+/// actually settled, not for an intermediate tool-calling turn.
 pub struct Settled {
     pub response: Response,
-    /// The final non-tool inference that ended this invocation.
+    /// The final inference that ended this invocation.
     pub inference_id: i64,
-    pub output_content_id: i64,
     /// Whether this invocation executed a model-requested tool before its
     /// final response.
     pub used_tools: bool,
@@ -265,6 +266,16 @@ pub async fn complete_with_call_context<B: Backend>(
             .context("waiting for earlier deferred work for this agent")?;
         let definitions =
             tools::definitions(turn.tools).context("validating declared tool schemas")?;
+        ensure!(
+            turn.terminal_reminder.is_some() == turn.tools.iter().any(Tool::is_terminal),
+            "a turn must have a terminal reminder exactly when it has a terminal tool"
+        );
+        let ending_tools: Vec<String> = turn
+            .tools
+            .iter()
+            .filter(|tool| tool.is_terminal())
+            .map(|tool| tool.definition().name)
+            .collect();
         let mut chat_spent = 0;
         let mut used_tools = false;
         loop {
@@ -283,6 +294,7 @@ pub async fn complete_with_call_context<B: Backend>(
                     static_messages: turn.static_messages,
                     dynamic_context: turn.dynamic_context,
                     tools: &definitions,
+                    ending_tools: &ending_tools,
                     sampling: turn.sampling.clone(),
                     model: turn.model,
                     compact_before_next_input_tokens: budget
@@ -300,17 +312,34 @@ pub async fn complete_with_call_context<B: Backend>(
             // their results executed and appended below; a settled text
             // reply is done.
             let Content::ToolCalls(calls) = &response.content else {
+                if let Some(reminder) = turn.terminal_reminder {
+                    tracing::error!(
+                        agent_id = turn.branch.agent_id(),
+                        inference_id = completion.inference_id,
+                        "plain-text reply refused: the model must end its turn with a terminal tool call"
+                    );
+                    store
+                        .reject_reply(completion.inference_id)
+                        .await
+                        .context("flagging the refused plain-text reply")?;
+                    store
+                        .append_instruction(
+                            turn.branch,
+                            &Message::text(Role::User, reminder),
+                            call.sequence_id
+                                .context("a turn ending with a terminal tool runs in a sequence")?,
+                        )
+                        .await
+                        .context("telling the model to end its turn with a tool call")?;
+                    continue;
+                }
                 backend
                     .after_agent(store, turn.branch, &turn.events)
                     .await
                     .context("admitting any due deferred compaction")?;
-                let output_content_id = completion
-                    .output_content_id
-                    .context("a settled reply always has an output content reference")?;
                 return Ok(Settled {
                     response,
                     inference_id: completion.inference_id,
-                    output_content_id,
                     used_tools,
                 });
             };
@@ -343,6 +372,8 @@ pub async fn complete_with_call_context<B: Backend>(
             // applied together, once, only after every ordinary call in the
             // batch has settled with no error.
             let mut pending_changes = Vec::new();
+            // A completed terminal tool call ends the turn once the batch is done.
+            let mut ended = false;
             // Deliveries put messages into histories, possibly the caller's
             // own, so they wait until every call of the batch has its result:
             // a message between a call and a sibling's result would break the
@@ -358,9 +389,14 @@ pub async fn complete_with_call_context<B: Backend>(
                         .begin_tool_execution(*tool_execution_id)
                         .await
                         .with_context(|| format!("beginning tool call {}", tool_call.id))?;
-                    let outcome = tools::execute(turn.tools, tool_call, *tool_execution_id)
-                        .await
-                        .with_context(|| format!("executing tool call {}", tool_call.id))?;
+                    let outcome = tools::execute(
+                        turn.tools,
+                        tool_call,
+                        *tool_execution_id,
+                        calls.len() == 1,
+                    )
+                    .await
+                    .with_context(|| format!("executing tool call {}", tool_call.id))?;
                     let (status, result, after_result) = match outcome {
                         tools::ToolOutcome::Completed(content) => ("completed", content, None),
                         tools::ToolOutcome::CompletedAfter {
@@ -400,6 +436,8 @@ pub async fn complete_with_call_context<B: Backend>(
                             format!("storing result for tool call {}", tool_call.id)
                         })?;
                     on_activity(format!("tool result {}: {result}", tool_call.id));
+                    ended |=
+                        status == "completed" && tools::is_terminal(turn.tools, &tool_call.name);
                     if let Some(after_result) = after_result {
                         deliveries.push((tool_call.id.clone(), after_result));
                     }
@@ -454,6 +492,17 @@ pub async fn complete_with_call_context<B: Backend>(
                         close_failed_calls(store, completion.inference_id, None, error).await,
                     );
                 }
+            }
+            if ended {
+                backend
+                    .after_agent(store, turn.branch, &turn.events)
+                    .await
+                    .context("admitting any due deferred compaction")?;
+                return Ok(Settled {
+                    response,
+                    inference_id: completion.inference_id,
+                    used_tools,
+                });
             }
         }
     }
@@ -538,6 +587,7 @@ async fn compact_merge_sources<B: Backend>(
                         sampling: &turn.sampling,
                         model: turn.model,
                         static_segments: &[],
+                        ending_tools: &[],
                     },
                 )
                 .await
@@ -627,6 +677,10 @@ mod tests {
             static_messages: &[],
             dynamic_context: &[],
             tools,
+            terminal_reminder: tools
+                .iter()
+                .any(Tool::is_terminal)
+                .then_some("End your turn with a tool call."),
             sampling: Sampling {
                 temperature: 0.0,
                 ..Default::default()
@@ -901,6 +955,147 @@ mod tests {
             content.contains("Tool arguments were rejected: parsing test echo arguments"),
             "got {content}"
         );
+        assert_eq!(store.inference_count().await.unwrap(), 2);
+    }
+
+    fn call(id: &str, name: &str, arguments: String) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments,
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_terminal_tool_ends_the_turn_without_another_inference() {
+        let (store, _db, agent_id) = test_store().await;
+        let backend = ScriptedBackend::new([response(
+            Content::ToolCalls(vec![call(
+                "finish-1",
+                "test_finish",
+                test_echo_arguments("done"),
+            )]),
+            "",
+        )]);
+        let tools = [tools::test_finish()];
+        complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(store.agent_branch(agent_id).await.unwrap(), &tools),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.inference_count().await.unwrap(), 1);
+        let entries = history(&store, agent_id).await;
+        let MessageContent::ToolResult { content, .. } = &entries.last().unwrap().content else {
+            panic!("the terminal call's result must still be recorded");
+        };
+        assert!(content.contains("done"), "got {content}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_ending_in_a_terminal_call_becomes_due_for_compaction() {
+        let (store, _db, agent_id) = test_store().await;
+        let backend = ScriptedBackend::new([response(
+            Content::ToolCalls(vec![call(
+                "finish-1",
+                "test_finish",
+                test_echo_arguments("done"),
+            )]),
+            "",
+        )]);
+        let tools = [tools::test_finish()];
+        let limits = Limits {
+            compact_before_next_input_tokens: 1,
+            ..Limits::default()
+        };
+        complete(
+            &store,
+            &backend,
+            &Budget::new(limits),
+            scripted_turn(store.agent_branch(agent_id).await.unwrap(), &tools),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(store.pending_compaction(agent_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn terminal_tool_beside_another_call_is_rejected_and_the_turn_continues() {
+        let (store, _db, agent_id) = test_store().await;
+        let backend = ScriptedBackend::new([
+            response(
+                Content::ToolCalls(vec![
+                    call("echo-1", "test_echo", test_echo_arguments("first")),
+                    call("finish-1", "test_finish", test_echo_arguments("done")),
+                ]),
+                "",
+            ),
+            response(
+                Content::ToolCalls(vec![call(
+                    "finish-2",
+                    "test_finish",
+                    test_echo_arguments("done"),
+                )]),
+                "",
+            ),
+        ]);
+        let tools = [tools::test_echo(), tools::test_finish()];
+        complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(store.agent_branch(agent_id).await.unwrap(), &tools),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.inference_count().await.unwrap(), 2);
+        let entries = history(&store, agent_id).await;
+        let MessageContent::ToolResult { content, .. } = &entries[3].content else {
+            panic!("the rejected terminal call must be answered");
+        };
+        assert!(content.contains("must be your only call"), "got {content}");
+    }
+
+    #[tokio::test]
+    async fn rejected_terminal_tool_arguments_do_not_end_the_turn() {
+        let (store, _db, agent_id) = test_store().await;
+        let backend = ScriptedBackend::new([
+            response(
+                Content::ToolCalls(vec![call("finish-1", "test_finish", "{}".to_string())]),
+                "",
+            ),
+            response(
+                Content::ToolCalls(vec![call(
+                    "finish-2",
+                    "test_finish",
+                    test_echo_arguments("done"),
+                )]),
+                "",
+            ),
+        ]);
+        let tools = [tools::test_finish()];
+        complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(store.agent_branch(agent_id).await.unwrap(), &tools),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
         assert_eq!(store.inference_count().await.unwrap(), 2);
     }
 
@@ -1394,6 +1589,7 @@ mod tests {
                         sampling: &Sampling::default(),
                         model: "test-model",
                         static_segments: &[],
+                        ending_tools: &[],
                     },
                 )
                 .await
@@ -1420,6 +1616,7 @@ mod tests {
             static_messages: &[],
             dynamic_context: &[],
             tools: &[],
+            terminal_reminder: None,
             sampling: Sampling::default(),
             model: "test-model",
         };

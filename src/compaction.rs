@@ -311,6 +311,7 @@ mod tests {
                 },
                 model: "scripted",
                 static_segments: &static_segments,
+                ending_tools: &[],
             },
             |_| {},
         )
@@ -499,6 +500,7 @@ mod tests {
                     sampling: &sampling,
                     model: "scripted",
                     static_segments: &[],
+                    ending_tools: &[],
                 },
             )
             .await

@@ -22,6 +22,8 @@ pub struct RecordedCompletion<'a> {
     pub static_messages: &'a [Message],
     pub dynamic_context: &'a [&'a str],
     pub tools: &'a [ToolDefinition],
+    /// The names among `tools` whose completed call ends the agent's turn.
+    pub ending_tools: &'a [String],
     pub sampling: Sampling,
     pub model: &'a str,
     pub compact_before_next_input_tokens: usize,
@@ -68,6 +70,7 @@ pub async fn complete_recorded<B: Backend>(
                 sampling: &completion.sampling,
                 model: completion.model,
                 static_segments: &static_segments_snapshot,
+                ending_tools: completion.ending_tools,
             },
             &mut on_token,
         )
@@ -108,6 +111,7 @@ pub async fn complete_recorded<B: Backend>(
                             sampling: &completion.sampling,
                             model: completion.model,
                             static_segments: &static_segments,
+                            ending_tools: completion.ending_tools,
                         },
                     )
                     .await
@@ -209,12 +213,6 @@ pub struct Completion {
     /// The inference this response came from, so a tool-calling turn can
     /// attribute its results to the call that requested them.
     pub inference_id: i64,
-    /// The recorded_content row this response's own reply message
-    /// references, so a caller can deliver that exact reference to other
-    /// recipients (e.g. GM narration) instead of re-recording the same text.
-    /// `None` for a compaction summary, which is never delivered to a
-    /// recipient this way.
-    pub output_content_id: Option<i64>,
 }
 
 /// Everything required to record one inference from already assembled segments.
@@ -413,7 +411,7 @@ pub async fn complete_recipe<B: Backend>(
         }
         other => other,
     };
-    let outcome = store
+    store
         .finish_chat_inference(
             run.inference.id,
             run.inference.agent_id,
@@ -435,7 +433,6 @@ pub async fn complete_recipe<B: Backend>(
     Ok(Completion {
         response: run.result.context("running inference")?,
         inference_id,
-        output_content_id: outcome.output_content_id,
     })
 }
 
@@ -480,7 +477,6 @@ pub async fn complete_summary_recipe<B: Backend>(
     Ok(Completion {
         response: run.result.context("running compaction inference")?,
         inference_id,
-        output_content_id: None,
     })
 }
 
@@ -600,6 +596,7 @@ mod tests {
                 static_messages: &[Message::text(Role::System, "Be concise.")],
                 dynamic_context: &[],
                 tools: &[],
+                ending_tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
                     ..Default::default()
@@ -658,6 +655,7 @@ mod tests {
                 static_messages: &[],
                 dynamic_context: &[],
                 tools: &[],
+                ending_tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
                     ..Default::default()
@@ -751,6 +749,7 @@ mod tests {
                 static_messages: &[],
                 dynamic_context: &[],
                 tools: &[],
+                ending_tools: &[],
                 sampling: Sampling {
                     temperature: 0.0,
                     ..Default::default()
