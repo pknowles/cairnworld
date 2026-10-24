@@ -1327,13 +1327,12 @@ appropriate action results directly, including future combat mechanics and dice
 rolls, through this same delivery path. Do not add a generated action sentence
 beside narration that already communicates the outcome. Narration need not describe exactly
 one action.
-Generic perception metadata belongs with the shared delivered content: in
-particular, the GM's optional perception prefix must not require a speech row.
-Speech-specific attribution remains structured where needed. A recipient's
-history references the shared content; readers render the same recorded prefix
-and content for model context, live chat, reload and inspection. Migrating old
-prefixes preserves historical rendering. This is content metadata, not another
-message or separately delivered observation.
+Content-specific metadata stays with the content it describes. The GM's optional
+prefix is a speech detail, retained with speech metadata and rendered consistently
+in model context, live chat, reload and inspection. Shared delivery and response
+scheduling do not require every action to support a prefix. Other action kinds
+gain such metadata only for a demonstrated requirement, not by inheriting speech
+fields. Historical prefixes and rendering remain reproducible.
 
 Response eligibility follows the messages actually received, not a speech-only
 audience query or a general history dirty flag. Store the source message IDs with

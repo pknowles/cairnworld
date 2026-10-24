@@ -206,8 +206,8 @@ Use the relevant group as the default audience and apply validated, group-local
 GM inclusion/exclusion before delivery. Whisper starts with its explicit
 listeners. Preserve offline-PC speech hearing and the existing connected-PC
 narration rule; include NPCs in narration as design.md already requires. Do not
-expand narration to every group at the same location in this slice. Prefixes
-describe perception and must follow the same restricted audience. Keep action
+expand narration to every group at the same location in this slice. Speech prefixes
+describe hearing and must follow the same restricted audience. Keep action
 permission separate from who perceives the outcome.
 
 Each recipient gets one history entry referencing shared content. The delivered
@@ -236,24 +236,22 @@ or rename-only commits.
   Remove `speech_batch` if its remaining group/sequence references can be
   resolved from existing records without losing historical facts. Do not require
   removal of the speech metadata row just to reduce table count: preserve
-  speaker/addressee IDs and frozen names, whisper intent and text format
+  speaker/addressee IDs and frozen names, whisper intent, prefix and text format
   in the smallest coherent representation. Do not add a target column intended
   to cover all future action kinds. A new action kind must not require its own
   observation or response tables.
-- Move the generic perception prefix out of speech-only storage into the shared
-  delivered-content representation. Store it once with that content and have
-  recipient entries reference it; do not copy it into every recipient row or
-  create a second message. Migrate existing prefixes and update every reader
-  together, preserving historical authored/legacy rendering and captured request
-  reconstruction. Keep genuinely speech-specific attribution separate as
-  needed; a non-speech perception must not need a speech row to carry a prefix.
+- Keep prefix with speech metadata. Shared perception delivery does not make
+  every content field generic: non-speech actions do not acquire a prefix
+  argument or storage field. Preserve speech prefixes across all readers and
+  historical request reconstruction. Extend content-specific metadata only
+  when that action kind has a demonstrated need.
 - Consolidate recipient validation and history delivery for speech and GM
-  narration. Extend approval's perception controls to non-speech outcomes and
+  narration. Extend approval's audience controls to non-speech outcomes and
   carry their validated audience to the associated narration delivery. Audit
   player and NPC action paths together: an exclusion must restrict the actual
   narration, not merely a receipt from approve_action. The resolved recipient
-  IDs and prefix travel with that action's narration;
-  do not re-resolve approval-time names against a later roster or depend on a
+  IDs travel with that action's narration; prefix remains speech-only.
+  Do not re-resolve approval-time names against a later roster or depend on a
   mutable "last audience" on the GM. Use the existing resolved-action/narration
   data flow, retaining a recorded snapshot wherever later reconstruction needs
   it. Standalone group/presence narration keeps its existing default audience;
@@ -329,7 +327,7 @@ separate suite for every delivery kind:
 | Case | Expected outcome and evidence |
 | --- | --- |
 | Speech and Take share delivery | Approved Say reaches each hearer unchanged; an approved Take changes ownership and its GM narration reaches PCs/NPCs once. NPC context contains that same narration and can produce an ordinary GM-approved response. No extra generated event sentence or second response path. |
-| Eligibility is independent of tool kind | A Look description and narration following speech offer other NPC recipients a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. A prefix on non-speech content appears through model/live/reload/inspection paths without requiring a speech row. |
+| Eligibility is independent of tool kind | A Look description and narration following speech offer other NPC recipients a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. Speech's prefix remains available without imposing it on other action kinds. |
 | Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
 | Narration without a source tool | Existing group/presence narration reaches eligible NPCs, creates pending work once and links the response to the actual message and producing inference. No synthetic action/tool record. No narration-only NPC opportunity is stranded by speech-only eligibility queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |
