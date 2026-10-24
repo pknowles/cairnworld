@@ -265,27 +265,35 @@ rename-only checkpoint is needed.
     in the actual model context and reject the call when no actor exists.
   - `narrate_characters(character_ids, text)`: one text for exactly the listed
     characters. The list is required, nonempty and validated.
-  - `narrate_nothing()`: there is nothing to convey.
+  - `narrate_nothing()`: the GM judges the outcome already conveyed, so it has
+    nothing to add. The classic case is speech, which is delivered verbatim and
+    not re-narrated as who said what.
   An answer never carries more than two texts: no list of entries and no mixing
   of forms. Each form takes its own arguments, so none is an optional override of
   another. The narration call is the last thing the GM does: it is the only call
   in its response and follows the action decisions whose results it needs. It
   ends the turn. Record its result in the GM's history so the history stays
   valid, but run no closing inference.
-- A response that mixes a narration with other calls, makes two narration calls,
-  or answers in plain text instead is invalid. It fails visibly: no repair loop
-  and no plain-text fallback; earlier committed actions remain. Validate the
-  arguments with the existing tool-argument machinery and its `prompts.toml`
-  descriptions, then validate pending-action resolution and every recipient
-  before any delivery, and commit all delivered texts with the pending NPC work
-  together. Update every GM invocation, including opening and presence, to
-  finish with a narration call.
+- Validate the arguments with the existing tool-argument machinery and its
+  `prompts.toml` descriptions, then validate pending-action resolution and every
+  recipient before any delivery, and commit all delivered texts with the pending
+  NPC work together. An invalid narration is answered, not repaired behind the
+  GM's back: a call that is malformed, names foreign recipients, narrates before
+  its action is resolved, mixes with other calls or repeats is a rejected tool
+  call, so the GM receives the error as the call's result and runs again; a
+  plain-text answer receives an instruction message saying to narrate with one
+  of the tools. Nothing is delivered for the invalid attempt, and earlier
+  committed actions remain. A rare recovery in a live game is acceptable, but it
+  is an error and not normal: log it at error level, flag it in Developer Mode
+  like any rejected call, and treat it as a failure in every real-model test.
+  The usual inference limits bound the retries. Update every GM invocation,
+  including opening and presence, to finish with a narration call.
 - Store the model's unmodified output as the GM's history. Record each delivered
   text once, linked to its producing inference and to which text of the call it
   is; recipient histories reference that shared text, not the call. Historical
   plain-text narration keeps its references and request reconstruction. Do not
-  manufacture observer narration for an unnoticeable action or duplicate
-  verbatim speech as narration.
+  manufacture observer narration for an outcome that is already conveyed,
+  and do not duplicate verbatim speech as narration.
 
   Worked example: Mara (character 7) climbs a rock and sees guards beyond a wall,
   and character 9 cannot perceive her movement. The GM calls
@@ -411,7 +419,7 @@ separate suite for every delivery kind:
 | Requester and observers see different information | Exercise the worked `narrate_actor_and_others` example: the actor receives only the detailed text; other eligible members receive only the brief text; an excluded character receives neither. Check history, captured prompts, reload and pending NPC work. `narrate_group` without exclusions includes the actor normally. Foreign exclusions fail the call before any delivery. Shared-detail on/off guides routine narration, but explicit private delivery stays private in both modes. Cover player, NPC and reaction actors and narration-only invocations without inventing a requester. |
 | Eligibility is independent of tool kind | An actually delivered perception offers its NPC recipient a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. Speech's prefix remains available without imposing it on other action kinds. |
 | Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid final narration audiences visibly fail the turn before any delivery; they are not tool-call rejection records. Invalid speech approval arguments remain recorded rejected tool calls. |
-| Narration tools and narration without a character action | Group/presence uses `narrate_group` and links replies to received messages and the actual producing inference/text. Exercise all four tools: a standard group narration, actor-and-others, addressed characters and nothing. A mixed response, two narration calls, plain text, an actor tool with no actor, unresolved actions or foreign recipients fail before any narration is delivered; prior action effects remain. The narration call needs no closing inference or synthetic action record. No narration-only opportunity is stranded by speech-only queries. |
+| Narration tools and narration without a character action | Group/presence uses `narrate_group` and links replies to received messages and the actual producing inference/text. Exercise all four tools: a standard group narration, actor-and-others, addressed characters and nothing. A mixed response, two narration calls, plain text, an actor tool with no actor, unresolved actions or foreign recipients deliver nothing for that attempt and return the error to the GM, which runs again; prior action effects remain. Any such error fails a real-model test. The narration call needs no closing inference or synthetic action record. No narration-only opportunity is stranded by speech-only queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |
 | Migration and all readers | Existing speech, IDs/frozen names, prefixes, authored/legacy rendering and historical request reconstruction survive migration. Model context, live chat, reload, compaction and Developer Mode show the same received content and its true cause. |
 | Worker and lifecycle | Preserve eagerness/tied selection, other-group progress, raised hands, shutdown between complete steps and crash failure without replay. Pause a producer after delivery: no NPC decision starts before its successful completion, and narration retains the same causal budget. Fail the producer: committed messages remain and follow-ups fail visibly. Disconnecting a browser cannot cancel a queued player turn; check completion and its reply, not only stored input. |

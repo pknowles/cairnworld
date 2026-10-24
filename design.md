@@ -1392,7 +1392,8 @@ There are four narration tools, of which the GM picks exactly one:
   the current request and one for the rest of the normal audience, optionally
   excluding character IDs.
 - `narrate_characters`: one text plus a required, explicit list of character IDs.
-- `narrate_nothing`: nothing to convey.
+- `narrate_nothing`: the GM judges the outcome already conveyed, such as
+  speech delivered verbatim, so it has nothing to add.
 
 An answer never carries more than two texts. Audience-specific arguments exist
 only on the tool that needs them, not as optional overrides on a common default.
@@ -1408,14 +1409,18 @@ rather than inventing an actor.
 
 Validate the call, action-resolution requirements and all audience references
 before delivering any text. Record actual recipients and content in one delivery
-transaction, with pending NPC work, then publish notifications. A response that
-mixes a narration with other calls, makes two, or answers in plain text fails
-visibly, without plain-text fallback or repair inference, and delivers nothing.
-Previously committed actions remain committed. Retain the original response in
+transaction, with pending NPC work, then publish notifications. An invalid narration
+(malformed, foreign recipients, narrating before its action is resolved, mixed
+with other calls or repeated) is a rejected tool call: the GM receives the error
+as the result and runs again, and a plain-text answer receives an instruction
+saying to narrate with one of the tools. Nothing is delivered for the invalid
+attempt, and previously committed actions remain committed. A live game may
+recover from this rarely, but it is an error and not normal: it is logged,
+flagged in Developer Mode, and fails real-model tests. Retain the original response in
 GM history and use the same shared delivery path for all four tools. Verbatim
 speech delivery remains separate from GM narration.
 Observer messages describe what observers perceive, not private results returned
-to the actor. An unnoticeable Look need not produce any observer narration.
+to the actor. An outcome already conveyed elsewhere need not produce further narration.
 
 The global shared-detail setting defaults on, as declared. Supply it in the GM's
 context so ordinary narration can give players a shared detailed account or

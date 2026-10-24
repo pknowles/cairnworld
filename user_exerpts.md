@@ -788,3 +788,49 @@ make committed edits available to the next inference. This does not authorize
 a post-narration save loop or automatic object creation. The later declaration
 also says not to start with a separate review stage. Ordinary read/edit tool
 results are part of the agent loop, not an extra review system.
+
+## 2026-10-24 Narration cases for review
+
+On the narration tools:
+
+> narrate_nothing  is fine. we can tweak later if it doesn't work.
+
+and on naming:
+
+> re. action - we have a word for action and the cairn action must be named
+> differently - llike you said. don't introduce a glossary just for that lol.
+
+Reviewing the proposed cases, the user corrected what `narrate_nothing` is for:
+
+> sorry? how would an action be unnoticable to the character doing the action???
+>
+> lol. no; this is for the case where the GM believes the action is already
+> narrated. a classic example is during conversation; the gm does not narrate who
+> says what
+
+On the opening narration and the meaning of the actor form:
+
+> you mention opening narration. this would simply be a private narration to the
+> character entering the scene.
+>
+> that's a point though - the GM should describe the initial scene to NPCs too.
+> In fact, I'd prefer the GM gives a general narration to the group without any
+> player present. Then the player joins the group and we can take the path of the
+> GM narrating the player's entrance to the game. For the very first turn/entry of
+> a new character, the player agent could be instructed to ask what the player
+> wants to do after the GM's narration.
+
+On an invalid narration:
+
+> In developer mode there should be a visible failure. Not sure what you mean by
+> no repair, but the GM should be given an error response to its final output and
+> re-run inference. For development this failure must be addressed. In a live
+> game, the GM may be able to recover in some rare cases. We should not treat this
+> as normal. This should cause our test cases to fail.
+
+Design interpretation: an invalid narration is an ordinary rejected tool call, or
+for plain text an instruction message, answered to the GM, which runs again within
+the usual limits. It is an error to investigate, logged, flagged in Developer
+Mode and failing every real-model test, never a path to rely on. The scene-setting
+and entrance proposal is recorded here as the user's idea; the plan does not yet
+change the opening flow.
