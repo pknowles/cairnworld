@@ -2806,9 +2806,15 @@ impl Store {
                  UNION \
                  SELECT ancestry.failed_id, inference.sequence_id FROM ancestry \
                  JOIN sequence_cause ON sequence_cause.child_sequence_id = ancestry.ancestor_id \
-                 JOIN tool_execution ON tool_execution.id = sequence_cause.source_tool_execution_id \
-                 JOIN inference ON inference.id = tool_execution.inference_id \
-                 WHERE inference.sequence_id IS NOT NULL) \
+                 LEFT JOIN tool_execution ON tool_execution.id = sequence_cause.source_tool_execution_id \
+                 LEFT JOIN message AS cause_message ON cause_message.id = sequence_cause.source_message_id \
+                 JOIN inference ON inference.id = COALESCE(tool_execution.inference_id, cause_message.source_inference_id) \
+                 WHERE inference.sequence_id IS NOT NULL \
+                 UNION \
+                 SELECT ancestry.failed_id, cause_message.trigger_sequence_id FROM ancestry \
+                 JOIN sequence_cause ON sequence_cause.child_sequence_id = ancestry.ancestor_id \
+                 JOIN message AS cause_message ON cause_message.id = sequence_cause.source_message_id \
+                 WHERE cause_message.trigger_sequence_id IS NOT NULL) \
              SELECT sequence.id AS \"sequence_id!: i64\", sequence.error AS \"error!\", \
                     MIN(history_entry.id) AS \"trigger_id!: i64\" \
              FROM ancestry \
@@ -5689,7 +5695,15 @@ impl Store {
                 .await
                 .with_context(|| format!("loading sequence {sequence_id}"))?;
         let caused_by = sqlx::query_scalar!(
-            "SELECT DISTINCT cause_inference.sequence_id AS \"cause_sequence_id!: i64\"              FROM sequence_cause              JOIN tool_execution ON tool_execution.id = sequence_cause.source_tool_execution_id              JOIN inference AS cause_inference ON cause_inference.id = tool_execution.inference_id              WHERE sequence_cause.child_sequence_id = ? AND cause_inference.sequence_id IS NOT NULL              ORDER BY 1",
+            "SELECT DISTINCT COALESCE(cause_message.trigger_sequence_id, cause_inference.sequence_id) AS \"cause_sequence_id!: i64\" \
+             FROM sequence_cause \
+             LEFT JOIN tool_execution ON tool_execution.id = sequence_cause.source_tool_execution_id \
+             LEFT JOIN message AS cause_message ON cause_message.id = sequence_cause.source_message_id \
+             LEFT JOIN inference AS cause_inference \
+                    ON cause_inference.id = COALESCE(tool_execution.inference_id, cause_message.source_inference_id) \
+             WHERE sequence_cause.child_sequence_id = ? \
+               AND COALESCE(cause_message.trigger_sequence_id, cause_inference.sequence_id) IS NOT NULL \
+             ORDER BY 1",
             sequence_id,
         )
         .fetch_all(&self.pool)
@@ -6593,6 +6607,93 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(old_table, 0, "the link table is gone");
+    }
+
+    #[tokio::test]
+    async fn the_response_source_migration_turns_speech_calls_into_the_messages_npcs_received() {
+        let db = database();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(db.path())
+                    .create_if_missing(true)
+                    .foreign_keys(false),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../migrations/0001_recording.sql"),
+            include_str!("../migrations/0002_consolidate_compaction.sql"),
+            include_str!("../migrations/0003_presence_return.sql"),
+            include_str!("../migrations/0004_speech.sql"),
+            include_str!("../migrations/0005_npc_rounds.sql"),
+            include_str!("../migrations/0006_individual_speech_approval.sql"),
+            include_str!("../migrations/0007_authored_speech.sql"),
+            include_str!("../migrations/0008_compaction_cause.sql"),
+            include_str!("../migrations/0009_message_action.sql"),
+            include_str!("../migrations/0010_rejected_reply.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        // Character 1 (agent 10) spoke action 7, requested by call 70. Character
+        // 2 (agent 20) is an NPC who heard it; agent 30 is a player who did too.
+        for statement in [
+            "INSERT INTO npc_agent (character_id, agent_id) VALUES (1, 10), (2, 20)",
+            "INSERT INTO agent_history (agent_id, branch_id) VALUES (10, 100), (20, 200), (30, 300)",
+            "INSERT INTO history_entry (id, branch_id, position, kind) VALUES \
+             (10, 100, 0, 'message'), (11, 200, 0, 'message'), (12, 300, 0, 'message')",
+            "INSERT INTO message (id, role, content, action_id) VALUES \
+             (10, 'Speech', 1, 7), (11, 'Speech', 1, 7), (12, 'Speech', 1, 7)",
+            "INSERT INTO action (id, sequence_id, requesting_tool_execution_id, result_content_id, approved) \
+             VALUES (7, 1, 70, 1, 1)",
+            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind) \
+             VALUES (7, 1, 1, 'Mara', 'say')",
+            "INSERT INTO npc_round (id, root_sequence_id, group_id, scene_revision, state) \
+             VALUES (1, 1, 1, 0, 'collecting')",
+            "INSERT INTO npc_round_source (round_id, source_tool_execution_id) VALUES (1, 70)",
+            "INSERT INTO sequence_cause (child_sequence_id, source_tool_execution_id) VALUES (5, 70)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0011_response_sources_are_messages.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let sources: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT round_id, message_id FROM npc_round_source")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            sources,
+            [(1, 11)],
+            "only the other NPC's message: not the speaker's copy, not a player's"
+        );
+        let causes: Vec<(i64, Option<i64>, Option<i64>)> = sqlx::query_as(
+            "SELECT child_sequence_id, source_tool_execution_id, source_message_id FROM sequence_cause",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            causes,
+            [(5, Some(70), None)],
+            "earlier tool-call causes are kept"
+        );
+        assert!(
+            sqlx::query(
+                "INSERT INTO sequence_cause (child_sequence_id, source_tool_execution_id, source_message_id) VALUES (6, 70, 11)"
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "a cause is a tool call or a message, never both"
+        );
     }
 
     fn response() -> Response {

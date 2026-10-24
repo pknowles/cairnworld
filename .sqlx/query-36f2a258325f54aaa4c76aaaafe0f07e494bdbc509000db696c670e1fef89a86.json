@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE message SET reply_rejected = 1 WHERE source_inference_id = ? AND source_tool_execution_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "36f2a258325f54aaa4c76aaaafe0f07e494bdbc509000db696c670e1fef89a86"
+}

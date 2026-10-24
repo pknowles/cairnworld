@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO sequence_cause (child_sequence_id, source_message_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2719df0b5cf3951a07f2ce01b49e1cc9ff3a29a6d1043ecfc5635e31ad08bdeb"
+}

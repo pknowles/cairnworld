@@ -165,28 +165,28 @@ struct Decided {
     decision: Decision,
 }
 
+/// What a new NPC-work sequence answers.
+enum Cause<'a> {
+    /// The messages a round received, all of them or one NPC's own.
+    Received { round_id: i64, by: Option<i64> },
+    /// The tool calls in which NPCs proposed what is now being executed.
+    Proposals(&'a [i64]),
+}
+
 impl Store {
-    /// Called in the transaction that commits an utterance. Advances the
-    /// group's scene revision and opens a round at the new revision for every
-    /// NPC that actually heard it; see `reopen_round`.
-    pub(super) async fn open_response_round(
+    /// Called in the transaction that delivers something the group's
+    /// characters perceive. Advances the group's scene revision and offers every
+    /// NPC that received one of `messages` (each NPC's own message, never the
+    /// actor's copy) a chance to respond at the new revision; see
+    /// `replace_pending_npc_responses`.
+    pub(super) async fn offer_npc_responses(
         transaction: &mut Transaction<'_, Sqlite>,
         group_id: i64,
-        action_id: i64,
         sequence_id: i64,
+        messages: &[i64],
     ) -> Result<()> {
         let revision = Self::advance_scene_revision(transaction, group_id).await?;
-        let Some(source) = sqlx::query_scalar!(
-            "SELECT requesting_tool_execution_id FROM action WHERE id = ?",
-            action_id,
-        )
-        .fetch_one(&mut **transaction)
-        .await
-        .context("finding the call that requested the speech")?
-        else {
-            return Ok(());
-        };
-        // A follow-up speech belongs to the discussion whose step produced it;
+        // A follow-up belongs to the discussion whose step produced it;
         // anything else is a human turn starting its own.
         let own = sqlx::query!(
             "SELECT npc_round.id, npc_round.root_sequence_id FROM npc_candidate \
@@ -211,13 +211,13 @@ impl Store {
             .await
             .context("recording the selected set's progress")?;
         }
-        Self::reopen_round(
+        Self::replace_pending_npc_responses(
             transaction,
             group_id,
             root,
             revision,
             own_round,
-            Some(source),
+            messages,
         )
         .await
     }
@@ -238,18 +238,18 @@ impl Store {
         .context("advancing the group's scene revision")
     }
 
-    /// Supersede the group's open round (carrying the speech it had not yet
-    /// answered), then open a round at `revision` answering that speech plus
-    /// `new_source`, for the NPCs who heard any of it and are still present.
-    /// It stays ineligible until the sequence that produced each source
-    /// speech has finished successfully.
-    async fn reopen_round(
+    /// Supersede the group's open rounds (carrying the messages they had not
+    /// yet answered), then open a round at `revision` answering those messages
+    /// plus `new_sources`, for the NPCs who received any of them and are still
+    /// present. It stays ineligible until the sequence that produced each source
+    /// message has finished successfully.
+    async fn replace_pending_npc_responses(
         transaction: &mut Transaction<'_, Sqlite>,
         group_id: i64,
         root: i64,
         revision: i64,
         keep_round: Option<i64>,
-        new_source: Option<i64>,
+        new_sources: &[i64],
     ) -> Result<()> {
         let mut sources = Vec::new();
         // `keep_round` is the selected set executing this very speech.
@@ -264,12 +264,12 @@ impl Store {
         for open in open_rounds {
             sources.extend(
                 sqlx::query_scalar!(
-                    "SELECT source_tool_execution_id FROM npc_round_source WHERE round_id = ?",
+                    "SELECT message_id FROM npc_round_source WHERE round_id = ?",
                     open.id,
                 )
                 .fetch_all(&mut **transaction)
                 .await
-                .context("carrying an open round's unanswered speech")?,
+                .context("carrying an open round's unanswered messages")?,
             );
             sqlx::query!(
                 "UPDATE npc_round SET state = 'superseded' WHERE id = ?",
@@ -280,30 +280,26 @@ impl Store {
             .context("superseding an open round")?;
             Self::settle_idle_discussion(transaction, open.root_sequence_id).await?;
         }
-        sources.extend(new_source);
+        sources.extend_from_slice(new_sources);
         sources.sort_unstable();
         sources.dedup();
         let mut roster = Vec::new();
         for source in &sources {
             roster.extend(
                 sqlx::query_scalar!(
-                    "SELECT DISTINCT npc_agent.character_id AS \"character_id!: i64\" \
-                     FROM action \
-                     JOIN speech ON speech.action_id = action.id \
-                     JOIN message ON message.action_id = speech.action_id \
+                    "SELECT npc_agent.character_id AS \"character_id!: i64\" \
+                     FROM message \
                      JOIN history_entry ON history_entry.id = message.id \
                      JOIN agent_history ON agent_history.branch_id = history_entry.branch_id \
                      JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id \
                      JOIN character_group ON character_group.character_id = npc_agent.character_id \
-                     WHERE action.requesting_tool_execution_id = ? \
-                       AND npc_agent.character_id <> speech.speaker_character_id \
-                       AND character_group.group_id = ?",
+                     WHERE message.id = ? AND character_group.group_id = ?",
                     source,
                     group_id,
                 )
                 .fetch_all(&mut **transaction)
                 .await
-                .context("finding the NPCs who heard the speech")?,
+                .context("finding the NPCs who received the message")?,
             );
         }
         roster.sort_unstable();
@@ -323,13 +319,13 @@ impl Store {
         .context("opening a response round")?;
         for source in sources {
             sqlx::query!(
-                "INSERT INTO npc_round_source (round_id, source_tool_execution_id) VALUES (?, ?)",
+                "INSERT INTO npc_round_source (round_id, message_id) VALUES (?, ?)",
                 round_id,
                 source,
             )
             .execute(&mut **transaction)
             .await
-            .context("recording the speech a round answers")?;
+            .context("recording the messages a round answers")?;
         }
         for character_id in roster {
             sqlx::query!(
@@ -489,10 +485,9 @@ impl Store {
                AND npc_discussion.state = 'ready'                AND (npc_round.state = 'selected' OR NOT EXISTS (                    SELECT 1 FROM npc_round AS earlier                    WHERE earlier.group_id = npc_round.group_id                      AND earlier.state IN ('selected', 'executing'))) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM npc_round_source \
-                   JOIN action ON action.requesting_tool_execution_id = npc_round_source.source_tool_execution_id \
-                   JOIN speech ON speech.action_id = action.id \
-                   JOIN speech_batch ON speech_batch.id = speech.batch_id \
-                   JOIN sequence ON sequence.id = speech_batch.sequence_id \
+                   JOIN message ON message.id = npc_round_source.message_id \
+                   LEFT JOIN inference ON inference.id = message.source_inference_id \
+                   JOIN sequence ON sequence.id = COALESCE(message.trigger_sequence_id, inference.sequence_id) \
                    WHERE npc_round_source.round_id = npc_round.id \
                      AND (sequence.finished_at IS NULL OR sequence.error IS NOT NULL)) \
              ORDER BY npc_round.id LIMIT 1",
@@ -550,13 +545,13 @@ impl Store {
         .fetch_one(&mut *transaction)
         .await
         .context("reading the group's scene revision")?;
-        Self::reopen_round(
+        Self::replace_pending_npc_responses(
             &mut transaction,
             round.group_id,
             round.root_sequence_id,
             revision,
             None,
-            None,
+            &[],
         )
         .await?;
         transaction
@@ -581,8 +576,10 @@ impl Store {
             &mut transaction,
             round.world_id,
             "npc response",
-            round.id,
-            None,
+            Cause::Received {
+                round_id: round.id,
+                by: Some(character_id),
+            },
         )
         .await?;
         let agent_id = sqlx::query_scalar!(
@@ -633,14 +630,14 @@ impl Store {
         })
     }
 
-    /// A sequence caused by the speech a round answers (its sources), or by the
-    /// winners' proposals when `proposals` is given.
+    /// A sequence caused by what a round answers: the messages it received
+    /// (only the one NPC's own, for that NPC's decision), or the winners'
+    /// proposals.
     async fn begin_caused_sequence(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
         trigger: &str,
-        round_id: i64,
-        proposals: Option<&[i64]>,
+        cause: Cause<'_>,
     ) -> Result<i64> {
         let sequence_id = sqlx::query_scalar!(
             "INSERT INTO sequence (world_id, trigger) VALUES (?, ?) RETURNING id",
@@ -650,25 +647,44 @@ impl Store {
         .fetch_one(&mut **transaction)
         .await
         .with_context(|| format!("starting {trigger} sequence in world {world_id}"))?;
-        let causes = match proposals {
-            Some(proposals) => proposals.to_vec(),
-            None => sqlx::query_scalar!(
-                "SELECT source_tool_execution_id FROM npc_round_source WHERE round_id = ?",
-                round_id,
-            )
-            .fetch_all(&mut **transaction)
-            .await
-            .context("loading what the round answers")?,
-        };
-        for cause in causes {
-            sqlx::query!(
-                "INSERT INTO sequence_cause (child_sequence_id, source_tool_execution_id) VALUES (?, ?)",
-                sequence_id,
-                cause,
-            )
-            .execute(&mut **transaction)
-            .await
-            .context("linking a sequence to its cause")?;
+        match cause {
+            Cause::Proposals(proposals) => {
+                for proposal in proposals {
+                    sqlx::query!(
+                        "INSERT INTO sequence_cause (child_sequence_id, source_tool_execution_id) VALUES (?, ?)",
+                        sequence_id,
+                        proposal,
+                    )
+                    .execute(&mut **transaction)
+                    .await
+                    .context("linking a sequence to the proposal it executes")?;
+                }
+            }
+            Cause::Received { round_id, by } => {
+                let messages = sqlx::query_scalar!(
+                    "SELECT npc_round_source.message_id FROM npc_round_source \
+                     JOIN history_entry ON history_entry.id = npc_round_source.message_id \
+                     JOIN agent_history ON agent_history.branch_id = history_entry.branch_id \
+                     JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id \
+                     WHERE npc_round_source.round_id = ?1 \
+                       AND (?2 IS NULL OR npc_agent.character_id = ?2)",
+                    round_id,
+                    by,
+                )
+                .fetch_all(&mut **transaction)
+                .await
+                .context("loading the messages the round answers")?;
+                for message in messages {
+                    sqlx::query!(
+                        "INSERT INTO sequence_cause (child_sequence_id, source_message_id) VALUES (?, ?)",
+                        sequence_id,
+                        message,
+                    )
+                    .execute(&mut **transaction)
+                    .await
+                    .context("linking a sequence to the message that caused it")?;
+                }
+            }
         }
         Ok(sequence_id)
     }
@@ -836,8 +852,10 @@ impl Store {
                 &mut transaction,
                 round.world_id,
                 "npc discussion failed",
-                round.id,
-                None,
+                Cause::Received {
+                    round_id: round.id,
+                    by: None,
+                },
             )
             .await?;
             Self::finish_sequence_in(&mut transaction, sequence_id, Some(error)).await?;
@@ -1014,8 +1032,7 @@ impl Store {
             &mut transaction,
             round.world_id,
             "npc speech",
-            round.id,
-            Some(&[execution_id]),
+            Cause::Proposals(&[execution_id]),
         )
         .await?;
         sqlx::query!(

@@ -654,7 +654,13 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   waits for the set to finish). Discussions share the root turn's `Budget`
   (`Budget::restore`/`spent`) and fail visibly through a failure sequence
   (`ensure_discussion_failed`; `sequence_cause` links it to the human turn so
-  `player_chat_errors` shows it there). Developer Mode shows the links:
+  `player_chat_errors` shows it there). A round answers the messages that reached
+  NPC histories (`npc_round_source.message_id`, migration 0011), added by
+  `offer_npc_responses` when something is delivered; the speaker's own copy is
+  never a source. A sequence's cause (`sequence_cause`) is either a tool call
+  (an NPC's proposal) or a message, and an NPC's decision names only messages
+  that NPC received. A round runs once the sequence that produced each source
+  message has finished. Developer Mode shows the links:
   `Store::sequence_inspection` returns `SequenceInspection { caused_by, nodes }`
   and the turn view lists "Caused by" turns. `group.scene_revision` advances in
   the writers that change what an NPC sees: an applied `take`, committed speech

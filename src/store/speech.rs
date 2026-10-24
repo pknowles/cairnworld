@@ -432,12 +432,23 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .context("recording utterance")?;
-        for branch_id in plan
-            .hearers
-            .iter()
-            .map(|hearer| hearer.branch_id)
-            .chain(plan.npc_speaker_branch)
-        {
+        // An NPC who hears the words may respond to them; the speaker's own
+        // copy does not invite its own response.
+        let mut heard_by_npcs = Vec::new();
+        for hearer in &plan.hearers {
+            let message_id = Self::append_speech_message(
+                transaction,
+                hearer.branch_id,
+                action_id,
+                words_content_id,
+                sequence_id,
+            )
+            .await?;
+            if hearer.is_npc {
+                heard_by_npcs.push(message_id);
+            }
+        }
+        if let Some(branch_id) = plan.npc_speaker_branch {
             Self::append_speech_message(
                 transaction,
                 branch_id,
@@ -447,8 +458,7 @@ impl Store {
             )
             .await?;
         }
-        Self::open_response_round(transaction, plan.group_id, action_id, sequence_id).await?;
-        Ok(())
+        Self::offer_npc_responses(transaction, plan.group_id, sequence_id, &heard_by_npcs).await
     }
 
     async fn append_speech_message(
@@ -457,7 +467,7 @@ impl Store {
         action_id: i64,
         words_content_id: i64,
         sequence_id: i64,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let message_id = Self::insert_message_with_content(
             transaction,
             branch_id,
@@ -476,7 +486,7 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .context("recording which action a hearer's message shows")?;
-        Ok(())
+        Ok(message_id)
     }
 
     /// The speaker's own history gets the utterance after their tool result,
