@@ -1290,10 +1290,32 @@ World time is the maximum character time. Each character advances by approved
 elapsed seconds; time advancement queues hourly distant-NPC opportunities only
 for elapsed whole hours, in stable character order, through the world task.
 
-## NPC speech and response rounds
+## Character perceptions and NPC responses
 
-Authority: NPC Interaction, Say/Whisper, GM InterventionCheck, World game page,
+Authority: Observed Events, NPC Interaction, Say/Whisper, GM InterventionCheck, World game page,
 Developer view and [the turn/pause clarifications](user_exerpts.md#2026-10-20-npc-speech-interruption-and-game-turn-allowance).
+
+The message delivered to a character's history is its observation. Speech,
+action consequences and presence narration share recipient validation, history
+delivery and NPC response scheduling; there is no additional observation message
+or per-action-kind observation system. Use group-local defaults with GM
+perception overrides. Preserve speech's offline-PC hearing and narration's
+connected-PC audience rule; NPCs receive both when eligible. Each delivered
+entry references shared content and retains its true provenance. Speech stays
+verbatim with structured attribution; other outcomes can be GM narration rather
+than an additional generated action sentence. Narration need not describe exactly
+one action. Approval receipts and internal bookkeeping are not observations.
+
+Response eligibility follows the messages actually received, not a speech-only
+audience query or a general history dirty flag. Store the source message IDs with
+pending decisions; a later group change cannot rewrite who perceived the source.
+Link response sequences to those messages and their originating actions or
+inferences, retaining direct proposal-tool links for selected action execution.
+Delivery and registration of responses commit together before notification;
+generated narration is delivered in its own transaction after generation, without
+holding an action transaction across inference. Forward migrations preserve
+historical attribution and request reconstruction. Do not force speech fields
+onto all action kinds or introduce a new observation table per kind.
 
 Speech is a completed game event, not a call awaiting an answer. GM arbitration
 can determine whether the speaker can speak and override hearers; the character
@@ -1329,14 +1351,14 @@ action. Eagerness is an integer 1–3: low, moderate or strong desire to act now
 Select the highest eagerness; speech-only highest ties may all speak. Their words
 were composed against the same history, without hearing one another's replies.
 The GM approves/rejects each action separately in any order, through ordinary
-approval tools. Finish the selected set before another response round; an earlier
+approval tools. Finish the selected set before collecting follow-up responses; an earlier
 selected utterance does not by itself invalidate its peers. The GM may describe
 overlap through each utterance's prefix, only to its actual hearers. Otherwise
 choose one tied proposal randomly and record the selection.
 Unselected proposals are superseded, not failed or executed tools. After a
 committed event, NPCs reconsider against the new history instead of executing
-stale replies. All-DoNothing ends the round; unchanged history does not trigger
-another round. Recheck actor eligibility, hearers and group topology before
+stale replies. All-DoNothing consumes the pending sources; unchanged history does not trigger
+another check. Recheck actor eligibility, hearers and group topology before
 executing any selected action through the ordinary shared character action path.
 Collect each NPC decision with one recorded inference and exactly one terminal
 do_nothing or real character-action tool call, using the same action schema and
@@ -1357,12 +1379,10 @@ returns that action's recorded outcome without another delivery. GM approval is
 mandatory: speaking ability and hearers remain GM decisions. Prefixes and any
 additional narration have explicit per-utterance audiences. A combined final GM
 reply that has seen several whispers is not broadcast to their union of hearers.
-When NPC response rounds are introduced, the GM narrates consequences while
-NPC agents supply their own dialogue. This replaces the current GM-voiced NPC
-replies and requires real-model prompt verification.
+The GM narrates consequences while NPC agents supply their own dialogue.
 
-Use concrete durable response rounds in the existing world event loop. A round
-records its source tool execution(s), group/history cut, phase, candidate
+Keep pending NPC responses in the existing world event loop. Saved work
+records its source messages, group/history cut, phase, candidate
 inference references and selected proposal references. Advance finite steps and
 yield to player input between them; do not await the whole discussion inside
 Say, an NPC action or the originating world event. A related follow-up is a new
@@ -1370,7 +1390,7 @@ chat-turn linked to the triggering Say/InterventionCheck and proposal execution.
 Retain these causal links in Developer Mode, distinct from nested call stacks.
 Use an explicit group scene revision for stale-work detection; actual committed
 fiction/state changes advance it, inference/proposal bookkeeping does not.
-Record round progress in SQLite and wake the worker through its existing
+Record response progress in SQLite and wake the worker through its existing
 notification mechanism. Do not enqueue work into the worker's own bounded
 channel. Foreground events take priority between finite NPC steps.
 The causal discussion shares the existing inference/tool budget across follow-ups;
@@ -1385,7 +1405,7 @@ saved agent call stack or per-inference durable budget system.
 | Approach | Benefit | Cost / decision |
 | --- | --- | --- |
 | Nested NPC calls inside Say | Uses the immediate call stack | Re-enters active agents and holds actions open; reject. |
-| Concrete response rounds in the world loop | Supports eagerness, stale-proposal cancellation, player input and restart between saved steps | Persist round progress and causal links; selected. |
+| Pending NPC responses in the world loop | Supports eagerness, stale-proposal cancellation, player input and restart between saved steps | Persist response progress and causal links; selected. |
 | New generic workflow engine | Could schedule arbitrary future jobs | Adds an unneeded framework alongside the world loop; reject. |
 
 Interrupt raises the player's hand, as in a meeting: they want the next opening
@@ -1404,8 +1424,8 @@ InterventionCheck collects reaction intentions before an action resolves. NPC
 decision calls do not invoke the already-active GM. The GM may approve a proposed
 reaction directly, receive its actual result, then decide the original action.
 Record these intentions through existing child invocations and pending actions
-inside the current turn, not scheduled response rounds. Only subsequent dialogue
-uses the world worker's response rounds after the original stack unwinds.
+inside the current turn, not scheduled follow-up responses. Only subsequent dialogue
+uses the world worker's pending NPC responses after the original stack unwinds.
 This uses the existing action/roll operations, not a ConditionalApprove tool,
 general dependency engine or dynamically generated rule language. Actions that
 can be tentative carry committed intent (initially Take, default false): false

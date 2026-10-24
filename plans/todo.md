@@ -6,10 +6,10 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [NPC interaction](npc-interaction.md): expressive speech and individual GM
-  approvals, complete response scheduling/causal inspection (Interrupt and
-  Never mind are done), NPC restraint and natural stopping, perceived-event
-  opportunities and tentative/committed intervention.
+- [NPC interaction](npc-interaction.md): consolidate speech and narration into
+  shared perception delivery and message-driven NPC responses, including Take,
+  privacy and causal inspection; then tentative/committed intervention.
+  Interrupt/Never mind exist; restraint and natural stopping are user-owned tuning.
 - [Code quality checks](code-quality-checks.md): measure and enforce module
   boundaries, function complexity and duplication; correct the reported problems. DO NOT SKIP THIS - secodnd attempt after the first was "verified complete" spuriously.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to

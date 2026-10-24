@@ -1,6 +1,6 @@
 # NPC interaction: remaining work and acceptance
 
-Partially implemented. Speech delivery, NPC response rounds, individual GM
+Partially implemented. Speech delivery, NPC response selection, individual GM
 approvals, expressive speech, causal inspection and Interrupt/Never mind exist.
 Remaining: restraint and natural stopping (user-owned tuning), responses to other
 perceived events, and tentative/committed intervention. What happens to existing
@@ -8,18 +8,19 @@ raised hands when another player acts is an open policy choice.
 
 ## Goal and authority
 
-Characters hear speech through their own histories and respond through the shared
+Characters perceive events through their own histories and respond through the shared
 character-action path. Responses to completed events use fresh turns; bounded
 intervention can affect an original action before the GM resolves it. Humans can
 raise a hand while typing without cancelling running work.
 
 Authority: [NPC Interaction and NPC Inference](../user_declarations.md#npc-interaction),
+[Observed Events](../user_declarations.md#observed-events),
 [Character actions](../user_declarations.md#character-actions),
 [GM tools](../user_declarations.md#gm-tools),
 [World game page](../user_declarations.md#world-game-page),
 [Developer view](../user_declarations.md#debugging-and-telemetry), and
 [turn/allowance clarifications](../user_exerpts.md#2026-10-20-npc-speech-interruption-and-game-turn-allowance).
-Follow [NPC speech and response rounds](../design.md#npc-speech-and-response-rounds).
+Follow [Character perceptions and NPC responses](../design.md#character-perceptions-and-npc-responses).
 
 Each remaining increment follows the
 [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
@@ -31,7 +32,7 @@ validation approaches with the user before adding prompts or LLM tests.
 
 Use the existing operations rather than implementing these again. The
 [implementation reference](../implementation_reference.md#web-play-designmd-web-server-and-ui-auth)
-indexes speech, response rounds, shared character actions, causal inspection,
+indexes speech, saved NPC responses, shared character actions, causal inspection,
 shutdown/crash handling and player control. It holds the current implementation
 details; this plan holds remaining work and acceptance requirements.
 
@@ -140,20 +141,31 @@ reached the player; it cannot close the natural-stopping requirement.
 
 ## Design choices
 
+For message delivery and responses, compare these approaches against the coding
+standards:
+
+| Approach | Benefits | Costs / decision |
+| --- | --- | --- |
+| Add a separate observation type/table and response path for each action kind | Keeps each kind isolated | Repeats routing, privacy and scheduling. Reject: the delivered history message already is the observation. |
+| Make every message describe one action with generic actor/target columns | Removes speech-specific joins | Human input, instructions and narration need not describe one action; Whisper has multiple listeners. Reject as a universal representation. |
+| Share history delivery and response scheduling, preserving necessary content-specific metadata | One recipient record and one response path; supports speech and narration without duplicate prose | Requires general message provenance and a forward migration. Selected. |
+
+Speech attribution can remain structured without making every future action use
+speech's fields or acquire its own observation tables. The history entry records
+receipt; its provenance records the cause; saved NPC work records pending
+decisions. These are distinct responsibilities, not three copies of an event.
+
 For intervention, scheduling a reaction after the original turn is too late to
 affect it; persisting a suspended GM stack adds continuation state. Selected:
 collect bounded child decisions in the current GM turn and apply approved
 reactions through existing pending actions, then schedule later dialogue.
-The source representation for non-tool perceived events needs a concrete design
-before implementation; compare extending the existing cause reference with a
-specific recorded event, preserving exact attribution without a workflow engine.
 The Interrupt choice remains open as described above.
 
 ## Remaining implementation order
 
 | Slice | Production change and finish line |
 | --- | --- |
-| Perceived-event opportunities | Extend source-linked response opportunities to actual delivered world events, using existing history/delivery paths and authorized perception. Verify one event creates an opportunity, bookkeeping creates none, and private events stay private. Combat events follow their later rules implementation. |
+| Shared perception delivery and NPC responses | Generalize the existing speech delivery/selection path and complete NPC narration delivery. Deliver Say/Whisper and the GM's Take narration through the shared path; derive response recipients from actual received messages, retain exact causes and preserve historical reconstruction. Complete the schema/refactoring and both action paths together, rather than a rename-only prerequisite. |
 | Tentative/committed intervention | Add committed intent and InterventionCheck. Resolve bounded reaction results before the original decision, then schedule dialogue. Verify warning versus committed retry, source/actor authority, no GM re-entry, shared budget and retained effects on failure. Physical reactions remain with combat rules. |
 
 The following sections specify these pending increments. Reuse existing
@@ -161,17 +173,124 @@ Store/Game/worker operations and checked SQL with forward migrations; no generic
 workflow engine, parallel executor or file-movement prerequisite is needed.
 Keep todo.md's overall order; this cleanup does not defer unfinished scope.
 
-## Perceived world events
+## Shared perception delivery and NPC responses
 
-Beyond speech, create response opportunities from actual events delivered to an
-NPC's history, preserving who perceived what and the actual recorded source. Reuse
-the existing source-linked opportunities; do not add a general dirty-history
-flag that retriggers on tool receipts, inference records or private GM notes.
-For a narration with no source tool call, link its producing inference/event
-rather than fabricate a tool execution to fit the current tool-only cause table.
-Coalescing events keeps their causes, and DoNothing consumes an opportunity
-without creating another. Add new event/action kinds with their implemented
-rules, preserving ordinary no-reentry and authorization checks.
+### Contract and scope
+
+An observation is the message already delivered to a character's history. Do
+not insert an additional observation message, event envelope, or Rust-generated
+Take sentence beside the GM's narration. Speech retains verbatim authored words
+and structured attribution. Other actions use the existing GM narration; do not
+expose internal approval receipts as perceived events. A rejected action has no
+automatic public failure announcement, but any narration the GM actually gives
+its observers can be perceived and answered.
+
+Use the relevant group as the default audience and apply validated, group-local
+GM inclusion/exclusion before delivery. Whisper starts with its explicit
+listeners. Preserve offline-PC speech hearing and the existing connected-PC
+narration rule; include NPCs in narration as design.md already requires. Do not
+expand narration to every group at the same location in this slice. Prefixes
+describe perception and must follow the same restricted audience. Keep action
+permission separate from who perceives the outcome.
+
+Each recipient gets one history entry referencing shared content. The delivered
+entries are the record of who perceived it, including after later group changes.
+Delivery and registration of pending NPC responses commit together. Action
+mutation and immediate delivery share the existing transaction where applicable;
+later generated narration has its own delivery transaction. Never keep a database
+transaction open across inference or pretend later narration was atomic with an
+earlier action. Publish wake-ups only after commit.
+
+### Implementation work, in dependency order
+
+Implement this as one complete behaviour-preserving consolidation plus Take
+coverage. Internal development steps need not become separate public features
+or rename-only commits.
+
+- Replace the speech-only message-to-action join with an optional action
+  reference on the existing message record. Keep its meaning distinct from
+  `source_tool_execution_id`, which answers a tool call. Retain producing
+  inference provenance for narration; a narration need not correspond to exactly
+  one action. Reuse action/tool records rather than copying their arguments.
+  Use forward migrations, preserving existing databases and recorded requests.
+- Remove `speech_message` after migrating its links and updating all readers.
+  Remove `speech_batch` if its remaining group/sequence references can be
+  resolved from existing records without losing historical facts. Do not require
+  removal of the speech metadata row just to reduce table count: preserve
+  speaker/addressee IDs and frozen names, whisper intent, prefix and text format
+  in the smallest coherent representation. Do not add a target column intended
+  to cover all future action kinds. A new action kind must not require its own
+  observation or response tables.
+- Consolidate recipient validation and history delivery for speech and GM
+  narration. Extend approval's perception controls to non-speech outcomes and
+  carry their validated audience to the associated narration delivery. Audit
+  player and NPC action paths together: an exclusion must restrict the actual
+  narration, not merely a receipt from approve_action. Preserve the rule that
+  all tool results precede deferred deliveries. Do not deliver speech twice
+  under different names; any additional GM narration is distinct content and
+  must retain the speech's privacy boundary. Apply the same rule to non-speech
+  narration: a combined GM reply must not leak restricted outcomes to the union
+  of several actions' audiences. Keep restricted narration scoped to its own
+  approved delivery rather than trying to redact generated prose afterward.
+- Change pending response sources from speech-tool-only references to the
+  actual delivered message IDs. Use those entries and their history ownership
+  to identify NPC recipients; do not reconstruct a past audience from current
+  membership or join through speech tables. Keep original source IDs when
+  coalescing unanswered messages, and revalidate current membership before
+  acting. A character's own speech does not invite its own response; an NPC can
+  still respond to distinct narration addressed to it.
+- Extend the existing causal relationship to reference a source message as
+  well as its existing direct tool-call cause. Use foreign keys and an
+  exactly-one-source constraint, retaining direct proposal-tool causes for
+  selected execution. Update causal readers and Developer Mode navigation
+  together: NPC response -> received message -> originating action/inference.
+  Narration with no originating tool must not require a fabricated execution.
+- Register opportunities only from delivered perceptions. Human input,
+  instructions, inference bookkeeping, tool receipts, summaries and DoNothing
+  results do not independently schedule responses. This is a delivery-path
+  operation, not a scan for arbitrary history changes or a second event bus.
+- Retain the existing finite-step world worker and necessary saved pending work:
+  source messages, decision invocations, selected proposals, scene revision and
+  shared budget. New received messages during collection supersede stale
+  proposals without losing unanswered sources. Own tied deliveries preserve
+  remaining selected words; external changes can invalidate them. A boolean
+  dirty flag or checking the last history entry alone cannot represent these
+  states. Do not replace working scheduling with recursive calls or detached
+  per-NPC tasks.
+- Rename misleading `round`/`reopen_round` terms while updating their actual
+  operations, schema and readers. Name stored data for pending NPC responses;
+  names such as `replace_pending_npc_responses` must describe the function body.
+  Do not split a function merely to satisfy a naming rule or perform a broad
+  mechanical rename before the structure is settled. There are no combat-style
+  turns granting each NPC a slot to speak.
+
+Review remaining scheduling fields and branches against the retained behaviours
+above; remove unused state and duplicate paths. Preserve progress at completed
+step boundaries, restart without replay, and visible crash failures. Line/table
+counts are evidence for investigation, not proof that required state is waste.
+Update implementation_reference.md only after the code exists.
+
+### Acceptance for this slice
+
+Retain U1–U6 and E1–E9 below. Extend existing scenarios rather than adding a
+separate suite for every delivery kind:
+
+| Case | Expected outcome and evidence |
+| --- | --- |
+| Speech and Take share delivery | Approved Say reaches each hearer unchanged; an approved Take changes ownership and its GM narration reaches PCs/NPCs once. NPC context contains that same narration and can produce an ordinary GM-approved response. No extra generated event sentence or second response path. |
+| Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
+| Narration without a source tool | Existing group/presence narration reaches eligible NPCs, creates pending work once and links the response to the actual message and producing inference. No synthetic action/tool record. No narration-only NPC opportunity is stranded by speech-only eligibility queries. |
+| Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |
+| Migration and all readers | Existing speech, IDs/frozen names, prefixes, authored/legacy rendering and historical request reconstruction survive migration. Model context, live chat, reload, compaction and Developer Mode show the same received content and its true cause. |
+| Worker and lifecycle | Preserve eagerness/tied selection, other-group progress, raised hands, shutdown between complete steps and crash failure without replay. Disconnecting a browser cannot cancel a queued player turn; check completion and its reply, not only stored input. |
+
+Use scripted Store/Game paths for routing, permission, source links and migration
+checks. Exercise changed tool descriptions/context through the real chat path
+with captured backend input, reviewing the cases with the user first as required
+by coding_standards.md. Do not start conversational tuning or require a specific
+NPC to reply. Keep the five-minute test budget; use existing lifecycle checks
+rather than repeated GPU scenarios. Finish the AGENTS.md self-review before
+committing this complete slice, then proceed to intervention.
 
 ## Intervention lifecycle
 
@@ -215,7 +334,7 @@ Actual system errors still fail the turn and retain committed effects.
 
 Combat, attacks, action allowance and contested physical outcomes depend on
 [Rules and travel](playable-rules.md); do not invent simulated combat in this
-speech increment. Verify the prisoner's warning and committed retry in this increment, and
+NPC increment. Verify the prisoner's warning and committed retry in this increment, and
 verify the shopkeeper's physical opposition when those rules are implemented.
 
 ## Combat boundary
@@ -262,7 +381,7 @@ not after every state transition or cosmetic edit.
 | --- | --- | --- |
 | U1: Say addresses one NPC | All actual NPC hearers get an opportunity; an addressed NPC may choose DoNothing. Selected speech retains the actor's authored style, without a fixed reader-added sentence, and gets ordinary GM approval. | A/B compare authored text through live/reload/context paths; C links speaker and source. Include text that omits the speaker's name: the captured backend input must still identify the speaker and addressee. Verify historical request reconstruction remains unchanged. |
 | U2: Different eagerness | Highest wins; losing proposals are superseded and their actors reconsider newly heard speech. | A contrasts 1/2/3; C checks only the winner acted. |
-| U3: Tied speech | Highest ties composed from the same history get separate single-action GM turns in any order. Earlier tied speech does not regenerate/invalidate the remaining chosen words. Approved words arrive once before a new response round; prefix is optional. | A/C check original decisions, individual approvals and deliveries; B checks intelligible overlap/style. |
+| U3: Tied speech | Highest ties composed from the same history get separate single-action GM turns in any order. Earlier tied speech does not regenerate/invalidate the remaining chosen words. Approved words arrive once before collecting follow-up responses; prefix is optional. | A/C check original decisions, individual approvals and deliveries; B checks intelligible overlap/style. |
 | U4: All DoNothing | No GM approval or follow-up inference after collection completes. | A counts model work; C shows a settled round without actions. |
 | U5: NPC conversation | Fresh follow-up turns share one budget; NPCs own dialogue and the GM owns approval/consequences. Evaluate natural stopping over repeated conversations. | B inspects actual prompts and play; A/C verify budget sharing and causal order. |
 | U6: Private speech | Only actual hearers other than a self-only speaker get opportunities. Two selected whispers to disjoint audiences have independent words, prefixes and narration. Excluded histories/prompts reveal no private words, style or unseen participants, including when a whisper is rejected. | A includes connected bystanders and revealing GM narration; B/C inspect captured inputs and delivered histories. |

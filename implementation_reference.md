@@ -613,7 +613,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   same tool turn, so beginning play never needs a second player message.
   Subsequent player messages expose creation or location-action tools
   according to durable character state.
-- Speech (design.md: NPC speech and response rounds; migrations 0004, 0007).
+- Speech (design.md: Character perceptions and NPC responses; migrations 0004, 0007).
   `say` (optional addressee) and `whisper` (explicit listeners) are validated
   against the speaker's group when submitted. On approval
   `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
@@ -644,7 +644,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   "Name says to X: ..." text so recorded requests reconstruct exactly.
   Presence narration keeps its
   connected-PC audience.
-- NPC speech rounds (design.md: NPC speech and response rounds; migrations
+- NPC speech responses (design.md: Character perceptions and NPC responses; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
   (`commit_speech`) opens an `npc_round` whose candidates are the NPCs who heard
   it. The world worker runs one `NpcStep` at a time at lowest priority
@@ -800,7 +800,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `tool_execution.status = 'rejected'`, flagged `tool_call_rejected` on the raw
   history entry with a red badge in Developer Mode, and every real-model device
   scenario fails if one occurred.
-- Player control (design.md NPC speech and response rounds): Interrupt raises the
+- Player control (design.md Character perceptions and NPC responses): Interrupt raises the
   player's hand. `World` keeps the raised hands as (group, character) pairs in memory;
   `Game::interrupt` / `never_mind` / `hand_raised` expose them. `next_npc_step` leaves
   out groups with a hand raised, so a step already running finishes, nothing is
