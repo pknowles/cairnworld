@@ -702,9 +702,22 @@ expressed a preference for distinct model-facing tools:
 > hope separate tool calls encourage the GM LLM to route appropriately as I
 > expect it would otherwise over-use optional parameters.
 
-Design selection: separate actor-only description and explicitly addressed
-narration tools share delivery. They replace implicit final-text broadcasting;
-neither optional recipient fields nor an automatic public copy are needed for
-private descriptions. The declaration's shared-detail setting guides ordinary
-narration but never widens an explicitly private delivery. These tool contracts
-are a design choice implementing the preference, not a direct user quote.
+Updated 2026-10-24: after discussing the agent loop and avoiding a useless
+closing inference, the user superseded the separate-tool design:
+
+> ok, I think the GM must use a structured final response then, probably much
+> like its other tool calls I assume. Narration would always come last and it
+> must do all narration in one batch, picking from one of a few structures,
+> like I described
+
+The standard form was clarified:
+
+> The standard example would be one narration simply given to all characters
+> in the group
+
+Selected design: the GM's structured final answer contains one narration batch
+with distinct group, actor-only and explicitly addressed forms. It is not a
+tool call and requires no separate end call or closing inference. The earlier
+separate narration tools are superseded; the distinction between audience forms
+is retained. The shared-detail setting guides ordinary narration but never
+widens an explicitly private delivery.

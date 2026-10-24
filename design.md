@@ -257,12 +257,13 @@ not a fabricated successful summary.
 Every content reference is a plain `recorded_content` ID: no view needs a typed
 sub-selection of a content row, since reasoning is always read alongside its own
 content's output (never referenced independently by a different history entry)
-and no tool call's argument stands in for narration text (Agent syntax and tool
-calls: the GM narrates in plain text after any approval/rejection tool call, not
-through a dedicated narration tool). Assistant history uses the inference's
-output content ID; GM narration is the GM's own settled reply, so every present
-character's delivered copy references that exact same content ID as the GM's
-own history entry - not a fresh copy of the text. Tool results have one content
+and no tool call's argument stands in for narration text. Assistant history uses
+the inference's complete output content ID. A structured GM final answer may
+contain several narrations: record each entry's content once for its recipients
+and retain its producing inference and entry index. Recipients reference that
+shared entry content rather than the whole JSON batch or a separate text copy
+per character. Historical plain-text narration retains its original references
+and request reconstruction. Tool results have one content
 ID shared by their history entry, execution and action. Original JSON arguments
 remain intact inside the model output; names, IDs and argument fragments do not
 get separate interned rows.
@@ -1334,24 +1335,34 @@ scheduling do not require every action to support a prefix. Other action kinds
 gain such metadata only for a demonstrated requirement, not by inheriting speech
 fields. Historical prefixes and rendering remain reproducible.
 
-GM narration uses explicit tools instead of implicitly broadcasting the final
-text of a GM turn. Two contracts keep routine routing clear to a small model:
-`describe_to_actor(text)` delivers exclusively to the acting character identified
-in the current action request; `narrate_to_characters(text, character_ids)`
-delivers to the explicitly named characters in the authorized scene. Recipients
-are required in the latter, not an optional override on an actor-only default.
-Both use the same delivery implementation. Use either as needed; an action does
-not require a public narration or both calls. Distinct text for different
-audiences uses the appropriate tool for each audience. Final assistant text
-remains recorded in GM history but is not implicitly delivered as narration.
-Action approval and verbatim speech delivery remain separate operations.
+The GM retains the ordinary tool/result agent loop, then returns a structured
+final answer containing all narration in one ordered batch. This final answer
+ends the GM turn; there is no narration tool, explicit end tool or extra closing
+inference. Resolve required action decisions and read their results before
+producing the final batch. Narration delivery does not itself approve an action.
 
-The actor-only tool is available when the invocation has an identified acting
-character, including an NPC or a character reacting to an action. Its tool
-description names that binding; it does not guess a recipient from the last
-speaker or browser. Narration-only invocations use the explicitly addressed
-tool. Validate recipient IDs within the authorized scene at delivery and retain
-the actual recipients, content and producing tool/inference as provenance.
+The final schema is a `narrations` array of tagged alternatives:
+
+- `group`: text for the authorized interacting group, the standard case.
+- `actor`: text exclusively for the acting character in the current request.
+- `characters`: text plus a required, explicit list of character IDs.
+
+Each entry has its own text; audience-specific fields exist only on the relevant
+variant, not as optional overrides on a common default. One ordinary group
+narration needs one entry. Use multiple entries only for distinct narrations;
+an empty array is valid when there is nothing to convey. Group narration follows
+the existing NPC/connected-PC recipient policy, not a global broadcast.
+An actor entry requires an identified acting character, including NPC and
+reaction actors; the context states that binding. Narration-only invocations
+use group or explicitly addressed entries rather than inventing an actor.
+
+Validate the entire final batch, action-resolution requirements and all audience
+references before delivering any entry. Record actual recipients and content in
+one delivery transaction, with pending NPC work, then publish notifications.
+Invalid output fails visibly without plain-text fallback, repair inference or
+partial batch delivery. Previously committed actions remain committed. Retain
+the original final response in GM history and use the same shared delivery path
+for all variants. Verbatim speech delivery remains separate from GM narration.
 Observer messages describe what observers perceive, not private results returned
 to the actor. An unnoticeable Look need not produce any observer narration.
 
@@ -1359,7 +1370,7 @@ The global shared-detail setting defaults on, as declared. Supply it in the GM's
 context so ordinary narration can give players a shared detailed account or
 separate perspectives when disabled. Explicitly private narration always stays
 within its selected audience; code must not widen it because sharing is enabled.
-NPC knowledge remains limited to their own delivered perceptions. Tool/context
+NPC knowledge remains limited to their own delivered perceptions. Schema/context
 changes require the prompt-standards review and real-chat verification.
 
 Response eligibility follows the messages actually received, not a speech-only
@@ -1440,7 +1451,7 @@ finishes, but human input can supersede stale remaining intentions. There is no
 batch approval tool or all-or-nothing multi-utterance transaction. Repeated resolution
 returns that action's recorded outcome without another delivery. GM approval is
 mandatory: speaking ability and hearers remain GM decisions. Prefixes and any
-additional narration have explicit per-utterance audiences. Narration calls
+additional narration have explicit per-utterance audiences. Final narration entries
 deliver only to their validated recipients; information from several whispers
 must not be broadcast to their union of hearers.
 The GM narrates consequences while NPC agents supply their own dialogue.

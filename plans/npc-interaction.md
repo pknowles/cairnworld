@@ -245,30 +245,47 @@ or rename-only commits.
   argument or storage field. Preserve speech prefixes across all readers and
   historical request reconstruction. Extend content-specific metadata only
   when that action kind has a demonstrated need.
-- Replace implicit GM final-text narration with two explicit tool contracts:
-  `describe_to_actor(text)` for an exclusively actor-addressed description, and
-  `narrate_to_characters(text, character_ids)` with required explicit recipients.
-  Both call the same history delivery operation. The actor is bound to the
-  current presented action, including NPC/reaction actions, and documented in
-  the tool description; omit this tool from invocations with no acting character.
-  Group/presence narration uses the explicitly addressed tool. Either tool can
-  be used without the other; do not manufacture observer narration for an
-  unnoticeable action or require two calls for every action. Retain final GM text
-  internally without broadcasting it. Update all GM invocation sites, including
-  opening/presence, so no second implicit narration route survives.
+- Keep the GM's ordinary action-tool/result loop and replace its plain-text final
+  narration with one structured final answer: `{"narrations": [...]}`. Use a
+  strict tagged enum: `{"kind":"group","text":"..."}`,
+  `{"kind":"actor","text":"..."}`, or
+  `{"kind":"characters","character_ids":[...],"text":"..."}`.
+  Group narration is the standard one-entry case. Actor means exclusively the
+  actor of the presented action, including NPC/reaction actions; document that
+  binding in the actual model context. Reject actor entries when no actor exists.
+  Require a nonempty explicit recipient list for characters entries. No optional
+  audience overrides, narration tools, terminal narration tools or end tool.
+  Multiple distinct narrations are entries in this single final batch, not
+  repeated calls. An empty batch is valid if there is nothing to convey.
+- Parse the structured final only when the GM completes without tool calls.
+  Keep normal tool processing intact; do not force intermediate action calls
+  into a final-answer schema. Define the final schema once for prompt/backend
+  formatting and Rust validation; use existing backend capabilities, with strict
+  application validation regardless of constrained-generation support. Reject
+  malformed/unknown forms visibly without a repair loop or plain-text fallback.
+  Validate pending action resolution and every narration/recipient before any
+  delivery, then commit all entries and pending NPC work together. Earlier
+  action effects are retained if final validation or delivery fails.
+- Store the unmodified final inference output for GM history/reconstruction.
+  Record each narration entry's text once, linked to that inference and entry
+  index; its recipient histories reference the shared entry content, not the
+  whole JSON batch. Keep entry order and historical plain-text references.
+  Update every GM invocation, including opening/presence, to use the same final
+  batch validation and delivery. Do not manufacture observer narration for an
+  unnoticeable action or duplicate verbatim speech as narration.
 - Implement the declaration's global shared-detail setting, default on, and
   supply it as a fact in GM context. It guides routine narration to players;
   explicitly private actor descriptions and chosen audiences always stay private.
   Do not automatically copy private information into observer or NPC histories.
-  Compare a generic narration tool with optional recipients (smaller interface,
-  but private routing depends on an override), structured final output (keeps
-  final-text narration but introduces another parsing contract), and the selected
-  two tools (clear routing contracts with shared implementation). Exercise the
-  selected interface through captured real-chat contexts before claiming that
-  it improves routing; the user's expectation is a hypothesis, not a measurement.
+  Compared alternatives: ordinary narration tools preserve tool/result flow but
+  leave a closing response to define; terminal tools avoid that response but
+  introduce custom completion behaviour. The user selected a structured final
+  batch, retaining useful final output and normal turn completion. Exercise its
+  distinct forms through captured real-chat contexts before claiming that they
+  improve routing; expected model behaviour is not a measurement.
 - Consolidate recipient validation and history delivery for speech and GM
-  narration. Speech approval controls who hears verbatim speech; explicit
-  narration tools choose who receives their separate text. Do not add general
+  narration. Speech approval controls who hears verbatim speech; final narration
+  entries choose who receives their separate text. Do not add general
   narration audience fields to approve_action as a competing routing mechanism.
   Audit player and NPC action paths together: exclusions must restrict actual
   delivery, not merely a receipt from approve_action. Resolved recipient
@@ -282,8 +299,8 @@ or rename-only commits.
   all tool results precede deferred deliveries. Do not deliver speech twice
   under different names; any additional GM narration is distinct content and
   must retain the speech's privacy boundary. Apply the same rule to non-speech
-  narration: separate narration calls must not leak restricted outcomes to the
-  union of their audiences. Each call delivers only to its own validated audience;
+  narration: separate batch entries must not leak restricted outcomes to the
+  union of their audiences. Each entry delivers only to its validated audience;
   do not attempt to redact generated prose afterward.
 - Change pending response sources from speech-tool-only references to the
   actual delivered message IDs. Use those entries and their history ownership
@@ -302,8 +319,8 @@ or rename-only commits.
   exactly-one-source constraint, retaining direct proposal-tool causes for
   selected execution. Update causal readers and Developer Mode navigation
   together: NPC response -> received message -> originating action/inference.
-  Narration without an originating character action links to its real narration
-  tool execution/inference, not a fabricated action or approval.
+  Narration without an originating character action links to its final producing
+  inference and batch entry, not a fabricated tool execution, action or approval.
 - Register an opportunity as part of delivering any perception. Human input,
   instructions, inference bookkeeping, tool receipts, summaries and DoNothing
   results do not independently schedule responses. Distinguish what a character
@@ -353,7 +370,7 @@ separate suite for every delivery kind:
 | Requester and observers see different information | A Look returns private detail only to its actor; observers receive a separate description only of noticeable behaviour, or nothing. Excluded PCs/NPCs never see the private detail in history, prompts or reload. Shared-detail on/off guides routine narration, but explicit private delivery stays private in both modes. Cover player, NPC and reaction actors and narration-only invocations without inventing a requester. |
 | Eligibility is independent of tool kind | An actually delivered perception offers its NPC recipient a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. Speech's prefix remains available without imposing it on other action kinds. |
 | Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
-| Narration without a character action | Group/presence narration uses the explicit narration tool, reaches eligible NPCs and links the response to the received message and real narration execution/inference. No synthetic character action or approval. Final GM text is recorded but never implicitly delivered; no narration-only NPC opportunity is stranded by speech-only eligibility queries. |
+| Final batch and narration without a character action | Group/presence uses the group final form and links replies to received messages and the actual producing inference/entry. Exercise a standard single group narration, actor-only description, mixed private/addressed batch and an empty batch. Malformed entries, unresolved actions or foreign recipients fail before any narration is delivered; prior action effects remain. Final output needs no closing inference or synthetic action/tool record. No narration-only opportunity is stranded by speech-only queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |
 | Migration and all readers | Existing speech, IDs/frozen names, prefixes, authored/legacy rendering and historical request reconstruction survive migration. Model context, live chat, reload, compaction and Developer Mode show the same received content and its true cause. |
 | Worker and lifecycle | Preserve eagerness/tied selection, other-group progress, raised hands, shutdown between complete steps and crash failure without replay. Pause a producer after delivery: no NPC decision starts before its successful completion, and narration retains the same causal budget. Fail the producer: committed messages remain and follow-ups fail visibly. Disconnecting a browser cannot cancel a queued player turn; check completion and its reply, not only stored input. |
