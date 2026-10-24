@@ -380,9 +380,13 @@ Hard configured note/field and tool-result bounds protect fixed context/memory
 requirements. Oversized writes fail unchanged; bounded reads/search explicitly
 identify partial results and allow continuation. Calibrate bounds against real
 assembled model inputs before enabling writes, not after an unbounded initial
-release. Named note bodies and existing descriptions are the
-initial representation; a proposed header/subnote hierarchy requires evidence
-before adding another memory structure. See [the implementation plan](plans/gm-editing.md).
+release. Compare named notes with bounded key listings and the declaration's
+header/subnote proposal against the same discovery, context-size and editing
+requirements before selecting the representation. Neither is a required default;
+reuse existing object relationships and avoid duplicate authoritative state.
+Individual field/result bounds do not guarantee that accumulated conversation
+fits; request budgeting and compaction retain that responsibility. See
+[the implementation plan](plans/gm-editing.md).
 
 ## World identity and agent topology
 

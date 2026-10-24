@@ -4,9 +4,9 @@ Pending implementation. First deliverable: a character moves within its existing
 location, the GM edits persistent placement and relevant notes, and the next
 inference/turn reads that state before producing consistent narration. Both
 whole-value replacement and exact-text editing are required from the outset.
-Read/edit work can proceed independently. The complete Move example additionally
-requires gameplay clock operations and the open time-window decision described
-below; it is not yet a fully specified movement implementation recipe.
+Read/edit work can proceed independently. The Move example includes its declared
+elapsed-time update; multiplayer time-window policy is not a prerequisite for
+demonstrating persistent placement within a location.
 
 ## Authority and scope
 
@@ -40,24 +40,27 @@ position store or copy placement into character identity and several notes.
 | Whole replacement plus exact find/replace | Familiar text editing; preserves untouched passages | Exact match can be missing/ambiguous; report that explicitly. Selected together. |
 | Line/paragraph patches or virtual files | Rich editing surface | Index drift, parser/path machinery and extra representations. Not needed initially. |
 
-Keep named note values and relational object navigation initially. The proposed
-header/subnote hierarchy is an alternative to evaluate against these existing
-fields, not authorization for a new memory framework. Existing object
-descriptions can provide orientation; do not manufacture competing summaries of
-the same state. Revisit the representation only with measured contexts showing
-that bounded key/index lookup cannot supply the needed information. Whole-note
-replacement must not be the only editing operation while that is evaluated.
+Before choosing the note representation, compare named note values with bounded
+key listings against the declaration's header/subnote proposal. Use the same
+short-note and large-note lookup/edit cases for both: can the GM discover relevant
+detail without already knowing its key, what must remain in each prompt, and
+what storage/tool code is needed? Record the context sizes, maintenance costs
+and limitations, then select the approach against those requirements. Neither
+option must first prove the other inadequate. Reuse existing object relationships
+for navigation and avoid storing the same authoritative state twice. Both editing
+operations remain required whichever note representation is selected.
 
 ## Dependencies and initial bounds
 
-NPC interaction supplies the structured final narration and shared action path;
+NPC interaction supplies the terminal narration tools and shared action path;
 code-quality checks precede this plan in todo.md. The current schema has world
 and character time columns, but gameplay clock advancement is not implemented.
-Do not confuse those columns with an existing Move/time operation. Complete
-out-of-combat Move must implement clock updates using those authoritative fields
-and settle the existing [time-window proposal](../design.md#product-decisions)
-before claiming its elapsed-time/turn-admission behaviour is ready. Editing
-alone neither resolves that policy nor authorizes an arbitrary lead limit.
+Do not confuse those columns with an existing Move/time operation. Implement the
+within-location Move's declared GM-supplied elapsed-time update using those
+authoritative fields. This does not require settling the broader
+[time-window proposal](../design.md#product-decisions), adding a lead limit or
+implementing multiplayer turn admission here. Those remain with the rules plan;
+this example does not claim that scheduling policy is implemented.
 
 Before enabling writes in the first checkpoint, configure finite field/note,
 key/index and tool-response limits. Choose and record their numerical values
@@ -112,8 +115,8 @@ first version; the second checkpoint extends this measurement to retrieval.
 - Demonstrate the complete path: the player requests movement behind a pillar;
   the GM reads the relevant current placement/location text and notes, resolves
   the request, edits placement and affected local facts, sees the tool results,
-  then produces the structured final narration. A later request must use the new
-  position. Use the declared Move action through the shared submission/arbitration
+  then finishes with the appropriate terminal narration tool. A later request
+  must use the new position. Use the declared Move action through the shared submission/arbitration
   path, not Look or a disguised Ask. Implement its out-of-combat within-location
   path and the GM-supplied elapsed time through shared action/clock operations
   that this movement path must supply; do not edit time as arbitrary text or
@@ -142,9 +145,12 @@ first version; the second checkpoint extends this measurement to retrieval.
 - Extend the first checkpoint's measured bounds to paged search/list workloads
   and representative large existing notes. Record assembled input sizes and any
   justified configuration changes. Do not assume character counts equal model
-  token counts. A legal lookup/edit sequence must leave room for the next
-  inference and final output; returning individually small pages is not by itself
-  proof that their accumulated context fits.
+  token counts. Exercise repeated lookup/edit calls through the existing request
+  budgeting and compaction path, including approaching the context limit. Field
+  and page limits bound individual values/results; they do not guarantee that
+  accumulated conversation fits. Preserve explicit capacity failures when the
+  request cannot be reduced sufficiently, rather than promising every legal
+  sequence can continue.
 - Storyteller integration later reuses these field operations with its own
   authority: it writes Storyteller notes and does not read GM notes. Do not add
   a placeholder Storyteller executor in this plan. Keep this boundary separate
@@ -169,7 +175,7 @@ Store/Game/tool paths; no new mock world engine or repeated full GPU suite.
 | Permissions and mechanical state | Foreign-world/local-scope violations, GM writes to Storyteller notes and edits to mechanical fields fail without mutation or search leakage. Valid private notes stay out of player/NPC perception histories. |
 | Hierarchical discovery | Starting from world/location references, find a known field/key, read/search its body and edit it through returned IDs. Captured context distinguishes partial reads from complete content and does not include all remote object bodies. |
 | Bounds and failures | Oversized writes fail unchanged with measured size/limit; search/read outputs are bounded and indicate remaining results. SQL/tool errors retain full context and Developer Mode evidence. No correction loop, truncation or synthetic success. |
-| Shared lifecycle | Edits invalidate relevant stale NPC proposals, but note receipts do not start NPC responses. Narration remains the final structured batch. A later failure retains committed edits and reports failure under existing crash/turn rules. |
+| Shared lifecycle | Edits invalidate relevant stale NPC proposals, but note receipts do not start NPC responses. A terminal narration tool ends the GM turn without a closing inference. A later failure retains committed edits and reports failure under existing crash/turn rules. |
 
 Run appropriate Rust/SQL/lint checks and the representative real chat for changed
 tools/context. Follow the five-minute testing budget; reserve broad checks for
