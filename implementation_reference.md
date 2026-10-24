@@ -607,7 +607,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   (its `GroupHistory { agent_id, branch_id }`) for opening narration in that
   same tool turn, so beginning play never needs a second player message.
   Subsequent player messages expose creation or location-action tools
-  according to durable character state.
+  according to durable character state. `look`, `investigate`, `open` and `ask`
+  share one description argument and the shared action path (`action_tools`);
+  each reaches the GM under its own name and, once approved, changes no state:
+  the GM's narration is the result. `take`, `say` and `whisper` have their own
+  arguments.
 - Speech (design.md: Character perceptions and NPC responses; migrations 0004, 0007).
   `say` (optional addressee) and `whisper` (explicit listeners) are validated
   against the speaker's group when submitted. On approval

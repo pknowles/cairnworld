@@ -1163,20 +1163,25 @@ where
                 }) as ToolFuture
             },
         );
-        Ok(vec![
-            party_presence,
-            self.action_tool(PlayerActionTool {
-                member: member.clone(),
-                sequence_id,
-                definition: prompts.player.tools.tool(
-                    "look",
-                    serde_json::to_value(schema_for!(CharacterAction))
-                        .expect("character action schema should serialize"),
-                )?,
-                validate: validate_character_action,
-                budget: budget.clone(),
-                call: call.clone(),
-            }),
+        let mut tools = vec![party_presence];
+        // These differ only in the intent they tell the GM.
+        for name in ["look", "investigate", "open", "ask"] {
+            tools.push(
+                self.action_tool(PlayerActionTool {
+                    member: member.clone(),
+                    sequence_id,
+                    definition: prompts.player.tools.tool(
+                        name,
+                        serde_json::to_value(schema_for!(CharacterAction))
+                            .expect("character action schema should serialize"),
+                    )?,
+                    validate: validate_character_action,
+                    budget: budget.clone(),
+                    call: call.clone(),
+                }),
+            );
+        }
+        tools.extend([
             self.action_tool(PlayerActionTool {
                 member: member.clone(),
                 sequence_id,
@@ -1213,7 +1218,8 @@ where
                 budget,
                 call,
             }),
-        ])
+        ]);
+        Ok(tools)
     }
 
     fn action_tool(self: &Arc<Self>, action: PlayerActionTool) -> Tool {
@@ -5313,6 +5319,58 @@ mod tests {
             "the GM is told how to end its turn: {:?}",
             last_gm_request.messages.last()
         );
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_request_tool_reaches_the_gm_under_its_own_name_and_is_resolved_like_any_action() {
+        let scene = speech_scene().await;
+        let tools = ["look", "investigate", "open", "ask"];
+        let approved_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM action WHERE approved = 1")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        for (index, tool) in tools.iter().enumerate() {
+            scene.responses.lock().unwrap().extend([
+                tool_call(tool, serde_json::json!({"description": "the shutters"})),
+                approve(i64::try_from(index).unwrap() + 1),
+                tool_call("narrate_nothing", serde_json::json!({})),
+                response(Content::Text(String::new())),
+            ]);
+            scene
+                .game
+                .player_message(scene.first.clone(), "Try the shutters.")
+                .await
+                .unwrap();
+        }
+
+        {
+            let requests = scene.requests.lock().unwrap();
+            // The player agent is offered all four, each named for what it does.
+            let offered: Vec<&str> = requests[0]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .filter(|name| tools.contains(name))
+                .collect();
+            assert_eq!(offered, tools);
+            // The GM is told which one was used, and the arguments it carried.
+            for (index, tool) in tools.iter().enumerate() {
+                let asked = requests.iter().any(|request| {
+                    matches!(request.messages.last().map(|message| &message.content),
+                        Some(MessageContent::Text(text))
+                            if text.contains(&format!("takes action {}: a `{tool}` request", index + 1))
+                                && text.contains("the shutters"))
+                });
+                assert!(asked, "the GM was not asked about a `{tool}` request");
+            }
+        }
+        let approved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM action WHERE approved = 1")
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(approved - approved_before, 4);
         assert!(failed_sequences(&scene).await.is_empty());
     }
 

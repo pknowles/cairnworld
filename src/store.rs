@@ -3900,7 +3900,9 @@ impl Store {
         action: &PendingAction,
     ) -> Result<std::result::Result<String, String>> {
         match action.tool.as_str() {
-            "look" => Ok(Ok("approved".to_string())),
+            // These requests only carry the character's intent to the GM; the
+            // GM's narration is their result.
+            "look" | "investigate" | "open" | "ask" => Ok(Ok("approved".to_string())),
             "take" => {
                 let arguments: TakeItemArguments = serde_json::from_str(&action.args)
                     .context("parsing stored take action arguments")?;

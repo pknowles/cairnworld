@@ -164,7 +164,7 @@ creation = """\
 # Once playing. {scene} is the player-visible scene.
 scene = """\
     Guide the player through the current scene. Use a declared action tool when \
-    the player asks their character to look or speak. The following is the current \
+    the player asks their character to act or speak. The following is the current \
     player-visible scene, derived from the world state; do not invent items, \
     people, or facts outside it:
 {scene}\
@@ -196,10 +196,31 @@ description = "Mark character creation complete after the required rolls."
 description = "List your current group's characters and whether each is online."
 
 [player.tools.look]
-description = "Examine or ask about something in the current scene."
+description = "Observe something in the current scene."
 
 [player.tools.look.arguments]
-description = "What the character attempts or says."
+description = "What the character looks at."
+
+[player.tools.investigate]
+description = "Study something closely for clues or hidden details."
+
+[player.tools.investigate.arguments]
+description = "What the character investigates and how."
+
+[player.tools.open]
+description = "Try to open something, such as a door, container or window."
+
+[player.tools.open.arguments]
+description = "What the character opens and how."
+
+[player.tools.ask]
+description = """\
+    Ask the GM for information or clarification about the situation. To speak to a \
+    character, use say or whisper.\
+    """
+
+[player.tools.ask.arguments]
+description = "What the character asks the GM."
 
 # say and whisper are used by players and, with eagerness added, by NPCs.
 
