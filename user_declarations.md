@@ -107,7 +107,10 @@ trying to further consolidate too.
   - What does Justin Alexander have to say in So You Want to Be a Game Master about scenario design, meaningful choices, investigations, clues and avoiding situations where players get stuck?
   - What is Justin Alexander's Three Clue Rule? How would you design challenges and mysteries without creating bottlenecks.
   - How can you build nonlinear adventures where players discover their own way forward? What is Node-Based Scenario Design?
-  - What are the core points of Robin D. Laws's GUMSHOE System Reference Document? 
+  - What are the core points of Robin D. Laws's GUMSHOE System Reference Document?
+  - Summarise Carolyn Wells's The Technique of the Mystery Story and its main takeaways.
+  - What are S. S. Van Dine's Twenty Rules for Writing Detective Stories?
+  - What are some other similar guiding principles?
 
 
 - **More specific questions**
@@ -448,6 +451,22 @@ in. It may be the whole location is too big, but we need a way to have rust
 automatically route messages. It may also be that PCs should not see messages
 from other locations. This needs play testing.
 
+## Observed Events
+
+All characters present for an event should implicitly observe the results as the
+thing that happend would simply appear in their chat history. This could be done
+only through GM narration. It might be beneficial to also show certain tool call
+results directly - for example Say should be passed verbatim to avoid the GM
+making mistakes if we were to narrate characters saying something. Some rigid
+combat mechanics and dice roll results would be useful to show for validation.
+Some characters may be in a group but temporarily unable to perceive an event.
+The GM needs to be able to exclude certain characters, and maybe even provide a
+specific list of all characters in the group that should perceive something.
+Perhaps a roll is even needed if something is difficult to perceive.
+
+Once perceived, characters should have the opportunity to respond to what they
+saw - both players and NPCs. See NPC Interaction.
+
 ## NPC Interaction
 
 There will be frequent times when NPCs may be present for some interaction and
@@ -528,7 +547,10 @@ appropriate in combat as per Cairn rules but I haven't thought it through.
 
 When an NPC does choose to respond, e.g. Say something, the process repeats to
 allow a conversation to happen as part of a chat-turn. Many things could happen:
-the discussion ends, one character may start combat, leave mid-discussion etc.
+the discussion ends (implicitly when noone replies; obviously not an explicit
+and overly rigid tool call - take this as precedence for implicit being better
+than rigid rules), one character may start combat, leave the group
+mid-discussion etc.
 
 If multiple NPCs choose to respond, either replying to conversation or
 intervening in some action, one of them must go first. What they say may then

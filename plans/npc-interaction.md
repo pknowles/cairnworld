@@ -225,7 +225,14 @@ or rename-only commits.
   narration. Extend approval's perception controls to non-speech outcomes and
   carry their validated audience to the associated narration delivery. Audit
   player and NPC action paths together: an exclusion must restrict the actual
-  narration, not merely a receipt from approve_action. Preserve the rule that
+  narration, not merely a receipt from approve_action. The resolved recipient
+  IDs and prefix travel with that action's narration;
+  do not re-resolve approval-time names against a later roster or depend on a
+  mutable "last audience" on the GM. Use the existing resolved-action/narration
+  data flow, retaining a recorded snapshot wherever later reconstruction needs
+  it. Standalone group/presence narration keeps its existing default audience;
+  this does not require inventing an approval call for narration-only work.
+  Preserve the rule that
   all tool results precede deferred deliveries. Do not deliver speech twice
   under different names; any additional GM narration is distinct content and
   must retain the speech's privacy boundary. Apply the same rule to non-speech
@@ -238,7 +245,11 @@ or rename-only commits.
   membership or join through speech tables. Keep original source IDs when
   coalescing unanswered messages, and revalidate current membership before
   acting. A character's own speech does not invite its own response; an NPC can
-  still respond to distinct narration addressed to it.
+  still respond to distinct narration addressed to it. Source registration may
+  cover several NPCs, but each decision's causal links name only the messages
+  delivered to that NPC. Do not attach private sources merely because another
+  NPC in the same group received them. Coalesce pending work without merging
+  audiences or identifying distinct messages by matching their text.
 - Extend the existing causal relationship to reference a source message as
   well as its existing direct tool-call cause. Use foreign keys and an
   exactly-one-source constraint, retaining direct proposal-tool causes for
@@ -257,6 +268,16 @@ or rename-only commits.
   dirty flag or checking the last history entry alone cannot represent these
   states. Do not replace working scheduling with recursive calls or detached
   per-NPC tasks.
+- Preserve admission after the originating turn has unwound and completed
+  successfully. Registering a received message does not immediately start an
+  NPC inference inside its producer's tool stack. Resolve readiness from that
+  message's producing inference/sequence or referenced action sequence, including
+  standalone narration, rather than retaining the speech-only readiness join.
+  A failed originating turn leaves its committed content intact but fails its
+  pending follow-ups visibly under the existing failure policy. Carry the
+  originating discussion's root and spent budget when registering narration
+  sources; do not grant a new budget because a source is narration instead of
+  speech. Standalone presence work uses its own recorded originating sequence.
 - Rename misleading `round`/`reopen_round` terms while updating their actual
   operations, schema and readers. Name stored data for pending NPC responses;
   names such as `replace_pending_npc_responses` must describe the function body.
@@ -278,11 +299,11 @@ separate suite for every delivery kind:
 | Case | Expected outcome and evidence |
 | --- | --- |
 | Speech and Take share delivery | Approved Say reaches each hearer unchanged; an approved Take changes ownership and its GM narration reaches PCs/NPCs once. NPC context contains that same narration and can produce an ordinary GM-approved response. No extra generated event sentence or second response path. |
-| Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
+| Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
 | Narration without a source tool | Existing group/presence narration reaches eligible NPCs, creates pending work once and links the response to the actual message and producing inference. No synthetic action/tool record. No narration-only NPC opportunity is stranded by speech-only eligibility queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |
 | Migration and all readers | Existing speech, IDs/frozen names, prefixes, authored/legacy rendering and historical request reconstruction survive migration. Model context, live chat, reload, compaction and Developer Mode show the same received content and its true cause. |
-| Worker and lifecycle | Preserve eagerness/tied selection, other-group progress, raised hands, shutdown between complete steps and crash failure without replay. Disconnecting a browser cannot cancel a queued player turn; check completion and its reply, not only stored input. |
+| Worker and lifecycle | Preserve eagerness/tied selection, other-group progress, raised hands, shutdown between complete steps and crash failure without replay. Pause a producer after delivery: no NPC decision starts before its successful completion, and narration retains the same causal budget. Fail the producer: committed messages remain and follow-ups fail visibly. Disconnecting a browser cannot cancel a queued player turn; check completion and its reply, not only stored input. |
 
 Use scripted Store/Game paths for routing, permission, source links and migration
 checks. Exercise changed tool descriptions/context through the real chat path

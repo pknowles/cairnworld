@@ -1311,11 +1311,18 @@ audience query or a general history dirty flag. Store the source message IDs wit
 pending decisions; a later group change cannot rewrite who perceived the source.
 Link response sequences to those messages and their originating actions or
 inferences, retaining direct proposal-tool links for selected action execution.
+Each NPC decision's sources are its own received messages, not every source
+received by any NPC in the group. Coalescing work does not merge audiences.
 Delivery and registration of responses commit together before notification;
 generated narration is delivered in its own transaction after generation, without
 holding an action transaction across inference. Forward migrations preserve
 historical attribution and request reconstruction. Do not force speech fields
 onto all action kinds or introduce a new observation table per kind.
+Pending responses become eligible only after their originating turn completes
+successfully and unwinds; changing the source from speech to narration does not
+reset its causal budget. A failed producer retains committed messages but fails
+its pending follow-ups visibly. Resolve readiness through message/action
+provenance, without a speech-only dependency or re-entering an active agent.
 
 Speech is a completed game event, not a call awaiting an answer. GM arbitration
 can determine whether the speaker can speak and override hearers; the character

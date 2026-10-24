@@ -14,6 +14,10 @@ Ownership is in the object itself. Processing happens in the constructor. The
 data lives on in the object. Name the object after the data it holds. Do not
 create "manager" or "<verb>-er" objects - this is an anti-pattern.
 
+Name functions based on what they actually do once implemented - their contract
+or observable behaviour. Do not name them based on what you want to call them
+for, i.e. aspirational or usage-driven naming.
+
 Group by feature, domain, responsibility, or reason to change, not by type or technical category. Things that change together should live together.
 
 Don’t introduce a named construct merely to group a category of operations. It's
