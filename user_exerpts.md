@@ -721,3 +721,21 @@ tool call and requires no separate end call or closing inference. The earlier
 separate narration tools are superseded; the distinction between audience forms
 is retained. The shared-detail setting guides ordinary narration but never
 widens an explicitly private delivery.
+
+## 2026-10-24 Distinct names for general GM requests
+
+The user clarified:
+
+> Oh - one thing I've been noticing is agents thinking "look" is an appropriate
+> generic action. it is not. it's a terrible name to use for general actions or
+> questions.
+
+After the assistant proposed separate Look, Investigate, Open and Ask tools
+sharing implementation, the user accepted:
+
+> that sounds good. please add that to the plan
+
+Design interpretation: preserve the actual requested intent in tool names and
+recorded GM requests, with shared schema/submission/arbitration. Ask is directed
+to the GM; questions spoken to another character use Say/Whisper. Separate names
+do not require separate action execution or perception systems.

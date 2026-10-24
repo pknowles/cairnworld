@@ -226,6 +226,18 @@ Implement this as one complete behaviour-preserving consolidation plus Take
 coverage. Internal development steps need not become separate public features
 or rename-only commits.
 
+- Expose `look`, `investigate`, `open` and `ask` with distinct model-facing names
+  and concise descriptions, sharing the existing description-argument schema,
+  character-action submission and GM arbitration implementation. Look means
+  observation, not arbitrary actions/questions; Ask requests information or
+  clarification from the GM, while speaking to a character uses Say/Whisper.
+  Preserve each actual tool name and arguments through validation, pending and
+  resolved action handling, model context and inspection. Do not silently alias
+  everything to Look or duplicate the executor. Apply the same shared path when
+  these actions are offered to NPCs; do not add separate NPC variants. This
+  interface change does not invent unsupported state mutations, saves or time
+  mechanics. Review descriptions under prompt_standards.md and exercise routing
+  through the real chat path rather than checking only generated schemas.
 - Replace the speech-only message-to-action join with an optional action
   reference on the existing message record. Keep its meaning distinct from
   `source_tool_execution_id`, which answers a tool call. Retain producing
@@ -397,6 +409,7 @@ separate suite for every delivery kind:
 | Case | Expected outcome and evidence |
 | --- | --- |
 | Speech and Take share delivery | Approved Say reaches each hearer unchanged; an approved Take changes ownership and its GM narration reaches PCs/NPCs once. NPC context contains that same narration and can produce an ordinary GM-approved response. No extra generated event sentence or second response path. |
+| Distinct general GM requests share implementation | Observe surroundings, investigate a clue, attempt to open something and ask for clarification use the appropriately named tools. Scripted production-path checks verify all four reach ordinary GM arbitration with their actual names/arguments and normal authorization; a representative real chat checks that Look is not presented as the generic action. Narration audiences depend on what is perceived, not which name was used. Do not claim unsupported world changes occurred. |
 | Requester and observers see different information | Exercise the worked actor-plus-group batch: the actor receives only detailed text; other eligible members receive only the brief text; an additional excluded character receives neither. Check history, captured prompts, reload and pending NPC work. Omitting group exclusions includes the actor normally. Foreign exclusions fail the batch before any delivery. Shared-detail on/off guides routine narration, but explicit private delivery stays private in both modes. Cover player, NPC and reaction actors and narration-only invocations without inventing a requester. |
 | Eligibility is independent of tool kind | An actually delivered perception offers its NPC recipient a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. Speech's prefix remains available without imposing it on other action kinds. |
 | Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |

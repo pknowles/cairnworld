@@ -1273,6 +1273,17 @@ fiction rather than substituting for mechanical state.
 | InterventionCheck/Approve/Reject | GM consults selected characters about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may pause for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Give/take/drop/place | One holder change after arbitration/consent; no duplicate item on repeated approval. |
+
+Expose `look`, `investigate`, `open` and `ask` as distinct character tools with
+one shared description-argument schema and GM request implementation. Their names
+express the character's intent: observe, examine/search, attempt to open, or ask
+the GM for information/clarification. Look is not a generic name for the other
+requests. Preserve the chosen tool name and description in the recorded request
+and GM context; do not translate all four into Look. Shared submission,
+authorization and arbitration do not imply identical fictional effects or four
+separate executors. Ask addresses the GM; spoken questions to characters still
+use Say/Whisper. Existing action rules and world-state operations determine what
+can actually happen; a new tool name does not itself implement missing mechanics.
 | Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
 | Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
 | BeginCombat/endCombat | GM identifies combatants and state boundary; Rust stores turn order and flags and determines eligibility. |
