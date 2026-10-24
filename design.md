@@ -1402,10 +1402,18 @@ global broadcast. Exclusions can only subtract from that audience, and every
 one is validated within the authorized group. For a detailed actor description
 and a brief account for the rest, use `narrate_actor_and_others` and exclude
 anyone who cannot perceive the observable behaviour. Without an explicit
-exclusion, `narrate_group` includes the actor. The actor tool requires an
-identified acting character, including NPC and reaction actors, and the context
-states that binding. Narration-only invocations use the group or addressed tools
-rather than inventing an actor.
+exclusion, `narrate_group` includes the actor. The actor is the character whose action or arrival the request describes: the
+requester of a presented action, including NPC and reaction actors, or the
+character entering a scene. The actor tool requires one and the context states
+that binding; a request that names none, such as scene-setting, uses the group
+or addressed tools.
+
+The initial scene is narrated to the group before any player is in it, so NPCs
+hold it in their histories. A player character joining the group is then
+narrated with the actor tool: the entering character receives the scene and the
+others a brief arrival. A new character's player agent asks the player what to
+do after that narration. Whether scene narration with no player present should
+offer NPCs a response opportunity is undecided and not specially handled.
 
 Validate the call, action-resolution requirements and all audience references
 before delivering any text. Record actual recipients and content in one delivery

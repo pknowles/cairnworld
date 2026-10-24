@@ -834,3 +834,18 @@ the usual limits. It is an error to investigate, logged, flagged in Developer
 Mode and failing every real-model test, never a path to rely on. The scene-setting
 and entrance proposal is recorded here as the user's idea; the plan does not yet
 change the opening flow.
+
+Decision, 2026-10-24: the user accepted the entrance flow and the actor definition:
+
+> yes to entrance and actor
+
+and deferred the open question on response opportunities after the scene is
+narrated with no player present:
+
+> I don't know yet how to handle response opportunities, so lets not build
+> anything for this yet and just see what happenes. I need to think on it and
+> possibly explore
+
+The plan therefore narrates the scene to the group first, then the entrance with
+the entering character as the actor, and adds no handling for NPC responses to
+the scene narration.
