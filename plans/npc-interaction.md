@@ -186,16 +186,19 @@ Keep todo.md's overall order; this cleanup does not defer unfinished scope.
 
 ### Contract and scope
 
-An observation is the message already delivered to a character's history. Every
-such perception offers an opportunity to respond, regardless of originating
-tool or content kind. Look descriptions, narration following speech and presence
+An observation is the message already delivered to a character's history.
+Perceptions offer an opportunity to respond regardless of originating tool or
+content kind; a character's own action does not invite its own response.
+Look descriptions, narration following speech and presence
 changes follow the same rule. Whether an NPC speaks or chooses DoNothing is its
 decision; do not add tool-specific exclusions to reduce model chatter.
 
 Do not insert an additional observation message or Rust-generated
 Take sentence beside the GM's narration. Speech retains verbatim authored words
-and structured attribution. Other actions use the existing GM narration; do not
-expose internal approval receipts as perceived events. A rejected action has no
+and structured attribution. Take uses the existing GM narration in this
+increment. Future actions may expose appropriate results directly, such as
+combat mechanics or dice rolls, through the same perception delivery path.
+Internal approval receipts are not perceived events. A rejected action has no
 automatic public failure announcement, but any narration the GM actually gives
 its observers can be perceived and answered.
 
@@ -267,8 +270,9 @@ or rename-only commits.
   to identify NPC recipients; do not reconstruct a past audience from current
   membership or join through speech tables. Keep original source IDs when
   coalescing unanswered messages, and revalidate current membership before
-  acting. A character's own speech does not invite its own response; an NPC can
-  still respond to distinct narration addressed to it. Source registration may
+  acting. A character's own action does not invite its own response, regardless
+  of action kind. Distinct perceptions can still offer that character a response
+  opportunity. Source registration may
   cover several NPCs, but each decision's causal links name only the messages
   delivered to that NPC. Do not attach private sources merely because another
   NPC in the same group received them. Coalesce pending work without merging
@@ -325,7 +329,7 @@ separate suite for every delivery kind:
 | Case | Expected outcome and evidence |
 | --- | --- |
 | Speech and Take share delivery | Approved Say reaches each hearer unchanged; an approved Take changes ownership and its GM narration reaches PCs/NPCs once. NPC context contains that same narration and can produce an ordinary GM-approved response. No extra generated event sentence or second response path. |
-| Eligibility is independent of tool kind | A Look description and narration following an NPC's own speech offer their actual NPC recipients a response opportunity. A scripted DoNothing ends the pending work; no tool-specific suppression is used. A prefix on non-speech content appears through model/live/reload/inspection paths without requiring a speech row. |
+| Eligibility is independent of tool kind | A Look description and narration following speech offer other NPC recipients a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. A prefix on non-speech content appears through model/live/reload/inspection paths without requiring a speech row. |
 | Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
 | Narration without a source tool | Existing group/presence narration reaches eligible NPCs, creates pending work once and links the response to the actual message and producing inference. No synthetic action/tool record. No narration-only NPC opportunity is stranded by speech-only eligibility queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |

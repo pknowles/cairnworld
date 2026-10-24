@@ -1305,8 +1305,10 @@ they do not define separate observation or response systems.
 The message delivered to a character's history is its observation. Delivery
 records that message and the pending NPC response work together. The world
 worker advances the pending work; it does not rescan old messages to discover
-observations. Every perception offers its recipient an opportunity to respond;
-no tool-name whitelist or narration blacklist controls eligibility. A Look
+observations. Perceptions offer recipients an opportunity to respond, except
+that a character's own action does not invite its own response. This applies
+across action kinds, not just speech. No tool-name whitelist or narration
+blacklist controls eligibility. A Look
 description and narration following a character's speech are perceptions too.
 Whether an NPC responds or chooses DoNothing is the NPC's decision, not a
 delivery filter used to compensate for model chatter. Internal instructions,
@@ -1320,8 +1322,10 @@ Use group-local defaults with GM
 perception overrides. Preserve speech's offline-PC hearing and narration's
 connected-PC audience rule; NPCs receive both when eligible. Each delivered
 entry references shared content and retains its true provenance. Speech stays
-verbatim with structured attribution; other outcomes can be GM narration rather
-than an additional generated action sentence. Narration need not describe exactly
+verbatim with structured attribution. Outcomes may use GM narration or expose
+appropriate action results directly, including future combat mechanics and dice
+rolls, through this same delivery path. Do not add a generated action sentence
+beside narration that already communicates the outcome. Narration need not describe exactly
 one action.
 Generic perception metadata belongs with the shared delivered content: in
 particular, the GM's optional perception prefix must not require a speech row.

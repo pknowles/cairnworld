@@ -465,12 +465,22 @@ specific list of all characters in the group that should perceive something.
 Perhaps a roll is even needed if something is difficult to perceive.
 
 Once perceived, characters should have the opportunity to respond to what they
-saw - both players and NPCs. See NPC Interaction.
+saw - both players and NPCs. This should happen at the end of a chat-turn. We'll
+start by letting NPCs react to everything but we may need to tune things to
+avoid explosions of reactions. See NPC Interaction.
+
+Observed events are NOT separate objects/things in the code or database. The
+message(s) already added to chats ARE the events we are talking about.
+Observation is simply letting agents read it and running inference to choose a
+response.
 
 ## NPC Interaction
 
 There will be frequent times when NPCs may be present for some interaction and
-occasionally they may need to respond. A response to something that already happened is straightforward. E.g. after a character says something, all those who heard it may make an action to respond. This could be a Say, but it could also start combat and attack.
+occasionally they may need to respond. A response to something that already
+happened is straightforward. E.g. after a character says something, all those
+who heard it may make a tool call to respond. This could be a Say, but it could
+also start combat, attack, anything - GM then accepts only if they can.
 
 For simplicity I'm thinking this should be handled with an inference for each
 NPC present asking whether they want to respond/act. They will have an explicit
