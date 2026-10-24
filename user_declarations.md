@@ -445,11 +445,17 @@ be not wasting time having the GM make special narrations to NPCs. Maybe the GM
 won't notice if it's only asked to make narrations for some characters. Maybe
 narrations can be the player agents' job?
 
-Narration should be seen by all characters in the vicinity. I'm not sure on the
-details yet, so we should begin with all NPCs at the location and all PCs logged
-in. It may be the whole location is too big, but we need a way to have rust
-automatically route messages. It may also be that PCs should not see messages
-from other locations. This needs play testing.
+Narration should generally be seen by all characters in the vicinity, capable of
+perceiving the event. In certain cases, there must be multiple narrations with
+different levels of detail to different characters for one event. For example, a
+character may move to a new position or look at something. The narration to them
+could be quite detailed while others may either receive no narration at all
+(spamming "CharacterName looks around" would be useless and noisy) or a brief
+description of what they see from their perspective ("CharacterName climbs the
+large rock for a better view"). There should be a global game setting for
+whether players all receive the same detailed narration (on by default), so they
+have a shared experience, unless the GM needs to explicitly narrate something
+privately.
 
 ## Observed Events
 

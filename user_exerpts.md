@@ -670,3 +670,41 @@ The user simplified the pause design and said what Interrupt means:
 and asked for no "paused group" concept, group lock or world lock: Interrupt only
 stops NPC responses for now, and Never mind lets them continue. This replaces the
 earlier per-character hold protocol with live pause acknowledgement.
+
+## 2026-10-24 Perceptions and narration audiences
+
+The user clarified that delivery and response must be shared across action kinds:
+
+> yes, start thinking holistically about how everything has to fit together when
+> implemented, not just the current slice
+
+The prefix remains content-specific:
+
+> prefix is speech only. doesn't make sense for ALL actions. maybe for others
+> but not all. like - I make an attack. how would yo think prefix makes sense
+
+The user's correction to the self-response exclusion was:
+
+> character’s own speech -> own action
+
+For narration, the user identified the missing audience control:
+
+> the GM currently has no tool to distinguish this I believe. I wonder if we
+> need some narration that is given to the player making an action, a reaction
+> or all players capable of perceiving. More generally, the GM occasionally
+> needs to provide different narration to different characters.
+
+After noting that narration currently comes from the GM's final text, the user
+expressed a preference for distinct model-facing tools:
+
+> Something for a description given exclusively to the character whos turn it
+> is. Another that takes a second parameter for characters watching. It is my
+> hope separate tool calls encourage the GM LLM to route appropriately as I
+> expect it would otherwise over-use optional parameters.
+
+Design selection: separate actor-only description and explicitly addressed
+narration tools share delivery. They replace implicit final-text broadcasting;
+neither optional recipient fields nor an automatic public copy are needed for
+private descriptions. The declaration's shared-detail setting guides ordinary
+narration but never widens an explicitly private delivery. These tool contracts
+are a design choice implementing the preference, not a direct user quote.

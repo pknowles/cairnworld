@@ -1334,6 +1334,34 @@ scheduling do not require every action to support a prefix. Other action kinds
 gain such metadata only for a demonstrated requirement, not by inheriting speech
 fields. Historical prefixes and rendering remain reproducible.
 
+GM narration uses explicit tools instead of implicitly broadcasting the final
+text of a GM turn. Two contracts keep routine routing clear to a small model:
+`describe_to_actor(text)` delivers exclusively to the acting character identified
+in the current action request; `narrate_to_characters(text, character_ids)`
+delivers to the explicitly named characters in the authorized scene. Recipients
+are required in the latter, not an optional override on an actor-only default.
+Both use the same delivery implementation. Use either as needed; an action does
+not require a public narration or both calls. Distinct text for different
+audiences uses the appropriate tool for each audience. Final assistant text
+remains recorded in GM history but is not implicitly delivered as narration.
+Action approval and verbatim speech delivery remain separate operations.
+
+The actor-only tool is available when the invocation has an identified acting
+character, including an NPC or a character reacting to an action. Its tool
+description names that binding; it does not guess a recipient from the last
+speaker or browser. Narration-only invocations use the explicitly addressed
+tool. Validate recipient IDs within the authorized scene at delivery and retain
+the actual recipients, content and producing tool/inference as provenance.
+Observer messages describe what observers perceive, not private results returned
+to the actor. An unnoticeable Look need not produce any observer narration.
+
+The global shared-detail setting defaults on, as declared. Supply it in the GM's
+context so ordinary narration can give players a shared detailed account or
+separate perspectives when disabled. Explicitly private narration always stays
+within its selected audience; code must not widen it because sharing is enabled.
+NPC knowledge remains limited to their own delivered perceptions. Tool/context
+changes require the prompt-standards review and real-chat verification.
+
 Response eligibility follows the messages actually received, not a speech-only
 audience query or a general history dirty flag. Store the source message IDs with
 pending decisions; a later group change cannot rewrite who perceived the source.
@@ -1412,8 +1440,9 @@ finishes, but human input can supersede stale remaining intentions. There is no
 batch approval tool or all-or-nothing multi-utterance transaction. Repeated resolution
 returns that action's recorded outcome without another delivery. GM approval is
 mandatory: speaking ability and hearers remain GM decisions. Prefixes and any
-additional narration have explicit per-utterance audiences. A combined final GM
-reply that has seen several whispers is not broadcast to their union of hearers.
+additional narration have explicit per-utterance audiences. Narration calls
+deliver only to their validated recipients; information from several whispers
+must not be broadcast to their union of hearers.
 The GM narrates consequences while NPC agents supply their own dialogue.
 
 Keep pending NPC responses in the existing world event loop. Saved work
