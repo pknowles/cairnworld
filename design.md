@@ -1343,7 +1343,8 @@ producing the final batch. Narration delivery does not itself approve an action.
 
 The final schema is a `narrations` array of tagged alternatives:
 
-- `group`: text for the authorized interacting group, the standard case.
+- `group`: text for the authorized interacting group, optionally excluding
+  specified character IDs; the standard case omits exclusions.
 - `actor`: text exclusively for the acting character in the current request.
 - `characters`: text plus a required, explicit list of character IDs.
 
@@ -1352,6 +1353,11 @@ variant, not as optional overrides on a common default. One ordinary group
 narration needs one entry. Use multiple entries only for distinct narrations;
 an empty array is valid when there is nothing to convey. Group narration follows
 the existing NPC/connected-PC recipient policy, not a global broadcast.
+Its `exclude_character_ids` list defaults to empty and can only subtract from
+that audience; validate every exclusion within the authorized group. For a
+detailed actor description and brief narration to the rest, use an actor entry
+and a group entry excluding that actor plus anyone who cannot perceive the
+observable behaviour. Without an explicit exclusion, group includes the actor.
 An actor entry requires an identified acting character, including NPC and
 reaction actors; the context states that binding. Narration-only invocations
 use group or explicitly addressed entries rather than inventing an actor.

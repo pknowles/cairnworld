@@ -253,8 +253,12 @@ or rename-only commits.
   Group narration is the standard one-entry case. Actor means exclusively the
   actor of the presented action, including NPC/reaction actions; document that
   binding in the actual model context. Reject actor entries when no actor exists.
-  Require a nonempty explicit recipient list for characters entries. No optional
-  audience overrides, narration tools, terminal narration tools or end tool.
+  Require a nonempty explicit recipient list for characters entries. The group
+  form alone accepts optional `exclude_character_ids`, defaulting to empty;
+  validate exclusions in the authorized group and subtract them from its normal
+  audience. It cannot add recipients. Keep the three distinct forms rather than
+  a generic optional audience override. No narration tools, terminal narration
+  tools or end tool.
   Multiple distinct narrations are entries in this single final batch, not
   repeated calls. An empty batch is valid if there is nothing to convey.
 - Parse the structured final only when the GM completes without tool calls.
@@ -273,6 +277,32 @@ or rename-only commits.
   Update every GM invocation, including opening/presence, to use the same final
   batch validation and delivery. Do not manufacture observer narration for an
   unnoticeable action or duplicate verbatim speech as narration.
+
+  Worked dual-narration example: Mara (character 7) climbs a rock and sees guards
+  beyond a wall. Character 9 cannot perceive her movement. Other eligible group
+  members receive only the brief account; Mara receives only the private detail:
+
+  ```json
+  {
+    "narrations": [
+      {
+        "kind": "actor",
+        "text": "From the rock, you see three guards beyond the wall."
+      },
+      {
+        "kind": "group",
+        "exclude_character_ids": [7, 9],
+        "text": "Mara climbs the rock for a better view."
+      }
+    ]
+  }
+  ```
+
+  Neither excluded character receives the group entry or an NPC response
+  opportunity for it. The actor entry remains private even with shared detail
+  enabled. Ordinary narration to everyone is simply one group entry without
+  `exclude_character_ids`; do not automatically exclude the actor in that case.
+
 - Implement the declaration's global shared-detail setting, default on, and
   supply it as a fact in GM context. It guides routine narration to players;
   explicitly private actor descriptions and chosen audiences always stay private.
@@ -367,7 +397,7 @@ separate suite for every delivery kind:
 | Case | Expected outcome and evidence |
 | --- | --- |
 | Speech and Take share delivery | Approved Say reaches each hearer unchanged; an approved Take changes ownership and its GM narration reaches PCs/NPCs once. NPC context contains that same narration and can produce an ordinary GM-approved response. No extra generated event sentence or second response path. |
-| Requester and observers see different information | A Look returns private detail only to its actor; observers receive a separate description only of noticeable behaviour, or nothing. Excluded PCs/NPCs never see the private detail in history, prompts or reload. Shared-detail on/off guides routine narration, but explicit private delivery stays private in both modes. Cover player, NPC and reaction actors and narration-only invocations without inventing a requester. |
+| Requester and observers see different information | Exercise the worked actor-plus-group batch: the actor receives only detailed text; other eligible members receive only the brief text; an additional excluded character receives neither. Check history, captured prompts, reload and pending NPC work. Omitting group exclusions includes the actor normally. Foreign exclusions fail the batch before any delivery. Shared-detail on/off guides routine narration, but explicit private delivery stays private in both modes. Cover player, NPC and reaction actors and narration-only invocations without inventing a requester. |
 | Eligibility is independent of tool kind | An actually delivered perception offers its NPC recipient a response opportunity. An NPC's own action does not itself invite another response from that actor; apply this equally to speech and other actions. A scripted DoNothing ends the pending work; no tool-specific suppression is used. Speech's prefix remains available without imposing it on other action kinds. |
 | Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
 | Final batch and narration without a character action | Group/presence uses the group final form and links replies to received messages and the actual producing inference/entry. Exercise a standard single group narration, actor-only description, mixed private/addressed batch and an empty batch. Malformed entries, unresolved actions or foreign recipients fail before any narration is delivered; prior action effects remain. Final output needs no closing inference or synthetic action/tool record. No narration-only opportunity is stranded by speech-only queries. |
