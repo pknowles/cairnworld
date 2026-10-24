@@ -290,8 +290,8 @@ impl Store {
                     "SELECT DISTINCT npc_agent.character_id AS \"character_id!: i64\" \
                      FROM action \
                      JOIN speech ON speech.action_id = action.id \
-                     JOIN speech_message ON speech_message.speech_action_id = speech.action_id \
-                     JOIN history_entry ON history_entry.id = speech_message.message_id \
+                     JOIN message ON message.action_id = speech.action_id \
+                     JOIN history_entry ON history_entry.id = message.id \
                      JOIN agent_history ON agent_history.branch_id = history_entry.branch_id \
                      JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id \
                      JOIN character_group ON character_group.character_id = npc_agent.character_id \

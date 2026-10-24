@@ -4760,8 +4760,7 @@ mod tests {
         assert_eq!((addressed_id, addressed_name), (toma, "Toma".to_string()));
         // One utterance is stored once and shared by every history.
         let contents: i64 = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT message.content) FROM speech_message \
-             JOIN message ON message.id = speech_message.message_id",
+            "SELECT COUNT(DISTINCT message.content) FROM message WHERE message.action_id IS NOT NULL",
         )
         .fetch_one(&scene.store.pool())
         .await
@@ -6232,7 +6231,7 @@ mod tests {
             let agent_id = guest.agent_id;
             async move {
                 sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM speech_message                      JOIN history_entry ON history_entry.id = speech_message.message_id                      JOIN agent_history ON agent_history.branch_id = history_entry.branch_id                      WHERE agent_history.agent_id = ? AND speech_message.speech_action_id IN                            (SELECT action_id FROM speech WHERE speaker_name = ?)",
+                    "SELECT COUNT(*) FROM message                      JOIN history_entry ON history_entry.id = message.id                      JOIN agent_history ON agent_history.branch_id = history_entry.branch_id                      WHERE agent_history.agent_id = ? AND message.action_id IN                            (SELECT action_id FROM speech WHERE speaker_name = ?)",
                 )
                 .bind(agent_id)
                 .bind(speaker)
@@ -8443,7 +8442,7 @@ mod tests {
         let mut quiet_polls = 0;
         for _ in 0..1200 {
             let heard_from_npcs: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM speech_message                  JOIN speech ON speech.action_id = speech_message.speech_action_id                  JOIN history_entry ON history_entry.id = speech_message.message_id                  JOIN agent_history ON agent_history.branch_id = history_entry.branch_id                  WHERE agent_history.agent_id = ?                    AND speech.speaker_character_id IN (SELECT character_id FROM npc_agent)",
+                "SELECT COUNT(*) FROM message                  JOIN speech ON speech.action_id = message.action_id                  JOIN history_entry ON history_entry.id = message.id                  JOIN agent_history ON agent_history.branch_id = history_entry.branch_id                  WHERE agent_history.agent_id = ?                    AND speech.speaker_character_id IN (SELECT character_id FROM npc_agent)",
             )
             .bind(first.agent_id)
             .fetch_one(&store.pool())

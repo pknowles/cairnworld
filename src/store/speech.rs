@@ -188,8 +188,8 @@ impl Store {
         };
         let mut audience = sqlx::query_scalar!(
             "SELECT player_character.character_id AS \"character_id!: i64\" FROM action \
-             JOIN speech_message ON speech_message.speech_action_id = action.id \
-             JOIN history_entry ON history_entry.id = speech_message.message_id \
+             JOIN message ON message.action_id = action.id \
+             JOIN history_entry ON history_entry.id = message.id \
              JOIN agent_history ON agent_history.branch_id = history_entry.branch_id \
              JOIN player_character ON player_character.agent_id = agent_history.agent_id \
              WHERE action.requesting_tool_execution_id = ?",
@@ -208,7 +208,7 @@ impl Store {
     /// exactly; newer ones are the authored text with its attribution.
     pub(super) async fn speech_content(&self, message_id: i64) -> Result<MessageContent> {
         let row = sqlx::query!(
-            "SELECT speech.speaker_character_id, speech.kind, speech.speaker_name,                     speech.addressed_character_id, speech.addressed_name, speech.prefix,                     speech.text_format, message.content              FROM speech_message              JOIN speech ON speech.action_id = speech_message.speech_action_id              JOIN message ON message.id = speech_message.message_id              WHERE speech_message.message_id = ?",
+            "SELECT speech.speaker_character_id, speech.kind, speech.speaker_name,                     speech.addressed_character_id, speech.addressed_name, speech.prefix,                     speech.text_format, message.content              FROM message              JOIN speech ON speech.action_id = message.action_id              WHERE message.id = ?",
             message_id,
         )
         .fetch_optional(&self.pool)
@@ -469,13 +469,13 @@ impl Store {
         )
         .await?;
         sqlx::query!(
-            "INSERT INTO speech_message (message_id, speech_action_id) VALUES (?, ?)",
-            message_id,
+            "UPDATE message SET action_id = ? WHERE id = ?",
             action_id,
+            message_id,
         )
         .execute(&mut **transaction)
         .await
-        .context("linking speech to its hearer's history")?;
+        .context("recording which action a hearer's message shows")?;
         Ok(())
     }
 

@@ -6493,6 +6493,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_message_action_migration_keeps_which_action_each_speech_message_shows() {
+        let db = database();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(db.path())
+                    .create_if_missing(true)
+                    .foreign_keys(false),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../migrations/0001_recording.sql"),
+            include_str!("../migrations/0002_consolidate_compaction.sql"),
+            include_str!("../migrations/0003_presence_return.sql"),
+            include_str!("../migrations/0004_speech.sql"),
+            include_str!("../migrations/0005_npc_rounds.sql"),
+            include_str!("../migrations/0006_individual_speech_approval.sql"),
+            include_str!("../migrations/0007_authored_speech.sql"),
+            include_str!("../migrations/0008_compaction_cause.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        // Two history messages; only the first shows a spoken action.
+        for (id, role) in [(1, "Speech"), (2, "Narration")] {
+            sqlx::query("INSERT INTO message (id, role, content) VALUES (?, ?, 1)")
+                .bind(id)
+                .bind(role)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO speech_message (message_id, speech_action_id) VALUES (1, 7)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!("../migrations/0009_message_action.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let shown: Vec<(i64, Option<i64>)> =
+            sqlx::query_as("SELECT id, action_id FROM message ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(shown, [(1, Some(7)), (2, None)]);
+        let old_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'speech_message'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(old_table, 0, "the link table is gone");
+    }
+
     fn response() -> Response {
         Response {
             content: Content::Text("A locked chest.".to_string()),
