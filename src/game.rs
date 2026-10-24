@@ -5973,17 +5973,13 @@ mod tests {
         let chat = heard(&scene.store, &scene.first).await;
         assert!(chat.contains(&"Ask the miller.".to_string()));
         assert!(chat.contains(&"(Together) It is in the hut.".to_string()));
-        let (batches, utterances): (i64, i64) = sqlx::query_as(
-            "SELECT COUNT(*), COUNT(DISTINCT speech_batch.id) FROM speech_batch              JOIN speech ON speech.batch_id = speech_batch.id WHERE speech_batch.sequence_id > 3",
+        let utterances: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM speech JOIN action ON action.id = speech.action_id WHERE action.sequence_id > 3",
         )
         .fetch_one(&scene.store.pool())
         .await
         .unwrap();
-        assert_eq!(
-            (batches, utterances),
-            (2, 2),
-            "each reply is its own utterance"
-        );
+        assert_eq!(utterances, 2, "each reply is its own utterance");
         // Each approval was a separate GM turn that knew the replies overlapped,
         // and each reconsideration came after both were said.
         let requests = scene.requests.lock().unwrap();

@@ -260,7 +260,7 @@ rename-only checkpoint is needed.
   one action. Reuse action/tool records rather than copying their arguments.
   Use forward migrations, preserving existing databases and recorded requests.
 - Remove `speech_message` after migrating its links and updating all readers.
-  Remove `speech_batch` if its remaining group/sequence references can be
+  (Done: `speech_batch` is gone, migration 0013.) Remove `speech_batch` if its remaining group/sequence references can be
   resolved from existing records without losing historical facts. Do not require
   removal of the speech metadata row just to reduce table count: preserve
   speaker/addressee IDs and frozen names, whisper intent, prefix and text format

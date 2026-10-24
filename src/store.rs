@@ -3867,7 +3867,6 @@ impl Store {
             Self::commit_speech(
                 transaction,
                 plan,
-                world_id,
                 action.sequence_id,
                 recorded_action_id,
                 result_content_id,
@@ -6769,6 +6768,78 @@ mod tests {
             .is_err(),
             "a cause is a tool call or a message, never both"
         );
+    }
+
+    #[tokio::test]
+    async fn the_speech_batch_migration_keeps_every_utterance() {
+        let db = database();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(db.path())
+                    .create_if_missing(true)
+                    .foreign_keys(false),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../migrations/0001_recording.sql"),
+            include_str!("../migrations/0002_consolidate_compaction.sql"),
+            include_str!("../migrations/0003_presence_return.sql"),
+            include_str!("../migrations/0004_speech.sql"),
+            include_str!("../migrations/0005_npc_rounds.sql"),
+            include_str!("../migrations/0006_individual_speech_approval.sql"),
+            include_str!("../migrations/0007_authored_speech.sql"),
+            include_str!("../migrations/0008_compaction_cause.sql"),
+            include_str!("../migrations/0009_message_action.sql"),
+            include_str!("../migrations/0010_rejected_reply.sql"),
+            include_str!("../migrations/0011_response_sources_are_messages.sql"),
+            include_str!("../migrations/0012_group_scene_narrated.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO speech (action_id, batch_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name, prefix) \
+             VALUES (7, 1, 3, 'Mara', 'whisper', 4, 'Toma', '(Quietly)')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0013_speech_without_batches.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let kept: (i64, i64, String, String, i64, String, String, String) = sqlx::query_as(
+            "SELECT action_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name, prefix, text_format FROM speech",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            kept,
+            (
+                7,
+                3,
+                "Mara".into(),
+                "whisper".into(),
+                4,
+                "Toma".into(),
+                "(Quietly)".into(),
+                "legacy".into()
+            )
+        );
+        let batches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'speech_batch'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(batches, 0);
     }
 
     fn response() -> Response {

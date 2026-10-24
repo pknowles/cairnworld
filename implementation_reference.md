@@ -624,7 +624,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   GM's `approve_action` include/exclude, plus an optional short `prefix` shown to every hearer before the words; an
   unknown or contradictory name, or an overlong prefix, is refused as
   `InvalidHearing` without resolving) and, in the same transaction
-  as the action row, records a `speech_batch` row (one per utterance)/`speech` and a `Role::Speech`
+  as the action row, records a `speech` row and a `Role::Speech`
   message in each hearer's history, sharing the action's result content (the
   speaker's authored text, unchanged; the addressee, when named, is stored as a character id plus its
   frozen name). Actions are submitted for a `CharacterActor` (the acting
