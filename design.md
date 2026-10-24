@@ -346,9 +346,40 @@ columns are an implementation detail; the JSON export format is the stable,
 checked-in representation (Bread Thief lives in `scenarios/` as importable
 JSON).
 
-Notes are stored as key/value pairs per object, per the "actually this sounds
-pretty solid" option in user_declarations.md: the editing tool overwrites a
-whole value by key, avoiding line-range or paragraph-index fragility.
+Notes use named values per object. Both whole-value replacement and exact-text
+editing are supported; whole replacement alone is insufficient for long fields.
+
+## GM field editing and lookup
+
+Authority: Note Editing and Search Tools, Game state and the
+[editing clarification](user_exerpts.md#2026-10-24-gm-editing-and-incidental-detail).
+The GM records local state in existing descriptions, relative placement fields
+and GM notes, separate from conversation history. Incidental scenery such as an
+ordinary chair can remain text. Significant items use the existing game-object
+model and Storyteller creation/approval responsibilities; descriptive editing
+does not create a second item system or bypass mechanical actions.
+
+Read and edit identified object fields directly rather than virtual files.
+Support whole-field writes and exact literal passage replacement from the outset.
+Require exactly one old-text match for a passage edit, with visible failures for
+missing/ambiguous matches. Use one scoped access path for reads, edits and search.
+GM edits local descriptions/GM notes and can read authorized local Storyteller
+notes; it cannot edit Storyteller notes. Storyteller access later uses its own
+permissions without exposing GM notes. Field authority is not blanket SQL access.
+
+Object relationships support hierarchical list/read/search with bounded results.
+Persisted values are authoritative and refreshed in GM context after edits,
+separately from history. Record changes before final narration; ordinary edit
+results allow the next inference to inspect the actual outcome without a new
+review stage or post-narration save agent. Public narration, not private field
+bookkeeping, determines what characters perceive and can respond to.
+
+Hard configured note/field and tool-result bounds protect fixed context/memory
+requirements. Oversized writes fail unchanged; bounded reads/search explicitly
+identify partial results and allow continuation. Calibrate bounds against real
+assembled model inputs. Named note bodies and existing descriptions are the
+initial representation; a proposed header/subnote hierarchy requires evidence
+before adding another memory structure. See [the implementation plan](plans/gm-editing.md).
 
 ## World identity and agent topology
 
@@ -1276,7 +1307,7 @@ fiction rather than substituting for mechanical state.
 | Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
 | BeginCombat/endCombat | GM identifies combatants and state boundary; Rust stores turn order and flags and determines eligibility. |
 | SpawnItem/SpawnNPC | GM submits a typed proposal to Storyteller; its approval creates the object through the same validated constructors and records the source. |
-| Edit notes | GM/Storyteller tools replace one named JSON value on an authorized object; Storyteller reads its own notes, GM reads both but edits only GM notes. |
+| Edit notes | Whole-value and exact-text edits on authorized object fields/note values; Storyteller reads its own notes, GM reads authorized notes from both roles but edits only GM notes. |
 
 Expose `look`, `investigate`, `open` and `ask` as distinct character tools with
 one shared description-argument schema and GM request implementation. Their names

@@ -12,6 +12,10 @@ there yet". Remove and archive only verified completions.
   Interrupt/Never mind exist; restraint and natural stopping are user-owned tuning.
 - [Code quality checks](code-quality-checks.md): measure and enforce module
   boundaries, function complexity and duplication; correct the reported problems. DO NOT SKIP THIS - secodnd attempt after the first was "verified complete" spuriously.
+- [GM editing and lookup](gm-editing.md): whole-field and exact-text editing,
+  persistent within-location placement/local notes, hierarchical reads/search
+  and bounded tool/context sizes. Incidental detail stays in text; significant
+  item creation retains its Storyteller responsibility.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and

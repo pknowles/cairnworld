@@ -20,6 +20,9 @@ The combat order, time lead and travel choices are explicit proposals under
 for confirmation; the implementation descriptions below are complete proposals.
 Storyteller approval tools are wired in the following Storyteller feature, not
 stubbed with unconditional approval here.
+The preceding [GM editing](gm-editing.md) feature supplies persisted relative
+placement and the out-of-combat within-location Move path. Extend its existing
+action/time operations for combat and travel rather than implementing Move again.
 
 ## Ordered changes
 
@@ -51,12 +54,13 @@ stubbed with unconditional approval here.
    ambiguity requiring another reply, disconnect, timeout and restart.
 4. Extend the shared speech path with lie's declared WIL/suspicion outcomes and
    BePersuaded as an NPC-owned save tool.
-   Add authorized per-object note-edit tools and feed current notes into each
-   GM/NPC invocation. Reuse NPC interaction's hearing rules, proposal selection,
+   Reuse [GM editing and lookup](gm-editing.md) for authorized object-field/note
+   access and current GM state; do not expose private notes to NPCs or implement
+   another editing interface. Reuse NPC interaction's hearing rules, proposal selection,
    shared character executor and GM intervention. Explicit human consent for
    transfers/travel uses pending_reply; do not reopen ordinary NPC discussion
    inside an unresolved tool call.
-   Reuse look for investigation/open/ask and its refusal-with-
+   Reuse the distinct Look/Investigate/Open/Ask tools' shared GM-request path and its refusal-with-
    alternatives flow. Test heard/unheard/private conversation, persuasion,
    the existing intervention and no-response paths without a GM
    recursion cycle; inspect actual supplied context, not prose alone.

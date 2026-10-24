@@ -757,3 +757,34 @@ Design interpretation: preserve the actual requested intent in tool names and
 recorded GM requests, with shared schema/submission/arbitration. Ask is directed
 to the GM; questions spoken to another character use Say/Whisper. Separate names
 do not require separate action execution or perception systems.
+
+## 2026-10-24 GM editing and incidental detail
+
+The user required both whole-value writes and text editing from the first
+working implementation:
+
+> both - same tools you get for editing files. whole value is great for many
+> fields but terrible when the fields are lareg and only a small change is needed
+
+The initial use case was:
+
+> the first working example should support player movement within a location,
+> however do think about the design holistically as many more fields will exist
+> for the GM to keep track of.
+
+The user corrected the assistant's assumption that incidental detail needed
+separate objects:
+
+> I'm heading towards a hybrid of items in the database for stuff that really
+> matters and incidental objects just stored as notes.
+
+> In most cases I think the storyteller will be the one creating items. The GM
+> would handle local interaction and add richness and detail to the world that
+> is mostly inconsequential to the overall plot/setting
+
+The user accepted recording changes before final narration. Existing placement
+fields and GM notes hold current state separately from history; tools should
+make committed edits available to the next inference. This does not authorize
+a post-narration save loop or automatic object creation. The later declaration
+also says not to start with a separate review stage. Ordinary read/edit tool
+results are part of the agent loop, not an extra review system.

@@ -723,7 +723,16 @@ messages pushing us past both the threshold and input limit in one go.
 
 Ideally compaction fallbacks are only needed in rare cases of very large messages, but a misconfiguration may also trigger it so we need logging for feedback and clear entries in developer mode for when it happens, directly linked to what caused it.
 
-## Notes editing tools
+## Note Editing and Search Tools
+
+The GM and storyteller must be able to update world state and keep notes on
+objects. This is because the LLMs cannot possibly keep reliable game state in
+their context and instead must rely on the application keeping track of things.
+An important example is character locations, or rather their description within
+a Location. This aims to give the GM and storyteller complete freedom to invent,
+but adds tools to help it be consistent and not hallucinate. LLMs must also be
+able to search and access information hierarchically. Local models with limited
+context will rely heavily on tools for iterative lookup and search.
 
 Much like coding agents editing a file, notes may get bigger than LLMs can be
 expected to reproduce faithfully.
@@ -732,14 +741,33 @@ Test options and pick one or a combination that works best:
 
 - Provide line range replacement
 - Provide paragraph index replacement (risky as the index could trivially be wrong)
-- Add a review stage, where the model gets to look at the result, or maybe some
-  small context around the replaced region for verification and can undo it.
+- Maybe add a review stage, where the model gets to look at the result, or maybe
+  some small context around the replaced region for verification and can undo
+  it. Actually lets not start with this.
 - Store notes as key/value pairs and the whole value can be overwritten.
   Actually this sounds pretty solid.
+- Database search for specific fields.
+- Text search, much like grep or maybe SQL.
+- Find/replace like sed, within a text entry.
 
 What happens when notes get too big for context? Providing a list of note names
 and a query tool relies on agents knowing to query the name and they might miss
-things. Something to explore.
+things. A structured hierarchy of text might be interestin, but LLMs are already
+trained well for searching and editing text files. Setting a hard limit on note
+sizes will be important to maintain memory constraints. Tools that add more
+simply error out and other tools could report the current budget after edits.
+Something to explore.
+
+One idea is to explicitly have a two-level hierarchy where notes is a top level
+header and list of subnotes with fixed size descriptions/names that is always
+given to the GM; then the GM has tool calls to read or search within the body of
+each note.
+
+- Simple descriptions just use the header as a single note
+- As it grows, subnotes are added and the header organically becomes a top level
+  description
+- Subnotes can be much larger and have many details that are accessed
+  infrequently.
 
 ## Consistency Checks
 
