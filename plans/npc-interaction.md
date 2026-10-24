@@ -148,6 +148,26 @@ These are recorded observations, not universal model guarantees. Preserve useful
 captured context and conclusions. A first-response test proves only that a reply
 reached the player; it cannot close the natural-stopping requirement.
 
+## Ideas to explore — not to be implemented
+
+These are discussion notes, not implementation requirements or approved changes
+to the current scheduler, prompts, time rules or acceptance tests. Do not build
+them as part of this plan without a later explicit decision.
+
+- Explore out-of-combat action timing as a resource governing when characters
+  can act again, including NPC reactions. Initiating a conversation/action
+  advances the character's action clock; its action availability does not reset
+  until the group's game time catches up. Costs are ordinary RPG time costs,
+  not a separate conversation-energy currency.
+- The user's proposed group time is implicitly the earliest character time in
+  that group. Characters therefore get a fair opportunity to advance, rather
+  than fast actors repeatedly acting while others remain behind. This is a
+  group-time idea, not a change to the world's clock definition.
+- Timing does not replace conversation tuning. Conversations should tend to end
+  when their subjects are resolved, reach a standstill, or give way to combat.
+  What produces that behaviour still needs exploration; do not assert that the
+  clock alone guarantees termination or add a forced end-conversation tool.
+
 ## Design choices
 
 For message delivery and responses, compare these approaches against the coding
