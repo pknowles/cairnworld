@@ -13,6 +13,15 @@ character-action path. Responses to completed events use fresh turns; bounded
 intervention can affect an original action before the GM resolves it. Humans can
 raise a hand while typing without cancelling running work.
 
+Design the complete flow together: something happens -> each observer receives
+a history message -> each may respond -> selected responses use ordinary
+character actions -> their outcomes can be perceived in turn. Content and action
+rules vary; delivery, perception controls and response scheduling remain shared
+across current and future features. Say and Take below exercise that mechanism;
+they are not the list of event kinds it accepts. Combat supplies its own rules
+later, and InterventionCheck collects intentions before the original outcome,
+without introducing another perception or action execution system.
+
 Authority: [NPC Interaction and NPC Inference](../user_declarations.md#npc-interaction),
 [Observed Events](../user_declarations.md#observed-events),
 [Character actions](../user_declarations.md#character-actions),
@@ -177,8 +186,13 @@ Keep todo.md's overall order; this cleanup does not defer unfinished scope.
 
 ### Contract and scope
 
-An observation is the message already delivered to a character's history. Do
-not insert an additional observation message, event envelope, or Rust-generated
+An observation is the message already delivered to a character's history. Every
+such perception offers an opportunity to respond, regardless of originating
+tool or content kind. Look descriptions, narration following speech and presence
+changes follow the same rule. Whether an NPC speaks or chooses DoNothing is its
+decision; do not add tool-specific exclusions to reduce model chatter.
+
+Do not insert an additional observation message or Rust-generated
 Take sentence beside the GM's narration. Speech retains verbatim authored words
 and structured attribution. Other actions use the existing GM narration; do not
 expose internal approval receipts as perceived events. A rejected action has no
@@ -200,6 +214,8 @@ mutation and immediate delivery share the existing transaction where applicable;
 later generated narration has its own delivery transaction. Never keep a database
 transaction open across inference or pretend later narration was atomic with an
 earlier action. Publish wake-ups only after commit.
+The worker processes the pending response work, not a repeated scan of delivered
+messages. No new message-reprocessing or deduplication layer is required.
 
 ### Implementation work, in dependency order
 
@@ -217,10 +233,17 @@ or rename-only commits.
   Remove `speech_batch` if its remaining group/sequence references can be
   resolved from existing records without losing historical facts. Do not require
   removal of the speech metadata row just to reduce table count: preserve
-  speaker/addressee IDs and frozen names, whisper intent, prefix and text format
+  speaker/addressee IDs and frozen names, whisper intent and text format
   in the smallest coherent representation. Do not add a target column intended
   to cover all future action kinds. A new action kind must not require its own
   observation or response tables.
+- Move the generic perception prefix out of speech-only storage into the shared
+  delivered-content representation. Store it once with that content and have
+  recipient entries reference it; do not copy it into every recipient row or
+  create a second message. Migrate existing prefixes and update every reader
+  together, preserving historical authored/legacy rendering and captured request
+  reconstruction. Keep genuinely speech-specific attribution separate as
+  needed; a non-speech perception must not need a speech row to carry a prefix.
 - Consolidate recipient validation and history delivery for speech and GM
   narration. Extend approval's perception controls to non-speech outcomes and
   carry their validated audience to the associated narration delivery. Audit
@@ -256,10 +279,13 @@ or rename-only commits.
   selected execution. Update causal readers and Developer Mode navigation
   together: NPC response -> received message -> originating action/inference.
   Narration with no originating tool must not require a fabricated execution.
-- Register opportunities only from delivered perceptions. Human input,
+- Register an opportunity as part of delivering any perception. Human input,
   instructions, inference bookkeeping, tool receipts, summaries and DoNothing
-  results do not independently schedule responses. This is a delivery-path
-  operation, not a scan for arbitrary history changes or a second event bus.
+  results do not independently schedule responses. Distinguish what a character
+  perceives from its agent's internal conversation, rather than checking an
+  allowlist of action names or adding per-kind scheduling callbacks. This is a
+  delivery-path operation, not a scan for arbitrary history changes, a second
+  event bus or a separate speech/combat response subsystem.
 - Retain the existing finite-step world worker and necessary saved pending work:
   source messages, decision invocations, selected proposals, scene revision and
   shared budget. New received messages during collection supersede stale
@@ -299,6 +325,7 @@ separate suite for every delivery kind:
 | Case | Expected outcome and evidence |
 | --- | --- |
 | Speech and Take share delivery | Approved Say reaches each hearer unchanged; an approved Take changes ownership and its GM narration reaches PCs/NPCs once. NPC context contains that same narration and can produce an ordinary GM-approved response. No extra generated event sentence or second response path. |
+| Eligibility is independent of tool kind | A Look description and narration following an NPC's own speech offer their actual NPC recipients a response opportunity. A scripted DoNothing ends the pending work; no tool-specific suppression is used. A prefix on non-speech content appears through model/live/reload/inspection paths without requiring a speech row. |
 | Perception overrides and privacy | Exclude an in-group NPC from Take narration: it receives neither text nor a response opportunity. Included NPCs receive both. Whisper and its additional narration stay private; an NPC decision's causes do not include another NPC's private sources. Invalid or foreign recipients are visible rejected tool calls and do not partly deliver. |
 | Narration without a source tool | Existing group/presence narration reaches eligible NPCs, creates pending work once and links the response to the actual message and producing inference. No synthetic action/tool record. No narration-only NPC opportunity is stranded by speech-only eligibility queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |

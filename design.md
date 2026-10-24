@@ -1295,16 +1295,41 @@ for elapsed whole hours, in stable character order, through the world task.
 Authority: Observed Events, NPC Interaction, Say/Whisper, GM InterventionCheck, World game page,
 Developer view and [the turn/pause clarifications](user_exerpts.md#2026-10-20-npc-speech-interruption-and-game-turn-allowance).
 
-The message delivered to a character's history is its observation. Speech,
-action consequences and presence narration share recipient validation, history
-delivery and NPC response scheduling; there is no additional observation message
-or per-action-kind observation system. Use group-local defaults with GM
+The complete interaction flow is: something happens, characters perceive it
+through messages in their histories, they may respond, and selected responses
+use ordinary character actions which can produce further perceptions. One
+delivery and response mechanism serves this flow regardless of the originating
+action or content kind. Speech, exploration and future combat plug into it;
+they do not define separate observation or response systems.
+
+The message delivered to a character's history is its observation. Delivery
+records that message and the pending NPC response work together. The world
+worker advances the pending work; it does not rescan old messages to discover
+observations. Every perception offers its recipient an opportunity to respond;
+no tool-name whitelist or narration blacklist controls eligibility. A Look
+description and narration following a character's speech are perceptions too.
+Whether an NPC responds or chooses DoNothing is the NPC's decision, not a
+delivery filter used to compensate for model chatter. Internal instructions,
+tool receipts, summaries and inference bookkeeping are not perceptions.
+Humans receive perceptions through the same history path and respond through
+the browser; Interrupt provides time to type without cancelling running work.
+InterventionCheck collects bounded intentions before an original action is
+resolved; responses to its completed outcome follow this same delivery path.
+
+Use group-local defaults with GM
 perception overrides. Preserve speech's offline-PC hearing and narration's
 connected-PC audience rule; NPCs receive both when eligible. Each delivered
 entry references shared content and retains its true provenance. Speech stays
 verbatim with structured attribution; other outcomes can be GM narration rather
 than an additional generated action sentence. Narration need not describe exactly
-one action. Approval receipts and internal bookkeeping are not observations.
+one action.
+Generic perception metadata belongs with the shared delivered content: in
+particular, the GM's optional perception prefix must not require a speech row.
+Speech-specific attribution remains structured where needed. A recipient's
+history references the shared content; readers render the same recorded prefix
+and content for model context, live chat, reload and inspection. Migrating old
+prefixes preserves historical rendering. This is content metadata, not another
+message or separately delivered observation.
 
 Response eligibility follows the messages actually received, not a speech-only
 audience query or a general history dirty flag. Store the source message IDs with
