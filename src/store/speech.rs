@@ -167,8 +167,8 @@ impl Store {
             .collect())
     }
 
-    /// The player characters who heard the speech a tool call requested: its
-    /// speaker and every PC with its message in their history. `None` when the
+    /// The characters who heard the speech a tool call requested: its speaker
+    /// and every character with its message in their history. `None` when the
     /// call produced no speech.
     pub async fn speech_audience(
         &self,
@@ -187,11 +187,13 @@ impl Store {
             return Ok(None);
         };
         let mut audience = sqlx::query_scalar!(
-            "SELECT player_character.character_id AS \"character_id!: i64\" FROM action \
+            "SELECT COALESCE(player_character.character_id, npc_agent.character_id) AS \"character_id!: i64\" \
+             FROM action \
              JOIN message ON message.action_id = action.id \
              JOIN history_entry ON history_entry.id = message.id \
              JOIN agent_history ON agent_history.branch_id = history_entry.branch_id \
-             JOIN player_character ON player_character.agent_id = agent_history.agent_id \
+             LEFT JOIN player_character ON player_character.agent_id = agent_history.agent_id \
+             LEFT JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id \
              WHERE action.requesting_tool_execution_id = ?",
             requesting_tool_execution_id,
         )

@@ -296,6 +296,36 @@ pub struct NarrationText {
     pub except: Vec<i64>,
 }
 
+/// A GM narration ready to deliver.
+pub struct Narration {
+    pub group_id: i64,
+    /// The inference whose narrate call produced the texts.
+    pub inference_id: i64,
+    /// The sequence delivering them; NPC responses to them belong to its
+    /// discussion.
+    pub sequence_id: i64,
+    /// The character whose action is narrated, who is not offered a response
+    /// to the narration of their own action.
+    pub actor: Option<i64>,
+    pub texts: Vec<NarrationText>,
+}
+
+impl Narration {
+    /// Limit every text to `audience`, such as the characters who heard
+    /// private speech, so no text can describe it to anyone else.
+    pub fn restrict_to(&mut self, audience: Vec<i64>) {
+        for text in &mut self.texts {
+            text.only = Some(match text.only.take() {
+                Some(only) => only
+                    .into_iter()
+                    .filter(|id| audience.contains(id))
+                    .collect(),
+                None => audience.clone(),
+            });
+        }
+    }
+}
+
 #[derive(FromRow)]
 struct PresenceNarrationRow {
     group_id: i64,
@@ -3072,24 +3102,18 @@ impl Store {
     }
 
     /// Persist the texts of one GM narration in the histories of the connected
-    /// player agents in that group who are meant to receive them, all of a
-    /// text's recipients referencing one `recorded_content` row - not a fresh
-    /// copy of the text per recipient. Call this only after the triggering
-    /// player agent has settled, so its tool-call/result sequence stays intact.
-    pub async fn append_group_narration(
-        &self,
-        world_id: i64,
-        group_id: i64,
-        inference_id: i64,
-        texts: &[NarrationText],
-    ) -> Result<()> {
+    /// player agents and the NPCs in that group who are meant to receive them,
+    /// all of a text's recipients referencing one `recorded_content` row - not a
+    /// fresh copy of the text per recipient. NPCs who received a text are
+    /// offered a chance to respond. Call this only after the triggering player
+    /// agent has settled, so its tool-call/result sequence stays intact.
+    pub async fn append_group_narration(&self, world_id: i64, narration: &Narration) -> Result<()> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .context("starting group narration delivery")?;
-        Self::append_group_narration_in(&mut transaction, world_id, group_id, inference_id, texts)
-            .await?;
+        Self::append_group_narration_in(&mut transaction, world_id, narration).await?;
         transaction
             .commit()
             .await
@@ -3099,29 +3123,21 @@ impl Store {
     pub async fn append_presence_narration(
         &self,
         world_id: i64,
-        narration: &PresenceNarration,
+        presence: &PresenceNarration,
         character_ids: &[i64],
-        inference_id: i64,
-        texts: &[NarrationText],
+        narration: &Narration,
     ) -> Result<()> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .context("starting presence narration delivery")?;
-        Self::append_group_narration_in(
-            &mut transaction,
-            world_id,
-            narration.group_id,
-            inference_id,
-            texts,
-        )
-        .await?;
+        Self::append_group_narration_in(&mut transaction, world_id, narration).await?;
         Self::announce_presence_in(
             &mut transaction,
-            narration.group_id,
+            presence.group_id,
             character_ids,
-            narration.generation,
+            presence.generation,
         )
         .await?;
         transaction
@@ -3133,18 +3149,13 @@ impl Store {
     async fn append_group_narration_in(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
-        group_id: i64,
-        inference_id: i64,
-        texts: &[NarrationText],
+        narration: &Narration,
     ) -> Result<()> {
-        // Recipients are connected PCs in the interacting group (design.md's
-        // Membership and presence: "Narration recipients are NPCs and
-        // connected PCs in the interacting group; offline PCs do not receive
-        // it"). NPCs have no player-agent history to append to here; their
-        // own narration delivery is not yet implemented. Each text names who
-        // may receive it, so narration of private speech cannot describe the
-        // speech to anyone else.
-        let recipients = sqlx::query!(
+        // Recipients are the NPCs and connected PCs in the interacting group
+        // (design.md's Membership and presence: offline PCs do not receive
+        // it). Each text names who may receive it, so narration of private
+        // speech cannot describe the speech to anyone else.
+        let mut recipients: Vec<(i64, i64, bool)> = sqlx::query!(
             "SELECT player_character.agent_id, player_character.character_id FROM world_member \
              JOIN player_character ON player_character.member_id = world_member.id \
              JOIN character_group ON character_group.character_id = player_character.character_id \
@@ -3154,46 +3165,71 @@ impl Store {
              AND \"group\".id = ? AND character_presence.absent_since IS NULL \
              ORDER BY player_character.agent_id",
             world_id,
-            group_id,
+            narration.group_id,
         )
         .fetch_all(&mut **transaction)
         .await
-        .context("finding connected player agents in narrated group")?;
-        for narration in texts {
-            let agents: Vec<i64> = recipients
+        .context("finding connected player agents in narrated group")?
+        .into_iter()
+        .map(|row| (row.agent_id, row.character_id, false))
+        .collect();
+        recipients.extend(
+            sqlx::query!(
+                "SELECT npc_agent.agent_id, npc_agent.character_id FROM character_group \
+                 JOIN npc_agent ON npc_agent.character_id = character_group.character_id \
+                 WHERE character_group.group_id = ? ORDER BY npc_agent.agent_id",
+                narration.group_id,
+            )
+            .fetch_all(&mut **transaction)
+            .await
+            .context("finding the NPCs in the narrated group")?
+            .into_iter()
+            .map(|row| (row.agent_id, row.character_id, true)),
+        );
+        let mut heard_by_npcs = Vec::new();
+        for text in &narration.texts {
+            let receiving: Vec<_> = recipients
                 .iter()
-                .filter(|row| {
-                    narration
-                        .only
+                .filter(|(_, character_id, _)| {
+                    text.only
                         .as_ref()
-                        .is_none_or(|only| only.contains(&row.character_id))
-                        && !narration.except.contains(&row.character_id)
+                        .is_none_or(|only| only.contains(character_id))
+                        && !text.except.contains(character_id)
                 })
-                .map(|row| row.agent_id)
                 .collect();
-            if agents.is_empty() {
+            if receiving.is_empty() {
                 continue;
             }
-            let content_id = Self::content_in(
-                transaction,
-                &MessageContent::Text(narration.text.clone()),
-                "",
-            )
-            .await?;
-            for agent_id in agents {
+            let content_id =
+                Self::content_in(transaction, &MessageContent::Text(text.text.clone()), "").await?;
+            for &(agent_id, character_id, is_npc) in receiving {
                 let branch_id = history::branch_for_agent(transaction, agent_id).await?;
-                Self::insert_message_with_content(
+                let message_id = Self::insert_message_with_content(
                     transaction,
                     branch_id,
                     (Role::Narration, MessageOrigin::Conversation),
                     content_id,
-                    Some(inference_id),
+                    Some(narration.inference_id),
                     None,
                     None,
                 )
                 .await
-                .with_context(|| format!("storing group narration for player agent {agent_id}"))?;
+                .with_context(|| format!("storing group narration for agent {agent_id}"))?;
+                // The character whose action this describes does not respond to
+                // it, as with their own speech.
+                if is_npc && Some(character_id) != narration.actor {
+                    heard_by_npcs.push(message_id);
+                }
             }
+        }
+        if !heard_by_npcs.is_empty() {
+            Self::offer_npc_responses(
+                transaction,
+                narration.group_id,
+                narration.sequence_id,
+                &heard_by_npcs,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -8375,26 +8411,34 @@ mod tests {
         .unwrap();
 
         // One text for the whole group, one only for the first character.
+        let sequence = store
+            .begin_sequence(installed.world_id, "test narration")
+            .await
+            .unwrap();
         store
             .append_group_narration(
                 installed.world_id,
-                store
-                    .character_group_id(installed.member.character_id)
-                    .await
-                    .unwrap(),
-                inference_id,
-                &[
-                    NarrationText {
-                        text: "A shadow crosses the doorway.".to_string(),
-                        only: None,
-                        except: vec![],
-                    },
-                    NarrationText {
-                        text: "It is your own shadow.".to_string(),
-                        only: Some(vec![installed.member.character_id]),
-                        except: vec![],
-                    },
-                ],
+                &Narration {
+                    group_id: store
+                        .character_group_id(installed.member.character_id)
+                        .await
+                        .unwrap(),
+                    inference_id,
+                    sequence_id: sequence.id,
+                    actor: None,
+                    texts: vec![
+                        NarrationText {
+                            text: "A shadow crosses the doorway.".to_string(),
+                            only: None,
+                            except: vec![],
+                        },
+                        NarrationText {
+                            text: "It is your own shadow.".to_string(),
+                            only: Some(vec![installed.member.character_id]),
+                            except: vec![],
+                        },
+                    ],
+                },
             )
             .await
             .unwrap();

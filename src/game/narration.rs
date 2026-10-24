@@ -14,34 +14,9 @@ use super::Game;
 use crate::{
     llm::{Backend, ToolDefinition},
     prompts,
-    store::NarrationText,
+    store::{Narration, NarrationText},
     tools::{Tool, ToolFuture, ToolOutcome},
 };
-
-/// What a settled GM turn narrated, ready to deliver once the player agent
-/// that triggered it has settled.
-pub(super) struct Narration {
-    pub group_id: i64,
-    /// The inference whose narrate call produced the texts.
-    pub inference_id: i64,
-    pub texts: Vec<NarrationText>,
-}
-
-impl Narration {
-    /// Limit every text to `audience`, such as the characters who heard
-    /// private speech, so no text can describe it to anyone else.
-    pub fn restrict_to(&mut self, audience: Vec<i64>) {
-        for text in &mut self.texts {
-            text.only = Some(match text.only.take() {
-                Some(only) => only
-                    .into_iter()
-                    .filter(|id| audience.contains(id))
-                    .collect(),
-                None => audience.clone(),
-            });
-        }
-    }
-}
 
 /// Where the GM's narration goes, and what must be settled before it.
 pub(super) struct NarrationScope {
@@ -225,9 +200,14 @@ impl NarrationTools {
         )
     }
 
-    /// The narration the GM's call captured for `group_id`. A turn that ended
-    /// through a narrate tool always has one.
-    pub fn finish(self, group_id: i64, inference_id: i64) -> Result<Narration> {
+    /// The narration the GM's call captured, to deliver in `group_id` from
+    /// `sequence_id`. A turn that ended through a narrate tool always has one.
+    pub fn finish(
+        self,
+        (group_id, sequence_id): (i64, i64),
+        inference_id: i64,
+        actor: Option<i64>,
+    ) -> Result<Narration> {
         let texts = self
             .captured
             .lock()
@@ -237,6 +217,8 @@ impl NarrationTools {
         Ok(Narration {
             group_id,
             inference_id,
+            sequence_id,
+            actor,
             texts,
         })
     }
@@ -312,12 +294,7 @@ where
     ) -> Result<()> {
         let world = self.world(world_id)?;
         self.store
-            .append_group_narration(
-                world_id,
-                narration.group_id,
-                narration.inference_id,
-                &narration.texts,
-            )
+            .append_group_narration(world_id, narration)
             .await
             .context("storing GM narration before the player agent follows up")?;
         // A player may disconnect while the GM resolves. The narration remains

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(player_character.character_id, npc_agent.character_id) AS \"character_id!: i64\" FROM action JOIN message ON message.action_id = action.id JOIN history_entry ON history_entry.id = message.id JOIN agent_history ON agent_history.branch_id = history_entry.branch_id LEFT JOIN player_character ON player_character.agent_id = agent_history.agent_id LEFT JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id WHERE action.requesting_tool_execution_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4845937f1a1a0ce76a6491768dee31e8030231e641ad676c0976f8a9ff161288"
+}

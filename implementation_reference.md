@@ -665,9 +665,13 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   and the turn view lists "Caused by" turns. `group.scene_revision` advances in
   the writers that change what an NPC sees: an applied `take`, committed speech
   (the selected set's own speech counts as its progress) and a player character
-  joining a group; GM narration is not delivered to NPC histories, so it does not
-  advance it. Narration of a say/whisper that was not delivered reaches only its
-  speaker. Startup recovery
+  joining a group, and GM narration an NPC receives. Narration reaches the NPCs
+  in the group like the connected PCs (`append_group_narration`), limited by each
+  text's recipients and, after speech, to those who heard it; the NPC whose own
+  action it narrates receives it but is not offered a response to it. Presence
+  narration offers the NPCs a response the same way, and its sequence finishes
+  through `finish_root_turn` so that discussion has a budget. Narration of a
+  say/whisper that was not delivered reaches only its speaker. Startup recovery
   (`fail_interrupted_discussions`) fails a discussion with an interrupted step
   instead of replaying it.
 - Prompts (`prompts.toml`, `src/prompts.rs`). All model-facing roles,

@@ -9,7 +9,7 @@ use std::{
 mod narration;
 mod npc;
 
-use narration::{Narration, NarrationScope, NarrationTools};
+use narration::{NarrationScope, NarrationTools};
 
 use anyhow::{Context, Result, ensure};
 use schemars::{JsonSchema, schema_for};
@@ -26,8 +26,8 @@ use crate::{
     prompts,
     settings::Limits,
     store::{
-        ActionOutcome, Hearing, InvalidHearing, MAX_PREFIX_CHARS, PendingAction, PlayerAgent,
-        PresenceNarration, SayAction, Store, WhisperAction,
+        ActionOutcome, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration, PendingAction,
+        PlayerAgent, PresenceNarration, SayAction, Store, WhisperAction,
     },
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
@@ -685,9 +685,9 @@ where
             .begin_sequence(world_id, "presence transition")
             .await
             .context("starting presence narration sequence")?;
+        let budget = Budget::new(self.limits);
         let result: Result<()> = async {
             let call = CallContext::root(Some(sequence.id));
-            let budget = Budget::new(self.limits);
             let branch = self.store.group_branch(group_id).await?;
             self.store
                 .append_instruction(branch, &request, sequence.id)
@@ -713,30 +713,26 @@ where
             )
             .await
             .context("asking group GM for presence narration")?;
-            let spoken = narrate.finish(group_id, settled.inference_id)?;
+            let spoken = narrate.finish((group_id, sequence.id), settled.inference_id, None)?;
             self.store
-                .append_presence_narration(
-                    world_id,
-                    narration,
-                    online,
-                    spoken.inference_id,
-                    &spoken.texts,
-                )
+                .append_presence_narration(world_id, narration, online, &spoken)
                 .await
                 .context("storing presence narration")?;
             let _no_live_viewers = world.broadcasts.send(ChatChange::Entries);
             Ok(())
         }
         .await;
+        // Like a player's turn, it may have given NPCs something to respond to.
         if let Err(finish_error) = self
             .store
-            .finish_sequence(
+            .finish_root_turn(
                 sequence.id,
                 result
                     .as_ref()
                     .err()
                     .map(|error| format!("{error:#}"))
                     .as_deref(),
+                budget.spent(),
             )
             .await
         {
@@ -1360,7 +1356,7 @@ where
         )
         .await
         .context("asking group GM for opening narration")?;
-        narrate.finish(group_id, settled.inference_id)
+        narrate.finish((group_id, sequence_id), settled.inference_id, None)
     }
 
     /// `note` adds circumstances the GM should weigh, such as replies composed
@@ -1683,8 +1679,12 @@ where
         // A split or merge in this turn may have moved the actor, and the
         // narration describes where they now are.
         let mut narration = narrate.finish(
-            self.store.character_group_id(pending.character_id).await?,
+            (
+                self.store.character_group_id(pending.character_id).await?,
+                pending.sequence_id,
+            ),
             settled.inference_id,
+            Some(pending.character_id),
         )?;
         // The GM saw what was said; only those who heard it are told how the
         // GM describes it. Speech that was not delivered was heard by no one,
@@ -2346,6 +2346,9 @@ mod tests {
             }])),
             narrate("You lift the flour sack while Toma watches."),
             response(Content::Text(String::new())),
+            // Mara and Toma each decide about what they were told.
+            do_nothing(),
+            do_nothing(),
         ]);
         let backend = InferenceScheduler::new(scripted_backend, Limits::default()).unwrap();
         let game = Game::new(
@@ -2382,16 +2385,10 @@ mod tests {
                     && entry.text == "You lift the flour sack while Toma watches."
             })
             .expect("the GM narration must be stored for a browser reload");
-        let sequence: i64 = sqlx::query_scalar(
-            "SELECT id FROM sequence WHERE world_id = ? ORDER BY id DESC LIMIT 1",
-        )
-        .bind(installed.world_id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
+        // The player's turn follows creation; the NPCs' decisions come later.
         assert_eq!(
             chat[narration].sequence_id,
-            Some(sequence),
+            Some(creation.id + 1),
             "a delivered GM narration must retain its producing turn so its chat entry opens Developer Mode directly"
         );
         assert!(
@@ -2998,6 +2995,8 @@ mod tests {
             ])),
             narrate("You step outside with Mara."),
             response(Content::Text("What do you do next?".into())),
+            // Mara, now with the Adventurer, hears the narration.
+            do_nothing(),
         ]);
         let split_backend = InferenceScheduler::new(split_backend, Limits::default()).unwrap();
         let split_game = Game::new(
@@ -3015,6 +3014,7 @@ mod tests {
             .player_message(installed.member.clone(), "I look, then we split up.")
             .await
             .unwrap();
+        wait_for_npc_work_of(&split_game, &store, &installed.member).await;
 
         let adventurer_group = store
             .character_group_id(installed.member.character_id)
@@ -3102,6 +3102,9 @@ mod tests {
             ])),
             narrate("You and Mara rejoin Toma."),
             response(Content::Text("What do you do next?".into())),
+            // Mara and Toma hear the narration.
+            do_nothing(),
+            do_nothing(),
         ]);
         let merge_backend = InferenceScheduler::new(merge_backend, Limits::default()).unwrap();
         let merge_game = Game::new(
@@ -3119,6 +3122,7 @@ mod tests {
             .player_message(installed.member.clone(), "I look at Toma, then we regroup.")
             .await
             .unwrap();
+        wait_for_npc_work_of(&merge_game, &store, &installed.member).await;
 
         let merge_result = {
             let requests = merge_requests.lock().unwrap();
@@ -4586,6 +4590,15 @@ mod tests {
 
     /// The speech messages in an NPC's own history, as its model would see them.
     async fn heard_by_npc(store: &Store, name: &str) -> Vec<String> {
+        npc_history_texts(store, name, Role::Speech).await
+    }
+
+    /// The GM narration messages in an NPC's own history.
+    async fn narrated_to_npc(store: &Store, name: &str) -> Vec<String> {
+        npc_history_texts(store, name, Role::Narration).await
+    }
+
+    async fn npc_history_texts(store: &Store, name: &str, role: Role) -> Vec<String> {
         let agent_id: i64 = sqlx::query_scalar(
             "SELECT npc_agent.agent_id FROM npc_agent \
              JOIN character ON character.id = npc_agent.character_id WHERE character.name = ?",
@@ -4613,7 +4626,7 @@ mod tests {
             .unwrap()
             .messages
             .into_iter()
-            .filter(|message| message.role == Role::Speech)
+            .filter(|message| message.role == role)
             .filter_map(|message| match message.content {
                 MessageContent::Text(text) => Some(text),
                 MessageContent::Speech(speech) => Some(speech.display()),
@@ -5074,6 +5087,22 @@ mod tests {
         );
     }
 
+    /// How many recorded requests were the GM's (the only agent that narrates),
+    /// leaving out the NPCs' decisions about what it narrated.
+    fn gm_requests(requests: &Arc<Mutex<Vec<crate::llm::Request>>>) -> usize {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                request
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == "narrate_group")
+            })
+            .count()
+    }
+
     /// What each narration entry in a player's chat says.
     async fn narrations(store: &Store, member: &PlayerAgent) -> Vec<String> {
         store
@@ -5088,7 +5117,13 @@ mod tests {
 
     /// `first` looks around, the GM approves and ends its turn with `narration`.
     /// Both players are connected so each can receive narration.
-    async fn look_and_narrate(scene: &SpeechScene, narration: Response) {
+    /// `n` NPC decisions with nothing to add.
+    fn quiet(n: usize) -> Vec<Response> {
+        (0..n).map(|_| do_nothing()).collect()
+    }
+
+    /// `npc_script` is what the NPCs that receive the narration then answer.
+    async fn look_and_narrate(scene: &SpeechScene, narration: Response, npc_script: Vec<Response>) {
         for member in [&scene.first, &scene.second] {
             scene
                 .store
@@ -5102,11 +5137,13 @@ mod tests {
             narration,
             response(Content::Text(String::new())),
         ]);
+        scene.responses.lock().unwrap().extend(npc_script);
         scene
             .game
             .player_message(scene.first.clone(), "Look around.")
             .await
             .unwrap();
+        wait_for_npc_work(scene).await;
     }
 
     #[tokio::test]
@@ -5121,6 +5158,7 @@ mod tests {
                     "others_text": "The adventurer climbs the rock.",
                 }),
             ),
+            quiet(2),
         )
         .await;
 
@@ -5132,8 +5170,9 @@ mod tests {
             narrations(&scene.store, &scene.second).await,
             ["The adventurer climbs the rock."]
         );
-        // The GM's turn ended with its narration: no closing inference.
-        assert_eq!(scene.requests.lock().unwrap().len(), 4);
+        // The player's request, two GM calls, the player's finish, then Mara and
+        // Toma: the GM's turn ended with its narration, with no closing inference.
+        assert_eq!(scene.requests.lock().unwrap().len(), 6);
     }
 
     #[tokio::test]
@@ -5149,6 +5188,7 @@ mod tests {
                     "exclude_character_ids": [scene.second.character_id],
                 }),
             ),
+            quiet(2),
         )
         .await;
         assert_eq!(
@@ -5184,7 +5224,12 @@ mod tests {
     #[tokio::test]
     async fn narrating_nothing_ends_the_turn_and_delivers_nothing() {
         let scene = speech_scene().await;
-        look_and_narrate(&scene, tool_call("narrate_nothing", serde_json::json!({}))).await;
+        look_and_narrate(
+            &scene,
+            tool_call("narrate_nothing", serde_json::json!({})),
+            quiet(0),
+        )
+        .await;
 
         assert!(narrations(&scene.store, &scene.first).await.is_empty());
         assert!(narrations(&scene.store, &scene.second).await.is_empty());
@@ -5229,12 +5274,15 @@ mod tests {
             response(Content::Text("The room is empty.".into())),
             narrate("The room is bare."),
             response(Content::Text(String::new())),
+            do_nothing(),
+            do_nothing(),
         ]);
         scene
             .game
             .player_message(scene.first.clone(), "Look around.")
             .await
             .unwrap();
+        wait_for_npc_work(&scene).await;
 
         for member in [&scene.first, &scene.second] {
             assert_eq!(
@@ -5265,6 +5313,148 @@ mod tests {
             "the GM is told how to end its turn: {:?}",
             last_gm_request.messages.last()
         );
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    /// How many decisions each NPC has been asked for, by name.
+    async fn decisions_asked(scene: &SpeechScene, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM npc_candidate JOIN character ON character.id = npc_candidate.character_id \
+             WHERE character.name = ? AND npc_candidate.decision_invocation_id IS NOT NULL",
+        )
+        .bind(name)
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_npc_that_received_narration_answers_it_and_its_decision_names_only_its_own_message()
+    {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        look_and_narrate(
+            &scene,
+            narrate("A cold wind blows through the hut."),
+            // Mara proposes to speak and Toma has nothing to add; the GM judges
+            // Mara's words and conveys nothing more; Toma hears them.
+            vec![
+                propose("Close the shutters.", &speaker, 2),
+                do_nothing(),
+                approve(2),
+                tool_call("narrate_nothing", serde_json::json!({})),
+                do_nothing(),
+            ],
+        )
+        .await;
+
+        for npc in ["Mara", "Toma"] {
+            assert_eq!(
+                narrated_to_npc(&scene.store, npc).await,
+                ["A cold wind blows through the hut."],
+                "{npc} perceived the narration in its own history"
+            );
+        }
+        assert!(
+            heard(&scene.store, &scene.first)
+                .await
+                .contains(&"Close the shutters.".to_string()),
+            "Mara's answer to the narration was said"
+        );
+        // Every decision was caused only by messages in the deciding NPC's
+        // own history, never by another NPC's copy.
+        let foreign: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM npc_candidate \
+             JOIN invocation ON invocation.id = npc_candidate.decision_invocation_id \
+             JOIN sequence_cause ON sequence_cause.child_sequence_id = invocation.sequence_id \
+             JOIN history_entry ON history_entry.id = sequence_cause.source_message_id \
+             WHERE history_entry.branch_id <> invocation.branch_id",
+        )
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        let own: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM npc_candidate \
+             JOIN invocation ON invocation.id = npc_candidate.decision_invocation_id \
+             JOIN sequence_cause ON sequence_cause.child_sequence_id = invocation.sequence_id \
+             JOIN history_entry ON history_entry.id = sequence_cause.source_message_id \
+             WHERE history_entry.branch_id = invocation.branch_id",
+        )
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(foreign, 0);
+        assert!(own >= 2, "each decision names the message it answers");
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_npc_is_not_asked_about_the_narration_of_its_own_words() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        scene.responses.lock().unwrap().extend([
+            // The player speaks to Toma; the GM narrates it to everyone who heard.
+            tool_call(
+                "say",
+                serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
+            ),
+            approve(1),
+            narrate("Toma looks up."),
+            response(Content::Text(String::new())),
+            // Mara answers and Toma stays quiet; the GM then narrates Mara's words.
+            propose("In the hut.", &speaker, 2),
+            do_nothing(),
+            approve(2),
+            narrate("Mara speaks."),
+            // Only Toma, who did not speak, is asked about that.
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+
+        assert_eq!(decisions_asked(&scene, "Mara").await, 1);
+        assert_eq!(decisions_asked(&scene, "Toma").await, 2);
+        assert!(
+            narrated_to_npc(&scene.store, "Mara")
+                .await
+                .contains(&"Mara speaks.".to_string()),
+            "Mara still perceives the narration of her own words"
+        );
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_npc_excluded_from_narration_neither_receives_it_nor_is_asked() {
+        let scene = speech_scene().await;
+        let toma: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+        look_and_narrate(
+            &scene,
+            tool_call(
+                "narrate_group",
+                serde_json::json!({
+                    "text": "Mara hears something Toma does not.",
+                    "exclude_character_ids": [toma],
+                }),
+            ),
+            // Only Mara is told, so only Mara decides.
+            quiet(1),
+        )
+        .await;
+
+        assert_eq!(
+            narrated_to_npc(&scene.store, "Mara").await,
+            ["Mara hears something Toma does not."]
+        );
+        assert!(narrated_to_npc(&scene.store, "Toma").await.is_empty());
+        assert_eq!(decisions_asked(&scene, "Mara").await, 1);
+        assert_eq!(decisions_asked(&scene, "Toma").await, 0);
         assert!(failed_sequences(&scene).await.is_empty());
     }
 
@@ -5315,12 +5505,19 @@ mod tests {
     /// Wait until the world has no NPC work left, as seen through its
     /// completed steps' notifications and the stored rounds.
     async fn wait_for_npc_work(scene: &SpeechScene) {
-        let mut notices = scene.game.subscribe(&scene.first).await.unwrap();
+        wait_for_npc_work_of(&scene.game, &scene.store, &scene.first).await;
+    }
+
+    async fn wait_for_npc_work_of<B>(game: &Arc<Game<B>>, store: &Store, watcher: &PlayerAgent)
+    where
+        B: Backend + Send + Sync + 'static,
+    {
+        let mut notices = game.subscribe(watcher).await.unwrap();
         for _ in 0..400 {
             let open: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM npc_round WHERE state IN ('collecting', 'selected', 'executing')",
             )
-            .fetch_one(&scene.store.pool())
+            .fetch_one(&store.pool())
             .await
             .unwrap();
             if open == 0 {
@@ -6338,6 +6535,8 @@ mod tests {
             ])),
             narrate("The group parts."),
             response(Content::Text(String::new())),
+            // Toma, left with the other player, hears the narration.
+            do_nothing(),
         ]);
         scene
             .game
@@ -6505,12 +6704,16 @@ mod tests {
             ])),
             narrate("The group parts."),
             response(Content::Text(String::new())),
+            // Mara and Toma, left in the hut, hear the narration.
+            do_nothing(),
+            do_nothing(),
         ]);
         scene
             .game
             .player_message(scene.first.clone(), "Look around.")
             .await
             .unwrap();
+        wait_for_npc_work(&scene).await;
         let groups: Vec<i64> =
             sqlx::query_scalar("SELECT id FROM \"group\" WHERE retired_at IS NULL ORDER BY id")
                 .fetch_all(&scene.store.pool())
@@ -6553,6 +6756,9 @@ mod tests {
             ])),
             narrate("They come together."),
             response(Content::Text(String::new())),
+            // Mara and Toma hear the narration.
+            do_nothing(),
+            do_nothing(),
         ]);
         scene
             .game
@@ -6983,10 +7189,11 @@ mod tests {
         wait_for_npc_work(&scene).await;
 
         assert_eq!(scene.requests.lock().unwrap().len(), 5);
-        let candidates: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM npc_candidate")
-            .fetch_one(&scene.store.pool())
-            .await
-            .unwrap();
+        let candidates: i64 =
+            sqlx::query_scalar("SELECT COUNT(DISTINCT character_id) FROM npc_candidate")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
         assert_eq!(candidates, 1, "Mara did not hear it and is not asked");
     }
 
@@ -7303,13 +7510,16 @@ mod tests {
 
     #[tokio::test]
     async fn group_changes_preserve_presence_and_wake_existing_viewers() {
-        let (backend, _) = ScriptedBackend::recording([narrate("Both arrive.")]);
+        // Mara and Toma decide about the arrival they are told of.
+        let (backend, _) =
+            ScriptedBackend::recording([narrate("Both arrive."), do_nothing(), do_nothing()]);
         let responses = Arc::clone(&backend.responses);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 3600).await;
         let first_connection = game.connect(&first).await.unwrap();
         let second_connection = game.connect(&second).await.unwrap();
         deliver_presence_deadline(&game, &store, &first).await;
+        wait_for_npc_work_of(&game, &store, &first).await;
         game.disconnect(&second, second_connection).await.unwrap();
         let_presence_handlers_run(&game, &first).await;
         game.connect(&second).await.unwrap();
@@ -7361,10 +7571,13 @@ mod tests {
             ])),
             narrate("Split narration."),
             response(Content::Text("Done.".into())),
+            // Mara, with the players, hears the narration.
+            do_nothing(),
         ]);
         game.player_message(first.clone(), "Look and split.")
             .await
             .unwrap();
+        wait_for_npc_work_of(&game, &store, &first).await;
         let players = store.character_group_id(second.character_id).await.unwrap();
         let alone = store.character_group_id(toma).await.unwrap();
         let split_state = store.presence_narration(players).await.unwrap();
@@ -7417,10 +7630,14 @@ mod tests {
             ])),
             narrate("Merge narration."),
             response(Content::Text("Done.".into())),
+            // Mara and Toma hear the narration.
+            do_nothing(),
+            do_nothing(),
         ]);
         game.player_message(first.clone(), "Look and merge.")
             .await
             .unwrap();
+        wait_for_npc_work_of(&game, &store, &first).await;
         let merged = store.character_group_id(second.character_id).await.unwrap();
         let merge_state = store.presence_narration(merged).await.unwrap();
         let merge_preserved =
@@ -7670,15 +7887,21 @@ mod tests {
     #[tokio::test]
     async fn restart_recovers_connections_and_durable_windows() {
         for returning in 0..=2 {
+            // Mara and Toma decide about each narration they are told of.
             let (backend, requests) = ScriptedBackend::recording([
                 narrate("Both arrive."),
+                do_nothing(),
+                do_nothing(),
                 narrate("One returns, one remains away."),
+                do_nothing(),
+                do_nothing(),
             ]);
             let (game, store, db, first, second) =
                 two_player_bread_thief_game_with_deadline(backend, 3600).await;
             let connection = game.connect(&first).await.unwrap();
             game.connect(&second).await.unwrap();
             deliver_presence_deadline(&game, &store, &first).await;
+            wait_for_npc_work_of(&game, &store, &first).await;
             game.disconnect(&first, connection).await.unwrap();
             let_presence_handlers_run(&game, &first).await;
             let group = store.character_group_id(first.character_id).await.unwrap();
@@ -7756,28 +7979,23 @@ mod tests {
                 );
             }
             assert_eq!(
-                requests.lock().unwrap().len(),
+                gm_requests(&requests),
                 1,
                 "future windows wait; empty expired windows make no model call"
             );
             if returning > 0 {
                 deliver_presence_deadline(&game, &store, &first).await;
+                wait_for_npc_work_of(&game, &store, &first).await;
             }
             let settled = store.presence_narration(group).await.unwrap();
             assert!(settled.due_at.is_none());
             assert_eq!(settled.waiting_for_return, returning == 0);
-            assert_eq!(
-                requests.lock().unwrap().len(),
-                if returning == 1 { 2 } else { 1 }
-            );
+            assert_eq!(gm_requests(&requests), if returning == 1 { 2 } else { 1 });
             // A consumed generation cannot deliver a second narration.
             game.handle_presence_deadline(group, recovered.generation)
                 .await
                 .unwrap();
-            assert_eq!(
-                requests.lock().unwrap().len(),
-                if returning == 1 { 2 } else { 1 }
-            );
+            assert_eq!(gm_requests(&requests), if returning == 1 { 2 } else { 1 });
         }
     }
 
@@ -7962,23 +8180,40 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_group_narrates_nothing_on_the_deadline() {
+        // Mara and Toma each decide about every arrival they are told of.
         let (backend, recorded_requests) = ScriptedBackend::recording([
             narrate("Someone arrives."),
+            do_nothing(),
+            do_nothing(),
             narrate("Someone else arrives."),
+            do_nothing(),
+            do_nothing(),
         ]);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 60).await;
         let first_connection = game.connect(&first).await.unwrap();
         deliver_presence_deadline(&game, &store, &first).await;
+        wait_for_npc_work_of(&game, &store, &first).await;
+        let told: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT character_id) FROM npc_candidate WHERE decision_invocation_id IS NOT NULL",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            told, 2,
+            "an arrival is narrated to the NPCs, who may respond"
+        );
         let second_connection = game.connect(&second).await.unwrap();
         let_presence_handlers_run(&game, &first).await;
-        assert_eq!(recorded_requests.lock().unwrap().len(), 2);
+        wait_for_npc_work_of(&game, &store, &first).await;
+        assert_eq!(gm_requests(&recorded_requests), 2);
 
         game.disconnect(&first, first_connection).await.unwrap();
         game.disconnect(&second, second_connection).await.unwrap();
         deliver_presence_deadline(&game, &store, &first).await;
         assert_eq!(
-            recorded_requests.lock().unwrap().len(),
+            gm_requests(&recorded_requests),
             2,
             "an empty group retains the difference without running an inference"
         );
@@ -7993,13 +8228,13 @@ mod tests {
         game.connect(&second).await.unwrap();
         let_presence_handlers_run(&game, &first).await;
         assert_eq!(
-            recorded_requests.lock().unwrap().len(),
+            gm_requests(&recorded_requests),
             2,
             "the same returning group still waits through its window"
         );
         deliver_presence_deadline(&game, &store, &first).await;
         assert_eq!(
-            recorded_requests.lock().unwrap().len(),
+            gm_requests(&recorded_requests),
             2,
             "an unchanged returned set needs no repeated narration"
         );
@@ -8244,6 +8479,9 @@ mod tests {
             ])),
             narrate("The group splits up."),
             response(Content::Text(String::new())),
+            // Mara and Toma, left with the first group, hear it.
+            do_nothing(),
+            do_nothing(),
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-2".into(),
                 name: "look".into(),
@@ -8256,6 +8494,8 @@ mod tests {
             }])),
             narrate("Only the first group should see this."),
             response(Content::Text(String::new())),
+            do_nothing(),
+            do_nothing(),
         ]);
         store
             .mark_character_present(first.character_id)
@@ -8277,6 +8517,7 @@ mod tests {
         game.player_message(first.clone(), "Look around and split up.")
             .await
             .unwrap();
+        wait_for_npc_work_of(&game, &store, &first).await;
         assert!(
             store
                 .player_chat(&first)
