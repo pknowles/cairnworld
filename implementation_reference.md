@@ -606,6 +606,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   Completing character creation asks the character's resolved group's world_gm
   (its `GroupHistory { agent_id, branch_id }`) for opening narration in that
   same tool turn, so beginning play never needs a second player message.
+  `opening_narrations` first narrates the group's initial scene to its NPCs if it
+  has not been (`group.scene_narrated`, migration 0012; set by delivering that
+  narration), then narrates the entrance with the entering character as the
+  actor: they receive the scene, everyone else is told they arrive.
   Subsequent player messages expose creation or location-action tools
   according to durable character state. `look`, `investigate`, `open` and `ask`
   share one description argument and the shared action path (`action_tools`);

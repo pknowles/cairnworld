@@ -36,7 +36,8 @@ pub struct Gm {
     pub narrate_reminder: String,
     pub action_request: String,
     pub tied_note: String,
-    pub opening_request: String,
+    pub scene_request: String,
+    pub entrance_request: String,
     pub presence_request: String,
     pub tools: Tools,
 }

@@ -219,6 +219,7 @@ impl NarrationTools {
             inference_id,
             sequence_id,
             actor,
+            opens_scene: false,
             texts,
         })
     }

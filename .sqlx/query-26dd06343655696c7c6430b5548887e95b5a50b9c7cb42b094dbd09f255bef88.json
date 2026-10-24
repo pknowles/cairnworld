@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE \"group\" SET scene_narrated = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "26dd06343655696c7c6430b5548887e95b5a50b9c7cb42b094dbd09f255bef88"
+}

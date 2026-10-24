@@ -41,10 +41,17 @@ tied_note = """\
     replies you have not approved as said.\
     """
 
-# A player character has just finished creation.
-opening_request = """\
-    A player character has just begun play here. Narrate the scene, surroundings, \
-    and plot-relevant details the characters present can perceive.\
+# The first player character is about to enter a group nobody has narrated to.
+scene_request = """\
+    No player character is here yet. Narrate the scene, surroundings, and \
+    plot-relevant details the characters present can perceive.\
+    """
+
+# A player character has just finished creation. {character} is their name.
+entrance_request = """\
+    {character} has just begun play here. Describe to {character} the scene, \
+    surroundings, and plot-relevant details they can perceive, and tell everyone \
+    else how they arrive.\
     """
 
 # Characters arrived or left. {change} states who.

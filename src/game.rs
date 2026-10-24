@@ -1110,8 +1110,8 @@ where
                     game.store
                         .ready_to_begin(&member, sequence_id, Some(tool_execution_id))
                         .await?;
-                    let narration = game
-                        .opening_narration(
+                    let narrations = game
+                        .opening_narrations(
                             &member,
                             sequence_id,
                             budget,
@@ -1122,9 +1122,12 @@ where
                     Ok(ToolOutcome::CompletedAfter {
                         content: "Character creation complete.".to_string(),
                         after_result: Box::pin(async move {
-                            delivery_game
-                                .deliver_narration(member.world_id, &narration)
-                                .await
+                            for narration in &narrations {
+                                delivery_game
+                                    .deliver_narration(member.world_id, narration)
+                                    .await?;
+                            }
+                            Ok(())
                         }),
                     })
                 }) as ToolFuture
@@ -1305,13 +1308,60 @@ where
     /// The location GM, not the player agent, introduces a character who has
     /// just completed creation. The opening is a world transition, so it runs
     /// immediately from ready_to_begin instead of waiting for another player
-    /// message to select normal scene tools.
-    async fn opening_narration(
+    /// message to select normal scene tools. A group's initial scene is
+    /// narrated first, to the NPCs in it, so they know it before the first
+    /// player is; then the character's entrance is narrated with them as the
+    /// actor, receiving the scene while everyone else is told they arrive.
+    async fn opening_narrations(
         self: &Arc<Self>,
         member: &PlayerAgent,
         sequence_id: i64,
         budget: Budget,
         call: CallContext,
+    ) -> Result<Vec<Narration>> {
+        let group_id = self.store.character_group_id(member.character_id).await?;
+        let prompts = prompts::current()?;
+        let mut narrations = Vec::new();
+        if !self.store.group_scene_narrated(group_id).await? {
+            let mut scene = self
+                .opening_turn(
+                    member,
+                    sequence_id,
+                    &budget,
+                    &call,
+                    prompts.gm.scene_request.clone(),
+                    false,
+                )
+                .await?;
+            scene.opens_scene = true;
+            scene.restrict_to(self.store.group_npc_ids(group_id).await?);
+            narrations.push(scene);
+        }
+        let character = self.store.character_name(member.character_id).await?;
+        narrations.push(
+            self.opening_turn(
+                member,
+                sequence_id,
+                &budget,
+                &call,
+                prompts::fill(&prompts.gm.entrance_request, &[("character", &character)])?,
+                true,
+            )
+            .await?,
+        );
+        Ok(narrations)
+    }
+
+    /// One GM turn of the opening, ended by a narrate tool. `entering` makes
+    /// the entering character the actor of the narration.
+    async fn opening_turn(
+        self: &Arc<Self>,
+        member: &PlayerAgent,
+        sequence_id: i64,
+        budget: &Budget,
+        call: &CallContext,
+        request: String,
+        entering: bool,
     ) -> Result<Narration> {
         let group_id = self.store.character_group_id(member.character_id).await?;
         let gm_history = self.store.player_group_history(member).await?;
@@ -1327,13 +1377,14 @@ where
         let scene_packet = format!("Current scene packet:\n{scene}");
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
-        let request = Message::text(Role::User, &prompts.gm.opening_request);
+        let request = Message::text(Role::User, request);
+        let actor = entering.then_some(member.character_id);
         let narrate = NarrationTools::new(
             self,
             NarrationScope {
                 world_id: member.world_id,
                 in_group: member.character_id,
-                actor: None,
+                actor,
                 unresolved_action: None,
             },
         )?;
@@ -1345,7 +1396,7 @@ where
         let settled = agent::complete_with_call_context(
             &self.store,
             &self.backend,
-            &budget,
+            budget,
             agent::Turn {
                 events: self.world(member.world_id)?.events.clone(),
                 branch,
@@ -1356,13 +1407,13 @@ where
                 sampling: self.sampling.clone(),
                 model: &self.model,
             },
-            &call,
+            call,
             |_| {},
             |_| {},
         )
         .await
         .context("asking group GM for opening narration")?;
-        narrate.finish((group_id, sequence_id), settled.inference_id, None)
+        narrate.finish((group_id, sequence_id), settled.inference_id, actor)
     }
 
     /// `note` adds circumstances the GM should weigh, such as replies composed
@@ -2028,8 +2079,20 @@ mod tests {
                 name: "ready_to_begin".into(),
                 arguments: "{}".into(),
             }])),
-            narrate("The charcoal hut is quiet."),
+            // The scene goes to the NPCs; the entrance gives the character the
+            // scene and everyone else their arrival.
+            narrate("The hut stands silent."),
+            tool_call(
+                "narrate_actor_and_others",
+                serde_json::json!({
+                    "actor_text": "The charcoal hut is quiet.",
+                    "others_text": "The Adventurer ducks inside.",
+                }),
+            ),
             response(Content::Text(String::new())),
+            // Mara and Toma hear both and have nothing to add.
+            do_nothing(),
+            do_nothing(),
         ]);
         let (game, store, _db, member) = blank_opening_game(backend).await;
         let creation = store
@@ -2049,11 +2112,28 @@ mod tests {
         game.player_message(member.clone(), "Begin play.")
             .await
             .unwrap();
+        wait_for_npc_work_of(&game, &store, &member).await;
 
         let chat = store.player_chat(&member).await.unwrap();
-        assert!(chat.iter().any(|entry| {
-            entry.role == Role::Narration && entry.text == "The charcoal hut is quiet."
-        }));
+        let narrations: Vec<&str> = chat
+            .iter()
+            .filter(|entry| entry.role == Role::Narration)
+            .map(|entry| entry.text.as_str())
+            .collect();
+        assert_eq!(
+            narrations,
+            ["The charcoal hut is quiet."],
+            "the entering character gets the scene, not the NPCs' copy or the arrival"
+        );
+        for npc in ["Mara", "Toma"] {
+            assert_eq!(
+                narrated_to_npc(&store, npc).await,
+                ["The hut stands silent.", "The Adventurer ducks inside."],
+                "{npc} was told the scene, then the arrival"
+            );
+        }
+        let group = store.character_group_id(member.character_id).await.unwrap();
+        assert!(store.group_scene_narrated(group).await.unwrap());
         assert!(
             !chat
                 .iter()
@@ -2062,9 +2142,8 @@ mod tests {
         );
         {
             let requests = requests.lock().unwrap();
-            let final_request = requests
-                .last()
-                .expect("player agent must settle after the tool");
+            // The player's call, two GM turns, then the player settling.
+            let final_request = &requests[3];
             assert!(matches!(
                 final_request.messages.as_slice(),
                 messages if messages.windows(2).any(|pair| matches!(
@@ -2080,6 +2159,57 @@ mod tests {
         assert!(
             game.opening_complete(&member).await.unwrap(),
             "a durable silent completion must prevent reopening character creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_character_entering_a_group_whose_scene_is_known_is_only_introduced() {
+        let (backend, requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "ready-1".into(),
+                name: "ready_to_begin".into(),
+                arguments: "{}".into(),
+            }])),
+            tool_call(
+                "narrate_actor_and_others",
+                serde_json::json!({
+                    "actor_text": "The charcoal hut is quiet.",
+                    "others_text": "The Adventurer ducks inside.",
+                }),
+            ),
+            response(Content::Text(String::new())),
+            do_nothing(),
+            do_nothing(),
+        ]);
+        let (game, store, _db, member) = blank_opening_game(backend).await;
+        sqlx::query("UPDATE \"group\" SET scene_narrated = 1")
+            .execute(&store.pool())
+            .await
+            .unwrap();
+        let creation = store
+            .begin_sequence(member.world_id, "complete creation")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&member, creation.id, None)
+            .await
+            .unwrap();
+        let _connection = game.connect(&member).await.unwrap();
+
+        game.player_message(member.clone(), "Begin play.")
+            .await
+            .unwrap();
+        wait_for_npc_work_of(&game, &store, &member).await;
+
+        // The player's call, one GM turn, the player settling, two NPC decisions.
+        assert_eq!(requests.lock().unwrap().len(), 5);
+        assert_eq!(
+            narrated_to_npc(&store, "Mara").await,
+            ["The Adventurer ducks inside."]
         );
     }
 

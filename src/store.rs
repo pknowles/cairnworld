@@ -307,6 +307,8 @@ pub struct Narration {
     /// The character whose action is narrated, who is not offered a response
     /// to the narration of their own action.
     pub actor: Option<i64>,
+    /// Whether this is the narration of the group's initial scene.
+    pub opens_scene: bool,
     pub texts: Vec<NarrationText>,
 }
 
@@ -1685,8 +1687,8 @@ impl Store {
             let gm_notes = Json(&group.notes.gm);
             let storyteller_notes = Json(&group.notes.storyteller);
             let group_id = sqlx::query!(
-                "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id, gm_notes, storyteller_notes) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id, gm_notes, storyteller_notes, scene_narrated) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
                 world_id,
                 group.name,
                 locations[group.location.as_str()],
@@ -3186,6 +3188,15 @@ impl Store {
             .into_iter()
             .map(|row| (row.agent_id, row.character_id, true)),
         );
+        if narration.opens_scene {
+            sqlx::query!(
+                "UPDATE \"group\" SET scene_narrated = 1 WHERE id = ?",
+                narration.group_id,
+            )
+            .execute(&mut **transaction)
+            .await
+            .context("recording that the group's scene was narrated")?;
+        }
         let mut heard_by_npcs = Vec::new();
         for text in &narration.texts {
             let receiving: Vec<_> = recipients
@@ -3232,6 +3243,32 @@ impl Store {
             .await?;
         }
         Ok(())
+    }
+
+    /// Whether the GM has already narrated the group's initial scene.
+    pub async fn group_scene_narrated(&self, group_id: i64) -> Result<bool> {
+        sqlx::query_scalar!(
+            "SELECT scene_narrated AS \"narrated!: bool\" FROM \"group\" WHERE id = ?",
+            group_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading whether group {group_id} has its scene narrated"))?
+        .with_context(|| format!("group {group_id} does not exist"))
+    }
+
+    /// The NPCs currently in a group.
+    pub async fn group_npc_ids(&self, group_id: i64) -> Result<Vec<i64>> {
+        sqlx::query_scalar!(
+            "SELECT character.id FROM character_group \
+             JOIN character ON character.id = character_group.character_id \
+             WHERE character_group.group_id = ? AND character.role = 'npc' \
+             ORDER BY character.id",
+            group_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("loading the NPCs in group {group_id}"))
     }
 
     /// The characters currently in a group, players and NPCs.
@@ -8428,6 +8465,7 @@ mod tests {
                     inference_id,
                     sequence_id: sequence.id,
                     actor: None,
+                    opens_scene: false,
                     texts: vec![
                         NarrationText {
                             text: "A shadow crosses the doorway.".to_string(),

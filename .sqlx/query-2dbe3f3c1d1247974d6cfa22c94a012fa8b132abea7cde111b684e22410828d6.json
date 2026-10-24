@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT scene_narrated AS \"narrated!: bool\" FROM \"group\" WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "narrated!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2dbe3f3c1d1247974d6cfa22c94a012fa8b132abea7cde111b684e22410828d6"
+}
