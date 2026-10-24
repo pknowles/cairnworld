@@ -363,6 +363,8 @@ Read and edit identified object fields directly rather than virtual files.
 Support whole-field writes and exact literal passage replacement from the outset.
 Require exactly one old-text match for a passage edit, with visible failures for
 missing/ambiguous matches. Use one scoped access path for reads, edits and search.
+Named notes can be created and removed on existing objects through that same
+authorized access; removing a note does not remove the object or a fixed field.
 GM edits local descriptions/GM notes and can read authorized local Storyteller
 notes; it cannot edit Storyteller notes. Storyteller access later uses its own
 permissions without exposing GM notes. Field authority is not blanket SQL access.
@@ -377,7 +379,8 @@ bookkeeping, determines what characters perceive and can respond to.
 Hard configured note/field and tool-result bounds protect fixed context/memory
 requirements. Oversized writes fail unchanged; bounded reads/search explicitly
 identify partial results and allow continuation. Calibrate bounds against real
-assembled model inputs. Named note bodies and existing descriptions are the
+assembled model inputs before enabling writes, not after an unbounded initial
+release. Named note bodies and existing descriptions are the
 initial representation; a proposed header/subnote hierarchy requires evidence
 before adding another memory structure. See [the implementation plan](plans/gm-editing.md).
 

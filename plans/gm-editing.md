@@ -4,6 +4,9 @@ Pending implementation. First deliverable: a character moves within its existing
 location, the GM edits persistent placement and relevant notes, and the next
 inference/turn reads that state before producing consistent narration. Both
 whole-value replacement and exact-text editing are required from the outset.
+Read/edit work can proceed independently. The complete Move example additionally
+requires gameplay clock operations and the open time-window decision described
+below; it is not yet a fully specified movement implementation recipe.
 
 ## Authority and scope
 
@@ -45,6 +48,24 @@ the same state. Revisit the representation only with measured contexts showing
 that bounded key/index lookup cannot supply the needed information. Whole-note
 replacement must not be the only editing operation while that is evaluated.
 
+## Dependencies and initial bounds
+
+NPC interaction supplies the structured final narration and shared action path;
+code-quality checks precede this plan in todo.md. The current schema has world
+and character time columns, but gameplay clock advancement is not implemented.
+Do not confuse those columns with an existing Move/time operation. Complete
+out-of-combat Move must implement clock updates using those authoritative fields
+and settle the existing [time-window proposal](../design.md#product-decisions)
+before claiming its elapsed-time/turn-admission behaviour is ready. Editing
+alone neither resolves that policy nor authorizes an arbitrary lead limit.
+
+Before enabling writes in the first checkpoint, configure finite field/note,
+key/index and tool-response limits. Choose and record their numerical values
+from measured assembled inputs for the configured model, including schemas,
+old/new edit arguments, returned content and next-inference/output headroom.
+Use small configurable limits in deterministic checks. There is no unbounded
+first version; the second checkpoint extends this measurement to retrieval.
+
 ## First checkpoint: read/edit and movement
 
 - Define a small typed set of writable fields on existing object references:
@@ -53,6 +74,11 @@ replacement must not be the only editing operation while that is evaluated.
   appropriate, but not unrestricted Developer Mode query access. Preserve
   arbitrary note keys; only text values accept exact-text edits. Never accept
   SQL, filesystem paths or model-selected table/column names as executable input.
+  A whole-value write may create a named GM note on an existing authorized
+  object. Include explicit removal of a named note through the same field access,
+  so obsolete short-term notes do not accumulate as empty keys. Neither operation
+  creates or deletes the game object; fixed fields such as placement can be
+  cleared but not removed. Validate permissions and bounds before any change.
 - Provide whole-field write and exact-text edit operations through the same
   authorized field access. Exact edit takes the complete literal old passage and
   replacement, changes exactly one match and leaves all other text untouched.
@@ -89,8 +115,9 @@ replacement must not be the only editing operation while that is evaluated.
   then produces the structured final narration. A later request must use the new
   position. Use the declared Move action through the shared submission/arbitration
   path, not Look or a disguised Ask. Implement its out-of-combat within-location
-  path and the GM-supplied elapsed time through the existing clock/action model;
-  do not edit time as arbitrary text. Reuse this in the later rules plan. Travel
+  path and the GM-supplied elapsed time through shared action/clock operations
+  that this movement path must supply; do not edit time as arbitrary text or
+  assume time advancement already exists. Reuse this in the later rules plan. Travel
   and combat movement stay in that plan; this checkpoint does not claim those
   mechanics work or add a second time system.
 
@@ -112,13 +139,12 @@ replacement must not be the only editing operation while that is evaluated.
   stored text. Read/search pagination handles large existing values without
   pretending they were returned in full. Normal tool results report remaining
   allowance without adding an extra model call.
-- Determine production bounds from the configured model/context, complete tool
-  schemas, existing scenario notes and the longest supported edit/read request.
-  Record the selected numerical limits and measured assembled input sizes in
-  configuration/docs before marking this checkpoint complete. Exercise rejection
-  using small configured bounds in scripted tests. Do not invent unmeasured
-  limits or assume character counts are model token counts. Check that a legal
-  read/edit plus its result leaves room for the GM's next inference/final output.
+- Extend the first checkpoint's measured bounds to paged search/list workloads
+  and representative large existing notes. Record assembled input sizes and any
+  justified configuration changes. Do not assume character counts equal model
+  token counts. A legal lookup/edit sequence must leave room for the next
+  inference and final output; returning individually small pages is not by itself
+  proof that their accumulated context fits.
 - Storyteller integration later reuses these field operations with its own
   authority: it writes Storyteller notes and does not read GM notes. Do not add
   a placeholder Storyteller executor in this plan. Keep this boundary separate
@@ -138,7 +164,7 @@ Store/Game/tool paths; no new mock world engine or repeated full GPU suite.
 | Case | Required outcome and verification |
 | --- | --- |
 | Movement and next-turn consistency | Real chat uses Move within a location. Inspect the recorded placement edit, elapsed time and next captured GM input; later narration uses persisted placement after reconnect/restart, not just remembered dialogue. Group/location IDs do not change. No arbitrary time-field edit or duplicate clock implementation. |
-| Short and long edits | Scripted calls replace a whole short value and one passage in a large value. Unrelated passages remain intact; a private/incidental chair remains location text/notes without a new Item. Missing/ambiguous text fails visibly without mutation. |
+| Short and long edits | Scripted calls replace a whole short value and one passage in a large value, then create and remove an incidental named note. Unrelated passages/keys remain intact; a chair remains location text/notes without a new Item. Missing/ambiguous text fails visibly without mutation. No game object is created/deleted by note operations. |
 | Newly invented incidental detail | GM reads existing relevant detail before adding it to descriptions/GM notes, then narrates only after its write result. A subsequent read finds the detail. No forced object creation and no extra after-narration inference. |
 | Permissions and mechanical state | Foreign-world/local-scope violations, GM writes to Storyteller notes and edits to mechanical fields fail without mutation or search leakage. Valid private notes stay out of player/NPC perception histories. |
 | Hierarchical discovery | Starting from world/location references, find a known field/key, read/search its body and edit it through returned IDs. Captured context distinguishes partial reads from complete content and does not include all remote object bodies. |
