@@ -126,13 +126,13 @@ checkBrowser(server, async (tab, port) => {
   assert.equal(await tab.locator("aside .ring-2").count() > 0, true, "the turn visibly retains the selected entry context");
   await tab.locator("aside").getByText("In the dim light of the weak fire", { exact: false }).waitFor();
   // Cumulative totals count every inference caused by this action once. The
-  // tool call, its follow-up reply, and the deferred compaction are all tied
-  // to the triggering sequence; the saved real-model responses contribute
-  // 1,726 input and 767 output tokens. Duration is measured wall time, so it must be displayed but has
+  // tool call, the scene and entrance narrations, the deferred compaction and
+  // the follow-up reply are all tied to the triggering sequence; the saved
+  // responses contribute 2,026 input and 827 output tokens. Duration is measured wall time, so it must be displayed but has
   // no fixture-specific value.
   await tab.locator("aside details summary").getByText("Technical details", { exact: true }).first().click();
-  await tab.locator("aside").getByText("4 inferences", { exact: true }).waitFor();
-  assert.equal(await tab.locator("aside").getByText("1726+767 tokens total", { exact: true }).count(), 1);
+  await tab.locator("aside").getByText("5 inferences", { exact: true }).waitFor();
+  assert.equal(await tab.locator("aside").getByText("2026+827 tokens total", { exact: true }).count(), 1);
   assert.equal(await tab.locator("aside").getByText(/^\d+ms summed inference time$/).count(), 1);
   await tab.locator("aside").getByText("What would you like to do next?", { exact: true }).waitFor();
   const compaction = tab.locator("aside details.border-warning").filter({ hasText: "Certainly, I understand the request." });

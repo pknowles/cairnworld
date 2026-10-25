@@ -4002,6 +4002,18 @@ mod tests {
             real_model_gm_resolves_a_run_of_actions(&model),
         )
         .await;
+        scenario(
+            "intervention check",
+            120,
+            real_model_gm_asks_a_character_before_deciding_a_take(&model),
+        )
+        .await;
+        scenario(
+            "committed take",
+            120,
+            real_model_player_marks_only_a_determined_take_committed(&model),
+        )
+        .await;
         println!(
             "SUITE total: {:.0} s",
             suite_started.elapsed().as_secs_f32()
@@ -4079,6 +4091,116 @@ mod tests {
     /// coverage: it caught the GM skipping its approval call as history grew, so
     /// run it for GM prompt or context changes. It says nothing about the
     /// quality of NPC conversation.
+    /// A take the GM is told a nearby character may object to: it must ask that
+    /// character with `intervention_check` using ids it can see, decide any
+    /// reaction the character proposes, and still end its turn by narrating.
+    async fn real_model_gm_asks_a_character_before_deciding_a_take(model: &DeviceModel) {
+        let (backend, _model_path, _sampling, limits) = model.parts();
+        let (game, store, _db, first, _second) =
+            two_player_bread_thief_game_with_limits(backend, limits).await;
+        let sequence = store
+            .begin_sequence(first.world_id, "real GM intervention")
+            .await
+            .unwrap();
+        let arguments = serde_json::json!({"item": "flour sack", "committed": false}).to_string();
+        let requesting = crate::store::record_tool_call_for_test(
+            &store,
+            store.agent_branch(first.agent_id).await.unwrap(),
+            Some(sequence.id),
+            "take-1",
+            "take",
+            &arguments,
+        )
+        .await;
+        let pending = store
+            .create_pending_action(
+                &store.player_actor(&first).await.unwrap(),
+                sequence.id,
+                requesting,
+                "take",
+                &arguments,
+            )
+            .await
+            .unwrap();
+        let narration = game
+            .arbitrate(
+                pending.clone(),
+                Budget::new(limits),
+                CallContext::root(Some(sequence.id)),
+                Some("Toma is beside the sack and may object; ask him with intervention_check before you decide."),
+            )
+            .await
+            .expect("the GM's turn with an intervention check");
+        game.deliver_narration(first.world_id, &narration)
+            .await
+            .unwrap();
+        let asked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invocation JOIN npc_agent ON npc_agent.agent_id = invocation.agent_id \
+             WHERE invocation.parent_tool_execution_id IS NOT NULL",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert!(
+            asked >= 1,
+            "the GM never asked a character whether to intervene"
+        );
+        let undecided: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pending_action")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        assert_eq!(undecided, 0, "an action was left undecided");
+        assert_no_rejected_output(&store).await;
+        game.shutdown().await.unwrap();
+    }
+
+    /// The take arguments a real player agent sends for what a player says.
+    async fn take_arguments_for(model: &DeviceModel, text: &str) -> Vec<String> {
+        let (backend, _model_path, _sampling, limits) = model.parts();
+        let (game, store, _db, first, _second) =
+            two_player_bread_thief_game_with_limits(backend, limits).await;
+        let _connection = game.connect(&first).await.unwrap();
+        game.player_message(first.clone(), text)
+            .await
+            .expect("the player's turn");
+        let sent: Vec<String> = sqlx::query_scalar(
+            "SELECT json_extract(value, '$.arguments') FROM recorded_content, \
+             json_each(json_extract(recorded_content.body, '$.content.value')) \
+             WHERE json_extract(recorded_content.body, '$.content.type') = 'ToolCalls' \
+               AND json_extract(value, '$.name') = 'take'",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        assert_no_rejected_output(&store).await;
+        game.shutdown().await.unwrap();
+        sent
+    }
+
+    /// The player agent marks a take committed only when the player is set on
+    /// it despite objections.
+    async fn real_model_player_marks_only_a_determined_take_committed(model: &DeviceModel) {
+        let determined = take_arguments_for(
+            model,
+            "I take the flour sack, and I'm doing it no matter what anyone says.",
+        )
+        .await;
+        assert!(
+            determined
+                .iter()
+                .any(|arguments| arguments.contains("\"committed\":true")),
+            "a determined take was not marked committed: {determined:?}"
+        );
+        let tentative = take_arguments_for(model, "Take the flour sack, if nobody minds.").await;
+        assert!(
+            !tentative.is_empty()
+                && tentative
+                    .iter()
+                    .all(|arguments| !arguments.contains("\"committed\":true")),
+            "a tentative take was marked committed: {tentative:?}"
+        );
+    }
+
     async fn real_model_gm_resolves_a_run_of_actions(model: &DeviceModel) {
         let (backend, _model_path, _sampling, limits) = model.parts();
         let (game, store, _db, first, _second) =

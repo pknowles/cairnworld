@@ -459,8 +459,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   then changes the current world notes and proves the saved inference still
   reconstructs identically before reopening it in the browser. The
   regular browser fixture replays a reviewed response collection captured from the
-  configured local model through the same Game-recorded tool/reply/
-  deferred-compaction sequence and compares its raw request with the backend
+  configured local model (the GM's opening converted to its scene and entrance
+  narrate calls, the scene carrying the captured prose) through the same
+  Game-recorded tool/reply/deferred-compaction sequence and compares its raw request with the backend
   capture; its separately seeded history is only for live websocket events.
   `inference.model` already
   records the configured model name that served each call; no separate

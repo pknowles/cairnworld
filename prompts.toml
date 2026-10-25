@@ -70,9 +70,9 @@ scene_request = """\
 
 # A player character has just finished creation. {character} is their name.
 entrance_request = """\
-    {character} has just begun play here. Describe to {character} the scene, \
-    surroundings, and plot-relevant details they can perceive, and tell everyone \
-    else how they arrive, with a narrate tool.\
+    {character} has just begun play here. Give {character} one account of the \
+    scene, surroundings, and plot-relevant details they can perceive, and everyone \
+    else another of how they arrive.\
     """
 
 # Characters arrived or left. {change} states who.

@@ -18,8 +18,14 @@
   },
   {
     "content": {
-      "type": "Text",
-      "value": "In the dim light of the weak fire, the charcoal-burner's hut is a cramped space. The front door is barred from the inside, and the rear window is large enough to crawl through. A narrow crawlspace runs beneath the rear wall. Mara stands outside, her face stern but her eyes pleading. Toma sits beside the fire, his leg wrapped tightly, and the open sack of flour visible through the cracks. The interior is cluttered with the necessities of survival, including a wood axe and a flatbread scattered on the floor.\n\nMara approaches you, her voice urgent. \"The village needs flour, but I don't want to make Toma's situation worse. Please, recover the flour and return it to the storehouse. I know he took one of the large sacks and ran to the old charcoal hut. We need back whatever remains. Please don't kill him over it.\"\n\nAdventurer14, the player, can see the signs of a recent struggle: a loose floorboard, torn waxed cloth, mouse-chewed crumbs, and old charcoal-burner cache markings. The exterior of the hut is not a safe place, but the interior offers a chance to resolve the situation without unnecessary violence."
+      "type": "ToolCalls",
+      "value": [
+        {
+          "id": "call-narrate_group-fixture",
+          "name": "narrate_group",
+          "arguments": "{\"text\":\"In the dim light of the weak fire, the charcoal-burner's hut is a cramped space. The front door is barred from the inside, and the rear window is large enough to crawl through. A narrow crawlspace runs beneath the rear wall. Mara stands outside, her face stern but her eyes pleading. Toma sits beside the fire, his leg wrapped tightly, and the open sack of flour visible through the cracks. The interior is cluttered with the necessities of survival, including a wood axe and a flatbread scattered on the floor.\\n\\nMara approaches you, her voice urgent. \\\"The village needs flour, but I don't want to make Toma's situation worse. Please, recover the flour and return it to the storehouse. I know he took one of the large sacks and ran to the old charcoal hut. We need back whatever remains. Please don't kill him over it.\\\"\\n\\nAdventurer14, the player, can see the signs of a recent struggle: a loose floorboard, torn waxed cloth, mouse-chewed crumbs, and old charcoal-burner cache markings. The exterior of the hut is not a safe place, but the interior offers a chance to resolve the situation without unnecessary violence.\"}"
+        }
+      ]
     },
     "reasoning": "",
     "usage": {
@@ -40,6 +46,23 @@
   },
   {
     "content": {
+      "type": "ToolCalls",
+      "value": [
+        {
+          "id": "call-narrate_actor_and_others-fixture",
+          "name": "narrate_actor_and_others",
+          "arguments": "{\"actor_text\":\"You duck inside the charcoal-burner's hut. Toma watches you from beside the weak fire, and Mara waits outside the window.\",\"others_text\":\"A newcomer ducks inside the hut.\"}"
+        }
+      ]
+    },
+    "reasoning": "",
+    "usage": {
+      "input_tokens": 300,
+      "output_tokens": 60
+    }
+  },
+  {
+    "content": {
       "type": "Text",
       "value": "What would you like to do next?"
     },
@@ -47,6 +70,40 @@
     "usage": {
       "input_tokens": 488,
       "output_tokens": 9
+    }
+  },
+  {
+    "content": {
+      "type": "ToolCalls",
+      "value": [
+        {
+          "id": "call-do_nothing-fixture",
+          "name": "do_nothing",
+          "arguments": "{}"
+        }
+      ]
+    },
+    "reasoning": "",
+    "usage": {
+      "input_tokens": 900,
+      "output_tokens": 10
+    }
+  },
+  {
+    "content": {
+      "type": "ToolCalls",
+      "value": [
+        {
+          "id": "call-do_nothing-fixture",
+          "name": "do_nothing",
+          "arguments": "{}"
+        }
+      ]
+    },
+    "reasoning": "",
+    "usage": {
+      "input_tokens": 900,
+      "output_tokens": 10
     }
   }
 ]

@@ -1978,13 +1978,14 @@ mod tests {
         // reply directly in Store. E2 must inspect the records normal play
         // creates, so exercise Game's ordinary player-message loop instead.
         // These responses were captured from one local configured-model run
-        // with forced compaction. Replaying them keeps this browser test
+        // with forced compaction (the GM's opening is now its two narrate
+        // calls, one carrying the captured prose). Replaying them keeps this browser test
         // repeatable while request assembly, tool execution, result delivery
         // and recording stay in production code.
         let browser_limits = crate::settings::Limits {
-            // The recorded opening narration exceeds this threshold and
-            // creates one deferred summary. The short post-tool reply does
-            // not, so this fixture is one complete turn rather than a chain
+            // The recorded scene narration exceeds this threshold and
+            // creates one deferred summary. The short entrance narration and
+            // post-tool reply do not, so this fixture is one complete turn rather than a chain
             // of summaries of summaries.
             compact_before_next_input_tokens: 700,
             keep_raw_messages: 1,
@@ -2113,6 +2114,8 @@ mod tests {
                     name: "approve_action".into(),
                     arguments: serde_json::json!({"action_id": stage + 1}).to_string(),
                 }];
+                // The NPCs who hear the narration each decide, with nothing to add.
+                let mut hearing_npcs = store.group_npc_ids(group).await.unwrap();
                 if stage == 0 {
                     let members: Vec<i64> = store
                         .party_presence(actor.character_id)
@@ -2122,6 +2125,7 @@ mod tests {
                         .map(|member| member.character_id)
                         .filter(|id| *id != mara_id && *id != isolated.character_id)
                         .collect();
+                    hearing_npcs.retain(|id| members.contains(id));
                     calls.push(ToolCall {id: "split-chat".into(), name: "split_group".into(), arguments: serde_json::json!({
                         "group_id": group, "partitions": [
                             {"character_ids": members, "name": "chat players", "description": "together"},
@@ -2133,6 +2137,7 @@ mod tests {
                         .character_group_id(isolated.character_id)
                         .await
                         .unwrap();
+                    hearing_npcs.extend(store.group_npc_ids(other).await.unwrap());
                     calls.push(ToolCall {id: "merge-chat".into(), name: "merge_groups".into(), arguments: serde_json::json!({"group_ids": [group, other], "name": "chat reunited", "description": "together"}).to_string()});
                 }
                 let narration = [
@@ -2156,10 +2161,38 @@ mod tests {
                         arguments: r#"{"description":"the room"}"#.into(),
                     }])),
                     reply(Content::ToolCalls(calls)),
-                    reply(Content::Text(narration.into())),
+                    reply(Content::ToolCalls(vec![ToolCall {
+                        id: format!("narrate-{stage}"),
+                        name: "narrate_group".into(),
+                        arguments: serde_json::json!({ "text": narration }).to_string(),
+                    }])),
                     reply(Content::Text("Done.".into())),
                 ]);
+                responses
+                    .lock()
+                    .unwrap()
+                    .extend(hearing_npcs.iter().map(|_| {
+                        reply(Content::ToolCalls(vec![ToolCall {
+                            id: format!("quiet-{stage}"),
+                            name: "do_nothing".into(),
+                            arguments: "{}".into(),
+                        }]))
+                    }));
                 game.player_message(actor, "Look around.").await.unwrap();
+                // The next stage queues its own responses, so the NPCs' must
+                // be used first.
+                for _ in 0..400 {
+                    let open: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM npc_response_collection WHERE state IN ('collecting', 'selected', 'executing')",
+                    )
+                    .fetch_one(&store.pool())
+                    .await
+                    .unwrap();
+                    if open == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
                 StatusCode::NO_CONTENT
             }
         };
