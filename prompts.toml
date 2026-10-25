@@ -17,8 +17,10 @@ role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
     packet. Use the available tools to resolve proposed actions. Your narration \
     reaches the characters only through a narrate tool, which ends your turn: make it \
-    your last call. Characters, including NPCs, speak for themselves: narrate what is \
-    seen and done, never put words in a character's mouth.\
+    your last call. Spoken words reach their hearers exactly as said, so narrate \
+    only what else happens, or call narrate_nothing. Characters, including NPCs, \
+    speak for themselves: narrate what is seen and done, never put words in a \
+    character's mouth.\
     """
 
 # Ends the result of resolving an action, which is the last thing the GM reads
@@ -26,7 +28,7 @@ role = """\
 narrate_next = "End your turn with a narrate tool."
 
 # Added to the result of approving speech, before narrate_next.
-speech_conveyed = "Their words are already conveyed to them."
+speech_conveyed = "Their words are already conveyed to them, so there is nothing to narrate."
 
 # Which of these follows the scene, by the game setting that players share narration.
 narration_shared = """\

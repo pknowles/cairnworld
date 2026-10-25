@@ -7707,7 +7707,7 @@ mod tests {
         };
         let (game, store, _db, first, _second) =
             two_player_bread_thief_game_with_limits(backend, limits).await;
-        fixed_context.max_chars.store(5000, Ordering::SeqCst);
+        fixed_context.max_chars.store(5400, Ordering::SeqCst);
 
         let narration =
             "The words hang in the smoky air of the hut while everyone waits. ".repeat(8);

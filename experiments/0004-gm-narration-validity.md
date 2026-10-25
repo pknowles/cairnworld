@@ -58,3 +58,22 @@ samples per variant:
 - A scene request that said "No player character is here yet" while the packet
   listed the player contradicted itself; it now names the player as about to
   arrive.
+
+## Speech policy (the fix)
+
+Reading the whole rendered prompt showed the GM was only ever told to narrate
+what is seen and done; that spoken words are delivered as said appeared only as a
+clause inside the `narrate_nothing` tool description. Replaying the captured
+request after a spoken line, 10 samples each:
+
+| Where "speech is already conveyed" is stated | `narrate_nothing` | Plain text | Other |
+|---|---|---|---|
+| Nowhere | 0 | 3 | 7 `narrate_group` |
+| GM role only | 0 | 0 | 10 `narrate_group` |
+| GM role and the approval result | 10 | 0 | 0 |
+| Approval result only | 6 | 1 | 3 `narrate_group` |
+
+Adopted: the role says spoken words reach their hearers as said, so narrate only
+what else happens or call `narrate_nothing`; the approval result for speech says
+the words are already conveyed so there is nothing to narrate. The GM still has
+every narrate tool. The device suite then passed with no invalid output (178 s).
