@@ -7,7 +7,8 @@ Status: not started. Nothing below has been decided or tried.
 Know what every part of the context each agent is sent costs, and whether each
 part earns its place. The model has a fixed context of 4096 tokens in the
 real-model tests, and prompt_standards.md says every addition has a cost. This
-plan finds the waste; it does not choose the remedy.
+plan finds the waste; it does not choose the remedy yet, but we need figure one
+out. Brainstorm with the user before implementing anything.
 
 Follow the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
 [coding standards](../coding_standards.md) and
