@@ -10,6 +10,9 @@ there yet". Remove and archive only verified completions.
   shared perception delivery and message-driven NPC responses, including Take,
   privacy and causal inspection; then tentative/committed intervention.
   Interrupt/Never mind exist; restraint and natural stopping are user-owned tuning.
+- [Model context size](llm-context-size.md): measure what each agent's context
+  is made of (tool definitions are about 59% of a GM request) and find what does
+  not earn its place. Problems to investigate only; no remedy is decided.
 - [Code quality checks](code-quality-checks.md): measure and enforce module
   boundaries, function complexity and duplication; correct the reported problems. DO NOT SKIP THIS - secodnd attempt after the first was "verified complete" spuriously.
 - [GM editing and lookup](gm-editing.md): whole-field and exact-text editing,
