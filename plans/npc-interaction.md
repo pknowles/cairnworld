@@ -301,7 +301,8 @@ rename-only checkpoint is needed.
   recipient before any delivery, and commit all delivered texts with the pending
   NPC work together. An invalid narration is answered, not repaired behind the
   GM's back: a call that is malformed, names foreign recipients, narrates before
-  its action is resolved, mixes with other calls or repeats is a rejected tool
+  its action is resolved, is followed by other calls or comes after a rejected
+  call is a rejected tool
   call, so the GM receives the error as the call's result and runs again; a
   plain-text answer receives an instruction message saying to narrate with one
   of the tools. Nothing is delivered for the invalid attempt, and earlier

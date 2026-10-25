@@ -16,10 +16,17 @@
 role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
     packet. Use the available tools to resolve proposed actions. Your narration \
-    reaches the characters only through a narrate tool, which ends your turn: call it \
-    alone, once your other calls have returned. Characters, including NPCs, speak for \
-    themselves: narrate what is seen and done, never put words in a character's mouth.\
+    reaches the characters only through a narrate tool, which ends your turn: make it \
+    your last call. Characters, including NPCs, speak for themselves: narrate what is \
+    seen and done, never put words in a character's mouth.\
     """
+
+# Ends the result of resolving an action, which is the last thing the GM reads
+# before narrating it.
+narrate_next = "End your turn with a narrate tool."
+
+# Added to the result of approving speech, before narrate_next.
+speech_conveyed = "Their words are already conveyed to them."
 
 # Which of these follows the scene, by the game setting that players share narration.
 narration_shared = """\
@@ -40,7 +47,7 @@ action_request = """\
     {actor} takes action {action_id}: a `{tool}` request with arguments \
     {arguments}. Judge it from the current scene. Call approve_action with \
     action_id {action_id} if it can happen, or reject_action with action_id \
-    {action_id} and a concise reason.{note}\
+    {action_id} and a concise reason, then end your turn with a narrate tool.{note}\
     """
 
 # Added to an NPC reply's request when others were chosen at the same moment.
@@ -52,20 +59,22 @@ tied_note = """\
     """
 
 # The first player character is about to enter a group nobody has narrated to.
+# {character} is their name.
 scene_request = """\
-    No player character is here yet. Narrate the scene, surroundings, and \
-    plot-relevant details the characters present can perceive.\
+    {character} is about to arrive. Before they do, narrate the scene, \
+    surroundings, and plot-relevant details the characters already here can \
+    perceive, with a narrate tool.\
     """
 
 # A player character has just finished creation. {character} is their name.
 entrance_request = """\
     {character} has just begun play here. Describe to {character} the scene, \
     surroundings, and plot-relevant details they can perceive, and tell everyone \
-    else how they arrive.\
+    else how they arrive, with a narrate tool.\
     """
 
 # Characters arrived or left. {change} states who.
-presence_request = "{change} Narrate this to the characters present."
+presence_request = "{change} Narrate this to the characters present, with a narrate tool."
 
 [gm.tools.approve_action]
 description = """\

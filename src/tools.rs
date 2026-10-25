@@ -104,8 +104,8 @@ impl Tool {
         }
     }
 
-    /// A tool whose completed call ends the turn. It must be the only call in
-    /// its response, made once the results it needs have been read.
+    /// A tool whose completed call ends the turn. It must be the last call in
+    /// its response, after calls that all succeeded.
     pub fn terminal(
         definition: ToolDefinition,
         execute: impl Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync + 'static,
@@ -204,13 +204,14 @@ pub fn is_terminal(tools: &[Tool], name: &str) -> bool {
         .any(|tool| tool.terminal && tool.definition.name == name)
 }
 
-/// Run one call. `alone` says whether it is the only call in its response,
-/// which a terminal tool requires.
+/// Run one call. `cannot_end_turn` says why this response cannot end the turn
+/// at this call, which a terminal tool requires it can: it is not the last call
+/// of its response, or an earlier call in the response was rejected.
 pub async fn execute(
     tools: &[Tool],
     call: &ToolCall,
     tool_execution_id: i64,
-    alone: bool,
+    cannot_end_turn: Option<&str>,
 ) -> Result<ToolOutcome> {
     let Some(tool) = tools.iter().find(|tool| tool.definition.name == call.name) else {
         return Ok(ToolOutcome::Rejected(format!(
@@ -218,10 +219,10 @@ pub async fn execute(
             call.name
         )));
     };
-    if tool.terminal && !alone {
+    if let Some(reason) = cannot_end_turn.filter(|_| tool.terminal) {
         return Ok(ToolOutcome::Rejected(format!(
-            "`{}` ends your turn, so it must be your only call in a response, made after you have the results you need. Call it again on its own.",
-            call.name
+            "`{}` ends your turn, so it must be the last call in a response and every call before it must succeed: {reason}. Call it again once that is so.",
+            call.name,
         )));
     }
     tool.execute(ToolCallContext {

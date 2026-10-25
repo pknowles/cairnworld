@@ -739,8 +739,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   exactly one terminal tool: `narrate_group`, `narrate_actor_and_others` (offered
   only when the turn has an actor), `narrate_characters` or `narrate_nothing`.
   `Tool::terminal` marks a tool whose completed call ends the turn with no closing
-  inference; `tools::execute` rejects it unless it is the only call in its
-  response, and `Turn::terminal_reminder` makes a plain-text answer an error: it is
+  inference; `tools::execute` rejects it unless it is the last call of its
+  response and no earlier call in it was rejected, and `Turn::terminal_reminder` makes a plain-text answer an error: it is
   logged, flagged (`message.reply_rejected`, migration 0010, shown with rejected
   tool calls as `output_rejected` in Developer Mode) and answered with the
   `narrate_reminder` instruction. The tool validates the call against the group

@@ -1422,8 +1422,8 @@ offer NPCs a response opportunity is undecided and not specially handled.
 Validate the call, action-resolution requirements and all audience references
 before delivering any text. Record actual recipients and content in one delivery
 transaction, with pending NPC work, then publish notifications. An invalid narration
-(malformed, foreign recipients, narrating before its action is resolved, mixed
-with other calls or repeated) is a rejected tool call: the GM receives the error
+(malformed, foreign recipients, narrating before its action is resolved,
+followed by other calls, after a rejected call, or repeated) is a rejected tool call: the GM receives the error
 as the result and runs again, and a plain-text answer receives an instruction
 saying to narrate with one of the tools. Nothing is delivered for the invalid
 attempt, and previously committed actions remain committed. A live game may

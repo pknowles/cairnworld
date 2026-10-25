@@ -316,6 +316,7 @@ pub async fn complete_with_call_context<B: Backend>(
                     tracing::error!(
                         agent_id = turn.branch.agent_id(),
                         inference_id = completion.inference_id,
+                        reply = ?response.content,
                         "plain-text reply refused: the model must end its turn with a terminal tool call"
                     );
                     store
@@ -374,6 +375,9 @@ pub async fn complete_with_call_context<B: Backend>(
             let mut pending_changes = Vec::new();
             // A completed terminal tool call ends the turn once the batch is done.
             let mut ended = false;
+            // Whether an earlier call in this response was rejected, so the
+            // response cannot be the one that ends the turn.
+            let mut batch_rejected = false;
             // Deliveries put messages into histories, possibly the caller's
             // own, so they wait until every call of the batch has its result:
             // a message between a call and a sibling's result would break the
@@ -389,11 +393,24 @@ pub async fn complete_with_call_context<B: Backend>(
                         .begin_tool_execution(*tool_execution_id)
                         .await
                         .with_context(|| format!("beginning tool call {}", tool_call.id))?;
+                    let later: Vec<&str> = calls
+                        .iter()
+                        .skip_while(|other| !std::ptr::eq(*other, tool_call))
+                        .skip(1)
+                        .map(|other| other.name.as_str())
+                        .collect();
+                    let cannot_end_turn = if !later.is_empty() {
+                        Some(format!("it was followed by {}", later.join(", ")))
+                    } else if batch_rejected {
+                        Some("an earlier call in the response was rejected".to_string())
+                    } else {
+                        None
+                    };
                     let outcome = tools::execute(
                         turn.tools,
                         tool_call,
                         *tool_execution_id,
-                        calls.len() == 1,
+                        cannot_end_turn.as_deref(),
                     )
                     .await
                     .with_context(|| format!("executing tool call {}", tool_call.id))?;
@@ -438,6 +455,7 @@ pub async fn complete_with_call_context<B: Backend>(
                     on_activity(format!("tool result {}: {result}", tool_call.id));
                     ended |=
                         status == "completed" && tools::is_terminal(turn.tools, &tool_call.name);
+                    batch_rejected |= status == "rejected";
                     if let Some(after_result) = after_result {
                         deliveries.push((tool_call.id.clone(), after_result));
                     }
@@ -1028,12 +1046,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_tool_beside_another_call_is_rejected_and_the_turn_continues() {
+    async fn terminal_tool_after_succeeding_calls_ends_the_turn_in_one_response() {
+        let (store, _db, agent_id) = test_store().await;
+        let backend = ScriptedBackend::new([response(
+            Content::ToolCalls(vec![
+                call("echo-1", "test_echo", test_echo_arguments("first")),
+                call("finish-1", "test_finish", test_echo_arguments("done")),
+            ]),
+            "",
+        )]);
+        let tools = [tools::test_echo(), tools::test_finish()];
+        complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(store.agent_branch(agent_id).await.unwrap(), &tools),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.inference_count().await.unwrap(), 1);
+        let entries = history(&store, agent_id).await;
+        assert!(
+            matches!(&entries[2].content, MessageContent::ToolResult { content, .. } if content.contains("first")),
+            "the earlier call ran first"
+        );
+        assert!(
+            matches!(&entries[3].content, MessageContent::ToolResult { content, .. } if content.contains("done")),
+            "then the terminal call ended the turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_tool_followed_by_another_call_is_rejected_and_the_turn_continues() {
         let (store, _db, agent_id) = test_store().await;
         let backend = ScriptedBackend::new([
             response(
                 Content::ToolCalls(vec![
+                    call("finish-1", "test_finish", test_echo_arguments("done")),
                     call("echo-1", "test_echo", test_echo_arguments("first")),
+                ]),
+                "",
+            ),
+            response(
+                Content::ToolCalls(vec![call(
+                    "finish-2",
+                    "test_finish",
+                    test_echo_arguments("done"),
+                )]),
+                "",
+            ),
+        ]);
+        let tools = [tools::test_echo(), tools::test_finish()];
+        complete(
+            &store,
+            &backend,
+            &Budget::new(Limits::default()),
+            scripted_turn(store.agent_branch(agent_id).await.unwrap(), &tools),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.inference_count().await.unwrap(), 2);
+        let entries = history(&store, agent_id).await;
+        let MessageContent::ToolResult { content, .. } = &entries[2].content else {
+            panic!("the rejected terminal call must be answered");
+        };
+        assert!(content.contains("last call"), "got {content}");
+        assert!(content.contains("followed by test_echo"), "got {content}");
+    }
+
+    #[tokio::test]
+    async fn terminal_tool_after_a_rejected_call_does_not_end_the_turn() {
+        let (store, _db, agent_id) = test_store().await;
+        let backend = ScriptedBackend::new([
+            response(
+                Content::ToolCalls(vec![
+                    call("echo-1", "test_echo", "{}".to_string()),
                     call("finish-1", "test_finish", test_echo_arguments("done")),
                 ]),
                 "",
@@ -1062,9 +1155,12 @@ mod tests {
         assert_eq!(store.inference_count().await.unwrap(), 2);
         let entries = history(&store, agent_id).await;
         let MessageContent::ToolResult { content, .. } = &entries[3].content else {
-            panic!("the rejected terminal call must be answered");
+            panic!("the terminal call after a rejection must be answered");
         };
-        assert!(content.contains("must be your only call"), "got {content}");
+        assert!(
+            content.contains("an earlier call in the response was rejected"),
+            "got {content}"
+        );
     }
 
     #[tokio::test]

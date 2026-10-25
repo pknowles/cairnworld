@@ -32,3 +32,29 @@ run. Runs shared the GPU with other work at times, which affects timing only.
   several calls in one response (`narrate_nothing`, `narrate_characters` and
   `narrate_group` together), every one of which is rejected, and inferences took
   up to 115 s. Not used.
+
+## Later findings (replaying one captured GM request)
+
+The GM request after approving a spoken line, replayed on the real model, 10
+samples per variant:
+
+| Variant | Plain text | Tool call |
+|---|---|---|
+| As is | 3 | 7 (all `narrate_group`) |
+| Without the "End your turn with a narrate tool" sentence in the approval result | 5 | 5 |
+| Only `narrate_group` and `narrate_nothing` offered | 6 | 4 |
+| Without Mara's scenario dialogue note | 3 | 7 |
+| Approval result adds "Their words are already conveyed to them." | 1 | 9 |
+| Result adds "narrate only what else they perceive, or narrate nothing." | 4 | 6 |
+
+- The model never chose `narrate_nothing` for a plain spoken line; it writes new
+  narration, sometimes as a long scripted scene instead of a call.
+- `tool_choice: required` in this mistral.rs does not constrain generation: 6 of
+  12 samples errored with "required but no tools were called". A stop sequence
+  at `</tool_call>` strips the tag and breaks parsing.
+- The model sends `approve_action` and a narrate call together and repeats the
+  identical pair after a rejection, so a narrate call must be allowed as the
+  last call of a response whose earlier calls succeeded.
+- A scene request that said "No player character is here yet" while the packet
+  listed the player contradicted itself; it now names the player as about to
+  arrive.

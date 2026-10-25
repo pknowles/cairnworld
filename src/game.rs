@@ -1358,6 +1358,7 @@ where
     ) -> Result<Vec<Narration>> {
         let group_id = self.store.character_group_id(member.character_id).await?;
         let prompts = prompts::current()?;
+        let character = self.store.character_name(member.character_id).await?;
         let mut narrations = Vec::new();
         if !self.store.group_scene_narrated(group_id).await? {
             let mut scene = self
@@ -1366,7 +1367,7 @@ where
                     sequence_id,
                     &budget,
                     &call,
-                    prompts.gm.scene_request.clone(),
+                    prompts::fill(&prompts.gm.scene_request, &[("character", &character)])?,
                     false,
                 )
                 .await?;
@@ -1374,7 +1375,6 @@ where
             scene.restrict_to(self.store.group_npc_ids(group_id).await?);
             narrations.push(scene);
         }
-        let character = self.store.character_name(member.character_id).await?;
         narrations.push(
             self.opening_turn(
                 member,
@@ -1565,19 +1565,21 @@ where
                     );
                     // The result is a report for the GM's later judgements; the
                     // acting player's own call receives its own result.
+                    let next = prompts::current()?.gm.narrate_next.clone();
                     match resolved.outcome {
                         // The GM saw the words in the request; it needs who heard them.
                         ActionOutcome::Applied(_) if !resolved.heard_by.is_empty() => {
                             Ok(ToolOutcome::Completed(format!(
-                                "Action {action_id} approved. Delivered as spoken to {}.",
-                                resolved.heard_by.join(", ")
+                                "Action {action_id} approved. Delivered as spoken to {}. {} {next}",
+                                resolved.heard_by.join(", "),
+                                prompts::current()?.gm.speech_conveyed
                             )))
                         }
                         ActionOutcome::Applied(result) => Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} approved. Outcome: {result}"
+                            "Action {action_id} approved. Outcome: {result} {next}"
                         ))),
                         ActionOutcome::Failed(reason) => Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} approved, but it could not be applied: {reason}"
+                            "Action {action_id} approved, but it could not be applied: {reason} {next}"
                         ))),
                         ActionOutcome::Rejected(_) => Ok(ToolOutcome::Rejected(format!(
                             "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
@@ -1635,8 +1637,9 @@ where
                         });
                     match resolved.outcome {
                         ActionOutcome::Rejected(_) => Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} rejected: {}",
-                            rejection.reason
+                            "Action {action_id} rejected: {} {}",
+                            rejection.reason,
+                            prompts::current()?.gm.narrate_next
                         ))),
                         ActionOutcome::Applied(_) | ActionOutcome::Failed(_) => {
                             Ok(ToolOutcome::Rejected(format!(
@@ -5436,6 +5439,56 @@ mod tests {
             ["A cold wind touches only you."]
         );
         assert_eq!(narrations(&scene.store, &scene.first).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_gm_may_approve_and_narrate_in_one_response() {
+        let scene = speech_scene().await;
+        for member in [&scene.first, &scene.second] {
+            scene
+                .store
+                .mark_character_present(member.character_id)
+                .await
+                .unwrap();
+        }
+        scene.responses.lock().unwrap().extend([
+            tool_call("look", serde_json::json!({"description": "the room"})),
+            response(Content::ToolCalls(vec![
+                ToolCall {
+                    id: "approve".into(),
+                    name: "approve_action".into(),
+                    arguments: serde_json::json!({"action_id": 1}).to_string(),
+                },
+                ToolCall {
+                    id: "narrate".into(),
+                    name: "narrate_group".into(),
+                    arguments: serde_json::json!({"text": "The room is bare."}).to_string(),
+                },
+            ])),
+            response(Content::Text(String::new())),
+            do_nothing(),
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Look around.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+
+        assert_eq!(
+            narrations(&scene.store, &scene.second).await,
+            ["The room is bare."]
+        );
+        // The player's request, one GM response holding both calls, the
+        // player's finish, then Mara and Toma.
+        assert_eq!(scene.requests.lock().unwrap().len(), 5);
+        let rejected: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tool_execution WHERE status = 'rejected'")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(rejected, 0);
     }
 
     #[tokio::test]
