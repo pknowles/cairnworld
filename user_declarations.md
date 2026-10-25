@@ -29,21 +29,26 @@ World building is done through iterations of meta-questions and questions.
 answers and summaries.
 
 The Questioner is first given the input world prompt, some example questions and
-some hard coded meta-questions which it must initially ask itself and expand
-into concrete questions, ultimately making a list of questions for the
-Storyteller.
+some hard coded meta-questions which the questioner itself is initially asked by
+the system. It gets one round to answer the meta questions. It is then asked in
+a second inference to ask the Storyteller questions that either prompt a
+realistic RPG world generation or fill gaps in the existing world, setting and
+plot. Either that or respond saying the world is solid and complete enough to
+begin play.
 
-The Storyteller must answer each question in turn with a high LLM temperature
-(if the model supports it). This expands the seed and story variance. Once done
-it is asked to make a world summary. Only the summary is returned to the
-Questioner, which makes follow-up questions. The Storyteller runs again, but
-this time starting only with the world prompt and its most recent summary (the
-answers from the previous session should now be in the summary). Again it
-answers each in turn and makes a new summary. It is told that it may drop ideas
-from the previous summary that no longer make sense or work for a cohesive story
-after reviewing the previous answers. This process loops until the Questioner is
-satisfied the world feels complete or some limit is reached. The final "world
-summary" and the world/campaign name is the product.
+The Storyteller is also given the initial world prompt and the initial Storyteller's questions must answer each question in turn with a high LLM temperature
+(if the model supports it) just as text output to itself. This expands the seed
+and story variance. Once done it is asked to write a world summary. Only the
+summary is returned to the Questioner, which makes follow-up questions. The
+Storyteller runs again, but this time starting only with the world prompt and
+its most recent summary (the answers from the previous session should now be in
+the summary). Again it answers each in turn, then the code asks it to remake or
+make changes to the summary based on the answers and discussion so far. It is
+told that it may drop ideas from the previous summary that no longer make sense
+or work for a cohesive story after reviewing the previous answers. This process
+loops until both the Questioner is satisfied the world feels complete or some
+limit is reached. The final "world summary" and the world/campaign name is the
+product.
 
 The looping above is split into the following phases. The questioner is simply
 prompted with these phases, which will flow through to the Storyteller.
@@ -52,13 +57,19 @@ prompted with these phases, which will flow through to the Storyteller.
 - Expanding to important locations, where the NPCs start, how many other NPCs in their party, supporting NPCs at each location
 - Expanding to intermediate locations, less important NPCs and world details to make the setting feel alive
 
-Possible future idea: *freeze* summary sections after each phase to avoid the
-model having to regurgitate the same text that likely didn't change.
+The storyteller will have access to the standard text editing tools - same as
+the GM (but it gets access to storyteller fields that the GM cannot edit).
 
 My thinking is the Questioner is like an explicit reasoning model where we have
 fine grain control over how much thinking is done before the final output is
 accepted. Maybe there's already technologies that could do this more robustly.
 I'd be interested to know.
+
+The Questoiner and Storyteller behave a little as adversaries, working to
+improve the world and setting until both are satisified. This will likely need
+tuning so they do actually settle eventually. I expect getting the prompts to
+request the right scope and depth for the local LLM sizes we can support will be
+key. It must implicitly know the right balance of NPC background, location description to request.
 
 Some examples of meta-questions and questions are below. Testing the
 initialization loop with a few of these and evaluating would be important. Maybe
@@ -172,6 +183,13 @@ trying to further consolidate too.
   - What would the most cautious, exploitative, compassionate, and violent players each do first?
   - Is the interesting part deciding what to do, rather than discovering what the designer expects?
 
+- **Review questions**
+  - Which are the most confusing aspects of the world?
+  - Do any elements to the setting or story contradict each other?
+  - What ideas are unbelievable and is that a good thing or a bad thing?
+  - If you were to rewrite this from scratch, which things would you most like to change?
+  - If you had to cut this down a lot, what would you keep and what important aspects would be lost? Why are they important?
+
 ## Storyteller initialization output and tools
 
 At some point the storyteller must be able to initialize game state. The world
@@ -192,7 +210,13 @@ Introducing randomness in LLMs is difficult. One thing I'm tempted to try is
 injecting a pile of random nouns, adjectives (and maybe a few numbers in
 different scales) into the prompt that may trigger more variance without relying
 on LLM "temperature" to do all the work. They would simply be declared as random
-items to draw from. Maybe it'd just confuse the LLM but worth checking.
+items to draw from. Maybe it'd just confuse the LLM but worth checking. Another
+idea is to randomly pick seed questions from above which would ideally add new
+concepts.
+
+Ideally the story should start small and simple. We get that working well first.
+Later, the world and setting can grow during gameplay, with the storyteller
+adding more detail and side plots.
 
 ## Character creation
 
@@ -783,6 +807,10 @@ Game objects
   - Name and ID - the ID is charN where N is a small unique number
     calls to uniquely identify the character
   - Character sheet info
+    - Core stats
+    - Includes a background/backstory that the storyteller typically writes.
+      This is private and not visible to other characters. It should guide how
+      NPCs behave.
   - InCombat, Moved and Acted booleans for combat actions
   - Time
   - Group - both a reference to the group object and a string description within
@@ -810,16 +838,17 @@ Game objects
     road to another city. It could be the door to a tavern within a city, or its
     stairs to a mysteriously large basement.
 - World state
+  - Summary - written by the Storyteller at world creation and contains lots of spoilers; much larger than storyteller notes and also editable
   - Time
   - Initial prompt (just for record; unused except for initialization input)
   - Storyteller summary
-  - Next action ID
+  - Next free action ID to allocate from
 - ItemType
   - Description
   - Relevant stats, if weapons/armor etc. (type safe/structured)
 - Item
   - ItemType
-  - Location ID and description - could be in a character's inventory or at a
+  - Location ID or Character ID and description - could be in a character's inventory or at a
     location in a locked/trapped chest
   - Unique Description - optional.
   - Storyteller trigger?
@@ -1034,21 +1063,22 @@ indirectly explains why this happened to connect the character with the story.
 - Accept - a character's agent must approve an item being given to them or taken
   from them. If it's a player character, the agent would ask the player if they
   accept and make the returning call appropriately.
-- Look/Investigate/Open/Ask - more of a catch-all chat-with-the-gm. The
-  character agent may want more information about their surroundings from the
-  GM, to clarification something previously said or to actually spend time
-  searching for something. The GM may additionally require a save or advance
-  time. The GM may reject the request saying that that this is the middle of
-  combat and would cost an action and may leave them more vulnerable to attack
-  if the choose to proceed. The player should be able to acknowledge this and
-  make a second request to proceed regardless. Note that this example is a
-  rejection with a suggestion followed by a retry with an acknowledgement. The
-  GM LLM must be capable of performing this little dance as it will be common
-  during play and custom situation resolution. There is no structured "retry";
-  my hope is that the GM agent will recognise the retry, particularly if its
-  prompt implies this proceedure and the player agent's prompt suggests to
-  include the text "risk aside/nevertheless, spending the action to...". An
-  alternative would be a separate confirmation dialog.
+- Look/Investigate/Open/Ask - more of a catch-all chat-with-the-gm where the GM
+  may update world state as a result. The character agent may want more
+  information about their surroundings from the GM, to clarification something
+  previously said or to actually spend time searching for something. The GM may
+  additionally require a save or advance time. The GM may reject the request
+  saying that that this is the middle of combat and would cost an action and may
+  leave them more vulnerable to attack if the choose to proceed. The player
+  should be able to acknowledge this and make a second request to proceed
+  regardless. Note that this example is a rejection with a suggestion followed
+  by a retry with an acknowledgement. The GM LLM must be capable of performing
+  this little dance as it will be common during play and custom situation
+  resolution. There is no structured "retry"; my hope is that the GM agent will
+  recognise the retry, particularly if its prompt implies this proceedure and
+  the player agent's prompt suggests to include the text "risk
+  aside/nevertheless, spending the action to...". An alternative would be a
+  separate confirmation dialog.
 - Wait - skips the remainder of their turn if in combat, waits a given amount of
   time. This could default to waiting to catch up to world time (e.g. waiting
   for another PC to finish doing something). If the wait is significant (i.e.
@@ -1158,12 +1188,56 @@ they fail to notice the trap, the GM uses TakeDamage as the penalty, unless they
 can roll a DEX save to jump out of the way in time. When the player finally
 opens the chest, the GM describes the item they found.
 
+## Storyteller and Questioner tools
 
+During the initial world creation stage, much like character creation, the
+storyteller has access to the following tools. It will be prompted in a loop to
+complete and review phases until it marks it done and calls BeginWorld. The
+storyteller should receive stats after changes to help it know what might be
+missing, for example connection, npc and item counts.
 
-## Storyteller tools
+- CreateLocation/Connection/NPC/Group/ItemType/Item - initial attributes and details for all fields must be given in the tool call.
+- UpdateLocation/Connection/NPC/Group/ItemType/Item - Just like create, but supports replacing individual fields without specifing them all. 
+- DeleteLocation/Connection/NPC/Group/ItemType/Item
+- Storyteller notes text editing tools (See "Game state" section)
+- BeginWorld - called when the storyteller believes they have completed world creation and the state is ready for player characters to enter and play to begin. This ends world creation, but does not start play until characters join.
+
+We may need to create some prefab ItemTypes to make it easier for the
+storyteller; not sure yet.
+
+Validation must include making sure locations are fully connected, necessary
+fields such as the NPC background, motives etc are populated. ItemTypes have
+Items. Some validation is implicit, e.g. you can't have an item that is not at a
+location or in a player's inventory. These will already be instructions to the
+GM but we validate what we can and give the storyteller a chance to fix/update
+things.
+
+During world generation the storyteller should be given instructions to
+highlight character names, important items and locations with special syntax. We
+should then parse this and remind the storyteller which it has not created. This
+is non-blocking reminder and the storyteller will be explicitly
+instructed to ignore those it ultimately decides do not need to exist. We help it; we do not force things.
+
+The Questioner is far simpler and can only ask questions or make a tool call to
+say it is satisfied. It does not get access to any of the storyteller's answers
+or chat history. All it can see is the elements of the world that the
+storyteller creates. It then must reply with one of two structured responses:
+
+- AskQuestions - the world is implicitly incomplete and the questioner must indirectly ask a question that invites closing the gap. As though a reviewer skips the complaint and jumps straight to a clairfying question that gets at the core of the remaining issue(s).
+- WorldIsComplete
+
+Once the game is in progress, the storyteller loses access to BeginWorld and gains:
 
 - EndWorld - concludes the game for all players with a text narration of the
   immediate ending and begins the epilogue sequence.
+
+Developer mode should show both Storyteller and Questioner, just like other agents and their interactions.
+
+World generation happens async to the UI. Players can enter the world; they just
+can't act yet and their player creation cannot begin until world generation
+completes. If there is an error during world creation, players see this as they
+would other errors and the world is simply stuck. They can enable developer mode
+and inspect how far world generation got and exactly where it went wrong.
 
 ## Spell ideas
 
@@ -1202,8 +1276,10 @@ After logging in in with OAuth2, e.g. a google account they see more. We only al
 
 Each world is a game instance. When users create a world it's a new playable
 game setting. When they do they can optionally provide a seed prompt that is fed
-to the Storyteller agent for world initialization. This prompt is hidden by
-default but can be expanded.
+to the Storyteller agent for world initialization. The world title is shown. The
+seed prompt is hidden by default but can be expanded. The world has a summary,
+which is the main detail document for the campaign but this is private and not
+shown here - only visible in developer mode when inspecting the world object.
 
 There is no enforced limit on the number of worlds that can be created.
 
