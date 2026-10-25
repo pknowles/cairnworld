@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT npc_agent.agent_id, agent.world_id FROM npc_agent JOIN agent ON agent.id = npc_agent.agent_id WHERE npc_agent.character_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "world_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6adb8760fbf08a7137f33f03aea5572c92cf7b32c137dcd0947d2d663e96d954"
+}

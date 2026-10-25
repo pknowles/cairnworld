@@ -14,7 +14,7 @@ use super::Game;
 use crate::{
     llm::{Backend, ToolDefinition},
     prompts,
-    store::{Narration, NarrationText},
+    store::{Narration, NarrationText, PendingAction},
     tools::{Tool, ToolFuture, ToolOutcome},
 };
 
@@ -28,9 +28,15 @@ pub(super) struct NarrationScope {
     /// The character whose action or arrival is being narrated, when there is
     /// one. Only then is `narrate_actor_and_others` available.
     pub actor: Option<i64>,
-    /// An action the GM must approve or reject before narrating.
-    pub unresolved_action: Option<i64>,
+    /// The actions the GM was presented this turn: the one it is judging and any
+    /// reactions it asked for. Each must be approved or rejected before
+    /// narrating. The list grows during the turn.
+    pub presented: PresentedActions,
 }
+
+/// Actions presented to the GM in one turn, shared by the tools that resolve
+/// and narrate them.
+pub(super) type PresentedActions = Arc<Mutex<Vec<PendingAction>>>;
 
 /// The narrate tools of one GM turn, and the narration its call captured.
 pub(super) struct NarrationTools {
@@ -260,15 +266,23 @@ where
                     "Tool arguments were rejected: character {stranger} is not in this group"
                 )));
             }
-            if let Some(action_id) = scope.unresolved_action
-                && game
+            let presented: Vec<i64> = scope
+                .presented
+                .lock()
+                .expect("presented actions lock poisoned")
+                .iter()
+                .map(|action| action.id)
+                .collect();
+            for action_id in presented {
+                if game
                     .store
                     .has_pending_action(scope.world_id, action_id)
                     .await?
-            {
-                return Ok(ToolOutcome::Rejected(format!(
-                    "Tool arguments were rejected: action {action_id} is not yet approved or rejected; resolve it before narrating"
-                )));
+                {
+                    return Ok(ToolOutcome::Rejected(format!(
+                        "Tool arguments were rejected: action {action_id} is not yet approved or rejected; resolve it before narrating"
+                    )));
+                }
             }
             let nothing = draft.texts.is_empty();
             *captured.lock().expect("narration lock poisoned") = Some(draft.texts);

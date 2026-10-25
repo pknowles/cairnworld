@@ -849,3 +849,23 @@ narrated with no player present:
 The plan therefore narrates the scene to the group first, then the entrance with
 the entering character as the actor, and adds no handling for NPC responses to
 the scene narration.
+
+## 2026-10-25 Narrate as the last call; InterventionCheck built
+
+Decision for the user to confirm. The plan required the GM's narrate call to be
+the only call in its response. On the real model that looped: the model sends
+`approve_action` and a narrate call together and repeats the identical pair after
+every rejection. The code now treats a narrate call as the last call of its
+response, valid when every earlier call succeeded, and the GM is told in each
+request and action result to end its turn with a narrate tool. The user's own
+words on this: "can it trivially work if you just accept all tool calls with
+narration as the final response?"
+
+InterventionCheck and the `committed` flag on Take follow the plan's section on
+the intervention lifecycle; the plan's verification cases for them were not
+reviewed with the user first, so the scripted cases written are the ones in
+`src/game.rs` (`a_warning_from_an_npc_can_stop_a_tentative_take_before_it_happens`,
+`a_committed_take_goes_ahead_and_the_gm_is_told_it_is_committed`,
+`an_intervention_check_only_asks_npcs_other_than_the_actor_about_the_presented_action`,
+`a_proposed_reaction_must_be_decided_before_the_gm_narrates`,
+`an_intervention_check_where_nobody_objects_changes_nothing`).

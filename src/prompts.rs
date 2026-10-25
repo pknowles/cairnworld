@@ -61,6 +61,7 @@ pub struct Player {
 pub struct Npc {
     pub role: String,
     pub situation: String,
+    pub intervention_request: String,
     pub eagerness: String,
     pub tools: Tools,
 }

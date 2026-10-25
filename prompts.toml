@@ -130,6 +130,17 @@ description = """\
     Ends your turn.\
     """
 
+[gm.tools.intervention_check]
+description = """\
+    Before you decide a presented action, ask characters whether they intervene. \
+    Each may propose a reaction, which comes back as an action id you can approve \
+    or reject; a reaction does not stop the action by itself.\
+    """
+
+[gm.tools.intervention_check.arguments]
+action_id = "The visible action id they may intervene in."
+character_ids = "The NPCs to ask. Not the character taking the action."
+
 [gm.tools.split_group]
 description = """\
     Split this group into separate groups when characters go their own ways. \
@@ -258,6 +269,7 @@ description = """\
 
 [player.tools.take.arguments]
 item = "The exact item name from the current scene."
+committed = "True only if the character takes it even when someone objects; normally false."
 
 # ---------------------------------------------------------------------------
 # Non-player characters deciding whether to answer what they heard.
@@ -276,6 +288,12 @@ role = """\
 situation = """\
     Your situation:
 {scene}\
+    """
+
+# Asked of an NPC before an action happens. {actor} {tool} {arguments}.
+intervention_request = """\
+    {actor} is about to act: a `{tool}` request with arguments {arguments}. Say or \
+    whisper to intervene, or do nothing.\
     """
 
 # Added to say and whisper when an NPC calls them.

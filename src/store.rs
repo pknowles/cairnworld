@@ -618,6 +618,10 @@ struct PendingActionRow {
 #[serde(deny_unknown_fields)]
 struct TakeItemArguments {
     item: String,
+    // Tells the GM how firmly the character takes it; it does not change what
+    // the take does once approved.
+    #[serde(default, rename = "committed")]
+    _committed: bool,
 }
 
 impl From<PendingActionRow> for PendingAction {

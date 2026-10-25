@@ -13,9 +13,12 @@ use super::{Budget, CallContext, Game};
 use crate::{
     context::{self, RecordedCompletion},
     inspection::DevEvent,
-    llm::{Backend, Message, Role},
+    llm::{Backend, Message, Role, ToolCall},
     prompts,
-    store::{Decision, NpcStep, ResponseCollection, SayAction, WhisperAction, with_eagerness},
+    store::{
+        AgentBranch, Decision, NpcStep, ResponseCollection, SayAction, WhisperAction,
+        with_eagerness,
+    },
     world::{ChatChange, World},
 };
 
@@ -77,66 +80,24 @@ where
         let mut inference_id = None;
         let result: Result<()> = async {
             budget.spend(0).context("the discussion's budget")?;
-            self.backend
-                .before_agent(&self.store, claim.branch, &world.events)
-                .await
-                .context("waiting for earlier deferred work for this NPC")?;
-            let scene = serde_json::to_string(&self.store.npc_scene(character_id).await?)
-                .context("serializing the NPC's scene")?;
-            let prompts = prompts::current()?;
-            let facts = prompts::fill(&prompts.npc.situation, &[("scene", &scene)])?;
-            let speech = |name: &str, schema: serde_json::Value| -> Result<_> {
-                let mut definition = prompts.shared.tools.tool(name, schema)?;
-                definition.schema = with_eagerness(definition.schema, &prompts.npc.eagerness);
-                Ok(definition)
-            };
-            let tools = [
-                prompts.npc.tools.tool("do_nothing", prompts::no_arguments())?,
-                speech(
-                    "say",
-                    serde_json::to_value(schema_for!(SayAction))
-                        .expect("say action schema should serialize"),
-                )?,
-                speech(
-                    "whisper",
-                    serde_json::to_value(schema_for!(WhisperAction))
-                        .expect("whisper action schema should serialize"),
-                )?,
-            ];
-            let completion = context::complete_recorded(
-                &self.store,
-                &self.backend,
-                RecordedCompletion {
-                    events: world.events.clone(),
-                    branch: claim.branch,
-                    sequence_id: Some(claim.sequence_id),
-                    invocation_id: claim.invocation_id,
-                    static_messages: &[Message::text(Role::System, &prompts.npc.role)],
-                    dynamic_context: &[facts.as_str()],
-                    tools: &tools,
-                    ending_tools: &[],
-                    sampling: self.sampling.clone(),
-                    model: &self.model,
-                    compact_before_next_input_tokens: self.limits.compact_before_next_input_tokens,
-                },
-                |_| {},
-            )
-            .await
-            .context("running the NPC's decision inference")?;
-            inference_id = Some(completion.inference_id);
-            let (call, decision) = Decision::parse(&completion.response.content)?;
-            if let Decision::Propose(proposal) = &decision {
-                match proposal.tool {
-                    "say" => super::validate_say_action(&proposal.arguments)?,
-                    _ => super::validate_whisper_action(&proposal.arguments)?,
-                }
-            }
-            let recorded = match decision {
-                Decision::Nothing => "You stay silent.",
-                Decision::Propose(_) => "Your words are recorded. They are said only if the GM allows it and nobody wants to act more.",
-            };
+            let (decision_inference, call, decision) = self
+                .ask_npc(
+                    world,
+                    claim.branch,
+                    claim.sequence_id,
+                    claim.invocation_id,
+                    character_id,
+                    &mut inference_id,
+                )
+                .await?;
             self.store
-                .finish_npc_decision(&claim, completion.inference_id, &call, recorded, budget.spent())
+                .finish_npc_decision(
+                    &claim,
+                    decision_inference,
+                    &call,
+                    decision_result(&decision),
+                    budget.spent(),
+                )
                 .await
         }
         .await;
@@ -147,6 +108,78 @@ where
             result,
         )
         .await
+    }
+
+    /// Ask an NPC for one decision from its own history: exactly one
+    /// `do_nothing`, `say` or `whisper`. `inference_id` is set as soon as the
+    /// model has answered, so a caller can close a call that then fails.
+    pub(super) async fn ask_npc(
+        self: &Arc<Self>,
+        world: &Arc<World>,
+        branch: AgentBranch,
+        sequence_id: i64,
+        invocation_id: i64,
+        character_id: i64,
+        inference_id: &mut Option<i64>,
+    ) -> Result<(i64, ToolCall, Decision)> {
+        self.backend
+            .before_agent(&self.store, branch, &world.events)
+            .await
+            .context("waiting for earlier deferred work for this NPC")?;
+        let scene = serde_json::to_string(&self.store.npc_scene(character_id).await?)
+            .context("serializing the NPC's scene")?;
+        let prompts = prompts::current()?;
+        let facts = prompts::fill(&prompts.npc.situation, &[("scene", &scene)])?;
+        let speech = |name: &str, schema: serde_json::Value| -> Result<_> {
+            let mut definition = prompts.shared.tools.tool(name, schema)?;
+            definition.schema = with_eagerness(definition.schema, &prompts.npc.eagerness);
+            Ok(definition)
+        };
+        let tools = [
+            prompts
+                .npc
+                .tools
+                .tool("do_nothing", prompts::no_arguments())?,
+            speech(
+                "say",
+                serde_json::to_value(schema_for!(SayAction))
+                    .expect("say action schema should serialize"),
+            )?,
+            speech(
+                "whisper",
+                serde_json::to_value(schema_for!(WhisperAction))
+                    .expect("whisper action schema should serialize"),
+            )?,
+        ];
+        let completion = context::complete_recorded(
+            &self.store,
+            &self.backend,
+            RecordedCompletion {
+                events: world.events.clone(),
+                branch,
+                sequence_id: Some(sequence_id),
+                invocation_id,
+                static_messages: &[Message::text(Role::System, &prompts.npc.role)],
+                dynamic_context: &[facts.as_str()],
+                tools: &tools,
+                ending_tools: &[],
+                sampling: self.sampling.clone(),
+                model: &self.model,
+                compact_before_next_input_tokens: self.limits.compact_before_next_input_tokens,
+            },
+            |_| {},
+        )
+        .await
+        .context("running the NPC's decision inference")?;
+        *inference_id = Some(completion.inference_id);
+        let (call, decision) = Decision::parse(&completion.response.content)?;
+        if let Decision::Propose(proposal) = &decision {
+            match proposal.tool {
+                "say" => super::validate_say_action(&proposal.arguments)?,
+                _ => super::validate_whisper_action(&proposal.arguments)?,
+            }
+        }
+        Ok((completion.inference_id, call, decision))
     }
 
     /// Publish the step's outcome: a failure is recorded on the discussion
@@ -217,5 +250,15 @@ where
             result,
         )
         .await
+    }
+}
+
+/// What an NPC is told once its decision is recorded.
+pub(super) fn decision_result(decision: &Decision) -> &'static str {
+    match decision {
+        Decision::Nothing => "You stay silent.",
+        Decision::Propose(_) => {
+            "Your words are recorded. They are said only if the GM allows it and nobody wants to act more."
+        }
     }
 }

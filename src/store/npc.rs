@@ -708,16 +708,43 @@ impl Store {
             .begin()
             .await
             .context("finishing an NPC decision")?;
+        Self::record_decision_call(
+            &mut transaction,
+            claim.branch.branch_id,
+            claim.invocation_id,
+            inference_id,
+            call,
+            result,
+        )
+        .await?;
+        Self::finish_sequence_in(&mut transaction, claim.sequence_id, None).await?;
+        Self::save_discussion_budget(&mut transaction, claim.root_sequence_id, spent).await?;
+        transaction
+            .commit()
+            .await
+            .context("committing an NPC decision")
+    }
+
+    /// Give an NPC's decision call its result in the NPC's history and end the
+    /// invocation that asked for it. Returns the call's tool execution.
+    async fn record_decision_call(
+        transaction: &mut Transaction<'_, Sqlite>,
+        branch_id: i64,
+        invocation_id: i64,
+        inference_id: i64,
+        call: &ToolCall,
+        result: &str,
+    ) -> Result<i64> {
         let execution_id = sqlx::query_scalar!(
             "INSERT INTO tool_execution (inference_id, ordinal, status) VALUES (?, 0, 'running') RETURNING id",
             inference_id,
         )
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await
         .context("recording the decision call")?;
         let (_, content_id) = Self::insert_message(
-            &mut transaction,
-            claim.branch.branch_id,
+            transaction,
+            branch_id,
             &Message::tool_result(call.id.clone(), result.to_string()),
             Some(inference_id),
             Some(execution_id),
@@ -731,22 +758,126 @@ impl Store {
             content_id,
             execution_id,
         )
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .context("completing the decision call")?;
         sqlx::query!(
             "UPDATE invocation SET finished_at = CURRENT_TIMESTAMP, outcome = 'settled' WHERE id = ?",
-            claim.invocation_id,
+            invocation_id,
         )
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .context("finishing the decision invocation")?;
-        Self::finish_sequence_in(&mut transaction, claim.sequence_id, None).await?;
-        Self::save_discussion_budget(&mut transaction, claim.root_sequence_id, spent).await?;
+        Ok(execution_id)
+    }
+
+    /// The history an NPC reads and writes.
+    pub async fn npc_branch(&self, character_id: i64) -> Result<AgentBranch> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("finding an NPC's history")?;
+        let row = sqlx::query!(
+            "SELECT npc_agent.agent_id, agent.world_id FROM npc_agent \
+             JOIN agent ON agent.id = npc_agent.agent_id WHERE npc_agent.character_id = ?",
+            character_id,
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("finding the NPC's agent")?
+        .with_context(|| format!("character {character_id} is not an NPC"))?;
+        let branch_id = super::history::branch_for_agent(&mut transaction, row.agent_id).await?;
+        Ok(AgentBranch {
+            world_id: row.world_id,
+            agent_id: row.agent_id,
+            branch_id,
+        })
+    }
+
+    /// Record an NPC's answer to an InterventionCheck: the decision call and
+    /// its result, ending the invocation that asked. Returns the call's tool
+    /// execution, which a proposed reaction is requested by.
+    pub async fn record_reaction(
+        &self,
+        branch: AgentBranch,
+        invocation_id: i64,
+        inference_id: i64,
+        call: &ToolCall,
+        result: &str,
+    ) -> Result<i64> {
+        let mut transaction = self.pool.begin().await.context("recording a reaction")?;
+        let execution_id = Self::record_decision_call(
+            &mut transaction,
+            branch.branch_id,
+            invocation_id,
+            inference_id,
+            call,
+            result,
+        )
+        .await?;
         transaction
             .commit()
             .await
-            .context("committing an NPC decision")
+            .context("committing a reaction")?;
+        Ok(execution_id)
+    }
+
+    /// An NPC's answer to an InterventionCheck failed: close any call of its
+    /// inference that got no result and end the invocation with the real error.
+    pub async fn fail_reaction(
+        &self,
+        invocation_id: i64,
+        inference_id: Option<i64>,
+        error: &str,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin().await.context("failing a reaction")?;
+        if let Some(inference_id) = inference_id {
+            Self::close_tool_calls(
+                &mut transaction,
+                inference_id,
+                &CallClosure::Failed {
+                    failing_execution_id: None,
+                    error,
+                },
+            )
+            .await?;
+        }
+        sqlx::query!(
+            "UPDATE invocation SET finished_at = CURRENT_TIMESTAMP, outcome = 'error' \
+             WHERE id = ? AND finished_at IS NULL",
+            invocation_id,
+        )
+        .execute(&mut *transaction)
+        .await
+        .context("ending the failed reaction")?;
+        transaction
+            .commit()
+            .await
+            .context("committing a failed reaction")
+    }
+
+    /// Submit a selected NPC reaction to the GM as a pending action of its own.
+    pub async fn create_reaction_action(
+        &self,
+        world_id: i64,
+        character_id: i64,
+        sequence_id: i64,
+        requesting_tool_execution_id: i64,
+        tool: &str,
+        arguments: &str,
+    ) -> Result<PendingAction> {
+        self.create_pending_action(
+            &CharacterActor {
+                world_id,
+                character_id,
+            },
+            sequence_id,
+            requesting_tool_execution_id,
+            tool,
+            arguments,
+        )
+        .await
     }
 
     async fn save_discussion_budget(

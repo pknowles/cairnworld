@@ -752,6 +752,18 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `[game] players_share_narration` rule (`Game::gm_packet`, `GameSettings`, on by
   default) stated as a fact for the GM's choice of narrate tool. Compaction obligations also
   arise from a lone terminal call (`CompactionPolicy::ending_tools`).
+- Tentative and committed actions, InterventionCheck (`arbitrate` in
+  `src/game.rs`). `take` carries `committed` (default false), which the GM reads in
+  the recorded request; Rust does not act on it. The GM's `intervention_check`
+  names the presented action and NPCs in the actor's group (not the actor, not
+  players). Each NPC is asked in the GM's call as a child invocation
+  (`Game::ask_npc`, the same decision a response collection asks for, plus an
+  `npc.intervention_request` in its history), answers do_nothing, say or whisper,
+  and the strongest proposals become pending actions of their own
+  (`Store::create_reaction_action`). Those join the turn's `PresentedActions`: the
+  GM approves or rejects each with the ordinary tools, and narration is refused
+  until every presented action is decided. Nobody is blocked by proposing, and a
+  committed retry is the GM's to approve. Nested work spends the turn's budget.
 - Group-scoped narration. `Store::append_group_narration` selects connected
   active PCs inside one transaction and commits every recipient reference together.
   `append_presence_narration` also advances the narrated snapshot in that transaction.

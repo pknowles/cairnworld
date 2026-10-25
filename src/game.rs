@@ -9,7 +9,7 @@ use std::{
 mod narration;
 mod npc;
 
-use narration::{NarrationScope, NarrationTools};
+use narration::{NarrationScope, NarrationTools, PresentedActions};
 
 use anyhow::{Context, Result, ensure};
 use schemars::{JsonSchema, schema_for};
@@ -26,8 +26,8 @@ use crate::{
     prompts,
     settings::{GameSettings, Limits},
     store::{
-        ActionOutcome, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration, PendingAction,
-        PlayerAgent, PresenceNarration, SayAction, Store, WhisperAction,
+        ActionOutcome, Decision, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration,
+        PendingAction, PlayerAgent, PresenceNarration, SayAction, Store, WhisperAction,
     },
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
@@ -701,7 +701,7 @@ where
                 world_id,
                 in_group: online[0],
                 actor: None,
-                unresolved_action: None,
+                presented: PresentedActions::default(),
             },
         )?;
         let reminder = narrate.reminder()?;
@@ -1422,7 +1422,7 @@ where
                 world_id: member.world_id,
                 in_group: member.character_id,
                 actor,
-                unresolved_action: None,
+                presented: PresentedActions::default(),
             },
         )?;
         let reminder = narrate.reminder()?;
@@ -1488,8 +1488,9 @@ where
         // not an error - a later rejection reason can never replace an
         // earlier approval's result, or vice versa.
         let prompts = prompts::current()?;
+        let presented: PresentedActions = Arc::new(Mutex::new(vec![pending.clone()]));
         let game = Arc::clone(self);
-        let approval_pending = pending.clone();
+        let approval_presented = Arc::clone(&presented);
         let gm_tool = Tool::new(
             prompts.gm.tools.tool(
                 "approve_action",
@@ -1500,19 +1501,23 @@ where
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
-                let approval_pending = approval_pending.clone();
+                let presented = Arc::clone(&approval_presented);
                 Box::pin(async move {
                     let approval: ApproveAction =
                         match serde_json::from_str(&arguments).context("parsing action approval") {
                             Ok(approval) => approval,
                             Err(error) => return Ok(ToolOutcome::rejected(error)),
                         };
-                    if approval.action_id != action_id {
+                    // The action it was presented, or a reaction it asked for.
+                    let Some(approval_pending) = presented_action(&presented, approval.action_id)
+                    else {
                         return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: GM approved action {} but was presented action {action_id}",
-                            approval.action_id
+                            "Tool arguments were rejected: GM approved action {} but was presented {}",
+                            approval.action_id,
+                            presented_ids(&presented)
                         )));
-                    }
+                    };
+                    let action_id = approval_pending.id;
                     if (!approval.include.is_empty()
                         || !approval.exclude.is_empty()
                         || approval.prefix.is_some())
@@ -1589,6 +1594,7 @@ where
             },
         );
         let game = Arc::clone(self);
+        let rejection_presented = Arc::clone(&presented);
         let reject_tool = Tool::new(
             prompts.gm.tools.tool(
                 "reject_action",
@@ -1599,6 +1605,7 @@ where
                 let arguments = context.arguments.to_string();
                 let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
+                let presented = Arc::clone(&rejection_presented);
                 Box::pin(async move {
                     let rejection: RejectAction = match serde_json::from_str(&arguments)
                         .context("parsing action rejection")
@@ -1606,12 +1613,14 @@ where
                         Ok(rejection) => rejection,
                         Err(error) => return Ok(ToolOutcome::rejected(error)),
                     };
-                    if rejection.action_id != action_id {
+                    let Some(pending) = presented_action(&presented, rejection.action_id) else {
                         return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: GM rejected action {} but was presented action {action_id}",
-                            rejection.action_id
+                            "Tool arguments were rejected: GM rejected action {} but was presented {}",
+                            rejection.action_id,
+                            presented_ids(&presented)
                         )));
-                    }
+                    };
+                    let action_id = pending.id;
                     if rejection.reason.trim().is_empty() {
                         return Ok(ToolOutcome::Rejected(
                             "Tool arguments were rejected: GM rejection reason is empty"
@@ -1710,20 +1719,200 @@ where
                 }) as ToolFuture
             },
         );
+        let actor = self.store.character_name(pending.character_id).await?;
+        let game = Arc::clone(self);
+        let check_pending = pending.clone();
+        let check_presented = Arc::clone(&presented);
+        let check_budget = budget.clone();
+        let intervention_tool = Tool::new(
+            prompts.gm.tools.tool(
+                "intervention_check",
+                serde_json::to_value(schema_for!(InterventionCheck))
+                    .expect("intervention check schema should serialize"),
+            )?,
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
+                let game = Arc::clone(&game);
+                let pending = check_pending.clone();
+                let presented = Arc::clone(&check_presented);
+                let budget = check_budget.clone();
+                let actor = actor.clone();
+                Box::pin(async move {
+                    let check: InterventionCheck = match serde_json::from_str(&arguments)
+                        .context("parsing intervention_check arguments")
+                    {
+                        Ok(check) => check,
+                        Err(error) => return Ok(ToolOutcome::rejected(error)),
+                    };
+                    if check.action_id != pending.id {
+                        return Ok(ToolOutcome::Rejected(format!(
+                            "Tool arguments were rejected: characters can only be asked about the presented action {}, not {}",
+                            pending.id, check.action_id
+                        )));
+                    }
+                    let group_id = game.store.character_group_id(pending.character_id).await?;
+                    let npcs = game.store.group_npc_ids(group_id).await?;
+                    let mut asked = Vec::new();
+                    for character_id in check.character_ids {
+                        if character_id == pending.character_id {
+                            return Ok(ToolOutcome::Rejected(format!(
+                                "Tool arguments were rejected: character {character_id} is taking the action, so their intent is the action itself"
+                            )));
+                        }
+                        if !npcs.contains(&character_id) {
+                            return Ok(ToolOutcome::Rejected(format!(
+                                "Tool arguments were rejected: character {character_id} is not an NPC in this group"
+                            )));
+                        }
+                        if !asked.contains(&character_id) {
+                            asked.push(character_id);
+                        }
+                    }
+                    if asked.is_empty() {
+                        return Ok(ToolOutcome::Rejected(
+                            "Tool arguments were rejected: name at least one character to ask"
+                                .to_string(),
+                        ));
+                    }
+                    let prompts = prompts::current()?;
+                    let world = game.world(pending.world_id)?;
+                    let mut proposals = Vec::new();
+                    for character_id in asked {
+                        budget
+                            .spend(0)
+                            .context("asking a character about an intervention")?;
+                        let branch = game.store.npc_branch(character_id).await?;
+                        let name = game.store.character_name(character_id).await?;
+                        game.store
+                            .append_instruction(
+                                branch,
+                                &Message::text(
+                                    Role::User,
+                                    prompts::fill(
+                                        &prompts.npc.intervention_request,
+                                        &[
+                                            ("actor", &actor),
+                                            ("tool", &pending.tool),
+                                            ("arguments", &pending.args),
+                                        ],
+                                    )?,
+                                ),
+                                pending.sequence_id,
+                            )
+                            .await?;
+                        let invocation_id = game
+                            .store
+                            .start_invocation(
+                                Some(pending.sequence_id),
+                                branch,
+                                Some(tool_execution_id),
+                                None,
+                            )
+                            .await?;
+                        let mut inference_id = None;
+                        let (inference, call, decision) = match game
+                            .ask_npc(
+                                &world,
+                                branch,
+                                pending.sequence_id,
+                                invocation_id,
+                                character_id,
+                                &mut inference_id,
+                            )
+                            .await
+                        {
+                            Ok(answer) => answer,
+                            Err(error) => {
+                                game.store
+                                    .fail_reaction(
+                                        invocation_id,
+                                        inference_id,
+                                        &format!("{error:#}"),
+                                    )
+                                    .await?;
+                                return Err(
+                                    error.context(format!("asking {name} whether to intervene"))
+                                );
+                            }
+                        };
+                        let execution_id = game
+                            .store
+                            .record_reaction(
+                                branch,
+                                invocation_id,
+                                inference,
+                                &call,
+                                npc::decision_result(&decision),
+                            )
+                            .await?;
+                        if let Decision::Propose(proposal) = decision {
+                            proposals.push((character_id, name, execution_id, proposal));
+                        }
+                    }
+                    // As for any replies composed together, the strongest wish
+                    // is proposed; ties all stand.
+                    let top = proposals
+                        .iter()
+                        .map(|(_, _, _, proposal)| proposal.eagerness)
+                        .max();
+                    let mut reports = Vec::new();
+                    for (character_id, name, execution_id, proposal) in proposals {
+                        if Some(proposal.eagerness) != top {
+                            continue;
+                        }
+                        let reaction = game
+                            .store
+                            .create_reaction_action(
+                                pending.world_id,
+                                character_id,
+                                pending.sequence_id,
+                                execution_id,
+                                proposal.tool,
+                                &proposal.arguments,
+                            )
+                            .await?;
+                        reports.push(format!(
+                            "{name} proposes action {}: a `{}` request with arguments {}.",
+                            reaction.id, proposal.tool, proposal.arguments
+                        ));
+                        presented
+                            .lock()
+                            .expect("presented actions lock poisoned")
+                            .push(reaction);
+                    }
+                    Ok(ToolOutcome::Completed(if reports.is_empty() {
+                        format!("Nobody intervenes in action {}.", pending.id)
+                    } else {
+                        format!(
+                            "{} Approve or reject each, then decide action {}; a reaction does not stop it by itself.",
+                            reports.join(" "),
+                            pending.id
+                        )
+                    }))
+                }) as ToolFuture
+            },
+        );
         let narrate = NarrationTools::new(
             self,
             NarrationScope {
                 world_id: pending.world_id,
                 in_group: pending.character_id,
                 actor: Some(pending.character_id),
-                unresolved_action: Some(action_id),
+                presented: Arc::clone(&presented),
             },
         )?;
         let reminder = narrate.reminder()?;
-        let tools: Vec<Tool> = [gm_tool, reject_tool, split_tool, merge_tool]
-            .into_iter()
-            .chain(narrate.tools.iter().cloned())
-            .collect();
+        let tools: Vec<Tool> = [
+            gm_tool,
+            reject_tool,
+            split_tool,
+            merge_tool,
+            intervention_tool,
+        ]
+        .into_iter()
+        .chain(narrate.tools.iter().cloned())
+        .collect();
         let scene = serde_json::to_string(
             &self
                 .store
@@ -1813,6 +2002,10 @@ struct CharacterAction {
 struct TakeAction {
     // The exact item name from the current scene.
     item: String,
+    // Whether the character takes it despite any objection. The GM reads it in
+    // the request; Rust does not act on it.
+    #[serde(default, rename = "committed")]
+    _committed: bool,
 }
 
 fn validate_character_action(arguments: &str) -> Result<()> {
@@ -1865,6 +2058,27 @@ fn validate_take_action(arguments: &str) -> Result<()> {
     Ok(())
 }
 
+/// The action with this id among those presented to the GM this turn.
+fn presented_action(presented: &PresentedActions, id: i64) -> Option<PendingAction> {
+    presented
+        .lock()
+        .expect("presented actions lock poisoned")
+        .iter()
+        .find(|action| action.id == id)
+        .cloned()
+}
+
+/// Which actions the GM was presented, for telling it when it names another.
+fn presented_ids(presented: &PresentedActions) -> String {
+    let ids: Vec<String> = presented
+        .lock()
+        .expect("presented actions lock poisoned")
+        .iter()
+        .map(|action| action.id.to_string())
+        .collect();
+    format!("action {}", ids.join(", "))
+}
+
 fn parse_no_arguments(arguments: &str) -> Result<()> {
     let arguments: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(arguments).context("parsing empty tool arguments")?;
@@ -1873,6 +2087,15 @@ fn parse_no_arguments(arguments: &str) -> Result<()> {
         "empty tool arguments must be an empty object"
     );
     Ok(())
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InterventionCheck {
+    // The visible action id they may intervene in.
+    action_id: i64,
+    // The NPCs to ask.
+    character_ids: Vec<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -5635,6 +5858,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(approved - approved_before, 4);
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    async fn character_id(scene: &SpeechScene, name: &str) -> i64 {
+        sqlx::query_scalar("SELECT id FROM character WHERE name = ?")
+            .bind(name)
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap()
+    }
+
+    async fn items_held(scene: &SpeechScene) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM item_character")
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap()
+    }
+
+    fn take_flour(committed: bool) -> Response {
+        tool_call(
+            "take",
+            serde_json::json!({"item": "flour sack", "committed": committed}),
+        )
+    }
+
+    fn intervention_check(action_id: i64, character_ids: &[i64]) -> Response {
+        tool_call(
+            "intervention_check",
+            serde_json::json!({"action_id": action_id, "character_ids": character_ids}),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_warning_from_an_npc_can_stop_a_tentative_take_before_it_happens() {
+        let scene = speech_scene().await;
+        let toma = character_id(&scene, "Toma").await;
+        let speaker = scene.names[0].clone();
+        let held_before = items_held(&scene).await;
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            intervention_check(1, &[toma]),
+            // Toma answers the check with a warning.
+            propose("Don't touch that sack!", &speaker, 2),
+            approve(2),
+            tool_call(
+                "reject_action",
+                serde_json::json!({"action_id": 1, "reason": "Toma stops you."}),
+            ),
+            tool_call("narrate_nothing", serde_json::json!({})),
+            response(Content::Text(String::new())),
+            // Mara hears Toma's warning and has nothing to add.
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+
+        assert_eq!(
+            items_held(&scene).await,
+            held_before,
+            "the take was stopped"
+        );
+        assert!(
+            heard(&scene.store, &scene.first)
+                .await
+                .contains(&"Don't touch that sack!".to_string()),
+            "the warning was said before the take was decided"
+        );
+        assert!(
+            scene
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(tool_results)
+                .any(|result| result.contains("Toma proposes action 2")),
+            "the GM was told Toma's reaction and its action id"
+        );
+        // Toma was asked inside the GM's call, as its child.
+        let asked_in_call: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invocation JOIN npc_agent ON npc_agent.agent_id = invocation.agent_id \
+             WHERE npc_agent.character_id = ? AND invocation.parent_tool_execution_id IS NOT NULL",
+        )
+        .bind(toma)
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(asked_in_call, 1);
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_committed_take_goes_ahead_and_the_gm_is_told_it_is_committed() {
+        let scene = speech_scene().await;
+        let held_before = items_held(&scene).await;
+        scene.responses.lock().unwrap().extend([
+            take_flour(true),
+            approve(1),
+            tool_call("narrate_nothing", serde_json::json!({})),
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack anyway.")
+            .await
+            .unwrap();
+
+        assert_eq!(items_held(&scene).await, held_before + 1);
+        let told = scene.requests.lock().unwrap().iter().any(|request| {
+            matches!(request.messages.last().map(|message| &message.content),
+                Some(MessageContent::Text(text)) if text.contains("\"committed\":true"))
+        });
+        assert!(told, "the GM's request says the take is committed");
+    }
+
+    #[tokio::test]
+    async fn an_intervention_check_only_asks_npcs_other_than_the_actor_about_the_presented_action()
+    {
+        let scene = speech_scene().await;
+        let player = scene.first.character_id;
+        let toma = character_id(&scene, "Toma").await;
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            intervention_check(1, &[player]),
+            intervention_check(1, &[scene.second.character_id]),
+            intervention_check(9, &[toma]),
+            intervention_check(1, &[]),
+            approve(1),
+            tool_call("narrate_nothing", serde_json::json!({})),
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack.")
+            .await
+            .unwrap();
+
+        let rejected: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tool_execution WHERE status = 'rejected'")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            rejected, 4,
+            "the actor, another player, another action and nobody were all refused"
+        );
+        assert_eq!(decisions_asked(&scene, "Toma").await, 0);
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_proposed_reaction_must_be_decided_before_the_gm_narrates() {
+        let scene = speech_scene().await;
+        let toma = character_id(&scene, "Toma").await;
+        let speaker = scene.names[0].clone();
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            intervention_check(1, &[toma]),
+            propose("Wait!", &speaker, 2),
+            approve(1),
+            // Narrating while Toma's reaction is undecided is refused.
+            tool_call("narrate_nothing", serde_json::json!({})),
+            approve(2),
+            tool_call("narrate_nothing", serde_json::json!({})),
+            response(Content::Text(String::new())),
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+
+        let rejected: Vec<String> = sqlx::query_scalar(
+            "SELECT content_text FROM (SELECT json_extract(recorded_content.body, '$.content.value') AS content_text \
+             FROM tool_execution JOIN recorded_content ON recorded_content.id = tool_execution.result_content_id \
+             WHERE tool_execution.status = 'rejected')",
+        )
+        .fetch_all(&scene.store.pool())
+        .await
+        .unwrap();
+        assert!(
+            matches!(rejected.as_slice(), [one] if one.contains("action 2 is not yet approved or rejected")),
+            "{rejected:?}"
+        );
+        assert!(
+            heard(&scene.store, &scene.first)
+                .await
+                .contains(&"Wait!".to_string())
+        );
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_intervention_check_where_nobody_objects_changes_nothing() {
+        let scene = speech_scene().await;
+        let toma = character_id(&scene, "Toma").await;
+        let mara = character_id(&scene, "Mara").await;
+        let held_before = items_held(&scene).await;
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            intervention_check(1, &[toma, mara]),
+            do_nothing(),
+            do_nothing(),
+            approve(1),
+            tool_call("narrate_nothing", serde_json::json!({})),
+            response(Content::Text(String::new())),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack.")
+            .await
+            .unwrap();
+
+        let told = tool_results(&scene.requests.lock().unwrap()[4]);
+        assert!(
+            told.iter()
+                .any(|result| result.contains("Nobody intervenes in action 1")),
+            "{told:?}"
+        );
+        assert_eq!(items_held(&scene).await, held_before + 1);
         assert!(failed_sequences(&scene).await.is_empty());
     }
 
