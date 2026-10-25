@@ -9,13 +9,15 @@ a final account and closes play. Authority:
 [World detail](../user_declarations.md#world-detail-page).
 Implement [Campaign completion](../design.md#campaign-completion), reusing the
 Storyteller phase/state, conversations, rules death state and shared recordings.
+The preceding [Storyteller gameplay](storyteller-gameplay.md) plan supplies
+UpdateStoryteller and object notification metadata before ending is implemented.
 
 ## Ordered changes
 
-1. Add typed trigger metadata to story-relevant objects and the GM
-   update_storyteller(summary,object_ids) tool. Invoke it after marked item,
-   conversation or combat events; its context contains world summary,
-   Storyteller notes and the event summary, not the complete GM private transcript.
+1. Reuse typed trigger metadata and update_storyteller(summary,object_ids) from
+   Storyteller gameplay to evaluate end conditions after marked item,
+   conversation or combat events. Preserve its world-summary/Storyteller-notes
+   context and event summary, without the GM private transcript.
 2. Add end_world(outcome,text). Validate phase=playing, record its narration
    content reference and change to epilogue once. The no-living-PC condition
    enters the same loss path. Snapshot epilogue participants in

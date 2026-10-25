@@ -155,6 +155,8 @@ first version; the second checkpoint extends this measurement to retrieval.
   authority: it writes Storyteller notes and does not read GM notes. Do not add
   a placeholder Storyteller executor in this plan. Keep this boundary separate
   from GM permission to read local Storyteller instructions.
+  [World initialization](storyteller-worlds.md) adds the Storyteller executor,
+  object creation and editable world summary using this same field access.
 
 The first checkpoint must itself have bounded inputs/results using the initial
 configured limits; the second completes broader search/navigation and measures

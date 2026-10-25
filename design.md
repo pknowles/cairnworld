@@ -1629,35 +1629,51 @@ location. Group history follows the travellers without a location GM handoff.
 
 ## Storyteller world creation
 
-Authority: Game setting and story narrative, Storyteller initialization output
-and tools, Character creation and World detail page. `world.phase` is
-`initializing|playing|epilogue|complete|initialization_failed`. World creation
-stores the optional seed, owner and Storyteller history before queuing work;
-only playing/epilogue worlds accept play. Imported scenarios enter playing after
-validated installation. `world_build(world_id PRIMARY KEY, phase_index,
-round_index, step, question_index, question_inference_id, summary_inference_id)`
-is the persisted progress of the three declared phases. Each finished answer or
-summary advances one step atomically; a failed inference leaves that step and
-full error visible. Resume is explicit after failure. Pending work between saved
-steps resumes after a clean restart; a crash during an active turn uses shared
-crash cleanup rather than automatically replaying that turn.
+Authority: Game setting and story narrative, Storyteller initialization output,
+Storyteller and Questioner tools, Character creation and World detail page.
+World creation stores the optional seed, owner and Storyteller history before
+queuing initialization through ordinary world execution. Persist stage/object
+progress and references to committed outputs, reusing ordinary recordings and
+shutdown/crash handling. A generation failure leaves the world stuck with its
+full error inspectable; no automatic replay or user-facing resume feature is
+implied. Players can open an initializing world, but character creation, actions
+and NPC simulation are blocked. The normal page exposes status/error and the
+expandable seed, not the spoiler-bearing summary. Developer Mode exposes world
+objects, progress and both roles' recorded interactions.
 
-The Questioner sees the seed, phase, hard-coded meta-questions, and only the most
-recent Storyteller summary. Its structured output is `{questions, satisfied}`.
-The Storyteller answers those questions one by one in a fresh round history with
-seed and previous summary, then produces a new summary. The next round uses that
-summary without replaying previous answers. `world_build.max_rounds_per_phase`
-defaults to 3; inference safety budgets still apply. Each phase ends on satisfied
-or its round limit. The final named summary is retained by inference reference.
-Questioner is an invocation role, not another global autonomous agent.
+Questioner first answers supplied meta-questions in one inference, then emits
+AskQuestions or WorldIsComplete in the next. Storyteller answers questions one
+at a time as text to itself, then writes/edits the world summary. Its next round
+starts from the seed and current summary without earlier answer transcripts.
+Questioner reviews world artifacts, including that summary and the objects
+created so far, not Storyteller's answer history. During conceptual development
+the summary supplies the artifact under review; construction review includes
+persisted objects. The three declared phases and focused location/NPC development
+reuse these roles and bounded context assembly. Questioner is an invocation role,
+not a separate autonomous agent. A safety limit is a visible incomplete-generation
+failure, not permission to declare readiness or advance automatically.
 
-After the summary, Storyteller tools create locations first, then Connections
-with validated endpoint IDs, groups and NPCs one at a time, then items/holders.
-Each location/NPC seed gets its own Questioner/Storyteller enrichment using the
-world summary. Constructors enforce world-local references and exactly one
-character group/item holder. A final validation checks reachability from the
-starting location and required object references before phase becomes playing.
-Draft objects remain in the initializing world and are not exposed to game play.
+Storyteller has Create/Update/Delete tools for Location, Connection, NPC, Group,
+ItemType and Item, plus shared text editing and hierarchical lookup. Create
+supplies all initial fields; Update replaces selected fields by object ID.
+Return assigned IDs, committed changes and object counts. Reuse constructors,
+field access, world-local validation and existing object relationships. Reject
+deletion of referenced objects rather than cascading away their dependents.
+Create records in dependency order and develop locations/NPCs individually from
+their seeds and the world summary. NPC private backgrounds guide their own agents;
+they are not public descriptions or scripted dialogue. Storyteller notes and the
+large editable world summary remain separate from GM notes, which Storyteller
+cannot read. Explicitly marked generation mentions supply non-blocking reminders
+of uncreated names; they do not force object creation.
+
+After reviewing actual state, Storyteller calls BeginWorld. Validate connected
+locations, required fields/backgrounds/motives, item-type use, holders and references
+before completing initialization. Narrative readiness belongs to Storyteller;
+Questioner satisfaction alone does not start play. BeginWorld makes character
+creation available without starting an empty-world simulation, and is unavailable
+after initialization. Imported scenarios retain their validated development path.
+See [world initialization](plans/storyteller-worlds.md); gameplay support below is
+tracked separately in [Storyteller gameplay](plans/storyteller-gameplay.md).
 
 Character background negotiation uses three Storyteller proposals stored as
 `background_offer(id, character_id, private_content_ref, public_content_ref)`.

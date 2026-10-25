@@ -1239,6 +1239,12 @@ completes. If there is an error during world creation, players see this as they
 would other errors and the world is simply stuck. They can enable developer mode
 and inspect how far world generation got and exactly where it went wrong.
 
+The questioner could come in handy during gameplay, e.g. to prompt the
+storyteller to see which game style the players gravitate towards, what they
+enjoy, if anything is becoming stale. If the players only have one problem
+happening at once, the storyteller should create a new one. Gotta keep the
+players on their toes.
+
 ## Spell ideas
 
 In addition to the Cairn rules, the following spells would be uniquely useful

@@ -18,8 +18,10 @@ rounds, interruption and GM-selected intervention; extend those paths here.
 The combat order, time lead and travel choices are explicit proposals under
 [Product decisions](../design.md#product-decisions). Their dependent steps wait
 for confirmation; the implementation descriptions below are complete proposals.
-Storyteller approval tools are wired in the following Storyteller feature, not
-stubbed with unconditional approval here.
+World authoring tools already come from [Storyteller initialization](storyteller-worlds.md).
+Creation and encounter approval integration is wired in the following
+[Storyteller gameplay](storyteller-gameplay.md) feature, not stubbed with
+unconditional approval here.
 The preceding [GM editing](gm-editing.md) feature supplies persisted relative
 placement and the out-of-combat within-location Move path. Extend its existing
 action/time operations for combat and travel rather than implementing Move again.
@@ -79,7 +81,7 @@ action/time operations for combat and travel rather than implementing Move again
    deciding the original action, without re-entering an active GM. Exercise the
    declared shopkeeper example; ConditionalApprove and dynamic executable rules
    remain unimplemented ideas pending playtesting, not prerequisites here.
-   Add movement's within-location description and approved duration. Advance
+   Reuse GM editing's within-location description and approved duration. Advance
    world time to the maximum and queue crossed-hour NPC opportunities through
    WorldEvents. Verify the approved initiative/time policy, second move/action
    rejection, early Wait followed by an attempted action, repeated Interrupt/

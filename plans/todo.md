@@ -19,6 +19,9 @@ there yet". Remove and archive only verified completions.
   persistent within-location placement/local notes, hierarchical reads/search
   and bounded tool/context sizes. Incidental detail stays in text; significant
   item creation retains its Storyteller responsibility.
+- [Storyteller world initialization](storyteller-worlds.md): create/edit/delete
+  world objects, develop locations/NPCs individually, review persisted state
+  with the Questioner and finish explicitly with BeginWorld.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and
@@ -30,8 +33,9 @@ there yet". Remove and archive only verified completions.
 - [Rules and travel](playable-rules.md): complete creation/items, suspended
   consent, persuasion, combat/time and coordinated group travel using the shared
   NPC interaction and action paths.
-- [Storyteller worlds](storyteller-worlds.md): persisted phased initialization,
-  validated objects, public/private backgrounds, guidance and replacements.
+- [Storyteller gameplay](storyteller-gameplay.md): public/private backgrounds,
+  creation approvals, entry placement, encounter guidance, event updates and
+  replacements, reusing initialized world objects and the completed rules.
 - [Campaign completion](campaign-completion.md): event-driven ending,
   talk-only epilogue choices, final account and closed play.
 
