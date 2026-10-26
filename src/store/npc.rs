@@ -45,14 +45,14 @@ pub fn with_eagerness(mut schema: serde_json::Value, description: &str) -> serde
 
 impl Decision {
     /// The decision a model's whole response makes, or why it breaks the
-    /// protocol: exactly one `do_nothing`, `say` or `whisper` call.
+    /// protocol: exactly one `do_nothing` or `speak` call.
     pub fn parse(content: &Content) -> Result<(ToolCall, Self)> {
         let Content::ToolCalls(calls) = content else {
-            bail!("the NPC replied with text instead of calling do_nothing, say or whisper");
+            bail!("the NPC replied with text instead of calling do_nothing or speak");
         };
         let [call] = calls.as_slice() else {
             bail!(
-                "the NPC made {} tool calls; exactly one of do_nothing, say or whisper is required",
+                "the NPC made {} tool calls; exactly one of do_nothing or speak is required",
                 calls.len()
             );
         };
@@ -66,10 +66,9 @@ impl Decision {
                 );
                 Self::Nothing
             }
-            name @ ("say" | "whisper") => {
+            "speak" => {
                 let mut arguments: serde_json::Map<String, serde_json::Value> =
-                    serde_json::from_str(&call.arguments)
-                        .with_context(|| format!("parsing {name} arguments"))?;
+                    serde_json::from_str(&call.arguments).context("parsing speak arguments")?;
                 let eagerness = arguments
                     .remove("eagerness")
                     .context("an eagerness from 1 to 3 is required")?;
@@ -80,12 +79,12 @@ impl Decision {
                         format!("eagerness {eagerness} is not an integer from 1 to 3")
                     })?;
                 Self::Propose(SpeechProposal {
-                    tool: if name == "say" { "say" } else { "whisper" },
+                    tool: "speak",
                     arguments: serde_json::Value::Object(arguments).to_string(),
                     eagerness: u8::try_from(eagerness).context("eagerness out of range")?,
                 })
             }
-            name => bail!("the NPC called `{name}`, not do_nothing, say or whisper"),
+            name => bail!("the NPC called `{name}`, not do_nothing or speak"),
         };
         Ok((call.clone(), decision))
     }

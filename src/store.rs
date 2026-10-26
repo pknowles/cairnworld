@@ -8,7 +8,7 @@ use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
 pub use npc::{Decision, NpcStep, ResponseCollection, with_eagerness};
 pub use prompt::PromptEvidence;
-pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SayAction, WhisperAction};
+pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SpeakAction};
 
 // Developer Mode's inspection view types are shared with the browser; see
 // crate::inspection's doc comment. Re-exported here since this module's
@@ -3828,7 +3828,7 @@ impl Store {
             && !Self::character_may_act(transaction, action.character_id).await?
         {
             ActionOutcome::Failed("the character no longer has an active player".to_string())
-        } else if result == "approved" && matches!(action.tool.as_str(), "say" | "whisper") {
+        } else if result == "approved" && action.tool == "speak" {
             match Self::plan_speech(transaction, &action, hearing).await? {
                 Ok(plan) => {
                     let words = plan.words().to_string();
@@ -3942,7 +3942,7 @@ impl Store {
         match action.tool.as_str() {
             // These requests only carry the character's intent to the GM; the
             // GM's narration is their result.
-            "look" | "investigate" | "open" | "ask" => Ok(Ok("approved".to_string())),
+            "attempt" => Ok(Ok("approved".to_string())),
             "take" => {
                 let arguments: TakeItemArguments = serde_json::from_str(&action.args)
                     .context("parsing stored take action arguments")?;
@@ -7206,8 +7206,8 @@ mod tests {
                 &Message::assistant(
                     Content::ToolCalls(vec![ToolCall {
                         id: "call-1".into(),
-                        name: "look".into(),
-                        arguments: r#"{"description":"around"}"#.into(),
+                        name: "attempt".into(),
+                        arguments: r#"{"kind":"look","description":"around"}"#.into(),
                     }]),
                     String::new(),
                 ),
@@ -7681,7 +7681,7 @@ mod tests {
             store.agent_branch(installed.member.agent_id).await.unwrap(),
             Some(sequence.id),
             "call-1",
-            "look",
+            "attempt",
             args,
         )
         .await;
@@ -7690,13 +7690,13 @@ mod tests {
                 &store.player_actor(&installed.member).await.unwrap(),
                 sequence.id,
                 requesting_tool_execution_id,
-                "look",
+                "attempt",
                 args,
             )
             .await
             .unwrap();
         assert_eq!(action.id, 1);
-        assert_eq!(action.tool, "look");
+        assert_eq!(action.tool, "attempt");
         assert_eq!(action.args, args);
         assert_eq!(action.sequence_id, sequence.id);
         let group_gm: i64 = sqlx::query_scalar(
@@ -7795,7 +7795,7 @@ mod tests {
                 &store.player_actor(&installed.member).await.unwrap(),
                 other_sequence.id,
                 requesting_tool_execution_id,
-                "look",
+                "attempt",
                 args,
             )
             .await
@@ -7901,8 +7901,8 @@ mod tests {
     #[tokio::test]
     async fn speech_naming_someone_no_longer_present_is_a_recorded_failure() {
         for (tool, args) in [
-            ("say", r#"{"words":"Hi","to":"Nobody"}"#),
-            ("whisper", r#"{"words":"Hi","to":["Nobody"]}"#),
+            ("speak", r#"{"words":"Hi","to":["Nobody"]}"#),
+            ("speak", r#"{"words":"Hi","private":true,"to":["Nobody"]}"#),
         ] {
             let db = database();
             let store = Store::open(db.path()).await.unwrap();

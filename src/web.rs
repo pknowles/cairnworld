@@ -2157,8 +2157,8 @@ mod tests {
                 responses.lock().unwrap().extend([
                     reply(Content::ToolCalls(vec![ToolCall {
                         id: format!("look-{stage}"),
-                        name: "look".into(),
-                        arguments: r#"{"description":"the room"}"#.into(),
+                        name: "attempt".into(),
+                        arguments: r#"{"kind":"look","description":"the room"}"#.into(),
                     }])),
                     reply(Content::ToolCalls(calls)),
                     reply(Content::ToolCalls(vec![ToolCall {

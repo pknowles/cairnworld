@@ -1085,6 +1085,11 @@ indirectly explains why this happened to connect the character with the story.
   not in combat), the GM should quickly narrate the wait, e.g. what they see
   while waiting. A future idea is to add a combat Delay call, but not for now.
 
+Many have duplicate names for similar actions. I'd ideally like these to be
+separate tool calls but schema gets duplicated for each, which is exceedingly
+dumb, so the implementation should merge them and have an enum to distinguish
+until we figure out a better way.
+
 The Give/Take actions are a formal way to let rust transfer items in the world.
 The idea is to avoid the risk that the GM fails/hallucinates and an item is
 duplicated or lost.

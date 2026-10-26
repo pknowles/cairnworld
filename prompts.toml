@@ -85,10 +85,10 @@ description = """\
 
 [gm.tools.approve_action.arguments]
 action_id = "The visible action id to approve."
-include = "Only for a say or whisper; leave out for any other action. Characters who also hear it, by name."
-exclude = "Only for a say or whisper; leave out for any other action. Characters who must not hear it, by name."
+include = "Only for speech; leave out for any other action. Characters who also hear it, by name."
+exclude = "Only for speech; leave out for any other action. Characters who must not hear it, by name."
 prefix = """\
-    Only for a say or whisper; leave out for any other action. A short phrase every \
+    Only for speech; leave out for any other action. A short phrase every \
     hearer is shown before the words, such as how or why only some of them can hear.\
     """
 
@@ -234,34 +234,21 @@ description = "Mark character creation complete after the required rolls."
 [player.tools.party_presence]
 description = "List your current group's characters and whether each is online."
 
-[player.tools.look]
-description = "Observe something in the current scene."
-
-[player.tools.look.arguments]
-description = "What the character looks at."
-
-[player.tools.investigate]
-description = "Study something closely for clues or hidden details."
-
-[player.tools.investigate.arguments]
-description = "What the character investigates and how."
-
-[player.tools.open]
-description = "Try to open something, such as a door, container or window."
-
-[player.tools.open.arguments]
-description = "What the character opens and how."
-
-[player.tools.ask]
+[player.tools.attempt]
 description = """\
-    Ask the GM for information or clarification about the situation. To speak to a \
-    character, use say or whisper.\
+    Attempt something other than speaking or taking. To speak to a character, use \
+    speak.\
     """
 
-[player.tools.ask.arguments]
-description = "What the character asks the GM."
+[player.tools.attempt.arguments]
+kind = """\
+    look: observe something. investigate: study something closely for clues or \
+    hidden details. open: open a door, container or window. ask: ask the GM for \
+    information or clarification.\
+    """
+description = "What the character does or asks, and to what."
 
-# say and whisper are used by players and, with eagerness added, by NPCs.
+# speak is used by players and, with eagerness added, by NPCs.
 
 [player.tools.take]
 description = """\
@@ -280,9 +267,9 @@ committed = "True only if the character takes it even when someone objects; norm
 role = """\
     You are the character described below, in a scene you share with others. Speak \
     only for yourself. What you hear shows who said it and, when there is one, who \
-    it was said to. Call say to speak openly, whisper to speak privately to named \
-    characters, or do_nothing to stay silent. Say and whisper take the words and how \
-    strongly you want to speak now. The GM decides whether your words are said, and \
+    it was said to. Call speak to speak openly, or privately to named characters, or \
+    do_nothing to stay silent. Speak takes the words and how strongly you want to \
+    speak now. The GM decides whether your words are said, and \
     others may speak first or at the same time.\
     """
 
@@ -294,11 +281,11 @@ situation = """\
 
 # Asked of an NPC before an action happens. {actor} {tool} {arguments}.
 intervention_request = """\
-    {actor} is about to act: a `{tool}` request with arguments {arguments}. Say or \
-    whisper to intervene, or do nothing.\
+    {actor} is about to act: a `{tool}` request with arguments {arguments}. Speak to \
+    intervene, or do nothing.\
     """
 
-# Added to say and whisper when an NPC calls them.
+# Added to speak when an NPC calls it.
 eagerness = "How strongly you want to act now: 1 mild, 2 moderate, 3 strong."
 
 [npc.tools.do_nothing]
@@ -322,28 +309,10 @@ summary_request = """\
 # Shared by the player agent and NPCs, so the two always read the same.
 # NPCs also get an eagerness argument, described under [npc].
 # ---------------------------------------------------------------------------
-[shared.tools.say]
-description = """\
-    Say words aloud. Everyone present hears them, even when you address one \
-    character.\
-    """
+[shared.tools.speak]
+description = """    Speak. A public speech is heard by everyone present, even when you address one     character; a private one only by the characters you name.    """
 
-[shared.tools.say.arguments]
-words = """\
-    Your character's speech as it should read in the chat: who speaks and how it \
-    is said when that matters, e.g. `Mara says in a low voice: ...`.\
-    """
-to = """\
-    The character you are speaking to. This does not make your words private: \
-    everyone present still hears them.\
-    """
-
-[shared.tools.whisper]
-description = "Whisper words that only the named characters hear."
-
-[shared.tools.whisper.arguments]
-words = """\
-    Your character's whisper as it should read in the chat, with who speaks and \
-    how it is said when that matters.\
-    """
-to = "The characters who hear the whisper. Nobody else does."
+[shared.tools.speak.arguments]
+words = """    Your character's speech as it should read in the chat: who speaks and how it     is said when that matters, e.g. `Mara says in a low voice: ...`.    """
+to = """    Who it is for. Public: leave out, or the one character you are speaking to; this     does not make your words private. Private: every character who hears it, and     nobody else does.    """
+private = "True to speak so that only the characters in `to` hear you; normally false."

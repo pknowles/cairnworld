@@ -612,16 +612,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   narration), then narrates the entrance with the entering character as the
   actor: they receive the scene, everyone else is told they arrive.
   Subsequent player messages expose creation or location-action tools
-  according to durable character state. `look`, `investigate`, `open` and `ask`
-  share one description argument and the shared action path (`action_tools`);
-  each reaches the GM under its own name and, once approved, changes no state:
-  the GM's narration is the result. `take`, `say` and `whisper` have their own
-  arguments.
+  according to durable character state. `attempt` (`kind` of
+  look, investigate, open or ask, plus a description) goes through the shared
+  action path (`action_tools`); the GM reads the kind in the request and, once
+  approved, it changes no state: the GM's narration is the result. `take` and
+  `speak` have their own arguments.
 - Speech (design.md: Character perceptions and NPC responses; migrations 0004, 0007).
-  `say` (optional addressee) and `whisper` (explicit listeners) are validated
+  `speak` (`words`, `to`, `private`: a public speech singles out an addressee only when `to` names exactly one, a private one's `to` is its listeners) is validated
   against the speaker's group when submitted. On approval
   `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
-  (everyone in the group for say, the listeners for whisper, adjusted by the
+  (everyone in the group for public speech, the listeners for private, adjusted by the
   GM's `approve_action` include/exclude, plus an optional short `prefix` shown to every hearer before the words; an
   unknown or contradictory name, or an overlong prefix, is refused as
   `InvalidHearing` without resolving) and, in the same transaction
@@ -654,7 +654,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   it. The world worker runs one `NpcStep` at a time at lowest priority
   (`Store::next_npc_step`, none while draining): Refresh (stale
   `group.scene_revision`), Decide (one recorded inference per NPC, exactly one
-  `do_nothing`, `say` or `whisper`, the player tools plus eagerness 1 to 3), Select (highest
+  `do_nothing` or `speak`, the player tools plus eagerness 1 to 3), Select (highest
   eagerness; speech ties all win), Execute (one selected utterance per step:
   a pending action for that NPC and an ordinary single-action GM turn through
   `arbitrate`, so tied replies are approved one at a time and the round stays
@@ -759,7 +759,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   names the presented action and NPCs in the actor's group (not the actor, not
   players). Each NPC is asked in the GM's call as a child invocation
   (`Game::ask_npc`, the same decision a response collection asks for, plus an
-  `npc.intervention_request` in its history), answers do_nothing, say or whisper,
+  `npc.intervention_request` in its history), answers do_nothing or speak,
   and the strongest proposals become pending actions of their own
   (`Store::create_reaction_action`). Those join the turn's `PresentedActions`: the
   GM approves or rejects each with the ordinary tools, and narration is refused

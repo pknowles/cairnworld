@@ -27,7 +27,7 @@ use crate::{
     settings::{GameSettings, Limits},
     store::{
         ActionOutcome, Decision, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration,
-        PendingAction, PlayerAgent, PresenceNarration, SayAction, Store, WhisperAction,
+        PendingAction, PlayerAgent, PresenceNarration, SpeakAction, Store,
     },
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
@@ -1192,33 +1192,16 @@ where
             },
         );
         let mut tools = vec![party_presence];
-        // These differ only in the intent they tell the GM.
-        for name in ["look", "investigate", "open", "ask"] {
-            tools.push(
-                self.action_tool(PlayerActionTool {
-                    member: member.clone(),
-                    sequence_id,
-                    definition: prompts.player.tools.tool(
-                        name,
-                        serde_json::to_value(schema_for!(CharacterAction))
-                            .expect("character action schema should serialize"),
-                    )?,
-                    validate: validate_character_action,
-                    budget: budget.clone(),
-                    call: call.clone(),
-                }),
-            );
-        }
         tools.extend([
             self.action_tool(PlayerActionTool {
                 member: member.clone(),
                 sequence_id,
-                definition: prompts.shared.tools.tool(
-                    "say",
-                    serde_json::to_value(schema_for!(SayAction))
-                        .expect("say action schema should serialize"),
+                definition: prompts.player.tools.tool(
+                    "attempt",
+                    serde_json::to_value(schema_for!(AttemptAction))
+                        .expect("attempt action schema should serialize"),
                 )?,
-                validate: validate_say_action,
+                validate: validate_attempt_action,
                 budget: budget.clone(),
                 call: call.clone(),
             }),
@@ -1226,11 +1209,11 @@ where
                 member: member.clone(),
                 sequence_id,
                 definition: prompts.shared.tools.tool(
-                    "whisper",
-                    serde_json::to_value(schema_for!(WhisperAction))
-                        .expect("whisper action schema should serialize"),
+                    "speak",
+                    serde_json::to_value(schema_for!(SpeakAction))
+                        .expect("speak action schema should serialize"),
                 )?,
-                validate: validate_whisper_action,
+                validate: validate_speak_action,
                 budget: budget.clone(),
                 call: call.clone(),
             }),
@@ -1521,7 +1504,7 @@ where
                     if (!approval.include.is_empty()
                         || !approval.exclude.is_empty()
                         || approval.prefix.is_some())
-                        && !matches!(approval_pending.tool.as_str(), "say" | "whisper")
+                        && approval_pending.tool != "speak"
                     {
                         return Ok(ToolOutcome::Rejected(format!(
                             "Tool arguments were rejected: include, exclude and prefix shape how speech is heard, and action {action_id} is not speech"
@@ -1980,7 +1963,7 @@ where
             .speech_audience(pending.requesting_tool_execution_id)
             .await?
         {
-            None if matches!(pending.tool.as_str(), "say" | "whisper") => {
+            None if pending.tool == "speak" => {
                 narration.restrict_to(vec![pending.character_id]);
             }
             Some(audience) => narration.restrict_to(audience),
@@ -1992,9 +1975,23 @@ where
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct CharacterAction {
-    // What the character attempts or says.
+struct AttemptAction {
+    // The GM reads it in the request; Rust does not act on it.
+    #[serde(rename = "kind")]
+    _kind: AttemptKind,
+    // What the character does, and to what.
     description: String,
+}
+
+// The ways to attempt something; they differ only in the intent the GM reads.
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(inline)]
+enum AttemptKind {
+    Look,
+    Investigate,
+    Open,
+    Ask,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2008,9 +2005,9 @@ struct TakeAction {
     _committed: bool,
 }
 
-fn validate_character_action(arguments: &str) -> Result<()> {
-    let action: CharacterAction =
-        serde_json::from_str(arguments).context("parsing character action arguments")?;
+fn validate_attempt_action(arguments: &str) -> Result<()> {
+    let action: AttemptAction =
+        serde_json::from_str(arguments).context("parsing attempt action arguments")?;
     ensure!(
         !action.description.trim().is_empty(),
         "action description is empty"
@@ -2018,34 +2015,24 @@ fn validate_character_action(arguments: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_say_action(arguments: &str) -> Result<()> {
-    let action: SayAction =
-        serde_json::from_str(arguments).context("parsing say action arguments")?;
+fn validate_speak_action(arguments: &str) -> Result<()> {
+    let action: SpeakAction =
+        serde_json::from_str(arguments).context("parsing speak action arguments")?;
     ensure!(!action.words.trim().is_empty(), "words are empty");
-    Ok(())
-}
-
-fn validate_whisper_action(arguments: &str) -> Result<()> {
-    let action: WhisperAction =
-        serde_json::from_str(arguments).context("parsing whisper action arguments")?;
-    ensure!(!action.words.trim().is_empty(), "words are empty");
-    ensure!(
-        !action.to.is_empty(),
-        "a whisper needs at least one listener"
-    );
+    if action.private {
+        ensure!(
+            !action.to.is_empty(),
+            "a private speech needs at least one listener in `to`"
+        );
+    }
     Ok(())
 }
 
 /// The characters a speech action names, already validated as JSON.
 fn named_hearers(tool: &str, arguments: &str) -> Vec<String> {
     match tool {
-        "say" => serde_json::from_str::<SayAction>(arguments)
-            .ok()
-            .and_then(|say| say.to)
-            .into_iter()
-            .collect(),
-        "whisper" => serde_json::from_str::<WhisperAction>(arguments)
-            .map(|whisper| whisper.to)
+        "speak" => serde_json::from_str::<SpeakAction>(arguments)
+            .map(|speak| speak.to)
             .unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -3230,8 +3217,8 @@ mod tests {
         let (scripted_backend, recorded_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"the room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"the room"}"#.into(),
             }])),
             // approve_action and split_group in one batch: split_group must
             // not retarget approve_action's own group mid-batch (design.md's
@@ -3421,8 +3408,8 @@ mod tests {
         let (split_backend, _split_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"the room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"the room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![
                 ToolCall {
@@ -3528,8 +3515,8 @@ mod tests {
         let (merge_backend, merge_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-2".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"Toma"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"Toma"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![
                 ToolCall {
@@ -3739,7 +3726,7 @@ mod tests {
             store.agent_branch(member.agent_id).await.unwrap(),
             Some(sequence.id),
             "look-9",
-            "look",
+            "attempt",
             &arguments,
         )
         .await;
@@ -3748,7 +3735,7 @@ mod tests {
                 &store.player_actor(&member).await.unwrap(),
                 sequence.id,
                 requesting,
-                "look",
+                "attempt",
                 &arguments,
             )
             .await
@@ -3814,6 +3801,7 @@ mod tests {
             .await
             .unwrap();
         let arguments = serde_json::json!({
+            "kind": "ask",
             "description": "What did Mara say outside, and what did Toma say inside?"
         })
         .to_string();
@@ -3822,7 +3810,7 @@ mod tests {
             store.agent_branch(member.agent_id).await.unwrap(),
             Some(sequence.id),
             "look-1",
-            "look",
+            "attempt",
             &arguments,
         )
         .await;
@@ -3831,7 +3819,7 @@ mod tests {
                 &store.player_actor(&member).await.unwrap(),
                 sequence.id,
                 requesting,
-                "look",
+                "attempt",
                 &arguments,
             )
             .await
@@ -3879,12 +3867,13 @@ mod tests {
         let Content::ToolCalls(calls) = response.content else {
             panic!("the GM did not close with a narrate call: {response:?}");
         };
+        // Whichever narrate tool the GM chose, its text answers the question.
         let narration = calls
             .iter()
-            .find(|call| call.name == "narrate_group")
-            .unwrap_or_else(|| panic!("the GM did not narrate to the group: {calls:?}"))
-            .arguments
-            .to_lowercase();
+            .filter(|call| call.name.starts_with("narrate_"))
+            .map(|call| call.arguments.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
             narration.contains("heron") && narration.contains("lantern"),
             "the GM did not use both sides' history: {narration}"
@@ -4164,7 +4153,7 @@ mod tests {
             !answers.is_empty()
                 && answers
                     .iter()
-                    .all(|answer| matches!(answer.as_str(), "do_nothing" | "say" | "whisper")),
+                    .all(|answer| matches!(answer.as_str(), "do_nothing" | "speak")),
             "no asked character gave a valid answer: {answers:?}"
         );
         let undecided: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pending_action")
@@ -4241,11 +4230,14 @@ mod tests {
                 .await
                 .unwrap();
             let (tool, arguments) = if index < 2 {
-                ("look", serde_json::json!({"description": line}).to_string())
+                (
+                    "attempt",
+                    serde_json::json!({"kind": "look", "description": line}).to_string(),
+                )
             } else {
                 (
-                    "say",
-                    serde_json::json!({"words": line, "to": "Toma"}).to_string(),
+                    "speak",
+                    serde_json::json!({"words": line, "to": ["Toma"]}).to_string(),
                 )
             };
             let requesting = crate::store::record_tool_call_for_test(
@@ -4344,8 +4336,8 @@ mod tests {
         let (backend, recorded_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"the room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"the room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![
                 ToolCall {
@@ -4487,8 +4479,8 @@ mod tests {
         let (backend, recorded_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"the room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"the room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![
                 ToolCall {
@@ -5301,8 +5293,8 @@ mod tests {
         scene
             .speak(
                 tool_call(
-                    "say",
-                    serde_json::json!({"words": "I know who took the bread.", "to": "Toma"}),
+                    "speak",
+                    serde_json::json!({"words": "I know who took the bread.", "to": ["Toma"]}),
                 ),
                 serde_json::json!({"action_id": 1}),
             )
@@ -5391,8 +5383,8 @@ mod tests {
         scene
             .speak(
                 tool_call(
-                    "whisper",
-                    serde_json::json!({"words": "Meet me at the mill.", "to": [scene.names[1]]}),
+                    "speak",
+                    serde_json::json!({"private": true, "words": "Meet me at the mill.", "to": [scene.names[1]]}),
                 ),
                 serde_json::json!({"action_id": 1}),
             )
@@ -5415,7 +5407,7 @@ mod tests {
         let scene = speech_scene().await;
         scene
             .speak(
-                tool_call("say", serde_json::json!({"words": "Stand back."})),
+                tool_call("speak", serde_json::json!({"words": "Stand back."})),
                 serde_json::json!({"action_id": 1, "exclude": [scene.names[1]]}),
             )
             .await;
@@ -5428,7 +5420,7 @@ mod tests {
     async fn an_invalid_audience_is_returned_to_the_gm_and_nothing_is_resolved() {
         let scene = speech_scene().await;
         scene.responses.lock().unwrap().extend([
-            tool_call("say", serde_json::json!({"words": "Hello."})),
+            tool_call("speak", serde_json::json!({"words": "Hello."})),
             tool_call(
                 "approve_action",
                 serde_json::json!({"action_id": 1, "include": ["Nobody"]}),
@@ -5464,7 +5456,7 @@ mod tests {
         let listener = scene.names[1].clone();
         let speaker = scene.names[0].clone();
         scene.responses.lock().unwrap().extend([
-            tool_call("say", serde_json::json!({"words": "Hello."})),
+            tool_call("speak", serde_json::json!({"words": "Hello."})),
             tool_call(
                 "approve_action",
                 serde_json::json!({"action_id": 1, "include": [listener], "exclude": [listener]}),
@@ -5499,7 +5491,7 @@ mod tests {
         let scene = speech_scene().await;
         scene
             .speak(
-                tool_call("say", serde_json::json!({"words": "Run!"})),
+                tool_call("speak", serde_json::json!({"words": "Run!"})),
                 serde_json::json!({"action_id": 1, "prefix": "(Over the din)"}),
             )
             .await;
@@ -5520,7 +5512,10 @@ mod tests {
     async fn a_prefix_on_something_that_is_not_speech_is_refused() {
         let scene = speech_scene().await;
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             tool_call(
                 "approve_action",
                 serde_json::json!({"action_id": 1, "prefix": "(Quietly)"}),
@@ -5592,7 +5587,7 @@ mod tests {
     async fn an_overlong_prefix_is_returned_to_the_gm() {
         let scene = speech_scene().await;
         scene.responses.lock().unwrap().extend([
-            tool_call("say", serde_json::json!({"words": "Hello."})),
+            tool_call("speak", serde_json::json!({"words": "Hello."})),
             tool_call(
                 "approve_action",
                 serde_json::json!({"action_id": 1, "prefix": "x".repeat(300)}),
@@ -5650,8 +5645,8 @@ mod tests {
         scene
             .speak(
                 tool_call(
-                    "whisper",
-                    serde_json::json!({"words": "The cache is under the floor.", "to": ["Toma"]}),
+                    "speak",
+                    serde_json::json!({"private": true, "words": "The cache is under the floor.", "to": ["Toma"]}),
                 ),
                 serde_json::json!({"action_id": 1}),
             )
@@ -5719,7 +5714,10 @@ mod tests {
                 .unwrap();
         }
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             approve(1),
             narration,
             response(Content::Text(String::new())),
@@ -5785,7 +5783,10 @@ mod tests {
         assert!(narrations(&scene.store, &scene.second).await.is_empty());
 
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the sky"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the sky"}),
+            ),
             approve(2),
             tool_call(
                 "narrate_characters",
@@ -5819,7 +5820,10 @@ mod tests {
                 .unwrap();
         }
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "approve".into(),
@@ -5885,7 +5889,10 @@ mod tests {
                 .unwrap();
         }
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             // Narrating before the action is decided.
             tool_call("narrate_group", serde_json::json!({"text": "Too early."})),
             approve(1),
@@ -5953,18 +5960,35 @@ mod tests {
         assert!(failed_sequences(&scene).await.is_empty());
     }
 
+    #[test]
+    fn speech_must_name_who_hears_it_only_when_private() {
+        let valid = |arguments: serde_json::Value| validate_speak_action(&arguments.to_string());
+        assert!(valid(serde_json::json!({"words": "Hi."})).is_ok());
+        assert!(valid(serde_json::json!({"words": "Hi.", "to": ["Toma"]})).is_ok());
+        assert!(valid(serde_json::json!({"words": "Hi.", "to": ["Toma", "Mara"]})).is_ok());
+        assert!(valid(serde_json::json!({"words": "Hi.", "private": true})).is_err());
+        assert!(
+            valid(serde_json::json!({"words": "Hi.", "private": true, "to": ["Toma", "Mara"]}))
+                .is_ok()
+        );
+        assert!(valid(serde_json::json!({"words": " ", "to": ["Toma"]})).is_err());
+    }
+
     #[tokio::test]
-    async fn each_request_tool_reaches_the_gm_under_its_own_name_and_is_resolved_like_any_action() {
+    async fn each_attempt_kind_reaches_the_gm_with_its_kind_and_is_resolved_like_any_action() {
         let scene = speech_scene().await;
-        let tools = ["look", "investigate", "open", "ask"];
+        let kinds = ["look", "investigate", "open", "ask"];
         let approved_before: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM action WHERE approved = 1")
                 .fetch_one(&scene.store.pool())
                 .await
                 .unwrap();
-        for (index, tool) in tools.iter().enumerate() {
+        for (index, kind) in kinds.iter().enumerate() {
             scene.responses.lock().unwrap().extend([
-                tool_call(tool, serde_json::json!({"description": "the shutters"})),
+                tool_call(
+                    "attempt",
+                    serde_json::json!({"kind": kind, "description": "the shutters"}),
+                ),
                 approve(i64::try_from(index).unwrap() + 1),
                 tool_call("narrate_nothing", serde_json::json!({})),
                 response(Content::Text(String::new())),
@@ -5978,23 +6002,23 @@ mod tests {
 
         {
             let requests = scene.requests.lock().unwrap();
-            // The player agent is offered all four, each named for what it does.
-            let offered: Vec<&str> = requests[0]
+            // The player agent is offered one attempt tool, not one per kind.
+            let offered = requests[0]
                 .tools
                 .iter()
-                .map(|tool| tool.name.as_str())
-                .filter(|name| tools.contains(name))
-                .collect();
-            assert_eq!(offered, tools);
-            // The GM is told which one was used, and the arguments it carried.
-            for (index, tool) in tools.iter().enumerate() {
+                .filter(|tool| tool.name == "attempt")
+                .count();
+            assert_eq!(offered, 1);
+            // The GM is told which kind was used, and the arguments it carried.
+            for (index, kind) in kinds.iter().enumerate() {
                 let asked = requests.iter().any(|request| {
                     matches!(request.messages.last().map(|message| &message.content),
                         Some(MessageContent::Text(text))
-                            if text.contains(&format!("takes action {}: a `{tool}` request", index + 1))
+                            if text.contains(&format!("takes action {}: a `attempt` request", index + 1))
+                                && text.contains(&format!("\"kind\":\"{kind}\""))
                                 && text.contains("the shutters"))
                 });
-                assert!(asked, "the GM was not asked about a `{tool}` request");
+                assert!(asked, "the GM was not asked about a `{kind}` attempt");
             }
         }
         let approved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM action WHERE approved = 1")
@@ -6309,8 +6333,8 @@ mod tests {
         scene.responses.lock().unwrap().extend([
             // The player speaks to Toma; the GM narrates it to everyone who heard.
             tool_call(
-                "say",
-                serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
+                "speak",
+                serde_json::json!({"words": "Where is the flour?", "to": ["Toma"]}),
             ),
             approve(1),
             narrate("Toma looks up."),
@@ -6379,12 +6403,12 @@ mod tests {
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "say-a".into(),
-                    name: "say".into(),
+                    name: "speak".into(),
                     arguments: serde_json::json!({"words": "One."}).to_string(),
                 },
                 ToolCall {
                     id: "say-b".into(),
-                    name: "say".into(),
+                    name: "speak".into(),
                     arguments: serde_json::json!({"words": "Two."}).to_string(),
                 },
             ])),
@@ -6445,9 +6469,9 @@ mod tests {
 
     fn propose(words: &str, to: &str, eagerness: u8) -> Response {
         tool_call(
-            "say",
+            "speak",
             serde_json::json!({
-                "words": words, "to": to,
+                "words": words, "to": [to],
                 "eagerness": eagerness,
             }),
         )
@@ -6460,8 +6484,8 @@ mod tests {
         scene.responses.lock().unwrap().extend([
             // The player's turn: say to Toma, the GM approves and narrates.
             tool_call(
-                "say",
-                serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
+                "speak",
+                serde_json::json!({"words": "Where is the flour?", "to": ["Toma"]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("Toma looks up."),
@@ -6520,7 +6544,7 @@ mod tests {
     /// approving and narrating, and the player agent finishing.
     fn say_to_toma(words: &str) -> Vec<Response> {
         vec![
-            tool_call("say", serde_json::json!({"words": words, "to": "Toma"})),
+            tool_call("speak", serde_json::json!({"words": words, "to": ["Toma"]})),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("Toma looks up."),
             response(Content::Text(String::new())),
@@ -6919,7 +6943,7 @@ mod tests {
         );
         // The group splits: first with Mara outside, second with Toma inside.
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "approve".into(),
@@ -6958,8 +6982,8 @@ mod tests {
         });
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "say",
-                serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
+                "speak",
+                serde_json::json!({"words": "Where is the flour?", "to": ["Toma"]}),
             ),
             approve(2),
             narrate("Toma looks up."),
@@ -6978,8 +7002,8 @@ mod tests {
         scene.game.interrupt(&scene.second).await.unwrap();
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "say",
-                serde_json::json!({"words": "Where is the flour?", "to": "Mara"}),
+                "speak",
+                serde_json::json!({"words": "Where is the flour?", "to": ["Mara"]}),
             ),
             approve(3),
             narrate("Mara looks up."),
@@ -7154,7 +7178,7 @@ mod tests {
             approve(2),
             narrate("Mara speaks."),
             // The other player interrupts before Toma's reply is taken to the GM.
-            tool_call("say", serde_json::json!({"words": "Hold on."})),
+            tool_call("speak", serde_json::json!({"words": "Hold on."})),
             approve(3),
             narrate("The room stills."),
             response(Content::Text(String::new())),
@@ -7196,12 +7220,12 @@ mod tests {
             &scene,
             [
                 tool_call(
-                    "whisper",
-                    serde_json::json!({"words": "Mara whispers: trust me.", "to": [first_name], "eagerness": 2}),
+                    "speak",
+                    serde_json::json!({"private": true, "words": "Mara whispers: trust me.", "to": [first_name], "eagerness": 2}),
                 ),
                 tool_call(
-                    "whisper",
-                    serde_json::json!({"words": "Toma whispers: not him.", "to": [second_name], "eagerness": 2}),
+                    "speak",
+                    serde_json::json!({"private": true, "words": "Toma whispers: not him.", "to": [second_name], "eagerness": 2}),
                 ),
                 approve(2),
                 narrate("Mara leans toward the first adventurer."),
@@ -7249,8 +7273,8 @@ mod tests {
         let _second = scene.game.connect(&scene.second).await.unwrap();
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "whisper",
-                serde_json::json!({"words": "The key is under the stone.", "to": ["Toma"]}),
+                "speak",
+                serde_json::json!({"private": true, "words": "The key is under the stone.", "to": ["Toma"]}),
             ),
             tool_call(
                 "reject_action",
@@ -7423,7 +7447,7 @@ mod tests {
             approve(2),
             narrate("Mara speaks."),
             // While Toma's chosen reply waits, the other player splits the group.
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "approve".into(),
@@ -7598,7 +7622,7 @@ mod tests {
         };
         // The second player parts from everyone else.
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
             response(Content::ToolCalls(vec![
                 call("approve_action", serde_json::json!({"action_id": 1})),
                 call(
@@ -7646,8 +7670,8 @@ mod tests {
         });
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "say",
-                serde_json::json!({"words": "Where is the flour?", "to": "Toma"}),
+                "speak",
+                serde_json::json!({"words": "Where is the flour?", "to": ["Toma"]}),
             ),
             approve(2),
             narrate("Toma looks up."),
@@ -7656,7 +7680,7 @@ mod tests {
             propose("It is in the hut.", &speaker, 2),
             approve(3),
             narrate("Mara speaks."),
-            tool_call("look", serde_json::json!({"description": "the yard"})),
+            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the yard"})),
             response(Content::ToolCalls(vec![
                 call("approve_action", serde_json::json!({"action_id": 4})),
                 call(
@@ -7775,7 +7799,7 @@ mod tests {
             .unwrap();
         // Split first: the first player stays with Mara, the second with Toma.
         scene.responses.lock().unwrap().extend([
-            tool_call("look", serde_json::json!({"description": "the room"})),
+            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "approve".into(),
@@ -7806,8 +7830,8 @@ mod tests {
         // Speaking to Mara outside gives only Mara an opportunity.
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "say",
-                serde_json::json!({"words": "Is Toma well?", "to": "Mara"}),
+                "speak",
+                serde_json::json!({"words": "Is Toma well?", "to": ["Mara"]}),
             ),
             approve(2),
             narrate("Mara listens."),
@@ -7862,13 +7886,13 @@ mod tests {
                 .await
                 .unwrap();
             let arguments =
-                serde_json::json!({"words": format!("Line {index}."), "to": "Toma"}).to_string();
+                serde_json::json!({"words": format!("Line {index}."), "to": ["Toma"]}).to_string();
             let requesting = crate::store::record_tool_call_for_test(
                 &store,
                 store.agent_branch(first.agent_id).await.unwrap(),
                 Some(sequence.id),
                 &format!("say-{index}"),
-                "say",
+                "speak",
                 &arguments,
             )
             .await;
@@ -7877,7 +7901,7 @@ mod tests {
                     &store.player_actor(&first).await.unwrap(),
                     sequence.id,
                     requesting,
-                    "say",
+                    "speak",
                     &arguments,
                 )
                 .await
@@ -7971,9 +7995,9 @@ mod tests {
                 do_nothing(),
                 // Eagerness outside 1 to 3.
                 tool_call(
-                    "say",
+                    "speak",
                     serde_json::json!({
-                        "words": "Hi.", "to": speaker,
+                        "words": "Hi.", "to": [speaker],
                         "eagerness": 4,
                     }),
                 ),
@@ -8082,8 +8106,8 @@ mod tests {
         let scene = speech_scene().await;
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "whisper",
-                serde_json::json!({"words": "Keep this quiet.", "to": ["Toma"]}),
+                "speak",
+                serde_json::json!({"private": true, "words": "Keep this quiet.", "to": ["Toma"]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("Toma leans in."),
@@ -8112,8 +8136,8 @@ mod tests {
         let scene = speech_scene().await;
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "whisper",
-                serde_json::json!({"words": "Psst.", "to": [scene.names[1]]}),
+                "speak",
+                serde_json::json!({"private": true, "words": "Psst.", "to": [scene.names[1]]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("A quiet word."),
@@ -8145,8 +8169,8 @@ mod tests {
             .extend(say_to_toma("First point."));
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "say",
-                serde_json::json!({"words": "Second point.", "to": "Toma"}),
+                "speak",
+                serde_json::json!({"words": "Second point.", "to": ["Toma"]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 2})),
             narrate("Toma listens."),
@@ -8280,7 +8304,7 @@ mod tests {
         let scene = speech_scene().await;
         scene
             .speak(
-                tool_call("say", serde_json::json!({"words": "Good morning."})),
+                tool_call("speak", serde_json::json!({"words": "Good morning."})),
                 serde_json::json!({"action_id": 1}),
             )
             .await;
@@ -8337,8 +8361,8 @@ mod tests {
         scene
             .speak(
                 tool_call(
-                    "say",
-                    serde_json::json!({"words": "Good morning.", "to": "Toma"}),
+                    "speak",
+                    serde_json::json!({"words": "Good morning.", "to": ["Toma"]}),
                 ),
                 serde_json::json!({"action_id": 1}),
             )
@@ -8361,8 +8385,8 @@ mod tests {
         let scene = speech_scene().await;
         scene.responses.lock().unwrap().extend([
             tool_call(
-                "whisper",
-                serde_json::json!({"words": "Psst.", "to": ["Nobody"]}),
+                "speak",
+                serde_json::json!({"private": true, "words": "Psst.", "to": ["Nobody"]}),
             ),
             response(Content::Text("Nobody answers.".into())),
         ]);
@@ -8457,8 +8481,8 @@ mod tests {
         responses.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![
                 ToolCall {
@@ -8520,8 +8544,8 @@ mod tests {
         responses.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-2".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![
                 ToolCall {
@@ -8582,8 +8606,8 @@ mod tests {
         let (backend, _) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![ToolCall {
                 id: "approve-1".into(),
@@ -9246,8 +9270,8 @@ mod tests {
             responses.lock().unwrap().extend([
                 response(Content::ToolCalls(vec![ToolCall {
                     id: "look-1".into(),
-                    name: "look".into(),
-                    arguments: r#"{"description":"Look around."}"#.into(),
+                    name: "attempt".into(),
+                    arguments: r#"{"kind":"look","description":"Look around."}"#.into(),
                 }])),
                 response(Content::ToolCalls(vec![
                     ToolCall {
@@ -9372,8 +9396,8 @@ mod tests {
         script.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"the room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"the room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![
                 ToolCall {
@@ -9394,8 +9418,8 @@ mod tests {
             do_nothing(),
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-2".into(),
-                name: "look".into(),
-                arguments: r#"{"description":"the room"}"#.into(),
+                name: "attempt".into(),
+                arguments: r#"{"kind":"look","description":"the room"}"#.into(),
             }])),
             response(Content::ToolCalls(vec![ToolCall {
                 id: "approve-2".into(),
@@ -9781,8 +9805,8 @@ mod tests {
             real: Arc::clone(&model.backend),
             player: Mutex::new(VecDeque::from([
                 tool_call(
-                    "say",
-                    serde_json::json!({"words": "Toma, where did the bread go?", "to": "Toma"}),
+                    "speak",
+                    serde_json::json!({"words": "Toma, where did the bread go?", "to": ["Toma"]}),
                 ),
                 response(Content::Text(String::new())),
             ])),
@@ -9840,9 +9864,23 @@ mod tests {
         assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
 
+        let npc_inferences: Vec<i64> = sqlx::query_scalar(
+            "SELECT inference.id FROM inference JOIN npc_agent ON npc_agent.agent_id = inference.agent_id ORDER BY inference.id",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        let mut actions = Vec::new();
+        for id in npc_inferences {
+            if let crate::inspection::RecordedOutcome::Response(response) =
+                store.reconstruct_inference(id).await.unwrap().outcome
+            {
+                actions.push(format!("{:?}", response.content));
+            }
+        }
         assert!(
             reached_player,
-            "no NPC speech reached the player within two minutes; utterances: {utterances:?}"
+            "no NPC speech reached the player within two minutes; utterances: {utterances:?}; actions: {actions:?}"
         );
         let asked: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM npc_candidate              JOIN character ON character.id = npc_candidate.character_id              WHERE character.name = 'Toma' AND npc_candidate.decision_invocation_id IS NOT NULL",
@@ -9857,9 +9895,14 @@ mod tests {
         .fetch_one(&store.pool())
         .await
         .unwrap();
+        let errors: Vec<String> =
+            sqlx::query_scalar("SELECT error FROM sequence WHERE error IS NOT NULL")
+                .fetch_all(&store.pool())
+                .await
+                .unwrap();
         assert_eq!(
             failed, 0,
-            "the discussion failed; utterances: {utterances:?}"
+            "the discussion failed ({errors:?}); utterances: {utterances:?}"
         );
     }
 

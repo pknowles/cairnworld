@@ -1305,7 +1305,7 @@ fiction rather than substituting for mechanical state.
 | --- | --- |
 | Look/investigate/open/ask | GM can answer, request a save/time cost, or reject with a reason. No automatic repeated save. |
 | Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
-| Say/Whisper/lie | Say defaults to all characters in the group; Whisper names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
+| Speak/lie | A public speech (the default) is heard by all characters in the group and singles out an addressee only when it names exactly one; a private one (`private`) names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
 | DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
 | InterventionCheck/Approve/Reject | GM consults selected characters about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may pause for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
@@ -1316,15 +1316,14 @@ fiction rather than substituting for mechanical state.
 | SpawnItem/SpawnNPC | GM submits a typed proposal to Storyteller; its approval creates the object through the same validated constructors and records the source. |
 | Edit notes | Whole-value and exact-text edits on authorized object fields/note values; Storyteller reads its own notes, GM reads authorized notes from both roles but edits only GM notes. |
 
-Expose `look`, `investigate`, `open` and `ask` as distinct character tools with
-one shared description-argument schema and GM request implementation. Their names
-express the character's intent: observe, examine/search, attempt to open, or ask
-the GM for information/clarification. Look is not a generic name for the other
-requests. Preserve the chosen tool name and description in the recorded request
-and GM context; do not translate all four into Look. Shared submission,
-authorization and arbitration do not imply identical fictional effects or four
-separate executors. Ask addresses the GM; spoken questions to characters still
-use Say/Whisper. Existing action rules and world-state operations determine what
+Expose `look`, `investigate`, `open` and `ask` as one `attempt` character tool: a
+`kind` selecting observe, examine/search, attempt to open, or ask the GM for
+information/clarification, plus a description. One tool rather than four keeps
+the model-facing tool definitions small (four near-identical definitions were
+44% of a player agent's tool text). Preserve the chosen kind and description in
+the recorded request and GM context. Shared submission, authorization and
+arbitration do not imply identical fictional effects or separate executors. Ask
+addresses the GM; spoken questions to characters still use Speak. Existing action rules and world-state operations determine what
 can actually happen; a new tool name does not itself implement missing mechanics.
 
 `combat(id, group_id, round, current_character_id)` and

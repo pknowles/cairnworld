@@ -4,7 +4,7 @@
 //! every reader derives attribution from the speech record, never from a
 //! character's current name.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use sqlx::{Sqlite, Transaction};
@@ -15,28 +15,20 @@ use crate::{
     llm::{MessageContent, Role, SpeechContent},
 };
 
-// What the model supplies to speak to the whole group.
+// What the model supplies to speak.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SayAction {
+pub struct SpeakAction {
     // Your character's speech as it should read in the chat: who speaks and
     // how it is said when that matters, e.g. `Mara says in a low voice: ...`.
     pub words: String,
-    // The character you are speaking to. This does not make your words private:
-    // everyone present still hears them.
+    // Who it is for: the character a public speech is addressed to, or
+    // everyone who hears a private one.
     #[serde(default)]
-    pub to: Option<String>,
-}
-
-// What the model supplies to speak privately.
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WhisperAction {
-    // Your character's whisper as it should read in the chat, with who speaks
-    // and how it is said when that matters.
-    pub words: String,
-    // The characters who hear the whisper. Nobody else does.
     pub to: Vec<String>,
+    // Whether only the characters named in `to` hear it.
+    #[serde(default)]
+    pub private: bool,
 }
 
 /// The most characters of GM prefix a hearer is shown: it is a short phrase in
@@ -287,7 +279,7 @@ impl Store {
         .with_context(|| format!("character {character_id} has no group"))
     }
 
-    /// Decide the hearers of an approved say or whisper. `Err` is a typed
+    /// Decide the hearers of an approved speak action. `Err` is a typed
     /// `InvalidHearing` for a GM override that cannot be applied; the inner
     /// `Err` is an utterance that cannot happen in the current scene.
     pub(super) async fn plan_speech(
@@ -295,20 +287,23 @@ impl Store {
         action: &PendingAction,
         hearing: &Hearing,
     ) -> Result<std::result::Result<SpeechPlan, String>> {
-        let (kind, words, addressee, targets): (&'static str, String, Option<String>, Vec<String>) =
-            match action.tool.as_str() {
-                "say" => {
-                    let say: SayAction = serde_json::from_str(&action.args)
-                        .context("parsing stored say action arguments")?;
-                    ("say", say.words, say.to, Vec::new())
-                }
-                "whisper" => {
-                    let whisper: WhisperAction = serde_json::from_str(&action.args)
-                        .context("parsing stored whisper action arguments")?;
-                    ("whisper", whisper.words, None, whisper.to)
-                }
-                tool => bail!("`{tool}` is not a speech action"),
-            };
+        ensure!(
+            action.tool == "speak",
+            "`{}` is not a speech action",
+            action.tool
+        );
+        let speak: SpeakAction =
+            serde_json::from_str(&action.args).context("parsing stored speak action arguments")?;
+        let (kind, words) = (if speak.private { "whisper" } else { "say" }, speak.words);
+        let (addressee, targets) = if speak.private {
+            (None, speak.to)
+        } else {
+            // Naming several is allowed but singles out no one.
+            (
+                (speak.to.len() == 1).then(|| speak.to[0].clone()),
+                Vec::new(),
+            )
+        };
         let group_id = Self::character_group_in(transaction, action.character_id).await?;
         let members = Self::group_members(transaction, group_id).await?;
         let Some(speaker) = members

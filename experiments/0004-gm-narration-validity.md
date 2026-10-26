@@ -77,3 +77,21 @@ Adopted: the role says spoken words reach their hearers as said, so narrate only
 what else happens or call `narrate_nothing`; the approval result for speech says
 the words are already conveyed so there is nothing to narrate. The GM still has
 every narrate tool. The device suite then passed with no invalid output (178 s).
+
+## Merging the near-identical tools (`attempt`, `speak`)
+
+`look`/`investigate`/`open`/`ask` became `attempt` with a `kind`, and `say`/`whisper`
+became `speak` with `to` and `private`. The player's tool text fell from 3,721 to
+2,526 characters. The first device-suite runs passed 4 of 8, which prompted
+repeating the failing scenarios:
+
+- GM answering a player's question (8 runs each): `kind` ask 5 correct, `kind` look 5
+  correct. The kind does not matter. The misses were the GM narrating with another
+  narrate tool than the test demanded; the check now reads the text of whichever
+  narrate tool the GM called.
+- NPC answering a question (10 runs): 4 failed. The cause was in the model's own
+  output: it passed two names in `to` on a public speech and the "at most one
+  addressee" rule failed the NPC's step. Public speech now accepts several names
+  (it singles out an addressee only when exactly one is named). Afterwards 10 of 10
+  passed, none private.
+- Full device suite afterwards: passed (218 s).

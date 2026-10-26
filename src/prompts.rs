@@ -344,24 +344,24 @@ rolle = \"typo\"",
     fn a_tool_needs_text_for_exactly_its_arguments() {
         let schema = serde_json::json!({
             "type": "object",
-            "properties": {"words": {"type": "string"}, "to": {"type": "string"}},
+            "properties": {"words": {"type": "string"}, "to": {"type": "string"}, "private": {"type": "boolean"}},
         });
         let prompts = current().unwrap();
         let tools = &prompts.shared.tools;
-        assert!(tools.tool("say", schema.clone()).is_ok());
+        assert!(tools.tool("speak", schema.clone()).is_ok());
         let extra = serde_json::json!({
             "type": "object",
             "properties": {"words": {"type": "string"}},
         });
         assert!(
-            tools.tool("say", extra).is_err(),
-            "`to` has text but no argument"
+            tools.tool("speak", extra).is_err(),
+            "`to` and `private` have text but no argument"
         );
         let missing = serde_json::json!({
             "type": "object",
-            "properties": {"words": {"type": "string"}, "to": {"type": "string"}, "more": {"type": "string"}},
+            "properties": {"words": {"type": "string"}, "to": {"type": "string"}, "private": {"type": "boolean"}, "more": {"type": "string"}},
         });
-        assert!(tools.tool("say", missing).is_err(), "`more` has no text");
+        assert!(tools.tool("speak", missing).is_err(), "`more` has no text");
         assert!(tools.tool("no_such_tool", schema).is_err());
     }
 }

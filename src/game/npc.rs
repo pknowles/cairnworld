@@ -15,10 +15,7 @@ use crate::{
     inspection::DevEvent,
     llm::{Backend, Message, Role, ToolCall},
     prompts,
-    store::{
-        AgentBranch, Decision, NpcStep, ResponseCollection, SayAction, WhisperAction,
-        with_eagerness,
-    },
+    store::{AgentBranch, Decision, NpcStep, ResponseCollection, SpeakAction, with_eagerness},
     world::{ChatChange, World},
 };
 
@@ -111,7 +108,7 @@ where
     }
 
     /// Ask an NPC for one decision from its own history: exactly one
-    /// `do_nothing`, `say` or `whisper`. `inference_id` is set as soon as the
+    /// `do_nothing` or `speak`. `inference_id` is set as soon as the
     /// model has answered, so a caller can close a call that then fails.
     pub(super) async fn ask_npc(
         self: &Arc<Self>,
@@ -130,26 +127,18 @@ where
             .context("serializing the NPC's scene")?;
         let prompts = prompts::current()?;
         let facts = prompts::fill(&prompts.npc.situation, &[("scene", &scene)])?;
-        let speech = |name: &str, schema: serde_json::Value| -> Result<_> {
-            let mut definition = prompts.shared.tools.tool(name, schema)?;
-            definition.schema = with_eagerness(definition.schema, &prompts.npc.eagerness);
-            Ok(definition)
-        };
+        let mut speak = prompts.shared.tools.tool(
+            "speak",
+            serde_json::to_value(schema_for!(SpeakAction))
+                .expect("speak action schema should serialize"),
+        )?;
+        speak.schema = with_eagerness(speak.schema, &prompts.npc.eagerness);
         let tools = [
             prompts
                 .npc
                 .tools
                 .tool("do_nothing", prompts::no_arguments())?,
-            speech(
-                "say",
-                serde_json::to_value(schema_for!(SayAction))
-                    .expect("say action schema should serialize"),
-            )?,
-            speech(
-                "whisper",
-                serde_json::to_value(schema_for!(WhisperAction))
-                    .expect("whisper action schema should serialize"),
-            )?,
+            speak,
         ];
         let completion = context::complete_recorded(
             &self.store,
@@ -174,10 +163,7 @@ where
         *inference_id = Some(completion.inference_id);
         let (call, decision) = Decision::parse(&completion.response.content)?;
         if let Decision::Propose(proposal) = &decision {
-            match proposal.tool {
-                "say" => super::validate_say_action(&proposal.arguments)?,
-                _ => super::validate_whisper_action(&proposal.arguments)?,
-            }
+            super::validate_speak_action(&proposal.arguments)?;
         }
         Ok((completion.inference_id, call, decision))
     }

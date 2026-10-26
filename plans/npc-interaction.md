@@ -7,7 +7,8 @@ and entrance narration, the four request tools, `committed` and
 `intervention_check` exist.
 
 Not done or not verified:
-- Real-model routing of `look`/`investigate`/`open`/`ask` (scripted only), and
+- Real-model use of the merged `attempt` kinds and `speak` (public vs
+  `private`; see the whisper-only finding below), and
   the shared-detail setting on and off on the real model.
 - Scripted cases for a producer that is paused or fails after delivering
   narration (follow-ups wait or fail visibly), and for a failing
@@ -210,7 +211,7 @@ table is kept as the record of each slice's finish line.
 | --- | --- |
 | Narration tools and shared delivery | Replace plain-text GM completion across action/opening/presence paths with the four narration tools. Complete recipient validation, per-text provenance, shared-detail configuration and shared history delivery together. The group, actor-and-others and addressed forms work through live/reload/context/inspection paths; an invalid narration call delivers nothing. Existing speech responses keep working; general NPC response eligibility remains pending until the next checkpoint. |
 | Message-driven NPC responses | Complete narration delivery to NPC histories and generalize pending response sources/causal inspection to received messages. Verify Say/Whisper and Take together, including standalone narration, own-action exclusion, privacy, stale decisions and lifecycle/budget boundaries. Include necessary migrations and terminology cleanup with this behaviour; no rename-only prerequisite or new scheduler. |
-| Distinct GM request tools | Expose Look/Investigate/Open/Ask through the shared action path, retaining actual intent in recorded requests. Verify real-model routing and ordinary GM approval/results without adding unsupported world mechanics. |
+| One attempt tool | Expose Look/Investigate/Open/Ask as `attempt` kinds through the shared action path, retaining the actual kind in recorded requests. Verify real-model routing and ordinary GM approval/results without adding unsupported world mechanics. |
 | Tentative/committed intervention | Add committed intent and InterventionCheck. Resolve bounded reaction results before the original decision, then schedule dialogue. Verify warning versus committed retry, source/actor authority, no GM re-entry, shared budget and retained effects on failure. Physical reactions remain with combat rules. |
 
 The following sections specify these pending increments. Reuse existing
@@ -436,14 +437,14 @@ rename-only checkpoint is needed.
   Do not split a function merely to satisfy a naming rule or perform a broad
   mechanical rename before the structure is settled. There are no combat-style
   turns granting each NPC a slot to speak.
-- Expose `look`, `investigate`, `open` and `ask` with distinct model-facing names
-  and concise descriptions, sharing the existing description-argument schema,
+- Expose `look`, `investigate`, `open` and `ask` as one `attempt` tool with a
+  `kind` argument and concise descriptions, sharing
   character-action submission and GM arbitration implementation. Look means
   observation, not arbitrary actions/questions; Ask requests information or
-  clarification from the GM, while speaking to a character uses Say/Whisper.
-  Preserve each actual tool name and arguments through validation, pending and
-  resolved action handling, model context and inspection. Do not silently alias
-  everything to Look or duplicate the executor. Apply the same shared path when
+  clarification from the GM, while speaking to a character uses Speak.
+  Preserve the actual kind and arguments through validation, pending and
+  resolved action handling, model context and inspection. Do not silently treat
+  every kind as Look or duplicate the executor. Apply the same shared path when
   these actions are offered to NPCs; do not add separate NPC variants. This
   interface change does not invent unsupported state mutations, saves or time
   mechanics. Review descriptions under prompt_standards.md and exercise routing
