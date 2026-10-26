@@ -110,7 +110,7 @@ action/time operations for combat and travel rather than implementing Move again
    PC/NPC responses, apply the approved stay/join/object policy and ask the GM
    for final arbitration with all responses visible. On approval, call the real
    group split operation, update the travelling group's location and GM arrival
-   description, and complete the action atomically. A silent or away PC goes with the majority of the party, otherwise stays;
+   description, and complete the action atomically. A silent or away PC goes with a strict majority of the party, otherwise (including a tie) stays;
    an away character's combat turns are skipped. Keep all history parents
    and player agents. Test everyone travels, split party, NPC refusal, objection,
    timeout, stale connection endpoint and two simultaneous travel requests.

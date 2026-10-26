@@ -1641,7 +1641,7 @@ stored so a restart keeps it.
 
 A character whose player has timed out or is away does nothing and skips its
 turns: in combat its turn is closed without an action. For travel it goes with
-the majority of the party, and otherwise stays where it is.
+a strict majority of the party, and otherwise, including a tie, stays where it is.
 
 The action that needs a human response persists
 `pending_reply(action_id, character_id, deadline, status, response_content_id)`;
@@ -1796,8 +1796,8 @@ choices derived from the named requirements.
   the game's individual-turn declaration rather than Cairn's simultaneous sides.
 - **Travel:** stay splits the party; objection goes to GM arbitration before
   movement. No second initiator confirmation. A PC who has not answered by the
-  response deadline, or is away, goes with the majority of the party and
-  otherwise does nothing (accepted 2026-10-26, see user_exerpts.md); the 60 second
+  response deadline, or is away, goes with a strict majority of the party and
+  otherwise, including a tie, stays and does nothing (accepted 2026-10-26, see user_exerpts.md); the 60 second
   silent-join proposal is withdrawn.
 - **Time window:** propose `max_character_lead_seconds=600` out of combat;
   a character at least that far ahead of the least-advanced connected PC in its
