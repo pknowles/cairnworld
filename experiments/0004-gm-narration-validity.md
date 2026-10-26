@@ -95,3 +95,5 @@ repeating the failing scenarios:
   (it singles out an addressee only when exactly one is named). Afterwards 10 of 10
   passed, none private.
 - Full device suite afterwards: passed (218 s).
+
+- The structured public addressee was then dropped (user declaration: the addressee is up to the character agent, in the text). 	o now only lists a private speech's hearers and is ignored on a public one. Device suite afterwards: passed (232 s).

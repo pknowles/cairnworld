@@ -2032,7 +2032,7 @@ fn validate_speak_action(arguments: &str) -> Result<()> {
 fn named_hearers(tool: &str, arguments: &str) -> Vec<String> {
     match tool {
         "speak" => serde_json::from_str::<SpeakAction>(arguments)
-            .map(|speak| speak.to)
+            .map(|speak| if speak.private { speak.to } else { Vec::new() })
             .unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -5356,17 +5356,6 @@ mod tests {
                 }
             }
         }
-        // Who was addressed is kept as a character, not only as a name.
-        let (addressed_id, addressed_name): (i64, String) =
-            sqlx::query_as("SELECT addressed_character_id, addressed_name FROM speech")
-                .fetch_one(&scene.store.pool())
-                .await
-                .unwrap();
-        let toma: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
-            .fetch_one(&scene.store.pool())
-            .await
-            .unwrap();
-        assert_eq!((addressed_id, addressed_name), (toma, "Toma".to_string()));
         // One utterance is stored once and shared by every history.
         let contents: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT message.content) FROM message WHERE message.action_id IS NOT NULL",
@@ -5378,13 +5367,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_public_speech_naming_several_characters_singles_out_none_and_everyone_hears() {
+    async fn a_public_speech_ignores_to_and_records_no_addressee() {
         let scene = speech_scene().await;
         scene
             .speak(
                 tool_call(
                     "speak",
-                    serde_json::json!({"words": "Listen.", "to": ["Toma", "Mara"]}),
+                    serde_json::json!({"words": "Listen.", "to": ["Toma", "Nobody"]}),
                 ),
                 serde_json::json!({"action_id": 1}),
             )
@@ -8375,7 +8364,7 @@ mod tests {
             .expect("an NPC was shown the speech");
         assert_eq!(heard.text, "Where is the flour?");
         assert_eq!(heard.speaker, speaker);
-        assert_eq!(heard.addressee.as_deref(), Some("Toma"));
+        assert_eq!(heard.addressee, None);
         assert_eq!(heard.kind, "say");
     }
 
@@ -8391,10 +8380,14 @@ mod tests {
                 serde_json::json!({"action_id": 1}),
             )
             .await;
-        sqlx::query("UPDATE speech SET text_format = 'legacy'")
-            .execute(&scene.store.pool())
-            .await
-            .unwrap();
+        // Older records stored who was addressed; new speech does not.
+        sqlx::query(
+            "UPDATE speech SET text_format = 'legacy', addressed_name = 'Toma', \
+             addressed_character_id = (SELECT id FROM character WHERE name = 'Toma')",
+        )
+        .execute(&scene.store.pool())
+        .await
+        .unwrap();
 
         let expected = format!("{} says to Toma: Good morning.", scene.names[0]);
         assert_eq!(
@@ -9875,12 +9868,11 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let utterances: Vec<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT speaker_name, kind, addressed_name FROM speech ORDER BY action_id",
-        )
-        .fetch_all(&store.pool())
-        .await
-        .unwrap();
+        let utterances: Vec<(String, String)> =
+            sqlx::query_as("SELECT speaker_name, kind FROM speech ORDER BY action_id")
+                .fetch_all(&store.pool())
+                .await
+                .unwrap();
         println!(
             "NPC utterances after the first reply or the wait: {utterances:?}; the player heard {:?}",
             heard(&store, &first).await

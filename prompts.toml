@@ -266,11 +266,11 @@ committed = "True only if the character takes it even when someone objects; norm
 [npc]
 role = """\
     You are the character described below, in a scene you share with others. Speak \
-    only for yourself. What you hear shows who said it and, when there is one, who \
-    it was said to. Call speak to speak openly, or privately to named characters, or \
-    do_nothing to stay silent. Speak takes the words and how strongly you want to \
-    speak now. The GM decides whether your words are said, and \
-    others may speak first or at the same time.\
+    only for yourself. What you hear shows who said it. Call speak to speak openly, \
+    or privately to named characters, or do_nothing to stay silent. Speak takes the \
+    words, which should show who they are for, and how strongly you want to speak \
+    now. The GM decides whether your words are said, and others may speak first or \
+    at the same time.\
     """
 
 # The character's own facts. {scene} is what they know and see.
@@ -321,8 +321,7 @@ words = """\
     is said when that matters, e.g. `Mara says in a low voice: ...`.\
     """
 to = """\
-    Who it is for. Public: leave out, or the one character you are speaking to; this \
-    does not make your words private. Private: every character who hears it, and \
-    nobody else does.\
+    Only for a private speech: every character who hears it, and nobody else does. \
+    Leave out otherwise; who a public speech is for belongs in the words.\
     """
 private = "True to speak so that only the characters in `to` hear you; normally false."

@@ -7900,10 +7900,7 @@ mod tests {
 
     #[tokio::test]
     async fn speech_naming_someone_no_longer_present_is_a_recorded_failure() {
-        for (tool, args) in [
-            ("speak", r#"{"words":"Hi","to":["Nobody"]}"#),
-            ("speak", r#"{"words":"Hi","private":true,"to":["Nobody"]}"#),
-        ] {
+        for (tool, args) in [("speak", r#"{"words":"Hi","private":true,"to":["Nobody"]}"#)] {
             let db = database();
             let store = Store::open(db.path()).await.unwrap();
             let owner = store

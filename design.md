@@ -1305,7 +1305,7 @@ fiction rather than substituting for mechanical state.
 | --- | --- |
 | Look/investigate/open/ask | GM can answer, request a save/time cost, or reject with a reason. No automatic repeated save. |
 | Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
-| Speak/lie | A public speech (the default) is heard by all characters in the group and singles out an addressee only when it names exactly one; a private one (`private`) names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
+| Speak/lie | A public speech (the default) is heard by all characters in the group and names no addressee, since who it is for belongs in the words; a private one (`private`) names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
 | DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
 | InterventionCheck/Approve/Reject | GM consults selected characters about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may pause for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
@@ -1463,9 +1463,9 @@ can determine whether the speaker can speak and override hearers; the character
 agent owns the expressive text, including phrasing and descriptions of its own
 delivery. Store and show that text unchanged: readers do not manufacture a
 "Name says" sentence, strip style or infer identity from text. Speaker identity,
-intent, addressee and hearers remain structured metadata. The GM's optional
+intent and hearers remain structured metadata; who is addressed is in the text. The GM's optional
 prefix supplies circumstances of hearing rather than replacing the character's
-style. Addressing a character does not make Say private. Whisper supplies
+style. Naming a character in the words does not make Say private. Whisper supplies
 explicit targets; hearing overrides must stay within
 the authorized scene; a character cannot be both included and excluded.
 Snapshot hearers at commitment, retaining speaker identity and one original

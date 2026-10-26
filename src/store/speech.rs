@@ -22,8 +22,8 @@ pub struct SpeakAction {
     // Your character's speech as it should read in the chat: who speaks and
     // how it is said when that matters, e.g. `Mara says in a low voice: ...`.
     pub words: String,
-    // Who it is for: the character a public speech is addressed to, or
-    // everyone who hears a private one.
+    // Everyone who hears a private speech. A public one is heard by everyone
+    // present, and who it is for belongs in the words.
     #[serde(default)]
     pub to: Vec<String>,
     // Whether only the characters named in `to` hear it.
@@ -72,8 +72,6 @@ pub(super) struct SpeechPlan {
     group_id: i64,
     speaker_id: i64,
     speaker_name: String,
-    /// Who was spoken to, if anyone: their id and name when it was said.
-    addressed: Option<(i64, String)>,
     prefix: Option<String>,
     npc_speaker_branch: Option<i64>,
     /// Everyone who hears it except the speaker, whose own history is written
@@ -94,7 +92,8 @@ impl SpeechPlan {
     }
 }
 
-/// The text every reader shows for a speech message.
+/// The text every reader shows for a speech message. New speech has no
+/// addressee; older records keep theirs so recorded requests rebuild unchanged.
 pub(super) fn attributed(
     kind: &str,
     speaker: &str,
@@ -295,15 +294,9 @@ impl Store {
         let speak: SpeakAction =
             serde_json::from_str(&action.args).context("parsing stored speak action arguments")?;
         let (kind, words) = (if speak.private { "whisper" } else { "say" }, speak.words);
-        let (addressee, targets) = if speak.private {
-            (None, speak.to)
-        } else {
-            // Naming several is allowed but singles out no one.
-            (
-                (speak.to.len() == 1).then(|| speak.to[0].clone()),
-                Vec::new(),
-            )
-        };
+        // Who a public speech is for is in its words; `to` only chooses the
+        // hearers of a private one.
+        let targets = if speak.private { speak.to } else { Vec::new() };
         let group_id = Self::character_group_in(transaction, action.character_id).await?;
         let members = Self::group_members(transaction, group_id).await?;
         let Some(speaker) = members
@@ -311,13 +304,6 @@ impl Store {
             .find(|member| member.id == action.character_id)
         else {
             return Ok(Err("the speaker is no longer here".to_string()));
-        };
-        let addressed = match addressee {
-            Some(name) => match find(&members, &name) {
-                Ok(member) => Some((member.id, member.name.clone())),
-                Err(reason) => return Ok(Err(reason)),
-            },
-            None => None,
         };
         let mut hearer_ids: Vec<i64> = if kind == "say" {
             members.iter().map(|member| member.id).collect()
@@ -381,7 +367,6 @@ impl Store {
             group_id,
             speaker_id,
             speaker_name,
-            addressed,
             npc_speaker_branch,
             prefix: hearing
                 .prefix
@@ -402,17 +387,13 @@ impl Store {
         action_id: i64,
         words_content_id: i64,
     ) -> Result<()> {
-        let addressed_id = plan.addressed.as_ref().map(|(id, _)| *id);
-        let addressed_name = plan.addressed.as_ref().map(|(_, name)| name.as_str());
         sqlx::query!(
-            "INSERT INTO speech (action_id, speaker_character_id, speaker_name, kind, addressed_character_id, addressed_name, prefix, text_format) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'authored')",
+            "INSERT INTO speech (action_id, speaker_character_id, speaker_name, kind, prefix, text_format) \
+             VALUES (?, ?, ?, ?, ?, 'authored')",
             action_id,
             plan.speaker_id,
             plan.speaker_name,
             plan.kind,
-            addressed_id,
-            addressed_name,
             plan.prefix,
         )
         .execute(&mut **transaction)

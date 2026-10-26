@@ -618,7 +618,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   approved, it changes no state: the GM's narration is the result. `take` and
   `speak` have their own arguments.
 - Speech (design.md: Character perceptions and NPC responses; migrations 0004, 0007).
-  `speak` (`words`, `to`, `private`: a public speech singles out an addressee only when `to` names exactly one, a private one's `to` is its listeners) is validated
+  `speak` (`words`, `to`, `private`: `to` is only a private speech's listeners; a public speech's addressee is in its words) is validated
   against the speaker's group when submitted. On approval
   `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
   (everyone in the group for public speech, the listeners for private, adjusted by the
@@ -627,8 +627,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `InvalidHearing` without resolving) and, in the same transaction
   as the action row, records a `speech` row and a `Role::Speech`
   message in each hearer's history, sharing the action's result content (the
-  speaker's authored text, unchanged; the addressee, when named, is stored as a character id plus its
-  frozen name). Actions are submitted for a `CharacterActor` (the acting
+  speaker's authored text, unchanged; older records also hold an addressee character id and frozen name, which
+  new speech does not write). Actions are submitted for a `CharacterActor` (the acting
   character; `Store::player_actor` verifies a player's membership into one).
   PCs hear it with no browser open; NPCs receive it in their own
   history. The speaker's copy follows their tool result
@@ -641,7 +641,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   result.
   `Store::speech_content` is the one reader for a speech message, for model
   context, player chat and raw inspection: `MessageContent::Speech`
-  (`SpeechContent`: speaker/addressee ids and frozen names, kind, GM prefix,
+  (`SpeechContent`: speaker id and frozen name, an addressee only on older records, kind, GM prefix,
   authored text) for utterances with `speech.text_format = 'authored'`, which
   the backend presents as a user-role JSON object and the browser shows as the
   prefixed authored text with `data-speaker`; legacy utterances keep the fixed
