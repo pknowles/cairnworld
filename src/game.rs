@@ -1586,9 +1586,23 @@ where
                                 prompts::current()?.gm.speech_conveyed
                             )))
                         }
-                        ActionOutcome::Applied(result) => Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} approved. Outcome: {result} {next}"
-                        ))),
+                        ActionOutcome::Applied(result) => {
+                            // What the action did, if it says: "approved: flour sack transferred".
+                            let done = result
+                                .strip_prefix("approved")
+                                .unwrap_or(&result)
+                                .trim_start_matches(':')
+                                .trim();
+                            let done = if done.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {done}.")
+                            };
+                            Ok(ToolOutcome::Completed(format!(
+                                "Action {action_id} approved.{done} {} {next}",
+                                prompts::current()?.gm.outcome_untold
+                            )))
+                        }
                         ActionOutcome::Failed(reason) => Ok(ToolOutcome::Completed(format!(
                             "Action {action_id} approved, but it could not be applied: {reason} {next}"
                         ))),

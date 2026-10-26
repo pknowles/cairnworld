@@ -78,6 +78,27 @@ what else happens or call `narrate_nothing`; the approval result for speech says
 the words are already conveyed so there is nothing to narrate. The GM still has
 every narrate tool. The device suite then passed with no invalid output (178 s).
 
+## Narrating a non-speech action (look, ask, open)
+
+A look at an inventory got approval and no narration. The GM's history held a run
+of approve-then-`narrate_nothing` turns, and the approval result for a non-speech
+action read "Outcome: approved" without saying the characters had been told
+nothing. The GM's decision after approval, replayed on the real model with that
+history, 8 samples each:
+
+| Action | as it was | role sentence scoped to speech | result says nobody has been told |
+|---|---|---|---|
+| look | `narrate_nothing` 8 | `narrate_nothing` 8 | narrates 8 |
+| ask | `narrate_nothing` 8 | `narrate_nothing` 8 | narrates 8 |
+| open | `narrate_nothing` 8 | `narrate_nothing` 8 | narrates 8 |
+| investigate | narrates 8 | narrates 8 | narrates 8 |
+| speak | `narrate_nothing` 8 | 8 | 8 (unchanged) |
+
+Adopted: only the result change ("The characters have not been told the outcome:
+narrate it."). Rewriting the request text as plain language changed none of these
+choices. The narrations also invented a character's inventory: the GM's packet
+holds the location's items but not what each character carries.
+
 ## Merging the near-identical tools (`attempt`, `speak`)
 
 `look`/`investigate`/`open`/`ask` became `attempt` with a `kind`, and `say`/`whisper`

@@ -35,6 +35,7 @@ pub struct Gm {
     pub role: String,
     pub narrate_reminder: String,
     pub narrate_next: String,
+    pub outcome_untold: String,
     pub speech_conveyed: String,
     pub narration_shared: String,
     pub narration_separate: String,

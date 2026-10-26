@@ -27,6 +27,10 @@ role = """\
 # before narrating it.
 narrate_next = "End your turn with a narrate tool."
 
+# Added to the result of approving an action that is not speech: its outcome is
+# whatever the GM narrates, since nobody has been told it yet.
+outcome_untold = "The characters have not been told the outcome: narrate it."
+
 # Added to the result of approving speech, before narrate_next.
 speech_conveyed = "Their words are already conveyed to them, so there is nothing to narrate."
 
