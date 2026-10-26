@@ -159,7 +159,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   calls are "Not executed"; pending actions are rejected, as `finish_sequence`
   with an error also does. Players see a failed sequence's `sequence.error` as a
   `Role::System` entry in `Store::player_chat_after` (a notice in the browser),
-  ordered at the sequence's trigger message in their own or current group's GM
+  ordered at `sequence.error_position`, the last history entry id when it failed
+  (migration 0015), for failures descending from a trigger in their own or current group's GM
   history. A failed turn broadcasts `ChatChange::Failed` to every tab; the live
   path (`send_chat_failure`) sends the error only to a tab whose cursor already
   passed its trigger, and the requester's handler skips its own error event when
@@ -631,8 +632,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   new speech does not write). Actions are submitted for a `CharacterActor` (the acting
   character; `Store::player_actor` verifies a player's membership into one).
   PCs hear it with no browser open; NPCs receive it in their own
-  history. The speaker's copy follows their tool result
-  (`deliver_speech_to_speaker`); the GM learns through its approval result.
+  history. A player speaker has no copy: the words are in their call and its tool
+  result says who heard them (`Store::speech_outcome`); the result is tied to the
+  speech (`show_speech_with_result`) so the player's chat shows the words once.
+  An NPC speaker still gets a copy until its tool result reports the outcome. The GM learns through its approval result.
   GM narration of a speech action is delivered only to the speaker and PCs who
   heard it (`Store::speech_audience`). `character_may_act` is rechecked when an
   action is submitted and when it is applied, so access lost since the actor

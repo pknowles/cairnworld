@@ -882,7 +882,9 @@ continues. A system failure fails the turn and every agent's history records it.
 The GM's approval result is a side-channel report of the approved action's
 outcome; the caller still receives its own result, or the error if the action
 errored. Players see only system failures, without Developer Mode: a failed
-sequence's `sequence.error` at its trigger message (their own, or one on their
+sequence's `sequence.error` where it happened: after the last message that
+existed when it failed (`sequence.error_position`, recorded with the failure), for
+a failure that descends from one of their triggers (their own, or one on their
 current group's GM branch).
 
 This shared lifecycle applies to player, GM and NPC execution. Admission,

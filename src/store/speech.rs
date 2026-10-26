@@ -74,8 +74,8 @@ pub(super) struct SpeechPlan {
     speaker_name: String,
     prefix: Option<String>,
     npc_speaker_branch: Option<i64>,
-    /// Everyone who hears it except the speaker, whose own history is written
-    /// after the speaker's tool result (see `deliver_speech_to_speaker`).
+    /// Everyone who hears it except the speaker. A player speaker gets no copy:
+    /// their call holds the words and the result says who heard them.
     hearers: Vec<Member>,
 }
 
@@ -201,7 +201,7 @@ impl Store {
     /// exactly; newer ones are the authored text with its attribution.
     pub(super) async fn speech_content(&self, message_id: i64) -> Result<MessageContent> {
         let row = sqlx::query!(
-            "SELECT speech.speaker_character_id, speech.kind, speech.speaker_name,                     speech.addressed_character_id, speech.addressed_name, speech.prefix,                     speech.text_format, message.content              FROM message              JOIN speech ON speech.action_id = message.action_id              WHERE message.id = ?",
+            "SELECT speech.speaker_character_id, speech.kind, speech.speaker_name,                     speech.addressed_character_id, speech.addressed_name, speech.prefix,                     speech.text_format, action.result_content_id AS content              FROM message              JOIN speech ON speech.action_id = message.action_id              JOIN action ON action.id = speech.action_id              WHERE message.id = ?",
             message_id,
         )
         .fetch_optional(&self.pool)
@@ -357,8 +357,8 @@ impl Store {
         hearer_ids.dedup();
         let speaker_id = speaker.id;
         let speaker_name = speaker.name.clone();
-        // A player speaker's copy follows their tool result; an NPC is not
-        // inside a call, so its copy is written with everyone else's.
+        // An NPC speaker is not inside a call that could report the outcome, so
+        // it still gets a copy written with everyone else's.
         let npc_speaker_branch = speaker.is_npc.then_some(speaker.branch_id);
         let hearers = members
             .into_iter()
@@ -459,43 +459,55 @@ impl Store {
         Ok(message_id)
     }
 
-    /// The speaker's own history gets the utterance after their tool result,
-    /// since a message between a call and its result would break the history
-    /// (design.md's Server shutdown and crashes). Does nothing for a call that
-    /// requested no speech.
-    pub async fn deliver_speech_to_speaker(&self, requesting_tool_execution_id: i64) -> Result<()> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .context("starting speech delivery to the speaker")?;
+    /// What the speaker's own tool result says of their approved speech: who
+    /// heard it. The words are already in the call, so the result does not
+    /// repeat them. `None` for a call that requested no speech or whose speech
+    /// was not approved.
+    pub async fn speech_outcome(
+        &self,
+        requesting_tool_execution_id: i64,
+    ) -> Result<Option<String>> {
         let Some(speech) = sqlx::query!(
-            "SELECT action.id AS \"action_id!: i64\", action.sequence_id, action.result_content_id, \
-                    agent_history.branch_id AS \"branch_id!: i64\" \
-             FROM action \
-             JOIN speech ON speech.action_id = action.id \
-             JOIN player_character ON player_character.character_id = speech.speaker_character_id \
-             JOIN agent_history ON agent_history.agent_id = player_character.agent_id \
-             WHERE action.requesting_tool_execution_id = ?",
+            "SELECT action.id AS \"action_id!: i64\", speech.kind, speech.speaker_character_id              FROM action JOIN speech ON speech.action_id = action.id              WHERE action.requesting_tool_execution_id = ?",
             requesting_tool_execution_id,
         )
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&self.pool)
         .await
         .context("finding the speaker's utterance")?
         else {
-            return Ok(());
+            return Ok(None);
         };
-        Self::append_speech_message(
-            &mut transaction,
-            speech.branch_id,
+        let heard_by = sqlx::query_scalar!(
+            "SELECT DISTINCT character.name AS \"name!: String\" FROM message              JOIN history_entry ON history_entry.id = message.id              JOIN agent_history ON agent_history.branch_id = history_entry.branch_id              LEFT JOIN player_character ON player_character.agent_id = agent_history.agent_id              LEFT JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id              JOIN character ON character.id = COALESCE(player_character.character_id, npc_agent.character_id)              WHERE message.action_id = ? AND character.id <> ? ORDER BY character.name",
             speech.action_id,
-            speech.result_content_id,
-            speech.sequence_id,
+            speech.speaker_character_id,
         )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .context("committing speech delivery to the speaker")
+        .fetch_all(&self.pool)
+        .await
+        .context("finding who heard the utterance")?;
+        let what = if speech.kind == "whisper" {
+            "Your whisper"
+        } else {
+            "Your words"
+        };
+        Ok(Some(if heard_by.is_empty() {
+            format!("{what} were said, but nobody else was here to hear them.")
+        } else {
+            format!("{what} were heard by {}.", heard_by.join(", "))
+        }))
+    }
+
+    /// Tie the speaker's tool result to the speech it reports, so the player's
+    /// chat shows the words once, from the speech, while the result itself
+    /// stays short. Does nothing for a call that requested no speech.
+    pub async fn show_speech_with_result(&self, requesting_tool_execution_id: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE message SET action_id = (                  SELECT action.id FROM action JOIN speech ON speech.action_id = action.id                  WHERE action.requesting_tool_execution_id = ?1)              WHERE source_tool_execution_id = ?1                AND EXISTS (SELECT 1 FROM action JOIN speech ON speech.action_id = action.id                            WHERE action.requesting_tool_execution_id = ?1)",
+            requesting_tool_execution_id,
+        )
+        .execute(&self.pool)
+        .await
+        .context("linking the speaker's tool result to its speech")?;
+        Ok(())
     }
 }

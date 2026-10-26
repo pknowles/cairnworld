@@ -330,7 +330,9 @@ impl Store {
         .await
         .context("marking interrupted invocations")?;
         sqlx::query!(
-            "UPDATE sequence SET error = ?, finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL",
+            "UPDATE sequence SET error = ?, finished_at = CURRENT_TIMESTAMP, \
+                    error_position = (SELECT COALESCE(MAX(id), 0) FROM history_entry) \
+             WHERE finished_at IS NULL",
             INTERRUPTED_SEQUENCE_ERROR,
         )
         .execute(&mut *transaction)

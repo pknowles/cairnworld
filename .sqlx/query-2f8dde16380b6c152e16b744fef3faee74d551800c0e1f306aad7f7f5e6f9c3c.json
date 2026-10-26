@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE message SET action_id = (                  SELECT action.id FROM action JOIN speech ON speech.action_id = action.id                  WHERE action.requesting_tool_execution_id = ?1)              WHERE source_tool_execution_id = ?1                AND EXISTS (SELECT 1 FROM action JOIN speech ON speech.action_id = action.id                            WHERE action.requesting_tool_execution_id = ?1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2f8dde16380b6c152e16b744fef3faee74d551800c0e1f306aad7f7f5e6f9c3c"
+}

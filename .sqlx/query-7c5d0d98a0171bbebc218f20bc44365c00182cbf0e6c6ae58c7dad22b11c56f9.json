@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action.id AS \"action_id!: i64\", speech.kind, speech.speaker_character_id              FROM action JOIN speech ON speech.action_id = action.id              WHERE action.requesting_tool_execution_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "speaker_character_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7c5d0d98a0171bbebc218f20bc44365c00182cbf0e6c6ae58c7dad22b11c56f9"
+}

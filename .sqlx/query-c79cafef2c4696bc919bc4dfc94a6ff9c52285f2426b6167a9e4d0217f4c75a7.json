@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT speech.speaker_character_id, speech.kind, speech.speaker_name,                     speech.addressed_character_id, speech.addressed_name, speech.prefix,                     speech.text_format, message.content              FROM message              JOIN speech ON speech.action_id = message.action_id              WHERE message.id = ?",
+  "query": "SELECT speech.speaker_character_id, speech.kind, speech.speaker_name,                     speech.addressed_character_id, speech.addressed_name, speech.prefix,                     speech.text_format, action.result_content_id AS content              FROM message              JOIN speech ON speech.action_id = message.action_id              JOIN action ON action.id = speech.action_id              WHERE message.id = ?",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       false
     ]
   },
-  "hash": "c2b53af91b1cab2e17297881d4152ffdee519499036520d4e04623c93a771820"
+  "hash": "c79cafef2c4696bc919bc4dfc94a6ff9c52285f2426b6167a9e4d0217f4c75a7"
 }

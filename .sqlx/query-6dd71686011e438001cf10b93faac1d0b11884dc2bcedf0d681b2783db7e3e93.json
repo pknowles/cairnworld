@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sequence SET error = ?, finished_at = CURRENT_TIMESTAMP, error_position = (SELECT COALESCE(MAX(id), 0) FROM history_entry) WHERE finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6dd71686011e438001cf10b93faac1d0b11884dc2bcedf0d681b2783db7e3e93"
+}

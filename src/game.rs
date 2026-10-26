@@ -1294,7 +1294,15 @@ where
                     .await?
                 {
                     Some(reason) => format!("The action could not be applied: {reason}"),
-                    None => "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
+                    // Approved speech: the words are in the call, so say who heard them.
+                    None => match game
+                        .store
+                        .speech_outcome(requesting_tool_execution_id)
+                        .await?
+                    {
+                        Some(outcome) => outcome,
+                        None => "The GM's narration reached the player as its own entry. Respond to the player's next choice.".to_string(),
+                    },
                 };
                 let delivery_game = Arc::clone(&game);
                 Ok(ToolOutcome::CompletedAfter {
@@ -1302,7 +1310,7 @@ where
                     after_result: Box::pin(async move {
                         delivery_game
                             .store
-                            .deliver_speech_to_speaker(requesting_tool_execution_id)
+                            .show_speech_with_result(requesting_tool_execution_id)
                             .await?;
                         delivery_game
                             .deliver_narration(member.world_id, &narration)
@@ -5322,8 +5330,7 @@ mod tests {
             "{gm_report:?}"
         );
         // The speaker's and the GM's histories stay valid: every tool call is
-        // answered directly after it, with the speaker's own copy of the words
-        // arriving after its result.
+        // answered directly after it.
         let group = scene
             .store
             .character_group_id(scene.first.character_id)
@@ -5356,14 +5363,27 @@ mod tests {
                 }
             }
         }
-        // One utterance is stored once and shared by every history.
+        // One utterance is stored once and shared by every history it reaches.
         let contents: i64 = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT message.content) FROM message WHERE message.action_id IS NOT NULL",
+            "SELECT COUNT(DISTINCT message.content) FROM message              WHERE message.action_id IS NOT NULL AND message.role = '\"Speech\"'",
         )
         .fetch_one(&scene.store.pool())
         .await
         .unwrap();
         assert_eq!(contents, 1);
+        // The speaker's own history holds the words once, in the call; the
+        // result says who heard them.
+        let result: String = sqlx::query_scalar(
+            "SELECT json_extract(recorded_content.body, '$.content.value.content') FROM message              JOIN recorded_content ON recorded_content.id = message.content              JOIN history_entry ON history_entry.id = message.id              JOIN agent_history ON agent_history.branch_id = history_entry.branch_id              WHERE agent_history.agent_id = ? AND message.role = '\"Tool\"'                AND message.action_id IS NOT NULL",
+        )
+        .bind(scene.first.agent_id)
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        assert!(
+            result.starts_with("Your words were heard by") && result.contains("Toma"),
+            "{result}"
+        );
     }
 
     #[tokio::test]
@@ -8124,6 +8144,51 @@ mod tests {
             .player_message(scene.second.clone(), "Hello?")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failure_is_shown_after_what_happened_before_it_not_under_its_trigger() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        talk(
+            &scene,
+            [
+                do_nothing(),
+                propose("It is in the hut.", &speaker, 2),
+                approve(2),
+                narrate("Toma answers."),
+                // The other NPC then reconsiders, and its answer is malformed.
+                tool_call(
+                    "speak",
+                    serde_json::json!({"words": "Hm.", "to": [speaker], "eagerness": 4}),
+                ),
+            ],
+        )
+        .await;
+
+        let chat = scene.store.player_chat(&scene.first).await.unwrap();
+        let position = |wanted: &dyn Fn(&crate::store::PlayerChatEntry) -> bool| {
+            chat.iter().position(wanted).expect("entry is in the chat")
+        };
+        let said = position(&|entry| entry.text.contains("It is in the hut."));
+        let failed = position(&|entry| entry.role == Role::System);
+        assert!(
+            failed > said,
+            "the error follows the reply it came after: {chat:?}"
+        );
+        // Resuming from the last message still brings the error, once.
+        let later = scene
+            .store
+            .player_chat_after(&scene.first, Some(chat[said].id - 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            later
+                .iter()
+                .filter(|entry| entry.role == Role::System)
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

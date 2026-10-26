@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT character.name AS \"name!: String\" FROM message              JOIN history_entry ON history_entry.id = message.id              JOIN agent_history ON agent_history.branch_id = history_entry.branch_id              LEFT JOIN player_character ON player_character.agent_id = agent_history.agent_id              LEFT JOIN npc_agent ON npc_agent.agent_id = agent_history.agent_id              JOIN character ON character.id = COALESCE(player_character.character_id, npc_agent.character_id)              WHERE message.action_id = ? AND character.id <> ? ORDER BY character.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "574a9a99e0ce03a2bce2e8af2fbc5ceec226593cf4b72eafc92383a65f8cf883"
+}

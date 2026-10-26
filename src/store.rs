@@ -398,6 +398,7 @@ struct PlayerChatRow {
     id: i64,
     role: String,
     content: i64,
+    action_id: Option<i64>,
     trigger_sequence_id: Option<i64>,
     inference_sequence_id: Option<i64>,
 }
@@ -1369,8 +1370,10 @@ impl Store {
         error: Option<&str>,
     ) -> Result<()> {
         let result = sqlx::query!(
-            "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ? \
-             WHERE id = ? AND finished_at IS NULL",
+            "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ?1, \
+                    error_position = CASE WHEN ?1 IS NULL THEN NULL \
+                        ELSE (SELECT COALESCE(MAX(id), 0) FROM history_entry) END \
+             WHERE id = ?2 AND finished_at IS NULL",
             error,
             sequence_id,
         )
@@ -2828,12 +2831,30 @@ impl Store {
             .transpose()
     }
 
-    /// The player-visible system errors of failed sequences, each placed at
-    /// its sequence's trigger message (design.md's Server shutdown and
-    /// crashes): a message in the player's own history, or - for work no player
-    /// started, such as presence narration - one on their current group's GM
+    /// The player-visible system errors of failed sequences, each placed where
+    /// it happened (design.md's Server shutdown and crashes) for a failure
+    /// descending from a trigger message in the player's own history, or - for
+    /// work no player started, such as presence narration - one on their current group's GM
     /// history. `Role::System` marks an error entry. Nothing is returned for a
     /// member without active access.
+    // INTENT: an error is shown where it happened, after the messages that
+    // existed when its sequence failed (`sequence.error_position`, set in the
+    // same transaction that records the failure) and before any that came
+    // later, both on reload and when resyncing a live socket. The player is
+    // told about a failure only when it descends from one of their triggers.
+    //
+    // RISKS: the entry reuses that position as its `id`, so it shares an id
+    // with the message it follows. That is harmless while an id only orders
+    // entries and marks a resync cursor, and errors sort after messages of the
+    // same id. The sockets' "entry.id <= cursor" check in `send_chat_failure`
+    // depends on it, so change the two together. Positions come from a global
+    // id timeline, so they may fall between messages the player cannot see.
+    //
+    // WISH: something simpler, a failure as an ordinary entry of the chat
+    // timeline with its own id. That means a message row in the player agent's
+    // history, which the model reads, so it waits on the failure-context
+    // decision in design.md's Product decisions. Ordering by time instead was
+    // rejected because timestamps have whole-second resolution.
     async fn player_chat_errors(
         &self,
         member: &PlayerAgent,
@@ -2856,7 +2877,7 @@ impl Store {
                  JOIN message AS cause_message ON cause_message.id = sequence_cause.source_message_id \
                  WHERE cause_message.trigger_sequence_id IS NOT NULL) \
              SELECT sequence.id AS \"sequence_id!: i64\", sequence.error AS \"error!\", \
-                    MIN(history_entry.id) AS \"trigger_id!: i64\" \
+                    sequence.error_position AS \"position!: i64\" \
              FROM ancestry \
              JOIN sequence ON sequence.id = ancestry.failed_id \
              JOIN message ON message.trigger_sequence_id = ancestry.ancestor_id \
@@ -2869,7 +2890,7 @@ impl Store {
                AND world_member.access = 'active' \
                AND player_character.character_id = ? AND player_character.agent_id = ? \
                AND sequence.error IS NOT NULL AND (? IS NULL OR sequence.id = ?) \
-               AND history_entry.id > ? \
+               AND sequence.error_position > ? \
                AND (history_entry.branch_id = (SELECT branch_id FROM agent_history WHERE agent_id = player_character.agent_id) \
                     OR (history_entry.branch_id = \"group\".branch_id \
                         AND NOT EXISTS (SELECT 1 FROM message AS player_turn \
@@ -2877,7 +2898,7 @@ impl Store {
                             JOIN agent_history ON agent_history.branch_id = player_entry.branch_id \
                             JOIN player_character AS turn_owner ON turn_owner.agent_id = agent_history.agent_id \
                             WHERE player_turn.trigger_sequence_id = ancestry.ancestor_id))) \
-             GROUP BY sequence.id ORDER BY MIN(history_entry.id)",
+             GROUP BY sequence.id ORDER BY sequence.error_position",
             member.member_id,
             member.world_id,
             member.user_id,
@@ -2893,7 +2914,7 @@ impl Store {
         Ok(rows
             .into_iter()
             .map(|row| PlayerChatEntry {
-                id: row.trigger_id,
+                id: row.position,
                 role: Role::System,
                 text: row.error,
                 speaker: None,
@@ -3053,7 +3074,7 @@ impl Store {
         let after_message_id = after_message_id.unwrap_or_default();
         let rows = sqlx::query_as!(
             PlayerChatRow,
-            "SELECT message.id, message.role, message.content, message.trigger_sequence_id, inference.sequence_id AS inference_sequence_id \
+            "SELECT message.id, message.role, message.content, message.action_id, message.trigger_sequence_id, inference.sequence_id AS inference_sequence_id \
              FROM world_member AS member \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN agent_history ON agent_history.agent_id = player_character.agent_id \
@@ -3076,9 +3097,14 @@ impl Store {
         .context("loading player chat history")?;
         let mut entries = Vec::new();
         for row in rows {
-            let role = serde_json::from_str(&row.role).context("decoding player chat role")?;
+            let mut role = serde_json::from_str(&row.role).context("decoding player chat role")?;
+            // Heard speech, and the player's own, whose tool result is tied to it.
+            let spoken = row.action_id.is_some() && matches!(role, Role::Speech | Role::Tool);
+            if spoken {
+                role = Role::Speech;
+            }
             let (mut speaker, mut mine, mut whispered) = (None, false, false);
-            let text = if role == Role::Speech {
+            let text = if spoken {
                 let (text, speech) = self.speech_chat(row.id).await?;
                 if let Some(speech) = speech {
                     mine = speech.speaker_id == member.character_id;

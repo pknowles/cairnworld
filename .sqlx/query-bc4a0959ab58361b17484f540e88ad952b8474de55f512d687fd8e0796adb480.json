@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP, error = ?1, error_position = CASE WHEN ?1 IS NULL THEN NULL ELSE (SELECT COALESCE(MAX(id), 0) FROM history_entry) END WHERE id = ?2 AND finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bc4a0959ab58361b17484f540e88ad952b8474de55f512d687fd8e0796adb480"
+}
