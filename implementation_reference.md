@@ -244,8 +244,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   location_id, description, branch_id, gm_notes, storyteller_notes,
   retired_at)` owns one GM history branch each, and `character_group`
   replaces the removed `character_location` - every active character has
-  exactly one group. A group's fresh scene packet includes every player
-  character currently in it with its sheet, and its role prompt tells the
+  exactly one group. A group's fresh scene packet has one `characters` list: every character
+  in it, however controlled, with the same fields (sheet and GM notes included); and its role prompt tells the
   world_gm to narrate to the characters as a group; an arbitration request
   names the acting character. `install_scenario` creates the entire initial
   relationship graph - including the world_gm agent and every scenario-declared
@@ -753,7 +753,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `NarrationTools` and delivered after the player agent settles as `NarrationText`
   entries (`only` / `except` recipients); `Narration::restrict_to` keeps speech
   privacy. The GM scene packet carries character ids, and ends with the global
-  `[game] players_share_narration` rule (`Game::gm_packet`, `GameSettings`, on by
+  `[game] characters_share_narration` rule (`Game::gm_packet`, `GameSettings`, on by
   default) stated as a fact for the GM's choice of narrate tool. Compaction obligations also
   arise from a lone terminal call (`CompactionPolicy::ending_tools`).
 - Tentative and committed actions, InterventionCheck (`arbitrate` in
@@ -781,7 +781,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   delivery for departure-window cases. Regression tests also cover more presence
   transitions than a full action queue can hold during inference, failed presence
   writes, and release of idle world ownership. `gm_scene` includes group-local
-  description and notes. The stable world chat channel carries only entry wake-ups
+  description and notes and one list of the group's characters. The stable world chat channel carries only entry wake-ups
   and failed sequence IDs. Existing sockets follow split/merge through their own
   authorized stored-history cursor. Failure details require current membership
   and player-agent or current-group invocation authorization.

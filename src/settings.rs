@@ -25,15 +25,15 @@ pub struct Settings {
 /// Rules of play that apply to every world.
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct GameSettings {
-    /// Whether every player receives the same detailed narration of an event,
+    /// Whether every character receives the same detailed narration of an event,
     /// for a shared experience, unless the GM narrates something privately.
-    pub players_share_narration: bool,
+    pub characters_share_narration: bool,
 }
 
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
-            players_share_narration: true,
+            characters_share_narration: true,
         }
     }
 }

@@ -1337,10 +1337,10 @@ where
     }
 
     /// What the GM is shown of the scene it judges and narrates, with the
-    /// rule on whether players share the same narration.
+    /// rule on whether characters share the same narration.
     fn gm_packet(&self, scene: &str) -> Result<String> {
         let prompts = prompts::current()?;
-        let narration = if self.rules.players_share_narration {
+        let narration = if self.rules.characters_share_narration {
             &prompts.gm.narration_shared
         } else {
             &prompts.gm.narration_separate
@@ -1768,7 +1768,7 @@ where
                         }
                         if !npcs.contains(&character_id) {
                             return Ok(ToolOutcome::Rejected(format!(
-                                "Tool arguments were rejected: character {character_id} is not an NPC in this group"
+                                "Tool arguments were rejected: character {character_id} cannot be asked to intervene in this group"
                             )));
                         }
                         if !asked.contains(&character_id) {
@@ -2463,7 +2463,7 @@ mod tests {
                 "scripted".into(),
                 Sampling::default(),
                 GameSettings {
-                    players_share_narration: shares,
+                    characters_share_narration: shares,
                 },
             );
             let packet = game.gm_packet("{}").unwrap();
@@ -2474,8 +2474,8 @@ mod tests {
             crate::settings::Settings::load()
                 .unwrap()
                 .game
-                .players_share_narration,
-            "players share the narration unless configured otherwise"
+                .characters_share_narration,
+            "characters share the narration unless configured otherwise"
         );
     }
 

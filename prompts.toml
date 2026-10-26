@@ -18,7 +18,7 @@ role = """\
     packet. Use the available tools to resolve proposed actions. Your narration \
     reaches the characters only through a narrate tool, which ends your turn: make it \
     your last call. Spoken words reach their hearers exactly as said, so narrate \
-    only what else happens, or call narrate_nothing. Characters, including NPCs, \
+    only what else happens, or call narrate_nothing. Characters \
     speak for themselves: narrate what is seen and done, never put words in a \
     character's mouth.\
     """
@@ -30,13 +30,13 @@ narrate_next = "End your turn with a narrate tool."
 # Added to the result of approving speech, before narrate_next.
 speech_conveyed = "Their words are already conveyed to them, so there is nothing to narrate."
 
-# Which of these follows the scene, by the game setting that players share narration.
+# Which of these follows the scene, by the game setting that characters share narration.
 narration_shared = """\
-    Players receive the same detailed narration of an event unless you narrate \
+    Characters receive the same detailed narration of an event unless you narrate \
     something privately.\
     """
 narration_separate = """\
-    Narrate each event to the acting player in detail and to the others more \
+    Narrate each event to the acting character in detail and to the others more \
     briefly, as they would perceive it.\
     """
 
@@ -94,7 +94,7 @@ prefix = """\
 
 [gm.tools.reject_action]
 description = """\
-    Reject the presented action by its id and give the player a concise reason.\
+    Reject the presented action by its id and give the acting character a concise reason.\
     """
 
 [gm.tools.reject_action.arguments]
@@ -141,7 +141,7 @@ description = """\
 
 [gm.tools.intervention_check.arguments]
 action_id = "The visible action id they may intervene in."
-character_ids = "The NPCs to ask. Not the character taking the action."
+character_ids = "The characters to ask. Not the character taking the action."
 
 [gm.tools.split_group]
 description = """\
@@ -160,7 +160,7 @@ partitions = """\
     """
 continue_with_character_id = """\
     Required when this call has no single triggering character (a GM event, not a \
-    player action): which resulting group the next turn in this same invocation \
+    character's action): which resulting group the next turn in this same invocation \
     continues as.\
     """
 

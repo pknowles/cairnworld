@@ -923,3 +923,19 @@ majority of the party, but otherwise do nothing and skip turns." This replaces t
 design's earlier proposal that silent PCs join after 60 seconds.
 
 Ties: "agreed. ties result in players staying".
+
+## 2026-10-27: The GM is not told which characters are player- or NPC-controlled
+
+user_declarations.md asks "Can we hide who is a PC and NPC from the GM?" and
+frames it as a possible idea. The user then stated it as the rule: "the GM should
+not know the difference. this is in my declarations. please fix this", and on
+wording: "say 'player' where they mean character. I have made this mistake myself
+a few times and this needs fixing". On controllers: "the player agent can act.
+characters cant change" (a character keeps its controller; an away player is
+covered by the player agent acting for them).
+
+The GM scene packet is one `characters` list with the same fields for every
+character; the GM prompts say character where they meant a controller; the
+`[game]` setting is `characters_share_narration`. The player's and NPC's own scene
+packets still differ in shape (`npcs` for a player, `present` for an NPC), and the
+declaration could be updated to state the rule rather than ask it.

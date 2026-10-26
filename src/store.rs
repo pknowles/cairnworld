@@ -555,26 +555,13 @@ pub struct GmScene {
     pub group_description: String,
     pub group_gm_notes: serde_json::Value,
     pub items: Vec<SceneItem>,
-    pub npcs: Vec<GmSceneNpc>,
-    pub players: Vec<GmScenePlayer>,
+    /// Every character in the group, however it is controlled: the GM judges
+    /// them all alike.
+    pub characters: Vec<GmSceneCharacter>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct GmSceneNpc {
-    pub id: i64,
-    pub name: String,
-    pub description: String,
-    pub background: String,
-    pub motive: String,
-    pub ambition: String,
-    pub gm_notes: serde_json::Value,
-}
-
-/// A player character physically present at the GM's location. Player-agent
-/// history is private, but the GM needs this current character state to
-/// narrate and arbitrate a shared scene consistently.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct GmScenePlayer {
+pub struct GmSceneCharacter {
     pub id: i64,
     pub name: String,
     pub description: String,
@@ -582,21 +569,11 @@ pub struct GmScenePlayer {
     pub motive: String,
     pub ambition: String,
     pub sheet: serde_json::Value,
+    pub gm_notes: serde_json::Value,
 }
 
 #[derive(FromRow)]
-struct GmSceneNpcRow {
-    id: i64,
-    name: String,
-    description: String,
-    background: String,
-    motive: String,
-    ambition: String,
-    gm_notes: String,
-}
-
-#[derive(FromRow)]
-struct GmScenePlayerRow {
+struct GmSceneCharacterRow {
     id: i64,
     name: String,
     description: String,
@@ -604,6 +581,7 @@ struct GmScenePlayerRow {
     motive: String,
     ambition: String,
     sheet: String,
+    gm_notes: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -3370,8 +3348,7 @@ impl Store {
             group_gm_notes: serde_json::from_str(&group_gm_notes)
                 .context("decoding group GM notes")?,
             items: Self::location_items(&self.pool, location_id).await?,
-            npcs: Self::group_gm_npcs(&self.pool, group_id).await?,
-            players: Self::group_gm_players(&self.pool, group_id).await?,
+            characters: Self::group_gm_characters(&self.pool, group_id).await?,
         })
     }
 
@@ -3415,58 +3392,31 @@ impl Store {
         .context("loading location NPCs")
     }
 
-    async fn group_gm_npcs(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmSceneNpc>> {
-        let rows: Vec<GmSceneNpcRow> = sqlx::query_as!(
-            GmSceneNpcRow,
-            "SELECT character.id, character.name, character.description, character.background, character.motive, character.ambition, character.gm_notes \
-             FROM character_group JOIN character ON character.id = character_group.character_id \
-             WHERE character_group.group_id = ? AND character.role = 'npc' ORDER BY character.id",
+    async fn group_gm_characters(
+        pool: &SqlitePool,
+        group_id: i64,
+    ) -> Result<Vec<GmSceneCharacter>> {
+        let rows: Vec<GmSceneCharacterRow> = sqlx::query_as!(
+            GmSceneCharacterRow,
+            "SELECT character.id, character.name, character.description, character.background, character.motive, character.ambition, character.sheet, character.gm_notes              FROM character_group JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? ORDER BY character.id",
             group_id,
         )
         .fetch_all(pool)
         .await
-        .context("loading group GM NPCs")?;
+        .context("loading group characters for GM")?;
         rows.into_iter()
             .map(|row| {
-                Ok(GmSceneNpc {
+                Ok(GmSceneCharacter {
                     id: row.id,
                     name: row.name,
                     description: row.description,
                     background: row.background,
                     motive: row.motive,
                     ambition: row.ambition,
+                    sheet: serde_json::from_str(&row.sheet)
+                        .context("decoding character sheet for GM")?,
                     gm_notes: serde_json::from_str(&row.gm_notes)
-                        .context("decoding NPC GM notes")?,
-                })
-            })
-            .collect()
-    }
-
-    async fn group_gm_players(pool: &SqlitePool, group_id: i64) -> Result<Vec<GmScenePlayer>> {
-        let rows: Vec<GmScenePlayerRow> = sqlx::query_as!(
-            GmScenePlayerRow,
-            "SELECT character.id, character.name, character.description, character.background, character.motive, character.ambition, character.sheet \
-             FROM character_group \
-             JOIN player_character ON player_character.character_id = character_group.character_id \
-             JOIN character ON character.id = player_character.character_id \
-             WHERE character_group.group_id = ? ORDER BY character.id",
-            group_id,
-        )
-        .fetch_all(pool)
-        .await
-        .context("loading group player characters for GM")?;
-        rows.into_iter()
-            .map(|row| {
-                let sheet = serde_json::from_str(&row.sheet)
-                    .context("decoding player character sheet for GM")?;
-                Ok(GmScenePlayer {
-                    id: row.id,
-                    name: row.name,
-                    description: row.description,
-                    background: row.background,
-                    motive: row.motive,
-                    ambition: row.ambition,
-                    sheet,
+                        .context("decoding character GM notes")?,
                 })
             })
             .collect()
@@ -7191,21 +7141,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             gm_scene
-                .players
+                .characters
                 .iter()
-                .map(|player| player.name.as_str())
+                .filter(|character| characters.iter().any(|(name, _)| *name == character.name))
+                .map(|character| character.name.as_str())
                 .collect::<Vec<_>>(),
             characters
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
-            "the GM packet must identify every player character at its location"
-        );
-        assert!(
-            gm_scene
-                .players
-                .iter()
-                .all(|player| player.sheet == serde_json::json!({}))
+            "the GM packet must identify every character in the group"
         );
         assert_eq!(
             store
@@ -7695,7 +7640,11 @@ mod tests {
             gm_scene.group_gm_notes.get("grouping").is_some(),
             "the group's own GM notes must be distinct from the location's"
         );
-        let toma = gm_scene.npcs.iter().find(|npc| npc.name == "Toma").unwrap();
+        let toma = gm_scene
+            .characters
+            .iter()
+            .find(|character| character.name == "Toma")
+            .unwrap();
         assert!(toma.motive.contains("imprisonment"));
         assert!(toma.gm_notes.get("beliefs").is_some());
         assert_eq!(
