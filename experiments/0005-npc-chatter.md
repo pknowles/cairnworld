@@ -34,3 +34,26 @@ the NPC has already spoken since a player character last did:
 
 So the nudge works only as the last thing the NPC reads, and only after it has
 already spoken. Asked before it has spoken, the question silences it.
+
+## Around "something new and important to say"
+
+Variations of the current role wording that keep that phrase, three runs each:
+
+| Wording | Result |
+|---|---|
+| drop "are addressed" | 6 lines, 3 of 3 |
+| "call one action **only** when you need to act or have something new and important to say" | 6 lines, 3 of 3 |
+| "are asked something" in place of "are addressed" | 6 lines, 3 of 3 |
+| "before you speak, ask whether it is new and important to the others; if not, call do_nothing" | erratic: 0 lines, 1 line, then 6 lines (nobody answered the player in the first) |
+
+The same phrase as the final message of the NPC's request ("Do you have something
+new and important to say? If not, call do_nothing."):
+
+| When it is added | Result |
+|---|---|
+| after the NPC has spoken since a player character last did | 2 lines, 3 of 3 |
+| on every decision | 0, 2 and 1 lines: nobody answered the player in one run |
+| only when the last speech the NPC heard was by another NPC | 2 lines, 3 of 3; the player's question was answered each time |
+
+The last row needs no count of what the NPC has said: a player's speech never
+gets the question, so a player is always answered normally.
