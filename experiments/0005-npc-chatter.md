@@ -57,3 +57,11 @@ new and important to say? If not, call do_nothing."):
 
 The last row needs no count of what the NPC has said: a player's speech never
 gets the question, so a player is always answered normally.
+
+## Limits of these tests
+
+Only two NPCs are in the scene, so every NPC line addresses the other NPC and "are
+addressed" in the role wording is always true. The wordings that dropped it say
+nothing about scenes with three or more NPCs, where it keeps a bystander from
+answering something said to someone else. The final-question nudge keeps the role
+wording as it is. Untested: three or more NPCs, longer conversations.
