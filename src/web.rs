@@ -1387,6 +1387,8 @@ async fn send_new_entries<B: Backend + Send + Sync + 'static>(
                 role: entry.role,
                 text: entry.text,
                 speaker: entry.speaker,
+                mine: entry.mine,
+                whispered: entry.whispered,
                 id: entry.id,
                 sequence_id: entry.sequence_id,
             },
@@ -1678,6 +1680,8 @@ fn player_chat_entries(history: Vec<PlayerChatEntry>) -> Vec<ChatEntry> {
             },
             text: entry.text,
             speaker: entry.speaker,
+            mine: entry.mine,
+            whispered: entry.whispered,
             id: Some(entry.id),
             sequence_id: entry.sequence_id,
         })
@@ -1840,6 +1844,8 @@ mod tests {
                     },
                     text: entry.text,
                     speaker: entry.speaker,
+                    mine: entry.mine,
+                    whispered: entry.whispered,
                     sequence_id: entry.sequence_id,
                 })
                 .collect();
@@ -3089,8 +3095,8 @@ mod tests {
     fn game_page_renders_stored_chat_entries_with_their_visible_roles() {
         let html = render_page("Cairnworld", true, || {
             view! { <GamePage world_id=7 character_id=8 history=vec![
-                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), speaker: None, sequence_id: Some(1) },
-                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), speaker: None, sequence_id: None },
+                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), speaker: None, mine: false, whispered: false, sequence_id: Some(1) },
+                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), speaker: None, mine: false, whispered: false, sequence_id: None },
             ]/> }
         });
         assert!(html.contains("I look around."));
@@ -3108,11 +3114,15 @@ mod tests {
     fn speech_is_shown_as_authored_with_its_speaker_as_metadata() {
         let html = render_page("Cairnworld", true, || {
             view! { <GamePage world_id=7 character_id=8 history=vec![
-                PlayerChatEntry { id: 1, role: crate::llm::Role::Speech, text: "(Over the din) Run!".into(), speaker: Some("Mara".into()), sequence_id: None },
+                PlayerChatEntry { id: 1, role: crate::llm::Role::Speech, text: "(Over the din) Run!".into(), speaker: Some("Mara".into()), mine: false, whispered: false, sequence_id: None },
             ]/> }
         });
         assert!(html.contains("(Over the din) Run!"));
         assert!(html.contains("data-speaker=\"Mara\""));
+        assert!(
+            html.contains(">Mara</div>"),
+            "the speaker is named above the words"
+        );
         assert!(
             !html.contains("Mara says"),
             "no sentence is manufactured around the words"
@@ -3120,11 +3130,29 @@ mod tests {
     }
 
     #[test]
+    fn a_players_own_character_is_marked_apart_from_other_speakers_and_their_agent() {
+        let html = render_page("Cairnworld", true, || {
+            view! { <GamePage world_id=7 character_id=8 history=vec![
+                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "Whisper to Mara.".into(), speaker: None, mine: false, whispered: false, sequence_id: None },
+                PlayerChatEntry { id: 2, role: crate::llm::Role::Speech, text: "Psst.".into(), speaker: Some("Ada".into()), mine: true, whispered: true, sequence_id: None },
+                PlayerChatEntry { id: 3, role: crate::llm::Role::Speech, text: "Yes?".into(), speaker: Some("Mara".into()), mine: false, whispered: false, sequence_id: None },
+            ]/> }
+        });
+        assert!(html.contains(">You</div>"));
+        assert!(html.contains(">Ada (your character) whispers</div>"));
+        assert!(html.contains(">Mara</div>"));
+        assert!(
+            html.contains("chat-bubble-accent"),
+            "own speech has its own colour"
+        );
+    }
+
+    #[test]
     fn developer_mode_game_page_exposes_inspect_links_for_entries_with_a_sequence() {
         let html = render_page("Cairnworld", true, || {
             view! { <GamePage world_id=7 character_id=8 developer_mode=true history=vec![
-                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), speaker: None, sequence_id: Some(42) },
-                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), speaker: None, sequence_id: None },
+                PlayerChatEntry { id: 1, role: crate::llm::Role::User, text: "I look around.".into(), speaker: None, mine: false, whispered: false, sequence_id: Some(42) },
+                PlayerChatEntry { id: 2, role: crate::llm::Role::Narration, text: "Toma watches.".into(), speaker: None, mine: false, whispered: false, sequence_id: None },
             ]/> }
         });
         assert!(
@@ -3251,6 +3279,8 @@ mod tests {
             role: ChatRole::Narration,
             text: "Toma watches.".into(),
             speaker: None,
+            mine: false,
+            whispered: false,
             id: None,
             sequence_id: None,
         };

@@ -5391,6 +5391,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_recorded_inference_keeps_the_tool_definitions_the_agent_was_given() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call("speak", serde_json::json!({"words": "Hello all."})),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+        let inference: i64 =
+            sqlx::query_scalar("SELECT id FROM inference WHERE agent_id = ? ORDER BY id LIMIT 1")
+                .bind(scene.first.agent_id)
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        let recorded = scene.store.reconstruct_inference(inference).await.unwrap();
+        let speak = recorded
+            .request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "speak")
+            .expect("the player agent's tools are recorded with the inference");
+        assert!(!speak.description.is_empty());
+        assert!(speak.schema["properties"]["words"]["description"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_players_chat_marks_their_own_characters_speech_and_whispers() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call("speak", serde_json::json!({"words": "Hello all."})),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+        scene
+            .speak(
+                tool_call(
+                    "speak",
+                    serde_json::json!({"private": true, "words": "Psst.", "to": [scene.names[1]]}),
+                ),
+                serde_json::json!({"action_id": 2}),
+            )
+            .await;
+        let spoken = |chat: Vec<crate::store::PlayerChatEntry>| {
+            chat.into_iter()
+                .filter(|entry| entry.role == crate::llm::Role::Speech)
+                .map(|entry| (entry.speaker.unwrap(), entry.mine, entry.whispered))
+                .collect::<Vec<_>>()
+        };
+        let speaker = scene.names[0].clone();
+        assert_eq!(
+            spoken(scene.store.player_chat(&scene.first).await.unwrap()),
+            vec![
+                (speaker.clone(), true, false),
+                (speaker.clone(), true, true)
+            ]
+        );
+        assert_eq!(
+            spoken(scene.store.player_chat(&scene.second).await.unwrap()),
+            vec![(speaker.clone(), false, false), (speaker, false, true)]
+        );
+    }
+
+    #[tokio::test]
     async fn a_whisper_is_heard_only_by_its_listeners_and_the_speaker() {
         let scene = speech_scene().await;
         scene
@@ -7408,8 +7472,20 @@ mod tests {
                 !inspection.caused_by.is_empty(),
                 "{trigger} {reply} has a cause"
             );
-            for cause in inspection.caused_by {
-                assert_eq!(trigger_of(cause).await, cause_trigger);
+            for cause in &inspection.caused_by {
+                assert_eq!(trigger_of(*cause).await, cause_trigger);
+            }
+            if trigger == "npc speech" {
+                // Opening the reply shows the decision that proposed it.
+                for cause in &inspection.caused_by {
+                    assert!(
+                        inspection
+                            .nodes
+                            .iter()
+                            .any(|node| node.inference.sequence_id == Some(*cause)),
+                        "the speech turn includes the NPC's decision from turn {cause}"
+                    );
+                }
             }
         }
         let human = scene

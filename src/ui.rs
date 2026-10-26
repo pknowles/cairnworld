@@ -43,6 +43,12 @@ pub enum ServerEvent {
         /// Who said it, for speech whose authored text does not carry attribution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         speaker: Option<String>,
+        /// Speech by this player's own character.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mine: bool,
+        /// Speech only some of the group heard.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        whispered: bool,
         /// The stored message and its Developer Mode sequence, when this
         /// entry comes from a durable row. `None` for text streamed before
         /// its row is known to exist; a later resync fills it in, so a live
@@ -98,6 +104,12 @@ pub struct ChatEntry {
     /// Who said it, for speech whose authored text does not carry attribution.
     #[serde(default)]
     pub speaker: Option<String>,
+    /// Speech by this player's own character.
+    #[serde(default)]
+    pub mine: bool,
+    /// Speech only some of the group heard.
+    #[serde(default)]
+    pub whispered: bool,
     /// See `ServerEvent::Entry`: `None` until this entry's durable row (and,
     /// for Developer Mode, its sequence) is known.
     #[serde(default)]
@@ -1439,6 +1451,7 @@ fn InferenceCard(
         },
     };
     let request_messages = inference.request.messages;
+    let request_tools = inference.request.tools;
     let model_prompt = inference.model_prompt;
     let inference_id = inference.id;
     let agent_id = inference.agent_id;
@@ -1480,6 +1493,27 @@ fn InferenceCard(
                     </div>
                 </details>
             </div>
+            {(!request_tools.is_empty()).then(|| view! {
+                <section class="border-t border-base-300 pt-1">
+                    <details>
+                        <summary class="cursor-pointer select-none font-semibold">{format!("Tools ({})", request_tools.len())}</summary>
+                        <ul class="mt-1 space-y-1">
+                            {request_tools.into_iter().map(|tool| {
+                                let schema = serde_json::to_string_pretty(&tool.schema).unwrap_or_default();
+                                view! {
+                                    <li>
+                                        <details>
+                                            <summary class="cursor-pointer select-none"><span class="font-mono">{tool.name}</span></summary>
+                                            <p class="mt-1 whitespace-pre-wrap">{tool.description}</p>
+                                            <pre class="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-xs">{schema}</pre>
+                                        </details>
+                                    </li>
+                                }
+                            }).collect_view()}
+                        </ul>
+                    </details>
+                </section>
+            })}
             <section class="border-t border-base-300 pt-1">
                 <h4 class="font-semibold">"Input"</h4>
                 <ul class="mt-1 space-y-1">
@@ -2207,6 +2241,8 @@ pub fn PlayerChat(
                             role: ChatRole::User,
                             text,
                             speaker: None,
+                            mine: false,
+                            whispered: false,
                             id: None,
                             sequence_id: None,
                         })
@@ -2454,18 +2490,45 @@ pub fn ChatTranscript(
 
 #[component]
 fn ChatEntryView(entry: ChatEntry, #[prop(default = false)] developer_mode: bool) -> impl IntoView {
-    let class = match entry.role {
-        ChatRole::User => "chat chat-end",
-        ChatRole::Assistant => "chat chat-start",
-        ChatRole::Narration => "rounded-box bg-base-200 px-4 py-3 text-sm text-base-content/80",
-        ChatRole::Speech => "chat chat-start",
-        ChatRole::Notice => "alert alert-warning text-sm",
-    };
-    let bubble = match entry.role {
-        ChatRole::User => "chat-bubble chat-bubble-primary",
-        ChatRole::Assistant => "chat-bubble",
-        ChatRole::Speech => "chat-bubble chat-bubble-secondary",
-        ChatRole::Narration | ChatRole::Notice => "",
+    // Chat bubbles are the conversation with the player's own agent, on the
+    // right for the player and the left for the agent. A character's words are
+    // events in the world: other characters on the left in a different colour,
+    // the player's own character on the right in a third, each headed by name.
+    let speaker = entry.speaker.clone().unwrap_or_default();
+    let (class, bubble, header) = match entry.role {
+        ChatRole::User => (
+            "chat chat-end",
+            "chat-bubble chat-bubble-primary",
+            Some("You".to_string()),
+        ),
+        ChatRole::Assistant => (
+            "chat chat-start",
+            "chat-bubble",
+            Some("Your agent".to_string()),
+        ),
+        ChatRole::Narration => (
+            "rounded-box bg-base-200 px-4 py-3 text-sm text-base-content/80",
+            "",
+            None,
+        ),
+        ChatRole::Speech => {
+            let who = match (entry.mine, entry.whispered) {
+                (true, true) => format!("{speaker} (your character) whispers"),
+                (true, false) => format!("{speaker} (your character)"),
+                (false, true) => format!("{speaker} whispers"),
+                (false, false) => speaker,
+            };
+            if entry.mine {
+                ("chat chat-end", "chat-bubble chat-bubble-accent", Some(who))
+            } else {
+                (
+                    "chat chat-start",
+                    "chat-bubble chat-bubble-secondary",
+                    Some(who),
+                )
+            }
+        }
+        ChatRole::Notice => ("alert alert-warning text-sm", "", None),
     };
     let gm = entry.role == ChatRole::Narration;
     // Only present when Developer Mode is on: an ordinary player's page never
@@ -2480,6 +2543,7 @@ fn ChatEntryView(entry: ChatEntry, #[prop(default = false)] developer_mode: bool
     view! {
         <li class=class data-role=chat_role_name(entry.role) data-speaker=entry.speaker data-inspect-sequence=inspect.map(|id| id.to_string()) data-inspect-entry=entry.id.map(|id| id.to_string())>
             {gm.then(|| view! { <span class="badge badge-outline badge-sm mb-2">"GM"</span> })}
+            {header.map(|header| view! { <div class="chat-header text-xs opacity-70">{header}</div> })}
             <div class=bubble>{entry.text}</div>
         </li>
     }
@@ -2589,6 +2653,8 @@ fn connect_player_chat(
                 role,
                 text,
                 speaker,
+                mine,
+                whispered,
                 id,
                 sequence_id,
             }) => upsert_chat_entry(
@@ -2597,6 +2663,8 @@ fn connect_player_chat(
                     role,
                     text,
                     speaker,
+                    mine,
+                    whispered,
                     id,
                     sequence_id,
                 },
@@ -2825,6 +2893,8 @@ fn add_notice(entries: RwSignal<Vec<ChatEntry>>, text: String) {
             role: ChatRole::Notice,
             text,
             speaker: None,
+            mine: false,
+            whispered: false,
             id: None,
             sequence_id: None,
         })

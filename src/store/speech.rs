@@ -234,9 +234,12 @@ impl Store {
 
     /// What a player reads for a speech message, and who said it when the
     /// text itself does not say.
-    pub(super) async fn speech_chat(&self, message_id: i64) -> Result<(String, Option<String>)> {
+    pub(super) async fn speech_chat(
+        &self,
+        message_id: i64,
+    ) -> Result<(String, Option<SpeechContent>)> {
         Ok(match self.speech_content(message_id).await? {
-            MessageContent::Speech(speech) => (speech.display(), Some(speech.speaker)),
+            MessageContent::Speech(speech) => (speech.display(), Some(speech)),
             MessageContent::Text(text) => (text, None),
             _ => bail!("speech message {message_id} has unexpected content"),
         })

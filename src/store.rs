@@ -412,6 +412,10 @@ pub struct PlayerChatEntry {
     pub text: String,
     /// Who said it, for speech whose authored text does not carry attribution.
     pub speaker: Option<String>,
+    /// Speech by this player's own character.
+    pub mine: bool,
+    /// Speech only some of the group heard.
+    pub whispered: bool,
     /// The sequence this entry belongs to, for Developer Mode's chat-entry
     /// inspect button: `trigger_sequence_id` for player input that began a
     /// turn, or the producing inference's sequence for anything an inference
@@ -2893,6 +2897,8 @@ impl Store {
                 role: Role::System,
                 text: row.error,
                 speaker: None,
+                mine: false,
+                whispered: false,
                 sequence_id: Some(row.sequence_id),
             })
             .collect())
@@ -3071,10 +3077,14 @@ impl Store {
         let mut entries = Vec::new();
         for row in rows {
             let role = serde_json::from_str(&row.role).context("decoding player chat role")?;
-            let mut speaker = None;
+            let (mut speaker, mut mine, mut whispered) = (None, false, false);
             let text = if role == Role::Speech {
-                let (text, from) = self.speech_chat(row.id).await?;
-                speaker = from;
+                let (text, speech) = self.speech_chat(row.id).await?;
+                if let Some(speech) = speech {
+                    mine = speech.speaker_id == member.character_id;
+                    whispered = speech.kind == "whisper";
+                    speaker = Some(speech.speaker);
+                }
                 text
             } else if let (MessageContent::Text(text), _) =
                 self.recorded_content(row.content).await?
@@ -3093,6 +3103,8 @@ impl Store {
                     role,
                     text,
                     speaker,
+                    mine,
+                    whispered,
                     sequence_id: row.trigger_sequence_id.or(row.inference_sequence_id),
                 });
             }
@@ -5766,7 +5778,7 @@ impl Store {
         world_id: i64,
         sequence_id: i64,
     ) -> Result<SequenceInspection> {
-        let nodes = self.sequence_tree(viewer_id, world_id, sequence_id).await?;
+        let own_nodes = self.sequence_tree(viewer_id, world_id, sequence_id).await?;
         let trigger =
             sqlx::query_scalar!("SELECT trigger FROM sequence WHERE id = ?", sequence_id,)
                 .fetch_one(&self.pool)
@@ -5787,6 +5799,16 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("loading what caused sequence {sequence_id}"))?;
+        // An NPC's spoken reply is the GM's approval of what the NPC decided to
+        // say, so the turn a reader opens from the reply starts with that
+        // decision, where the words and the NPC's own input are.
+        let mut nodes = Vec::new();
+        if trigger == "npc speech" {
+            for cause in &caused_by {
+                nodes.extend(self.sequence_tree(viewer_id, world_id, *cause).await?);
+            }
+        }
+        nodes.extend(own_nodes);
         Ok(SequenceInspection {
             trigger,
             caused_by,

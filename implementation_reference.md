@@ -644,7 +644,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   (`SpeechContent`: speaker id and frozen name, an addressee only on older records, kind, GM prefix,
   authored text) for utterances with `speech.text_format = 'authored'`, which
   the backend presents as a user-role JSON object and the browser shows as the
-  prefixed authored text with `data-speaker`; legacy utterances keep the fixed
+  prefixed authored text under a header naming the speaker (the player's own character is marked and right-aligned in its own colour, a whisper says so; `ChatEntry.mine`/`whispered`); legacy utterances keep the fixed
   "Name says to X: ..." text so recorded requests reconstruct exactly.
   Presence narration keeps its
   connected-PC audience.
@@ -671,7 +671,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   that NPC received. A collection runs once the sequence that produced each source
   message has finished. Developer Mode shows the links:
   `Store::sequence_inspection` returns `SequenceInspection { caused_by, nodes }`
-  and the turn view lists "Caused by" turns. `group.scene_revision` advances in
+  and the turn view lists "Caused by" turns; an NPC speech turn also starts with the NPC decision turn's inferences. `group.scene_revision` advances in
   the writers that change what an NPC sees: an applied `take`, committed speech
   (the selected set's own speech counts as its progress) and a player character
   joining a group, and GM narration an NPC receives. Narration reaches the NPCs
@@ -970,7 +970,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
     links. The browser appends each requested page and preserves the active
     search while doing so; selecting a relationship reloads its exact target
     and highlights it.
-  `InferenceCard` shows reconstructed input before output, rendering a GM
+  `InferenceCard` lists the recorded tool definitions (name, description, schema) in an expandable "Tools" section above the input, shows reconstructed input before output, rendering a GM
   `Current scene packet` as labelled scene fields rather than JSON. Its model
   prompt, token usage and verification evidence live in the top-right `…`
   technical popover. Per-node usage and the cumulative current-Turn total are
