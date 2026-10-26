@@ -363,24 +363,29 @@ could consider GM location hand-offs or merging GM histories. A better idea is
 to have GM inferences use a dynamic context/chat for all characters in a local
 group. This is like a shared experience history for all those involved and the
 GM can focus on just those interactions. As a bonus, GM narrations would only be
-sent to characters within a group and can be shared. Any characters joining
-become part of the group, share chat history and compaction. If a character or
-characters leave they form a new group, which takes a copy of the history of the
-previous group so far. Groups are fungible so there is no difference between a
-split being one new group or two new groups with the old one being deleted. This
-design allows separation between groups of characters at the same location that
-may not be interacting. When they need to interact their groups must be merged.
-This means both chat histories get given to the GM. When compacting merged
-histories we should prefer to compact individual group histories first, before
-making a compaction summary for the merged group's histories - we should have
-customizable threshold to tweak. I.e. if all pre-merged histories are small,
-there's no point compacting just them. The text in this document will refer to
-one GM, but it's implicit that it only has context for the group of players
-interacting.
+sent to characters within a group and can generally be shared. Any characters
+joining become part of the group, share chat history and compaction. If a
+character or characters leave they form a new group, which takes a copy of the
+history of the previous group so far. Groups are fungible so there is no
+difference between a split being one new group or two new groups with the old
+one being deleted. This design allows separation between groups of characters at
+the same location that may not be interacting. When they need to interact their
+groups must be merged. This means both chat histories get given to the GM. When
+compacting merged histories we should prefer to compact individual group
+histories first, before making a compaction summary for the merged group's
+histories - we should have customizable threshold to tweak. I.e. if all
+pre-merged histories are small, there's no point compacting just them. The text
+in this document will refer to one GM, but it's implicit that it only has
+context for the group of players interacting.
 
 The GM must be aware of other groups at the same location and can issue calls to
 merge or split them as their players make actions that would cause direct
 interaction.
+
+Future idea: multiple groups in a location may be too complex. One
+simplification is to say there can only be one group per location and groups of
+characters moving between locations instead a mechanism to move history between
+effectly location-based GMs, the original idea.
 
 The GM should provide the Storyteller with encounter summaries when major events
 happen. This could be a battle, when quest/story-relevant items are acquired or
@@ -828,16 +833,22 @@ Game objects
 - Non-player characters
   - Character
 - Group
-  - Location ID and simple description of where it is in the location.
+  - Location ID (no sub-Location position description since groups cannot move;
+    they only define interacting characters).
+  - Travel Connection ID
 - Location
   - Type - an unstructured string, e.g. "city", "river", "dark wood", "clearing".
   - Description - details everything characters can interact with
 - Connection
+  - Name, e.g. "North Gate", "Darkwood Trailhead" or "Basement Door"
   - Connecting location references {A, B}
   - Description of the transition/connection. It could be the start of a path or
     road where A is the north entrance to a city and B is the south end of a
     road to another city. It could be the door to a tavern within a city, or its
-    stairs to a mysteriously large basement.
+    stairs to a mysteriously large basement. It may even be trapped.
+  - Hidden - boolean; if true, the connection is not widely known and it is up
+    to the GM to provide the ID during narration. The ID is visible to the
+    player agent but rendered with the connection's name in chat.
 - World state
   - Summary - written by the Storyteller at world creation and contains lots of spoilers; much larger than storyteller notes and also editable
   - Initial prompt (just for record; unused except for initialization input)
@@ -900,8 +911,11 @@ forming a superset of rules but trying to keep things simple and intuitive.
   more organic, decided purely through text and assigned a duration by the GM,
   which implies an end time. They begin and are observable immediately but only
   complete once the end time is reached. They are also interruptable. When they
-  end, or when interrupted, the GM applies their effects - fully, partially or
-  none at its descretion.
+  end, or when interrupted, we run GM inference, asking it to apply the effects
+  (fully, partially or none at its descretion). We special case groups with all
+  characters having an identical activity with the same end time and have the GM
+  apply effects to them all - this is largely to handle whole-group travel
+  through Connections.
 - Characters have combat action resources that may be done in parallel. These
   include the standard Cairn one combat move and one combat action per turn. It
   is 10 seconds, the shortest increment of time; the above intent action must be
@@ -1029,20 +1043,23 @@ indirectly explains why this happened to connect the character with the story.
   consistent with the described layout of places within the location in the
   location notes. The GM narrates how far the character gets if not all the way,
   anything they see along the way if applicable and the scene once they arrive.
-- Travel/Follow - like move, but takes the argument of a Connection. First,
-  other characters in the group are informed of the action and asked if they
-  will stay, join with Follow or attempt to prevent travel, verbally or with
-  force with an action. This behaves just like InterventionCheck. If movement is
-  possible at the time and no other characters object, the GM approves the
-  action. The group may be split if some characters stay. The GM narrates the
-  character(s) moving to and through the connection to the destination. If
-  rejected, the GM narrates what happens instead, e.g. how far the character
-  actually get from their current position to the connection in the current
-  location before something else happens (e.g. some other event). If accepted,
-  rust then moves the group's location to the Connection's other side and makes
-  the GM re-populate their description within the location to note their
-  position near the connection they entered from, among any other required
-  consistency updates.
+- Travel/Follow - like move, but takes the argument of a Connection. Note that
+  Connection IDs are not always initially known to characters and may need to be
+  discovered. The GM should disclose  First, other characters in the group are
+  informed of the action and asked if they will stay or follow/join with Follow
+  or attempt to prevent travel, verbally or with force with an action. This
+  behaves just like InterventionCheck and may be committed or not. If movement
+  is possible at the time and no other characters object, the GM approves the
+  action with a duration implying when travel will complete and a text
+  description of travelling which is assigned to the characters' current
+  activity (i.e. a forced/implied ReplaceActivity). The GM narrates the
+  character(s) beginning moving to the connection in the current location. The
+  group is split if some characters stay, but this happens after narration is
+  delivered. A special travel Connection ID is assigned to the group. Note that
+  any time a character's activity is interrupted we clear the group's travel
+  Connection ID to prevent accidentally travelling without all characters in the
+  group being able or ready. The actual travel happens in the GM's GroupTravel
+  call after the end time is reached and the GM handles the completed activity.
 - Say/Whisper - text to be said that may include descriptions of how it is said
   and the adressee(s)/to whom (up to the character agent; they just need to know
   how it gets shown to others). The character agent may need to translate a
@@ -1102,10 +1119,11 @@ indirectly explains why this happened to connect the character with the story.
   used this turn/round. A future idea is to add a combat-length Delay call, but
   not for now.
 
-Many have duplicate names for similar actions. I'd ideally like these to be
-separate tool calls but schema gets duplicated for each, which is exceedingly
-dumb, so the implementation should merge them and have an enum to distinguish
-until we figure out a better way.
+Many have duplicate names for similar actions, like Say/Whisper/Lie. I'd ideally
+like these to be separate tool calls to help agents use the right one. However,
+schema gets duplicated for each, which is exceedingly dumb, so the
+implementation should merge them and have an enum to distinguish until we figure
+out a better way.
 
 The Give/Take actions are a formal way to let rust transfer items in the world.
 The idea is to avoid the risk that the GM fails/hallucinates and an item is
@@ -1153,11 +1171,11 @@ the case may be.
   action, given as an argument to the tool call. The result applies immediately.
   The GM gets to see the result of whatever they approve, including failures or
   errors, as it may affect future decisions. If rejecting, the GM must give a reason so that the caller may try something else.
-- InterventionCheck - called with an action ID and character(s) as arguments,
-  who are then each requested if they wish to intervene before the character
-  makes this action. Regardless of whether the action is committed (not
-  tentative) or not. E.g. if the situation implies the character may stop if
-  requested their agent should not set "committed" and the GM may reject the
+- InterventionCheck/TravelRequest - called with an action ID and character(s) as
+  arguments, who are then each requested if they wish to intervene before the
+  character makes this action. Regardless of whether the action is committed
+  (not tentative) or not. E.g. if the situation implies the character may stop
+  if requested their agent should not set "committed" and the GM may reject the
   action if another character intervenes. If characters are in no position to
   prevent an action and the player has made it clear they're going through with
   it then the GM would Approve the action and possibly Reject the reaction (e.g.
@@ -1188,9 +1206,21 @@ the case may be.
 - ReplaceActivity - sets a character's intended long form action. This could be
   used by the GM to mark a player as being knocked out or paralyzed for some
   time. The GM can then reject attemts by the player to do other actions.
-- AddEffect - appends a GM written effect to the player with a duration and implied end time; this is the same as a GM note except it automatically gets removed when time advances to the end time. Useful for example when a player recieves a lasting injury that the GM needs to remember to apply modifiers for later
+- AddEffect - appends a GM written effect to the player with a duration and
+  implied end time; this is the same as a GM note except it automatically gets
+  removed when time advances to the end time. Useful for example when a player
+  recieves a lasting injury that the GM needs to remember to apply modifiers for
+  later
 - RemoveEffect - prematurely removes an effect from a character, e.g. if they
   heal, sleep or otherwise remove an effect.
+- GroupTravel - Used by the GM to move a group of characters who have arrived at
+  a Connection to the Location on the other side. Only valid if the group has a
+  travel Connection ID set. Both the Connection and Location on the other side
+  must be provided as context to the GM while the group has one set. The GM
+  should narrate what the characters see when arriving. It could be a door to
+  another room or the entrance to a city, just for example. The call takes a new
+  character location description to be given to all characters on the other side
+  at the new location, replacing the current one(s).
 - UpdateStoryteller - send the Storyteller a text summary of some
   event/interaction/resolution that just happened or completed, letting the
   Storyteller make actions, update notes in turn.
@@ -1382,7 +1412,19 @@ there was an interruption. If the interruption was not triggered then
 paused, the game moves on. I'm not sure yet if this should cancel the original
 interrupter's interrupt - it could be frustrating if it's accidentally left on,
 but also frustrating if you can't finish typing your message quickly enough
-before the conversation takes off again.  
+before the conversation takes off again.
+
+Message owners must be visually distinct:
+
+- Player text
+- Player agent text
+- Player character speech
+- Other character speech
+- GM narration
+- Rolls, InterventionChecks, Travel requests, errors, game events etc.
+
+This needs care as sometimes the player chats with the agent, but sometimes it's
+really a conversation between the player character and other characters.
 
 When players join, the GM agent narrates their entry, e.g. entering the
 camp/walking up to the party from along the path/through the tavern
@@ -1443,6 +1485,10 @@ Ideas for the future, after the basics are implemented.
   structure that then gets enforced. E.g. an NPC tries to stop the player
   picking up an item by force - the GM then constructs an opposed strength test
   whos result leads to the player taking the item or not.
+- Allow the player agent to make actions on behalf of the player when they time
+  out (could be risky but also funny).
+- Live speech to text and spoken chat would be amazing. Especially when paired
+  with environmental sounds and music.
 
 
 # Debugging and Telemetry
