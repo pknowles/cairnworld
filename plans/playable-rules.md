@@ -44,13 +44,14 @@ action/time operations for combat and travel rather than implementing Move again
    `Intervention` continuation. agent.rs returns AwaitingReply while preserving
    invocation/call IDs, tool ordinals and budgets. Game::process_world releases
    the current event and accepts the requested character's reply through ordinary
-   chat. The deadline is a persisted wake-up that records do_nothing; nothing
+   chat. The deadline is a persisted wake-up that records the idle response (do_nothing for an intervention); nothing
    counts down in memory, and restart answers overdue replies first, using the
    earliest-deadline mechanism connection presence already has. Allow
    InterventionCheck to select player characters as well as NPCs: each gets the
-   question in their chat and answers through their agent. Test two real player
-   chats, a player who intervenes, one who answers do_nothing, a timeout,
-   disconnect, restart with an overdue reply, and a mixed NPC and player check.
+   question in their chat and answers through their agent. Count consecutive timeouts per membership, reset by any player response, and at 3
+   end the connection with the AFK message on WorldDetail. Test two real player
+   chats, a player who intervenes, one who answers do_nothing, a timeout, three
+   timeouts in a row ending the connection, disconnect, restart with an overdue reply, and a mixed NPC and player check.
 3. Consolidate item holders as specified in design.md. Introduce typed item stats
    for slots, armor, weapon dice and spell references; preserve separate object
    notes. Replace the `take` tool with the `transfer` tool (`kind` take, give,

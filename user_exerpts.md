@@ -909,3 +909,11 @@ plans/playable-rules.md follow this: a stored deadline, a persisted wake-up that
 records do_nothing, overdue replies answered first on restart, `[game]
 player_response_timeout` required with no code default. The declaration's
 one-minute window for travel and take-from-player is replaced by this setting.
+
+The user then added to user_declarations.md (\"Players are expected to respond in a
+timely manner\"): a configurable 5 minute timeout starts for a player only when the
+game cannot progress because of them; at the end they automatically DoNothing/wait/
+whatever idle response applies; after 3 in a row without any response they are
+navigated back to the world detail page with a message that they were
+disconnected for being AFK. design.md and plans/playable-rules.md follow this,
+with the setting kept as `[game] player_response_timeout`.

@@ -1621,9 +1621,23 @@ response, so a crash while waiting loses nothing: on restart the overdue replies
 are answered with their defaults first. Use the persisted form, with the same
 earliest-deadline wake mechanism connection presence already uses; no timer map.
 
+The general rule (user_declarations.md, "Players are expected to respond in a
+timely manner"): whenever the game cannot progress because of a player, meaning
+the player is on the critical path and not merely able to type in their chat box,
+a deadline starts for that player. Inaction otherwise has no consequence. When it
+passes, the applicable idle response is applied for them: do_nothing for an
+intervention, and the idle response named where each other kind of reply is
+defined. Several players blocked at once each have their own deadline.
+
 The deadline comes from the required game setting `player_response_timeout`
 (`[game]` in default.toml, seconds, initially 300). It has no code default: a
 missing value is a startup error, so the value is always a deliberate choice.
+
+A player who lets 3 deadlines in a row pass without responding between them is
+treated as away: their connection ends with a message on the WorldDetail page
+saying they were disconnected for being AFK, and the usual departure handling
+follows. Any response from the player resets the count. Count per membership,
+stored so a restart keeps it.
 
 The action that needs a human response persists
 `pending_reply(action_id, character_id, deadline, status, response_content_id)`;
