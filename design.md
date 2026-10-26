@@ -1306,22 +1306,24 @@ fiction rather than substituting for mechanical state.
 
 | Operation | Rust result and GM/NPC responsibility |
 | --- | --- |
-| Look/investigate/open/ask | GM can answer, request a save/time cost, or reject with a reason. No automatic repeated save. |
-| Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
+| Look/investigate/open/ask/gesture | GM can answer, request a save/time cost, or reject with a reason. Route timed work through the shared activity/resource rules below; the precise short/free/long cost policy remains a declaration question. No automatic repeated save. |
+| Move/CombatMove/wait | Move and Wait are duration-bearing activities. CombatMove has an immediate approved position change and consumes its short movement resource. Resolve a longer movement's completion or partial progress through the GM rather than moving to its destination at approval. |
 | Speak/lie | A public speech (the default) is heard by all characters in the group and names no addressee, since who it is for belongs in the words; a private one (`private`) names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
 | DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
 | InterventionCheck/Approve/Reject | GM consults selected characters, NPCs and players, about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may wait for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Take/give/drop/place | One holder change after the GM approves; no duplicate item on repeated approval. No separate acceptance step: the receiver or a holder may intervene (say or gesture a clear no), and the GM then rejects. A drop or place is approved with the item's new location description. A committed drop is not necessarily rejected, since a character cannot be forced to keep an item, but it may lead to combat. |
-| Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
+| Save | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. Initiative uses the declared individual DEX-based ordering, whose exact roll/ranking needs clarification below. |
 | Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
-| BeginCombat/endCombat | GM identifies combatants and state boundary; Rust stores turn order and flags and determines eligibility. |
+| EndTurn | At the timestamp of the character's short turn, raise every short resource's ready time to at least that timestamp plus ten seconds. Unused resources cannot grant another turn at the same time. This is a character tool, distinct from ending an LLM chat-turn or GM narration. |
+| ReplaceActivity | GM replaces the named character's long activity, including imposed activities such as unconsciousness. Resolve interruption of the previous activity through the same lifecycle; replacement is not completion. |
+| AddEffect/RemoveEffect | Store a GM-authored character effect with an expiry time, or end it early by explicit effect reference. Expired/removed effects leave active context but remain in recorded evidence. GM interprets their meaning; no new executable modifier language is implied. |
 | SpawnItem/SpawnNPC | GM submits a typed proposal to Storyteller; its approval creates the object through the same validated constructors and records the source. |
 | Edit notes | Whole-value and exact-text edits on authorized object fields/note values; Storyteller reads its own notes, GM reads authorized notes from both roles but edits only GM notes. |
 
-Expose `look`, `investigate`, `open` and `ask` as one `attempt` character tool: a
+Expose `look`, `investigate`, `open`, `ask` and `gesture` as one `attempt` character tool: a
 `kind` selecting observe, examine/search, attempt to open, or ask the GM for
-information/clarification, plus a description. One tool rather than four keeps
+information/clarification, or gesture, plus a description. One tool keeps
 the model-facing tool definitions small (four near-identical definitions were
 44% of a player agent's tool text). Preserve the chosen kind and description in
 the recorded request and GM context. Shared submission, authorization and
@@ -1338,17 +1340,78 @@ The receiver's agreement is not a protocol: the request is intervenable like any
 tentative or committed action, and a clear refusal from the receiver makes the GM
 reject it.
 
-`combat(id, group_id, round, current_character_id)` and
-`combat_participant(combat_id, character_id, initiative_order)` own the stable
-turn order. Character moved/acted flags clear when its new turn begins; wait
-can end it early. Closing the game-turn consumes any remaining move/action
-allowance; Interrupt and Never mind never reset it or grant a turn. Rust derives
-can_act from combat order, death/disabled state,
-pending reply eligibility and out-of-combat time. GM cannot set can_act directly.
-The proposed initiative order and out-of-combat time window are Product decisions.
-World time is the maximum character time. Each character advances by approved
-elapsed seconds; time advancement queues hourly distant-NPC opportunities only
-for elapsed whole hours, in stable character order, through the world task.
+## Unified game time and activities
+
+Authority: Game turns and time, Character game objects, Move/CombatMove, Wait,
+EndTurn, Attack, ReplaceActivity and AddEffect/RemoveEffect. These rules govern
+players and NPCs through the same action admission. There is no combat-mode
+boundary, moved/acted flag reset or authoritative global world clock. The word
+"short turn" below denotes the declared ten-second action opportunity, not an
+LLM chat-turn; the declaration still has an open turn/round terminology TODO.
+
+Each character owns its current long activity, when present, and its end time,
+plus next-ready times for short movement, action and dialogue-initiation
+resources. Short actions take effect immediately in tool-call order; those
+sharing a short turn do not each add another ten seconds. Rust checks readiness
+before action submission and again before application. Using a resource consumes
+its allowance; EndTurn also advances unused resources as specified above. Neither
+a response opportunity, Interrupt/Never mind, nor starting/replacing a long
+activity resets those timestamps. The scheduler derives due work from character
+activity ends and resource availability, reusing existing world execution rather
+than adding a separate combat scheduler.
+
+Long activities begin observably on approval, with GM-assigned duration greater
+than the short interval. They are intentions, not pre-applied completed outcomes.
+At completion or interruption, GM resolves actual full, partial or absent effects
+from the activity and elapsed time. Store enough timing/source information to
+present that situation accurately. A long-activity start returns a started result;
+it does not hold an unresolved model tool call or an active GM invocation for
+the duration. Later resolution uses the explicit activity identity and ordinary
+recorded GM execution, with no agent re-entry or automatic replay of earlier tools.
+
+Perceived events offer the existing player/NPC response opportunity without
+automatically ending the activity. DoNothing or a compatible response leaves it
+running. A conflicting short action, voluntary abandonment or circumstances
+making continuation impossible interrupts it. GM can impose a replacement such
+as unconsciousness. Responses still obey resource readiness and character
+capability: being invited to respond is not permission for another attack.
+Dialogue initiation has a short resource cost; the exact initiation/reply boundary
+and compatibility of speech with activities must be clarified before enforcing
+that cost. This timing mechanism does not promise that conversations terminate.
+
+On first entering short-action ordering, group members receive individual
+DEX-based initiative rather than side initiative. Rust controls eligibility and
+publishes it to the UI; GM resolves fictional capability and action effects.
+Human decisions blocking progress use the configured response deadline and AFK
+policy in Player replies and coordinated travel. Skipping a short turn applies
+EndTurn's resource update; it does not advance game time by the wall-clock wait.
+Game-time scheduling, inference budgets and human-response wall-clock deadlines
+are separate concerns. Natural changes such as dusk use the same GM perception
+delivery as other observable events, including NPC recipients.
+
+### Decisions required before implementing dependent timing rules
+
+- Define the timestamp used as a turn's "now" and the next-idle calculation from
+  character state, including initial state, long activities with ready resources
+  and a response before the activity ends. No independent maximum-character-time
+  world clock is authorized. Confirm time granularity/rounding and deterministic
+  ordering when completion, effect expiry and an action share a timestamp.
+- Resolve the declaration's remaining "DEX save" versus initiative-roll wording:
+  roll/ranking, ties, when order is retained/rerolled, and changes in group
+  membership. Do not retain the old success/failure-first ordering as a default.
+- Specify short-resource/free/long-duration classification for generic attempts,
+  and the boundary between initiating dialogue and replying. Retain existing
+  response opportunities while these costs are unresolved.
+- Wait still mentions catching up to "world time". Use explicit-duration cases
+  for the plan; its default target needs clarification, not an invented clock.
+
+Independent group drift by hours and jumps on merge remain exploratory. Cross-group
+travel must define causal ordering and handle outstanding activities/effects;
+do not silently complete them by changing a clock. Distant NPC action opportunities
+remain declared behaviour, but their cadence must use the agreed derived-time
+policy rather than an hourly tick from a removed global clock. Out-of-turn action
+queues, a combat-length Delay tool and new background simulation loops are not
+part of this design. See [the timing plan](plans/unified-game-time.md).
 
 ## Character perceptions and NPC responses
 
@@ -1640,7 +1703,7 @@ follows. Any response from the player resets the count. Count per membership,
 stored so a restart keeps it.
 
 A character whose player has timed out or is away does nothing and skips its
-turns: in combat its turn is closed without an action. For travel it goes with
+short turns through EndTurn, without resetting its ready times. For travel it goes with
 a strict majority of the party, and otherwise, including a tie, stays where it is.
 
 The action that needs a human response persists
@@ -1671,15 +1734,19 @@ unless the GM decides otherwise. A reaction that comes back is handled as any
 other (approve it, see its result, then decide the original action).
 
 Travel takes a Connection ID, validates that one endpoint is the source group's
-location, and asks the group's other characters to join/stay/object. NPCs answer
+location, and asks the group's other characters to Follow/stay/object through
+the ordinary intervention path. NPCs answer
 through their agents; PCs have the configured player response timeout. The proposed
-resolution is in Product decisions. On approval, create the travelling/staying
-partition using the group history operation, update the travelling group's
-location to the other endpoint, and replace its location description with the
-GM's arrival description. Record transfer of location and action completion
-atomically. Waiting/objections leave the original location unchanged; rejected
-travel can still have an explicitly narrated/recorded movement within the source
-location. Group history follows the travellers without a location GM handoff.
+resolution is in Product decisions. Approval starts the group's timed travel
+activity; it does not immediately complete the journey or move the group to the
+destination. Use the group history operation for the approved travelling/staying
+partition. Completion applies the destination and arrival description with the
+activity result; interruption records actual progress and resolves the resulting
+location/group placement through GM arbitration. Waiting/objections leave the
+original location unchanged unless actual movement has been resolved. Group
+history follows the travellers without a location GM handoff. Mid-journey placement
+and interactions between groups require the timing decisions above; do not
+invent intermediate locations merely to fit a timer implementation.
 
 ## Storyteller world creation
 
@@ -1791,18 +1858,16 @@ choices derived from the named requirements.
   interruption message for the next invocation, including unresolved tool IDs.
   No model runs in response to the failure. This reconciles Implementation
   Directives / Chat with immediate propagation and the safety bounds.
-- **Combat:** individual stable turns, successes on the initial DEX save before
-  failures, higher DEX next, remaining ties randomized once by Rust. This follows
-  the game's individual-turn declaration rather than Cairn's simultaneous sides.
+- **Unified time:** implement the declared activities, short resources and
+  EndTurn; resolve the remaining timing/initiative questions under
+  [Unified game time and activities](#unified-game-time-and-activities) before
+  implementing their dependent behaviour. Combat-mode and lead-window proposals
+  do not apply to this model.
 - **Travel:** stay splits the party; objection goes to GM arbitration before
   movement. No second initiator confirmation. A PC who has not answered by the
   response deadline, or is away, goes with a strict majority of the party and
   otherwise, including a tie, stays and does nothing (accepted 2026-10-26, see user_exerpts.md); the 60 second
   silent-join proposal is withdrawn.
-- **Time window:** propose `max_character_lead_seconds=600` out of combat;
-  a character at least that far ahead of the least-advanced connected PC in its
-  group waits for catch-up. The GM's elapsed time is bounded nonnegative, with
-  long activities gating further action. The declaration leaves this limit open.
 - **Epilogue barrier:** propose one choice per PC present in the campaign-end
   participant snapshot, including dead PCs. Disconnection does not auto-consent;
   a world stays in epilogue until those players return and answer. Owner override

@@ -160,25 +160,26 @@ These are recorded observations, not universal model guarantees. Preserve useful
 captured context and conclusions. A first-response test proves only that a reply
 reached the player; it cannot close the natural-stopping requirement.
 
-## Ideas to explore — not to be implemented
+## Timing integration and conversation tuning
 
-These are discussion notes, not implementation requirements or approved changes
-to the current scheduler, prompts, time rules or acceptance tests. Do not build
-them as part of this plan without a later explicit decision.
+The declared timing model is implemented by [Unified game time](unified-game-time.md)
+after this interaction increment. It adds short-resource admission, dialogue
+initiation costs, EndTurn and interruptible long activities to the same character
+action path. This plan does not implement a second clock or a conversation-energy
+currency, and does not claim those resource limits already exist.
 
-- Explore out-of-combat action timing as a resource governing when characters
-  can act again, including NPC reactions. Initiating a conversation/action
-  advances the character's action clock; its action availability does not reset
-  until the group's game time catches up. Costs are ordinary RPG time costs,
-  not a separate conversation-energy currency.
-- The user's proposed group time is implicitly the earliest character time in
-  that group. Characters therefore get a fair opportunity to advance, rather
-  than fast actors repeatedly acting while others remain behind. This is a
-  group-time idea, not a change to the world's clock definition.
-- Timing does not replace conversation tuning. Conversations should tend to end
-  when their subjects are resolved, reach a standstill, or give way to combat.
-  What produces that behaviour still needs exploration; do not assert that the
-  clock alone guarantees termination or add a forced end-conversation tool.
+An NPC or PC receiving a perception may consider responding while an activity is
+running. Receiving the opportunity, choosing DoNothing or a compatible response
+does not end that activity. Timing checks a chosen action's resources; GM resolves
+compatibility and forced interruption. This uses the same response delivery and
+causal links, not a special busy-character response system. The initiation/reply
+cost boundary remains an explicit timing design question.
+
+Natural stopping remains user-owned tuning: conversations should end when their
+subjects are resolved, reach a standstill or give way to other events. A cost for
+initiation does not guarantee replies terminate. Do not add a forced
+end-conversation tool. Group drift and time jumps on merge remain exploratory
+under the timing design rather than an alternative world-clock definition here.
 
 ## Design choices
 
@@ -530,16 +531,18 @@ Combat, attacks, action allowance and contested physical outcomes depend on
 NPC increment. Verify the prisoner's warning and committed retry in this increment, and
 verify the shopkeeper's physical opposition when those rules are implemented.
 
-## Combat boundary
+## Timing and physical-action boundary
 
 Interrupt changes scheduling, never character eligibility or allowance. Route
 all resulting requests through the existing shared action admission boundary;
 do not grant a turn because a hand is raised or because an action flag is unused.
-Combat order/flags, Move, Wait and damage are not implemented in the current
-runtime. Their complete implementation remains in [Rules and travel](playable-rules.md),
-with the accepted rule that closing a game-turn consumes remaining allowance and
-only a new game-turn resets it. This experiment does not expose dummy combat,
-attack, movement or travel tools, or claim combat-abuse tests have passed.
+The [timing plan](unified-game-time.md) owns initiative, ready-times, EndTurn,
+activities, Wait and timed effects. [GM editing](gm-editing.md) adds Move/CombatMove;
+[Rules and travel](playable-rules.md) adds actual damage/attack and timed Travel/Follow.
+EndTurn advances unused short resources; response processing never resets them.
+This interaction increment does not expose dummy physical actions or claim their
+resource-abuse tests have passed. Preserve the existing action admission boundary
+so these rules extend the same player/NPC and intervention paths.
 
 ## Verification and completion
 

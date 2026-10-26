@@ -811,8 +811,9 @@ Game objects
     - Includes a background/backstory that the storyteller typically writes.
       This is private and not visible to other characters. It should guide how
       NPCs behave.
-  - InCombat, Moved and Acted booleans for combat actions
-  - Time
+  - Current intent action and end time
+  - Next ready times for short combat-length actions (combat-moved and
+    combat-action, etc.)
   - Group - both a reference to the group object and a string description within
     it only if specified, e.g. the player has climbed a tree, rather than just
     generally with the rest of the group's characters. Any number of players can
@@ -839,7 +840,6 @@ Game objects
     stairs to a mysteriously large basement.
 - World state
   - Summary - written by the Storyteller at world creation and contains lots of spoilers; much larger than storyteller notes and also editable
-  - Time
   - Initial prompt (just for record; unused except for initialization input)
   - Storyteller summary
   - Next free action ID to allocate from
@@ -884,89 +884,93 @@ be overloaded with unnecessary detail.
 
 (*There are RPG game-turns and LLM agent chat-turns which are separate)
 
-With many PC actions, the GM returns how much time has progressed. The GM may
-decide since the players were only chatting, not much time has passed. Rust
-keeps track of this in the world state, but this is not shown in the UI.
+TODO: resolve "turn" and Cairn "round" terminology - currently used interchangably here
 
-For a strict time system, every character (NPC and PC) would have a current
-time. Any character action would advance their current time. The world time
-advances to the maximum of all character times. Then all characters take turns
-to catch up in order of their current time (resolving ties with the combat DEX
-save if there is combat). To facilitate the per-turn single move and single
-action mechanic of Cairn, characters have a boolean to mark whether they have
-moved or acted.
+Many TTRPGs have concepts for time passing and separate time progression
+handling for in-combat and out-of-combat play. I initially thought I'd follow
+this but I don't trust the GM LLM to handle this well. In genreal, time needs
+fair and realistic time progression, action opportunity, limits to avoid
+exploitation yet preserve intent and causal ordering.
 
-However, sticking to the above strict time tracking for the whole world may be
-inconvenient. We'd have to process time for all NPCs even though consequences
-would be unrelated. Drawing on quantum mechanics, there's no point processing
-until the outcome could affect anything. I'd lean towards first saying any
-combat at a location must finish first. Next that NPCs in other locations may
-only act when whole hours pass. I.e. the game and implementation may be better
-if we do not follow strict time ordering, but we can be close to it with rigid
-rules. To clarify, rust code will define when players are allowed to act, not
-the GM.
+For this game I will attempt to merge combat and out of combat time progression,
+forming a superset of rules but trying to keep things simple and intuitive.
 
-An easy multiplayer solution: players would have a greyed out send button in
-their chat until they can take a turn. Making actions out of order when out of
-combat is probably fine as long as they don't get too far ahead (e.g. when doing
-something for an hour they should not be allowed more actions until other
-players have decided what they will do). They may pre-type what they want to do
-though. A more complex one would allow asking GM and Storyteller questions. This
-may trigger note updates, quantum resolution style out of order mid-combat.
-That's probably OK because the duality collapse just happens earlier than later.
-Not sure how to handle the UI there though because the chat may or may not be a
-question. Something to decide on later.
+- Characters can have a current non-combat intent action with an end time, e.g.
+  travelling, waiting, preparing, shoppoing, training, sleeping etc. These are
+  more organic, decided purely through text and assigned a duration by the GM,
+  which implies an end time. They begin and are observable immediately but only
+  complete once the end time is reached. They are also interruptable. When they
+  end, or when interrupted, the GM applies their effects - fully, partially or
+  none at its descretion.
+- Characters have combat action resources that may be done in parallel. These
+  include the standard Cairn one combat move and one combat action per turn. It
+  is 10 seconds, the shortest increment of time; the above intent action must be
+  longer. We will add dialog initiation to this to make the game progress. These
+  happen immediately and in the order their tools are called. Each has a
+  next-ready time to prevent duplicates per combat turn. Since characters may
+  choose up to one of each in a combat turn, characters must call an EndTurn to
+  signify they are done making them.
+  
+These actions may not be mixed. Choosing a combat move, combat action or
+initiating dialog would break any longer non-combat action, interrupting it.
+
+There is no combat mode, but ordering within a group is defined by all group
+members making a DEX save the first time they begin making short combat-length
+actions. I will divert from Cairn rules here and make it a DEX roll that becomes
+initiative so we have more strict ordering. This is because for simplicity there
+are no defined "sides" - players could start attacking other players, although I
+don't expect them to.
+
+Perceiving an event gives PCs and NPCs an opportunity to respond under the
+existing response rules. Neither receiving that opportunity nor choosing a
+response automatically interrupts their current activity. The activity continues
+unless the chosen response is incompatible with it, the character abandons it,
+or circumstances make continuing impossible. Being knocked unconscious, for
+example, interrupts an activity regardless of the character’s preference.
+
+Many actions, such as Look/Investigate/Open/Ask, require the GM to return how
+much time until that action would end.
+
+There is no explicit global game time. The code instead keeps track of the next
+idle time of all characters and runs inference or waits for players to do
+something. Thus, the end-time and next-ready times implicitly drive time. Game
+time progresses as players make actions and NPCs run inference to keep up. To
+stop one player blocking gameplay a timeout will be built in where they
+automatically do nothing/skip their turn. They may be logged out for being AFK
+after some number of timeouts pass.
+
+It would be interesting to allow groups of characters to get a few in-game hours
+out of sync. This would mean we could delay processing NPC groups until players
+are idle and make the game more responsive. It probably wouldn't matter much to
+jump time forward when groups merge for the older group either.
+
+Player chats could have a greyed out send button in their chat until they can
+take a turn. They may still pre-type what they want to do. Then again, allowing
+characters to chat to their agent out of order and queue up an action would make
+the game faster, but adds complexity so save this to try later. Obviously when
+doing something for an hour they should not be allowed more actions until that
+hour is complete, or they are interrupted, or decide to stop what they are doing
+and do something else. Another thing to try would be to allow asking GM and
+Storyteller questions. This may trigger note updates, quantum resolution style
+out of order mid-combat. That's probably OK because the duality collapse just
+happens earlier than later. Not sure how to handle the UI there though because
+the chat may or may not be a question. Something to decide on later.
 
 When time advances, main NPCs in other locations may get a chance to take
 actions, chat, organise and plot with other NPCs. While rare, this could allow
 NPCs to suddenly enter a location, for example arrive at an encounter along a
-path while players are there.
+path while players are there. This would be a merge of two character groups.
 
 If the time of day changes such as sunrise/sunset/darkness, the GM should
-narrate this to the player in the next chat response. Narration is an optional
-tool call the GM can make, which queues up the message, is played back
-immediately visibly to the player and the player agent can see this (in the same
-chat) before the tool call result is displayed to it. Time of day may in turn
-affect the difficulty the GM decides some actions such as perception checks
-should be.
-
-We need to design the game rules so the GM can have all PCs complete their turns
-up to the advanced time, with allowed room for error. During combat this would
-be strictly turn by turn and time advancement could probably be ignored
-entirely.
+narrate this to all characters in the group. Time of day may in turn affect the
+difficulty the GM decides some actions such as perception checks should be.
+Obviously noticing stuff in the dark is harder.
 
 When one player does something for a few hours, another player may get many
 turns to do something while they wait, e.g. have a conversation with some NPC in
-the same city/town. They shouldn't be forced to do actions until the time adds
-up perfectly. I guess the GM could effectively just ask what they want to do in
-the meantime and waiting could be a perfectly valid response. This probably
-means every PC has their own time variable as state, which then advances up to
-the global world time through actions or waiting.
-
-I think being in and out of combat needs to be a distinct state. It would be
-nice if not - time could simply advance by a set turn time. However, per the
-Cairn rules, there is an explicit limit of one move and one action per turn that
-only applies while in combat. It would be good to enforce this with rust flags
-so characters can't accidentally cheat and so we activate chats in turn order.
-I.e. out of combat, players and NPCs could often act simultaneously as long as
-their current time does not get too far ahead of the others (in which case they
-wait for the others to catch up, i.e. their chat is blocked). However, when
-in-combat only one player should have an active chat box at once and their turn
-should be implicitly over after making one move and one action, or explicitly
-skipping the rest of their turn. There is also a DEX roll to determine turn
-order, which is made only at the start of combat. Combat is somewhat ambiguous -
-starting when violence or active hostilities begin. Sticking with matching real
-RPGs my conclusion is to have the GM make the call to begin and end combat. This
-probably needs a prompt reminder and description for events to look out for that
-indicate the start and end. A worry is that this state may be tricky for the GM
-LLM to track. One idea is to add some safeties such as reminding the GM or
-forcing combat when an attack roll is made. Then reminding the GM if a character
-attempts an action that takes longer than a turn. A further worry is if some
-characters in a location become out of sync with their InCombat state. This may
-need some reworking and play testing. I.e. I'm not sure what ideas will work
-best so we should try a few that includes complicated situations where there may
-even be NPC or player bystanders, maybe also in the same Location but not in the
-same area within it, and pick the one that works best.
+the same city/town. If a player goes shopping for a new sword for a morning,
+other players should see the narration as they wander off to the shops and then
+their agent should ask them what they want to do in the meantime. They may do the same, wait, whatever.
 
 # Tool calls
 
@@ -1016,17 +1020,20 @@ indirectly explains why this happened to connect the character with the story.
 
 - DoNothing - a common reply to a request to intervene or respond to a question.
   Kinda similar to Wait, except wait has an implied duration.
-- Move - the character describes going to a new position in the current
-  location. This can be during or out of combat. If out of combat, the GM
-  narrates how far the character gets if not all the way, anything they see
-  along the way if applicable and the scene once they arrive. If in combat,
-  follow the move rules of combat. The GM augments the move action with the time
-  the move takes, ideally being consistent with the described layout of places
-  within the location in the location notes.
-- Travel - like move, but takes the argument of a Connection. First, other
-  characters in the group are informed of the action and asked if they will
-  stay, join or attempt to prevent travel (verbally or with force). If movement
-  is possible at the time and no other characters object, the GM approves the
+- Move/CombatMove - the character describes going to a new position. The
+  CombatMove is a fixed short duration action with an implied short distance as
+  per Cairn movement rules and is only available if the implicit now time is at
+  or after the combat move's next ready time. The regular Move routes to the
+  character's long form intent/activity, may be much further away and typically
+  takes longer. For Move, The GM adds the duration when it approves, being
+  consistent with the described layout of places within the location in the
+  location notes. The GM narrates how far the character gets if not all the way,
+  anything they see along the way if applicable and the scene once they arrive.
+- Travel/Follow - like move, but takes the argument of a Connection. First,
+  other characters in the group are informed of the action and asked if they
+  will stay, join with Follow or attempt to prevent travel, verbally or with
+  force with an action. This behaves just like InterventionCheck. If movement is
+  possible at the time and no other characters object, the GM approves the
   action. The group may be split if some characters stay. The GM narrates the
   character(s) moving to and through the connection to the destination. If
   rejected, the GM narrates what happens instead, e.g. how far the character
@@ -1036,35 +1043,41 @@ indirectly explains why this happened to connect the character with the story.
   the GM re-populate their description within the location to note their
   position near the connection they entered from, among any other required
   consistency updates.
-- Say/Whisper - text to be said that may include descriptions of how it is said,
-  with an optional target for who the character is addressing. The character
-  agent may need to translate a general desire into a specific sentence. E.g. "I
-  want to ask if the bartender has heard of any unusual events recently, but
-  discretely" -> "PC-name says in a low voice: Hey NPC-name, have you noticed
-  anything unusual recently?". This must pass GM approval (i.e. unless they were
-  incapable of speaking). The GM may provide an optional list of characters who
-  overhear what was said (or who can't overhear), otherwise everyone in the
-  group hears. Whisper is a Say but takes specific characters to whisper to.
+- Say/Whisper - text to be said that may include descriptions of how it is said
+  and the adressee(s)/to whom (up to the character agent; they just need to know
+  how it gets shown to others). The character agent may need to translate a
+  general desire into a specific sentence. E.g. "I want to ask if the bartender
+  has heard of any unusual events recently, but discretely" -> "PC-name asks
+  BartenderName in a low voice: Hey NPC-name, have you noticed anything unusual
+  recently?". This must pass GM approval (i.e. unless they were incapable of
+  speaking). The GM may provide an optional list of characters who overhear what
+  was said (or who can't overhear), otherwise everyone in the group hears.
+  Whisper is a Say but takes specific characters to whisper to.
 - Lie - the same as Say, except the speaker and all characters who hear it make
   a WILL roll. Those that pass receive a canned note saying they think
   Speaker-Name may be lying. This opposed check diverts from Cairn rules, but
   fits the game mechanics here better. Player agents may confirm with the player
   if they intend to be lying before making this tool call if there is possible
   ambiguity. NPC agents must use it appropriately/honestly.
-- Attack - using a particular weapon
+- Attack - using a particular weapon. Only available when ready (can't attack
+  twice per turn/round) and updates the combat action next ready time.
 - Retreat - implies a DEX save
-- Give/Drop/Place - initiates an item transfer.
+- Give/Drop/Place - initiates an item transfer. If placed/dropped at a location,
+  the GM must approve and provide its new location description with the approval. If to a person
+  it must be accepted. It may also be contested, e.g. when a character tries to
+  leave something undesirable at a location. The GM may choose to not reject a
+  committed drop as it's hard to force a character not to drop something, but it
+  may still lead to combat.
 - Take/Request/Pickup - sends a request for an item; if from another character,
   the GM may forward that request to the character's agent for approval. If it's
-  from a PC, the player's agent must ask for player approval, which may time out
-  after a minute. A timeout is an error that propagates. The triggering
+  from a PC, the player's agent must ask for player approval. The triggering
   character agent receives both the timeout error and the narration that the
   other character just stands there motionless.
 - Accept - a character's agent must approve an item being given to them or taken
   from them. If it's a player character, the agent would ask the player if they
   accept and make the returning call appropriately.
-- Look/Investigate/Open/Ask - more of a catch-all chat-with-the-gm where the GM
-  may update world state as a result. The character agent may want more
+- Look/Investigate/Open/Ask/Gesture - more of a catch-all chat-with-the-gm where
+  the GM may update world state as a result. The character agent may want more
   information about their surroundings from the GM, to clarification something
   previously said or to actually spend time searching for something. The GM may
   additionally require a save or advance time. The GM may reject the request
@@ -1079,11 +1092,15 @@ indirectly explains why this happened to connect the character with the story.
   the player agent's prompt suggests to include the text "risk
   aside/nevertheless, spending the action to...". An alternative would be a
   separate confirmation dialog.
-- Wait - skips the remainder of their turn if in combat, waits a given amount of
-  time. This could default to waiting to catch up to world time (e.g. waiting
-  for another PC to finish doing something). If the wait is significant (i.e.
-  not in combat), the GM should quickly narrate the wait, e.g. what they see
-  while waiting. A future idea is to add a combat Delay call, but not for now.
+- Wait - waits a given amount of time. EndTurn is the combat version. This could
+  default to waiting to catch up to world time (e.g. waiting for another PC to
+  finish doing something). Once complete, the GM should narrate the wait, e.g.
+  what they saw while waiting.
+- EndTurn - sets next-ready time for all combat length actions to at least 10
+  seconds from now; if no move/act has been done this is effectively a wait for
+  10 seconds; otherwise it signifies an unused move or act is not going to be
+  used this turn/round. A future idea is to add a combat-length Delay call, but
+  not for now.
 
 Many have duplicate names for similar actions. I'd ideally like these to be
 separate tool calls but schema gets duplicated for each, which is exceedingly
@@ -1152,9 +1169,6 @@ the case may be.
   may make them save to find it. The save roll should take a very short string
   saying what the save is for. The GM may apply difficulty modifiers. Not to be
   used for persuasion (see BePersuaded)
-- RollInitiative - the same as Save, except this takes a list of characters and
-  writes the results to their objects so that they make actions in the correct
-  order as time updates. XXX does BeginCombat superseed this?
 - SpawnItem - the GM may create items and loot on-the-fly. As an example, the
   act of looking for loot may remind the GM that some loot should exist, but
   only if the players succeed a check. Creating an item after-the-fact is fine
@@ -1171,10 +1185,12 @@ the case may be.
   be aware of how much damage would be lethal and know that they need to have
   presented sufficient warning to players about consequences before applying
   this.
-- BeginCombat - takes a list of characters, sets their InCombat flag and they
-  all roll DEX for turn order.
-- EndCombat - unsets the characters' InCombat flag. InterventionCheck could be
-  used first to see if all characters actually wish to end combat.
+- ReplaceActivity - sets a character's intended long form action. This could be
+  used by the GM to mark a player as being knocked out or paralyzed for some
+  time. The GM can then reject attemts by the player to do other actions.
+- AddEffect - appends a GM written effect to the player with a duration and implied end time; this is the same as a GM note except it automatically gets removed when time advances to the end time. Useful for example when a player recieves a lasting injury that the GM needs to remember to apply modifiers for later
+- RemoveEffect - prematurely removes an effect from a character, e.g. if they
+  heal, sleep or otherwise remove an effect.
 - UpdateStoryteller - send the Storyteller a text summary of some
   event/interaction/resolution that just happened or completed, letting the
   Storyteller make actions, update notes in turn.
@@ -1392,6 +1408,18 @@ this indicates the thresholds are badly set or there is a once-off very large
 message. Rather than emit messages separately to a log, keeping everything
 inline in the one chat gives one unified user interface and preserves ordering
 to make development much easier.
+
+Players are expected to respond in a timely manner for some things. Sometimes
+inaction has no reprocussions. However, as soon as the game cannot progress
+because of a player (i.e. they are in the critical path, as opposed to their
+chat box accepting messages) a 5 minute timeout (configurable) begins for them.
+When time runs out, they automatically DoNothing/wait/reject give and take (e.g.
+with a canned Gesture "stares blankly, not doing anything")/whatever idle
+response is applicable for interacting as little as possible. AFK characters
+would travel with the majority of the party to avoid frustration when returning,
+but otherwise do nothing, skip turns and not interact. After 3 of these without
+any response from the player they are navigated back to the world detail page
+with a message saying they were disconnected for being AFK.
 
 **Polish ideas**
 

@@ -18,8 +18,10 @@ Follow [the design](../design.md#storyteller-world-creation),
 [AGENTS.md's checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
 [coding standards](../coding_standards.md) and [prompt standards](../prompt_standards.md).
 
-The preceding [GM editing plan](gm-editing.md) supplies shared field editing,
-lookup and bounds. Existing scenario installation and object constructors supply
+The preceding [Unified game time](unified-game-time.md) feature defines character
+activities, resource ready-times, initiative and timed effects; its constructors
+own initial timing values. The [GM editing plan](gm-editing.md) supplies shared
+field editing, lookup and bounds. Existing scenario installation and object constructors supply
 relationships and history ownership; reuse their validation rather than build a
 second world model. Full combat/travel rules are not a prerequisite for authoring
 the existing object fields. No placeholder rule effects or automatic Storyteller
@@ -75,6 +77,11 @@ after their rules dependencies. Campaign completion remains a separate plan.
   as context, not canned future messages or a new clue/knowledge subsystem.
   Record incidental scenery and discovery instructions in descriptions/notes
   where appropriate.
+- Reuse the timing feature's constructor state for each NPC. Do not author an
+  InCombat flag, moved/acted booleans or a global world time. An initial activity
+  or effect, if supplied, uses the shared typed lifecycle rather than text edits
+  to ready-times. BeginWorld must not execute queued NPC activity completions or
+  reset cooldowns simply to declare initialization finished.
 - Keep NPC responses, GM scene narration, character creation and ordinary game
   actions inactive while initialization is in progress. Players can open the
   world and see status/errors, but cannot start character creation or act.
@@ -149,7 +156,7 @@ combine cases rather than require repeated whole-world GPU runs by default.
 | Existing scenario becomes world state | Author Four Brothers through real Storyteller calls. Inspect objects and captured contexts: witnesses have relevant private memories, suspects have motives, and equipment/conditions are recorded. NPC dialogue is generated from that context rather than stored as a script. |
 | Authoring and permissions | Scripted production-path calls create, partially update, edit long text and flag an NPC as deleted. Its record, membership/agent links and history remain stored and inspectable when Developer Mode includes deleted objects, but normal discovery/context/scheduling/actions exclude it. An active item held by that NPC blocks the flag until explicitly reassigned or flagged too; unrelated objects remain unchanged. Foreign IDs, dangling active references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
 | Review can change the result | Supply a known omission in persisted state; the review sees it rather than only the intended summary. An edit changes the next captured review input. Check AskQuestions and WorldIsComplete without requiring particular prose. |
-| Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive current summary/artifacts without earlier answer transcripts; private NPC information stays with authorized roles. |
+| Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive current summary/artifacts without earlier answer transcripts; private NPC information stays with authorized roles. NPC creation uses the same activity/resource state as other characters; initialization causes no autonomous action or resource reset. |
 | Mention reminders | A marked uncreated mention appears as a reminder; creation updates that reminder. Intentionally leaving it uncreated does not block BeginWorld. Unmarked ordinary prose does not manufacture obligations. |
 | Readiness and lifecycle | Joining during generation allows status inspection but no character creation/action/NPC response. Invalid BeginWorld changes nothing; successful BeginWorld opens character creation without starting an empty-world simulation. An inference failure or budget exhaustion remains visible and never opens play. Clean shutdown and crash use the existing lifecycle without replaying committed edits. |
 

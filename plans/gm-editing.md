@@ -4,9 +4,9 @@ Pending implementation. First deliverable: a character moves within its existing
 location, the GM edits persistent placement and relevant notes, and the next
 inference/turn reads that state before producing consistent narration. Both
 whole-value replacement and exact-text editing are required from the outset.
-Read/edit work can proceed independently. The Move example includes its declared
-elapsed-time update; multiplayer time-window policy is not a prerequisite for
-demonstrating persistent placement within a location.
+The movement example uses the preceding unified timing feature: CombatMove
+updates placement immediately, while Move starts an activity whose completion
+or interruption resolves actual progress. Read/edit tools do not own another clock.
 
 ## Authority and scope
 
@@ -53,14 +53,11 @@ operations remain required whichever note representation is selected.
 ## Dependencies and initial bounds
 
 NPC interaction supplies the terminal narration tools and shared action path;
-code-quality checks precede this plan in todo.md. The current schema has world
-and character time columns, but gameplay clock advancement is not implemented.
-Do not confuse those columns with an existing Move/time operation. Implement the
-within-location Move's declared GM-supplied elapsed-time update using those
-authoritative fields. This does not require settling the broader
-[time-window proposal](../design.md#product-decisions), adding a lead limit or
-implementing multiplayer turn admission here. Those remain with the rules plan;
-this example does not claim that scheduling policy is implemented.
+code-quality checks and [Unified game time](unified-game-time.md) precede this
+plan in todo.md. Use its agreed action admission, ready-times, EndTurn and activity
+start/completion/interruption operations. Do not increment a world-time column,
+introduce combat flags or add a lead-window policy. Timing questions that block
+movement must be resolved in that design/plan before this example is implemented.
 
 Before enabling writes in the first checkpoint, configure finite field/note,
 key/index and tool-response limits. Choose and record their numerical values
@@ -99,8 +96,8 @@ first version; the second checkpoint extends this measurement to retrieval.
   and read applicable local Storyteller notes. Storyteller notes are read-only
   to the GM. World-level GM notes are accessible through the world reference;
   broader remote-object access must follow declared authority, not arbitrary IDs.
-  Fields for health, inventories, membership, combat flags, time and other
-  mechanics stay behind their existing action operations. Descriptive edits do
+  Fields for health, inventories, membership, activity lifecycle, resource
+  ready-times and timed effects stay behind their action operations. Descriptive edits do
   not transfer an item, change group membership or authorize an extra action.
 - Use existing recorded tool executions, shared errors and object inspection to
   retain who changed which field and the real result. Perform validation and the
@@ -112,17 +109,19 @@ first version; the second checkpoint extends this measurement to retrieval.
   at invocation entry. Keep this state separate from chat history and preserve
   captured immutable inputs for historical reconstruction. Tool results and the
   next GM request must agree with the committed database, including after reload.
-- Demonstrate the complete path: the player requests movement behind a pillar;
-  the GM reads the relevant current placement/location text and notes, resolves
-  the request, edits placement and affected local facts, sees the tool results,
-  then finishes with the appropriate terminal narration tool. A later request
-  must use the new position. Use the declared Move action through the shared submission/arbitration
-  path, not Look or a disguised Ask. Implement its out-of-combat within-location
-  path and the GM-supplied elapsed time through shared action/clock operations
-  that this movement path must supply; do not edit time as arbitrary text or
-  assume time advancement already exists. Reuse this in the later rules plan. Travel
-  and combat movement stay in that plan; this checkpoint does not claim those
-  mechanics work or add a second time system.
+- Add the declared Move/CombatMove through shared character submission and GM
+  arbitration. Both use the canonical relative-placement field. CombatMove checks
+  and consumes its ready resource and applies its approved short displacement
+  immediately. Move starts a longer activity with GM-assigned duration; approval
+  records observable departure, not arrival. GM updates placement/local facts at
+  actual completion or interruption using the existing timing resolution.
+- Demonstrate movement behind a pillar using CombatMove and longer movement
+  using Move. GM reads current placement/location notes, applies authorized field
+  edits consistent with actual progress, sees the results and ends its invocation
+  with the appropriate narration tool. Later requests use persisted placement.
+  Neither bookkeeping edits nor repeated field writes authorize another move or
+  complete an activity early. Reuse this movement code in Rules and travel;
+  cross-location Travel and damage/attack rules remain there.
 
 ## Second checkpoint: hierarchical lookup, search and bounded notes
 
@@ -171,7 +170,7 @@ Store/Game/tool paths; no new mock world engine or repeated full GPU suite.
 
 | Case | Required outcome and verification |
 | --- | --- |
-| Movement and next-turn consistency | Real chat uses Move within a location. Inspect the recorded placement edit, elapsed time and next captured GM input; later narration uses persisted placement after reconnect/restart, not just remembered dialogue. Group/location IDs do not change. No arbitrary time-field edit or duplicate clock implementation. |
+| Movement and next-turn consistency | Exercise CombatMove's immediate placement/resource use and Move's activity start plus completion or interruption. Inspect state, histories and captured GM inputs before/after arrival; the destination is not applied prematurely and later narration uses persisted progress after reconnect/restart. Group/location IDs do not change. Repeated edits cannot bypass ready-times or grant completion. |
 | Short and long edits | Scripted calls replace a whole short value and one passage in a large value, then create and remove an incidental named note. Unrelated passages/keys remain intact; a chair remains location text/notes without a new Item. Missing/ambiguous text fails visibly without mutation. No game object is created/deleted by note operations. |
 | Newly invented incidental detail | GM reads existing relevant detail before adding it to descriptions/GM notes, then narrates only after its write result. A subsequent read finds the detail. No forced object creation and no extra after-narration inference. |
 | Permissions and mechanical state | Foreign-world/local-scope violations, GM writes to Storyteller notes and edits to mechanical fields fail without mutation or search leakage. Valid private notes stay out of player/NPC perception histories. |

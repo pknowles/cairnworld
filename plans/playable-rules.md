@@ -2,8 +2,8 @@
 
 ## Deliverable and trace
 
-Rust enforces the declared creation, character/NPC actions, inventory, combat,
-time and travel rules through the existing agent tools. Required history/group,
+Rust enforces the declared creation, character/NPC actions, inventory, damage
+and travel rules through the existing agent tools. Required history/group,
 inspection, membership and presence data already exists. The preceding
 [NPC interaction](npc-interaction.md) feature supplies speech delivery, response
 rounds, interruption and GM-selected intervention; extend those paths here.
@@ -13,18 +13,21 @@ rounds, interruption and GM-selected intervention; extend those paths here.
 | Creation and item state | [Character creation actions](../user_declarations.md#character-creation-actions), [Game state](../user_declarations.md#game-state) | Rules and action execution |
 | Persuasion and notes | [Character actions](../user_declarations.md#character-actions), [NPC actions](../user_declarations.md#npc-character-actions), [GM tools](../user_declarations.md#gm-tools) | Rules and action execution |
 | Player replies and travel | [Character actions](../user_declarations.md#character-actions), [GM tools](../user_declarations.md#gm-tools) | Player replies and coordinated travel |
-| Combat and time | [Game turns and time](../user_declarations.md#game-turns-and-time) | Rules and action execution |
+| Damage and timed travel | [Game turns and time](../user_declarations.md#game-turns-and-time) | Unified game time and activities; Rules and action execution |
 
-The combat order, time lead and travel choices are explicit proposals under
-[Product decisions](../design.md#product-decisions). Their dependent steps wait
-for confirmation; the implementation descriptions below are complete proposals.
+The preceding [Unified game time](unified-game-time.md) feature supplies activity
+lifecycle, resource readiness, EndTurn, initiative, timed effects and generic
+human-response deadlines. Its unresolved timing choices and the remaining travel
+choices under [Product decisions](../design.md#product-decisions) must be settled
+before their dependent steps. Do not implement combat modes, turn flags or a
+global time/lead-window system alongside it.
 World authoring tools already come from [Storyteller initialization](storyteller-worlds.md).
 Creation and encounter approval integration is wired in the following
 [Storyteller gameplay](storyteller-gameplay.md) feature, not stubbed with
 unconditional approval here.
 The preceding [GM editing](gm-editing.md) feature supplies persisted relative
-placement and the out-of-combat within-location Move path. Extend its existing
-action/time operations for combat and travel rather than implementing Move again.
+placement and within-location Move/CombatMove. Extend those operations for damage
+and travel rather than implementing movement or scheduling again.
 
 ## Ordered changes
 
@@ -38,9 +41,10 @@ action/time operations for combat and travel rather than implementing Move again
    ready_to_begin validates the full creation state; the group's initial ready
    barrier performs RollOmens once and then opens play. Test incomplete/duplicate
    creation and the youngest-character omen rule through real agent chat.
-2. Add waiting for player replies and use it for InterventionCheck. Add the
-   required `[game] player_response_timeout` setting (300 seconds in default.toml,
-   no code default). Add the concrete pending_reply rows and the
+2. Extend the timing feature's existing human deadlines/AFK handling to calls
+   waiting for player replies, and use it for InterventionCheck. Reuse the
+   required `[game] player_response_timeout` setting and consecutive-timeout
+   counting. Add the concrete pending_reply rows and the
    `Intervention` continuation. agent.rs returns AwaitingReply while preserving
    invocation/call IDs, tool ordinals and budgets. Game::process_world releases
    the current event and accepts the requested character's reply through ordinary
@@ -48,8 +52,8 @@ action/time operations for combat and travel rather than implementing Move again
    counts down in memory, and restart answers overdue replies first, using the
    earliest-deadline mechanism connection presence already has. Allow
    InterventionCheck to select player characters as well as NPCs: each gets the
-   question in their chat and answers through their agent. Count consecutive timeouts per membership, reset by any player response, and at 3
-   end the connection with the AFK message on WorldDetail. Test two real player
+   question in their chat and answers through their agent. Preserve the shared
+   per-membership timeout count/reset and AFK departure behaviour. Test two real player
    chats, a player who intervenes, one who answers do_nothing, a timeout, three
    timeouts in a row ending the connection, disconnect, restart with an overdue reply, and a mixed NPC and player check.
 3. Consolidate item holders as specified in design.md. Introduce typed item stats
@@ -80,40 +84,44 @@ action/time operations for combat and travel rather than implementing Move again
    shared character executor and GM intervention. Explicit human consent for
    travel uses pending_reply; do not reopen ordinary NPC discussion
    inside an unresolved tool call.
-   Reuse the `attempt` tool's GM-request path and its refusal-with-
+   Include Gesture among the `attempt` kinds and reuse its GM-request path and refusal-with-
    alternatives flow. Test heard/unheard/private conversation, persuasion,
    the existing intervention and no-response paths without a GM
    recursion cycle; inspect actual supplied context, not prose alone.
 5. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
-   from the bundled core rules. Add attack, retreat, take_damage, begin_combat,
-   end_combat and wait. Store combat/participant order, turn flags and time in
-   the same action transaction. Compute can_act server-side before accepting a
-   command and publish it afterward; a disabled button is not enforcement.
-   Closing a character's game-turn consumes any remaining move/action allowance,
-   including Wait. Reset flags only when its next game-turn begins. Interrupt,
-   Never mind and unused allowance do not grant out-of-turn permission. Wire
-   these checks into the same action admission used by players and NPC follow-ups.
+   from the bundled core rules. Add actual attack, retreat and take_damage through
+   unified timing's admission/resources and GM approval. Attack consumes the short
+   action resource with its approved effect. Use the agreed resource costs for
+   other operations; do not add begin_combat/end_combat or reimplement EndTurn,
+   Wait, ReplaceActivity or timed effects. Compute can_act at the shared boundary
+   and publish it; a disabled button is not enforcement. No intervention,
+   Interrupt/Never mind or unused resource grants extra permission.
    Extend NPC interaction's tentative/committed intervention to physical contests:
    committed intent does not bypass a shopkeeper's actual obstruction, initiative
    or consumed allowance. Resolve checks and approved reaction effects before
    deciding the original action, without re-entering an active GM. Exercise the
    declared shopkeeper example; ConditionalApprove and dynamic executable rules
    remain unimplemented ideas pending playtesting, not prerequisites here.
-   Reuse GM editing's within-location description and approved duration. Advance
-   world time to the maximum and queue crossed-hour NPC opportunities through
-   WorldEvents. Verify the approved initiative/time policy, second move/action
-   rejection, early Wait followed by an attempted action, repeated Interrupt/
-   Never mind, out-of-turn requests with unused flags, armor/STR damage, death
-   and environmental damage. Do not add the proposed future combat Delay tool.
-6. Add travel(Connection ID) using the waiting-for-replies machinery from the
-   second step with a `Travel` continuation. Collect
+   Reuse GM editing's placement and movement, and timing's activity interruption
+   when damage makes continuing impossible. Verify second-action rejection,
+   skipped resources after EndTurn, optional versus forced activity interruption,
+   repeated Interrupt/Never mind, armor/STR damage, death and environmental harm.
+   Distant NPC opportunities use the agreed derived-time policy; do not restore
+   hourly processing from a global maximum clock. Delay remains a future idea.
+6. Add Travel/Follow(Connection/action references) using the waiting-for-replies
+   machinery from the second step with a `Travel` continuation. Collect
    PC/NPC responses, apply the approved stay/join/object policy and ask the GM
-   for final arbitration with all responses visible. On approval, call the real
-   group split operation, update the travelling group's location and GM arrival
-   description, and complete the action atomically. A silent or away PC goes with a strict majority of the party, otherwise (including a tie) stays;
-   an away character's combat turns are skipped. Keep all history parents
+   for final arbitration with all responses visible, as with InterventionCheck.
+   Approval starts timed travel and applies the real group split operation; it
+   does not instantly arrive. Resolve completion or interruption through the
+   activity lifecycle. Apply destination/arrival description only when reached,
+   and record actual partial placement on interruption under the agreed travel
+   policy. A silent or away PC goes with a strict majority of the party,
+   otherwise (including a tie) stays. Short opportunities use the common
+   skip/EndTurn handling. Keep all history parents
    and player agents. Test everyone travels, split party, NPC refusal, objection,
-   timeout, stale connection endpoint and two simultaneous travel requests.
+   timeout, stale connection endpoint, two simultaneous travel requests, and
+   interruption before arrival without a later duplicate completion.
    No duplicate questions/results after restart or reply re-delivery.
 
 ## Completion
