@@ -869,3 +869,23 @@ reviewed with the user first, so the scripted cases written are the ones in
 `an_intervention_check_only_asks_npcs_other_than_the_actor_about_the_presented_action`,
 `a_proposed_reaction_must_be_decided_before_the_gm_narrates`,
 `an_intervention_check_where_nobody_objects_changes_nothing`).
+
+## 2026-10-26: Item transfers use intervention, not an acceptance step
+
+Asked whether Give/Drop/Place was planned, the assistant said a give to a person
+"must be accepted", which is what user_declarations.md says (Give/Drop/Place, and
+the Accept action). The user replied: "not must be accepted. both take and give
+can be intervened. The exact action could be for the reciever to say or gesture -
+a clear no. Then the GM should reject the transfer." On the location description:
+"this must be provided by the GM with the accept call. I already said this" (the
+declaration says the GM provides it "with the approval"). On capacity: "this is
+something for way later; I'll be happy if it just works now."
+
+design.md and plans/playable-rules.md follow this: no Accept tool or transfer
+continuation, only Travel keeps the suspended-consent protocol, and
+`approve_action` carries the location description for a drop or place. The
+declaration lines that still describe acceptance (Give/Drop/Place "If to a person
+it must be accepted", Take/Request/Pickup's player-approval timeout, and Accept)
+are now stale and need the user's update. Also earlier in the same conversation:
+"Many have duplicate names for similar actions... the implementation should merge
+them and have an enum to distinguish", which the `transfer` tool follows.

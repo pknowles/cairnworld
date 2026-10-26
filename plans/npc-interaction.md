@@ -498,7 +498,8 @@ their world, scene and authority. NPCs return reaction intentions through short
 child decision invocations. These do not execute actions or ask the active GM
 for approval again. Never invoke an agent already active on the stack; its
 original intent is already available. Human non-intervention remains the default;
-blocking for human consent belongs to the later explicit-consent protocol.
+blocking for human consent belongs to the later travel consent protocol; item
+transfers use intervention only.
 Use the existing child invocation/tool records and pending actions for these
 intentions, applying the same decision validation and eagerness selection rules
 as responses. No npc_discussion/npc_response_collection/npc_candidate rows are needed to hold

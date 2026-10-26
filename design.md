@@ -1295,9 +1295,11 @@ a separate arrival narration.
 
 Consolidate item_location/item_character into `item_holder(item_id PRIMARY KEY,
 location_id, character_id, description)` with exactly one holder FK set.
-A transfer validates current holder, visibility, capacity (ten slots, bulky two,
-petty zero), and any consent, then changes that row with its recorded action in
-one transaction. Full inventory imposes the Cairn HP restriction. Typed item
+A transfer validates current holder and visibility, then changes that row with its
+recorded action in one transaction. Capacity (ten slots, bulky two, petty zero)
+and the Cairn HP restriction for a full inventory are later additions to the
+same validation. A drop or place gives the item a location description, which
+the GM supplies with its approval. Typed item
 stats hold damage dice, armor, slots and spell references; object notes hold
 fiction rather than substituting for mechanical state.
 
@@ -1309,7 +1311,7 @@ fiction rather than substituting for mechanical state.
 | DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
 | InterventionCheck/Approve/Reject | GM consults selected characters about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may pause for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
-| Give/take/drop/place | One holder change after arbitration/consent; no duplicate item on repeated approval. |
+| Take/give/drop/place | One holder change after the GM approves; no duplicate item on repeated approval. No separate acceptance step: the receiver or a holder may intervene (say or gesture a clear no), and the GM then rejects. A drop or place is approved with the item's new location description. A committed drop is not necessarily rejected, since a character cannot be forced to keep an item, but it may lead to combat. |
 | Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
 | Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
 | BeginCombat/endCombat | GM identifies combatants and state boundary; Rust stores turn order and flags and determines eligibility. |
@@ -1325,6 +1327,15 @@ the recorded request and GM context. Shared submission, authorization and
 arbitration do not imply identical fictional effects or separate executors. Ask
 addresses the GM; spoken questions to characters still use Speak. Existing action rules and world-state operations determine what
 can actually happen; a new tool name does not itself implement missing mechanics.
+
+Likewise expose take, give, drop and place as one `transfer` tool: a `kind`, the
+`item`, `to` (the receiving character for give, where within the location for
+place; unused for take and drop) and `committed`. Approval goes through the same
+GM approval and intervention path as take; the GM's approve call carries the new
+location description for a drop or place, as it carries the audience for speech.
+The receiver's agreement is not a protocol: the request is intervenable like any
+tentative or committed action, and a clear refusal from the receiver makes the GM
+reject it.
 
 `combat(id, group_id, round, current_character_id)` and
 `combat_participant(combat_id, character_id, initiative_order)` own the stable
@@ -1570,7 +1581,7 @@ inside the current turn, not scheduled follow-up responses. Only subsequent dial
 uses the world worker's pending NPC responses after the original stack unwinds.
 This uses the existing action/roll operations, not a ConditionalApprove tool,
 general dependency engine or dynamically generated rule language. Actions that
-can be tentative carry committed intent (initially Take, default false): false
+can be tentative carry committed intent (Take, Give, Drop and Place, default false): false
 means willing to pause for an objection; true means proceeding despite objections,
 not guaranteed success or permission to bypass physical opposition or turn rules.
 The GM gets this intent in the action request. A prisoner's warning can stop a
@@ -1581,7 +1592,7 @@ Do not ask an agent already active in the call stack for another inference.
 Use its already-recorded intent, or resolve the current call before further
 dialogue. Once the bounded reaction/original-action decision finishes, ordinary
 conversation runs through scheduled follow-up turns. An idle
-human's default non-intervention is not consent to a transfer/travel request
+human's default non-intervention is not consent to a travel request
 that explicitly requires an answer; those requests use the separate protocol
 below. GM routing, response costs and automatic denial require playtesting.
 Actual perceived world events may also create NPC opportunities. Use their
@@ -1597,22 +1608,23 @@ rules increment; scheduling controls confer no action allowance.
 
 ## Player replies and coordinated travel
 
-Authority: Take/Request, Accept, Travel and Agent syntax's recursion tree.
+Authority: Travel and Agent syntax's recursion tree. Item transfers do not use
+this protocol; they rely on intervention.
 The action that needs a human response persists
 `pending_reply(action_id, character_id, deadline, status, response_content_id)`;
 its deadline and intended character are explicit. The corresponding
-`pending_action` also holds a typed continuation `Transfer|Travel`, original
+`pending_action` also holds a typed `Travel` continuation, original
 invocation/call IDs and the ordered remaining tool-call ordinals. It retains
 budget consumption. It never serializes a Rust future or re-executes earlier tools.
 
 The agent loop returns `Suspended(action_id)` up through its call stack; each
 waiting invocation remains recorded. The world queue is then free. Only the
 requested character's ordinary input is accepted as a response to that action;
-their player agent interprets text and calls accept/decline/stay/join/object with
+their player agent interprets text and calls stay/join/object with
 that explicit action ID. Other characters may continue legal independent work.
 A response or deadline event updates the pending reply and resumes the stored
 continuation once; original completed tool results are reused. Recheck mutable
-preconditions before transferring or moving. Restart reconstructs these concrete
+preconditions before moving. Restart reconstructs these concrete
 continuations from rows and restores outstanding timers.
 
 Travel takes a Connection ID, validates that one endpoint is the source group's

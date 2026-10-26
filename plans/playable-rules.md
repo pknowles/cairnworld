@@ -12,7 +12,7 @@ rounds, interruption and GM-selected intervention; extend those paths here.
 | --- | --- | --- |
 | Creation and item state | [Character creation actions](../user_declarations.md#character-creation-actions), [Game state](../user_declarations.md#game-state) | Rules and action execution |
 | Persuasion and notes | [Character actions](../user_declarations.md#character-actions), [NPC actions](../user_declarations.md#npc-character-actions), [GM tools](../user_declarations.md#gm-tools) | Rules and action execution |
-| Consent and travel | [Character actions](../user_declarations.md#character-actions) | Player replies and coordinated travel |
+| Travel | [Character actions](../user_declarations.md#character-actions) | Player replies and coordinated travel |
 | Combat and time | [Game turns and time](../user_declarations.md#game-turns-and-time) | Rules and action execution |
 
 The combat order, time lead and travel choices are explicit proposals under
@@ -40,33 +40,36 @@ action/time operations for combat and travel rather than implementing Move again
    creation and the youngest-character omen rule through real agent chat.
 2. Consolidate item holders as specified in design.md. Introduce typed item stats
    for slots, armor, weapon dice and spell references; preserve separate object
-   notes. Change take and add give/drop/place to the same transactional transfer
-   operation, checking current ownership, ten-slot capacity and consumed approval.
-   Render the resulting action/dice via existing history entries. Test concurrent
-   attempts to take one item, full inventory, bulky/petty items and repeated
-   approval: exactly one holder and no second mutation.
-3. Add the concrete pending_reply rows and Transfer/Travel continuation variants.
-   agent.rs returns Suspended while preserving invocation/call IDs, tool ordinals
-   and budgets. Game::process_world releases the current event and accepts the
-   requested character's reply through ordinary chat. Add accept/decline tools
-   with explicit action IDs. Response/deadline events resume a continuation once;
-   recover these rows/timers at startup. A consent timeout records the declared
-   motionless narration and propagates an error, without transferring the item.
-   Recheck target ownership/capacity when resuming. Test two real player chats,
-   ambiguity requiring another reply, disconnect, timeout and restart.
-4. Extend the shared speech path with lie's declared WIL/suspicion outcomes and
+   notes. Replace the `take` tool with the `transfer` tool (`kind` take, give,
+   drop or place; design.md) and make all four kinds one transactional holder
+   change checking current ownership and consumed approval. `approve_action`
+   gains an optional location description, required for drop and place and
+   stored as the item's description at its new location. `committed` and
+   InterventionCheck apply to every kind. There is no acceptance step: a clear
+   refusal by the receiver arrives as an intervention and the GM rejects. A
+   committed drop need not be rejected. The ten-slot capacity check may be added
+   here or later; it is not required for this step. Render the resulting
+   action via existing history entries. Test concurrent attempts to take one
+   item, give to an NPC who objects and one who does not, drop and place with
+   and without a description, committed drop, and repeated approval: exactly one
+   holder and no second mutation. Exercise routing of the four kinds on the real
+   model.
+   Open question for the user: InterventionCheck asks NPCs. A player-character
+   receiver cannot answer inside the GM's call, so how they get the chance to
+   object to a give or take before it applies is undecided.
+3. Extend the shared speech path with lie's declared WIL/suspicion outcomes and
    BePersuaded as an NPC-owned save tool.
    Reuse [GM editing and lookup](gm-editing.md) for authorized object-field/note
    access and current GM state; do not expose private notes to NPCs or implement
    another editing interface. Reuse NPC interaction's hearing rules, proposal selection,
    shared character executor and GM intervention. Explicit human consent for
-   transfers/travel uses pending_reply; do not reopen ordinary NPC discussion
+   travel uses pending_reply; do not reopen ordinary NPC discussion
    inside an unresolved tool call.
-   Reuse the distinct Look/Investigate/Open/Ask tools' shared GM-request path and its refusal-with-
+   Reuse the `attempt` tool's GM-request path and its refusal-with-
    alternatives flow. Test heard/unheard/private conversation, persuasion,
    the existing intervention and no-response paths without a GM
    recursion cycle; inspect actual supplied context, not prose alone.
-5. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
+4. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
    from the bundled core rules. Add attack, retreat, take_damage, begin_combat,
    end_combat and wait. Store combat/participant order, turn flags and time in
    the same action transaction. Compute can_act server-side before accepting a
@@ -87,7 +90,12 @@ action/time operations for combat and travel rather than implementing Move again
    rejection, early Wait followed by an attempted action, repeated Interrupt/
    Never mind, out-of-turn requests with unused flags, armor/STR damage, death
    and environmental damage. Do not add the proposed future combat Delay tool.
-6. Add travel(Connection ID) using the same pending reply continuation. Collect
+5. Add the concrete pending_reply rows and the Travel continuation. agent.rs
+   returns Suspended while preserving invocation/call IDs, tool ordinals and
+   budgets. Game::process_world releases the current event and accepts the
+   requested character's reply through ordinary chat. Response/deadline events
+   resume a continuation once; recover these rows/timers at startup. Add
+   travel(Connection ID) using it. Collect
    PC/NPC responses, apply the approved stay/join/object policy and ask the GM
    for final arbitration with all responses visible. On approval, call the real
    group split operation, update the travelling group's location and GM arrival
