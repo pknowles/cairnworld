@@ -1639,6 +1639,10 @@ saying they were disconnected for being AFK, and the usual departure handling
 follows. Any response from the player resets the count. Count per membership,
 stored so a restart keeps it.
 
+A character whose player has timed out or is away does nothing and skips its
+turns: in combat its turn is closed without an action. For travel it goes with
+the majority of the party, and otherwise stays where it is.
+
 The action that needs a human response persists
 `pending_reply(action_id, character_id, deadline, status, response_content_id)`;
 its deadline and intended character are explicit. The corresponding
@@ -1790,8 +1794,11 @@ choices derived from the named requirements.
 - **Combat:** individual stable turns, successes on the initial DEX save before
   failures, higher DEX next, remaining ties randomized once by Rust. This follows
   the game's individual-turn declaration rather than Cairn's simultaneous sides.
-- **Travel:** silent PCs join after 60 seconds; stay splits the party; objection
-  goes to GM arbitration before movement. No second initiator confirmation.
+- **Travel:** stay splits the party; objection goes to GM arbitration before
+  movement. No second initiator confirmation. A PC who has not answered by the
+  response deadline, or is away, goes with the majority of the party and
+  otherwise does nothing (accepted 2026-10-26, see user_exerpts.md); the 60 second
+  silent-join proposal is withdrawn.
 - **Time window:** propose `max_character_lead_seconds=600` out of combat;
   a character at least that far ahead of the least-advanced connected PC in its
   group waits for catch-up. The GM's elapsed time is bounded nonnegative, with

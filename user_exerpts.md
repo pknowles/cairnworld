@@ -917,3 +917,7 @@ whatever idle response applies; after 3 in a row without any response they are
 navigated back to the world detail page with a message that they were
 disconnected for being AFK. design.md and plans/playable-rules.md follow this,
 with the setting kept as `[game] player_response_timeout`.
+
+On idle responses for travel: "I think an AFK character would travel with the
+majority of the party, but otherwise do nothing and skip turns." This replaces the
+design's earlier proposal that silent PCs join after 60 seconds.
