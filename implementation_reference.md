@@ -245,7 +245,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   retired_at)` owns one GM history branch each, and `character_group`
   replaces the removed `character_location` - every active character has
   exactly one group. A group's fresh scene packet has one `characters` list: every character
-  in it, however controlled, with the same fields (sheet and GM notes included); and its role prompt tells the
+  in it, however controlled, with the same fields (sheet, GM notes and what it
+  carries, from the one `Store::character_items` that also fills a player's and
+  an NPC's own scene); and its role prompt tells the
   world_gm to narrate to the characters as a group; an arbitration request
   names the acting character. `install_scenario` creates the entire initial
   relationship graph - including the world_gm agent and every scenario-declared

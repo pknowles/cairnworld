@@ -570,6 +570,8 @@ pub struct GmSceneCharacter {
     pub ambition: String,
     pub sheet: serde_json::Value,
     pub gm_notes: serde_json::Value,
+    /// What the character carries, loaded the same way as a player's own scene.
+    pub inventory: Vec<SceneItem>,
 }
 
 #[derive(FromRow)]
@@ -3404,22 +3406,23 @@ impl Store {
         .fetch_all(pool)
         .await
         .context("loading group characters for GM")?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(GmSceneCharacter {
-                    id: row.id,
-                    name: row.name,
-                    description: row.description,
-                    background: row.background,
-                    motive: row.motive,
-                    ambition: row.ambition,
-                    sheet: serde_json::from_str(&row.sheet)
-                        .context("decoding character sheet for GM")?,
-                    gm_notes: serde_json::from_str(&row.gm_notes)
-                        .context("decoding character GM notes")?,
-                })
-            })
-            .collect()
+        let mut characters = Vec::new();
+        for row in rows {
+            characters.push(GmSceneCharacter {
+                inventory: Self::character_items(pool, row.id).await?,
+                id: row.id,
+                name: row.name,
+                description: row.description,
+                background: row.background,
+                motive: row.motive,
+                ambition: row.ambition,
+                sheet: serde_json::from_str(&row.sheet)
+                    .context("decoding character sheet for GM")?,
+                gm_notes: serde_json::from_str(&row.gm_notes)
+                    .context("decoding character GM notes")?,
+            });
+        }
+        Ok(characters)
     }
 
     /// Roll the Adventurer's starting Hit Protection once. Repeating a tool

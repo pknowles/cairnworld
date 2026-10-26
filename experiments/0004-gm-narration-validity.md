@@ -97,7 +97,9 @@ history, 8 samples each:
 Adopted: only the result change ("The characters have not been told the outcome:
 narrate it."). Rewriting the request text as plain language changed none of these
 choices. The narrations also invented a character's inventory: the GM's packet
-holds the location's items but not what each character carries.
+held the location's items but not what each character carries. With each
+character's inventory in the packet, and the result above, the GM's look at an
+inventory narrated 8 of 8, naming only the flour sack the character held.
 
 ## Merging the near-identical tools (`attempt`, `speak`)
 

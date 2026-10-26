@@ -6780,6 +6780,30 @@ mod tests {
             holder_of(&scene, "flour sack").await.as_deref(),
             Some("Mara")
         );
+        // What Mara now carries is part of what she and the GM are shown.
+        let mara = character_id(&scene, "Mara").await;
+        let carried =
+            |items: &[crate::store::SceneItem]| items.iter().any(|item| item.name == "flour sack");
+        assert!(carried(
+            &scene.store.npc_scene(mara).await.unwrap().inventory
+        ));
+        let branch: i64 =
+            sqlx::query_scalar("SELECT branch_id FROM \"group\" WHERE world_id = ? LIMIT 1")
+                .bind(scene.first.world_id)
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        let gm_scene = scene
+            .store
+            .gm_scene(scene.first.world_id, branch)
+            .await
+            .unwrap();
+        let gm_view = gm_scene
+            .characters
+            .iter()
+            .find(|character| character.id == mara)
+            .unwrap();
+        assert!(carried(&gm_view.inventory), "the GM sees what Mara carries");
         let chat = heard(&scene.store, &scene.first).await;
         assert!(
             !chat.iter().any(|line| line.contains("Leave it.")),

@@ -103,6 +103,8 @@ pub struct NpcScene {
     pub location: String,
     pub location_description: String,
     pub items: Vec<SceneItem>,
+    /// What this character carries.
+    pub inventory: Vec<SceneItem>,
     pub present: Vec<Person>,
 }
 
@@ -451,6 +453,7 @@ impl Store {
             location: you.location,
             location_description: you.location_description,
             items: Self::location_items(&self.pool, you.location_id).await?,
+            inventory: Self::character_items(&self.pool, character_id).await?,
             present,
         })
     }
