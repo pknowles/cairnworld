@@ -5378,6 +5378,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_public_speech_naming_several_characters_singles_out_none_and_everyone_hears() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call(
+                    "speak",
+                    serde_json::json!({"words": "Listen.", "to": ["Toma", "Mara"]}),
+                ),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+        let addressed: Option<String> = sqlx::query_scalar("SELECT addressed_name FROM speech")
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(addressed, None);
+        assert_eq!(
+            heard(&scene.store, &scene.second).await,
+            vec!["Listen.".to_string()],
+            "the other player still hears it"
+        );
+    }
+
+    #[tokio::test]
     async fn a_whisper_is_heard_only_by_its_listeners_and_the_speaker() {
         let scene = speech_scene().await;
         scene

@@ -310,9 +310,19 @@ summary_request = """\
 # NPCs also get an eagerness argument, described under [npc].
 # ---------------------------------------------------------------------------
 [shared.tools.speak]
-description = """    Speak. A public speech is heard by everyone present, even when you address one     character; a private one only by the characters you name.    """
+description = """\
+    Speak. A public speech is heard by everyone present, even when you address one \
+    character; a private one only by the characters you name.\
+    """
 
 [shared.tools.speak.arguments]
-words = """    Your character's speech as it should read in the chat: who speaks and how it     is said when that matters, e.g. `Mara says in a low voice: ...`.    """
-to = """    Who it is for. Public: leave out, or the one character you are speaking to; this     does not make your words private. Private: every character who hears it, and     nobody else does.    """
+words = """\
+    Your character's speech as it should read in the chat: who speaks and how it \
+    is said when that matters, e.g. `Mara says in a low voice: ...`.\
+    """
+to = """\
+    Who it is for. Public: leave out, or the one character you are speaking to; this \
+    does not make your words private. Private: every character who hears it, and \
+    nobody else does.\
+    """
 private = "True to speak so that only the characters in `to` hear you; normally false."
