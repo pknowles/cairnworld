@@ -54,9 +54,13 @@ after their rules dependencies. Campaign completion remains a separate plan.
   NPCs and item types/items with existing holders. This is an ordering of needed
   references, not a mandatory extra inference for each record. Every character
   belongs to one group, and every item has one valid location or character holder.
-  Reject deletion while other records reference the object; the Storyteller can
-  explicitly update/delete those records first. Do not silently cascade-delete
-  an NPC, inventory or location contents to repair an invalid request.
+  Deleting an object also removes its owned links, such as an NPC's group
+  membership; these links must not make every object undeletable. References
+  from other game objects, such as inventory items held by that NPC, block
+  deletion until the Storyteller explicitly updates/deletes those objects.
+  Preserve identities needed by recorded history/inspection; deleting authored
+  state must not destroy past inference evidence. Do not silently cascade-delete
+  other game objects to repair an invalid request.
 - Use the GM editing feature's whole-field and exact-text operations for
   Storyteller notes and the editable, spoiler-bearing world summary. Storyteller
   access excludes GM notes. Keep summary distinct from short object notes and
@@ -140,7 +144,7 @@ combine cases rather than require repeated whole-world GPU runs by default.
 | Case | Outcome and evidence |
 | --- | --- |
 | Existing scenario becomes world state | Author Four Brothers through real Storyteller calls. Inspect objects and captured contexts: witnesses have relevant private memories, suspects have motives, and equipment/conditions are recorded. NPC dialogue is generated from that context rather than stored as a script. |
-| Authoring and permissions | Scripted production-path calls create, partially update, edit long text and delete an unreferenced object. Foreign IDs, dangling references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
+| Authoring and permissions | Scripted production-path calls create, partially update, edit long text and delete an NPC with owned membership/agent links. An item held by that NPC blocks deletion until explicitly moved/deleted; unrelated objects and historical inspection remain intact. Foreign IDs, dangling references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
 | Review can change the result | Supply a known omission in persisted state; the review sees it rather than only the intended summary. An edit changes the next captured review input. Check AskQuestions and WorldIsComplete without requiring particular prose. |
 | Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive current summary/artifacts without earlier answer transcripts; private NPC information stays with authorized roles. |
 | Mention reminders | A marked uncreated mention appears as a reminder; creation updates that reminder. Intentionally leaving it uncreated does not block BeginWorld. Unmarked ordinary prose does not manufacture obligations. |
