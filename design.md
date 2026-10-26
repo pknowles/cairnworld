@@ -1314,7 +1314,7 @@ fiction rather than substituting for mechanical state.
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Take/give/drop/place | One holder change after the GM approves; no duplicate item on repeated approval. No separate acceptance step: the receiver or a holder may intervene (say or gesture a clear no), and the GM then rejects. A drop or place is approved with the item's new location description. A committed drop is not necessarily rejected, since a character cannot be forced to keep an item, but it may lead to combat. |
 | Save | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. Initiative uses the declared individual DEX-based ordering, whose exact roll/ranking needs clarification below. |
-| Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Out-of-combat harm affects the appropriate attribute. |
+| Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Environmental harm uses the GM's TakeDamage operation and declared roll/save. |
 | EndTurn | At the timestamp of the character's short turn, raise every short resource's ready time to at least that timestamp plus ten seconds. Unused resources cannot grant another turn at the same time. This is a character tool, distinct from ending an LLM chat-turn or GM narration. |
 | ReplaceActivity | GM replaces the named character's long activity, including imposed activities such as unconsciousness. Resolve interruption of the previous activity through the same lifecycle; replacement is not completion. |
 | AddEffect/RemoveEffect | Store a GM-authored character effect with an expiry time, or end it early by explicit effect reference. Expired/removed effects leave active context but remain in recorded evidence. GM interprets their meaning; no new executable modifier language is implied. |
@@ -1376,8 +1376,10 @@ making continuation impossible interrupts it. GM can impose a replacement such
 as unconsciousness. Responses still obey resource readiness and character
 capability: being invited to respond is not permission for another attack.
 Dialogue initiation has a short resource cost; the exact initiation/reply boundary
-and compatibility of speech with activities must be clarified before enforcing
-that cost. This timing mechanism does not promise that conversations terminate.
+must be clarified before enforcing that cost. Compatibility with an activity is
+the GM's case-by-case judgment, not a fixed speech/activity classification that
+must be designed first. This timing mechanism does not promise conversations
+terminate.
 
 On first entering short-action ordering, group members receive individual
 DEX-based initiative rather than side initiative. Rust controls eligibility and
@@ -1393,8 +1395,11 @@ delivery as other observable events, including NPC recipients.
 
 - Define the timestamp used as a turn's "now" and the next-idle calculation from
   character state, including initial state, long activities with ready resources
-  and a response before the activity ends. No independent maximum-character-time
-  world clock is authorized. Confirm time granularity/rounding and deterministic
+  and a response before the activity ends. A player must also be able to request
+  abandoning an activity without a new perceived event; select an explicit input
+  route before disabling ordinary action input while busy. Making that request
+  does not itself reset resources or cancel work already executing. No independent
+  maximum-character-time world clock is authorized. Confirm time granularity/rounding and deterministic
   ordering when completion, effect expiry and an action share a timestamp.
 - Resolve the declaration's remaining "DEX save" versus initiative-roll wording:
   roll/ranking, ties, when order is retained/rerolled, and changes in group
@@ -1404,6 +1409,10 @@ delivery as other observable events, including NPC recipients.
   response opportunities while these costs are unresolved.
 - Wait still mentions catching up to "world time". Use explicit-duration cases
   for the plan; its default target needs clarification, not an invented clock.
+- The time section makes Travel a long activity, while its tool description
+  still says acceptance moves the group to the destination. The timed-travel
+  design below follows the new activity model; ask the user to reconcile the
+  tool declaration before implementing approval versus arrival semantics.
 
 Independent group drift by hours and jumps on merge remain exploratory. Cross-group
 travel must define causal ordering and handle outstanding activities/effects;

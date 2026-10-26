@@ -29,8 +29,8 @@ cooldowns. Use real supported speech, timed activities, Wait and EndTurn.
 
 The linked design lists the unresolved "now"/next-idle calculation, initiative
 roll and lifetime, generic attempt costs, dialogue-initiation boundary, Wait
-default and same-time ordering. Work through concrete timelines with the user,
-then update design before implementation; request user declaration corrections
+default, voluntary-stop input and same-time ordering. Work through concrete
+timelines with the user, then update design before implementation; request user declaration corrections
 where needed. This plan is not permission to choose hidden defaults.
 
 The minimum examples are an attack-like resource use plus an unused Move ending
@@ -99,6 +99,9 @@ turn_time + 10)` update and immediate tool-call order as declared constraints.
   or choosing DoNothing does not cancel it. The GM evaluates compatibility and
   can impose an activity such as unconsciousness when continuing is impossible.
   Starting/replacing an activity never resets short-resource ready-times.
+  Include the agreed voluntary-stop input so a player can request stopping
+  without waiting for an external event or activity completion. Do not turn
+  this into general out-of-turn action queuing or automatic cancellation on typing.
 - Add AddEffect/RemoveEffect with character/effect IDs, GM text and a duration/
   derived expiry. Use the same due-time processing, current-state refresh and
   recording. At expiry or early removal, exclude the effect from active context
@@ -117,6 +120,7 @@ turn_time + 10)` update and immediate tool-call order as declared constraints.
   this timing and canonical placement state; it does not add another clock.
 - [Rules and travel](playable-rules.md) adds actual attacks/damage and timed
   Travel/Follow through the same resources/activity resolution and group history.
+  Reconcile the Travel tool declaration's immediate-arrival wording first.
   Cross-group synchronization and mid-travel placement need explicit policy;
   they are not solved by automatically completing activities when groups merge.
 - [Storyteller initialization](storyteller-worlds.md) uses the resulting character
@@ -137,7 +141,7 @@ world or count an inference as proof that the intended outcome happened.
 | --- | --- |
 | Short resources and EndTurn | Use one real short resource, skip another, close the turn and attempt to act again. Unused resources cannot produce another opportunity at the same time; later ready-times never decrease. Replies/Interrupt cannot bypass admission. |
 | Activity start and completion | A timed activity starts observably, with no completion benefit yet. GM resolves it when due. No tool/GM remains active for its duration, and neither duplicate work nor restart grants a second completion. |
-| Optional and forced interruption | Hearing a line and choosing DoNothing/compatible response preserves the activity. An incompatible action or imposed unconsciousness resolves interruption without a later full completion. Actual partial progress remains. |
+| Optional and forced interruption | Hearing a line and choosing DoNothing/compatible response preserves the activity. The player can request abandonment without an external event. An incompatible action, abandonment or imposed unconsciousness resolves interruption without a later full completion. Actual partial progress remains. |
 | Explicit waiting and idle players | Wait has the agreed duration; EndTurn advances a short opportunity. An inactive human receives the configured deadline and skips without blocking indefinitely; replies reset the AFK count. Wall-clock delay does not alter game duration. |
 | Timed effects and current context | A real effect reaches GM state immediately, remains before expiry and leaves active context at expiry/explicit removal, with its recorded evidence intact. Same-time effects/completion follow the agreed order. |
 | Ordering and scope | Initiative, readiness, group changes and activity ends follow the agreed timeline, including an NPC choosing a response before its previous activity ends. Unrelated groups do not receive private content or invented actions. |
