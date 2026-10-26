@@ -1198,7 +1198,7 @@ missing, for example connection, npc and item counts.
 
 - CreateLocation/Connection/NPC/Group/ItemType/Item - initial attributes and details for all fields must be given in the tool call.
 - UpdateLocation/Connection/NPC/Group/ItemType/Item - Just like create, but supports replacing individual fields without specifing them all. 
-- DeleteLocation/Connection/NPC/Group/ItemType/Item
+- DeleteLocation/Connection/NPC/Group/ItemType/Item - flags them as deleted and filters. We don't want to let agents be actually destructive, ever. Still findable in developer mode, but default filtered out.
 - Storyteller notes text editing tools (See "Game state" section)
 - BeginWorld - called when the storyteller believes they have completed world creation and the state is ready for player characters to enter and play to begin. This ends world creation, but does not start play until characters join.
 

@@ -54,13 +54,16 @@ after their rules dependencies. Campaign completion remains a separate plan.
   NPCs and item types/items with existing holders. This is an ordering of needed
   references, not a mandatory extra inference for each record. Every character
   belongs to one group, and every item has one valid location or character holder.
-  Deleting an object also removes its owned links, such as an NPC's group
-  membership; these links must not make every object undeletable. References
-  from other game objects, such as inventory items held by that NPC, block
-  deletion until the Storyteller explicitly updates/deletes those objects.
-  Preserve identities needed by recorded history/inspection; deleting authored
-  state must not destroy past inference evidence. Do not silently cascade-delete
-  other game objects to repair an invalid request.
+  Delete only flags the selected object as deleted. Never physically remove
+  its record, owned links, agent/history or other related records. Filter deleted
+  objects out of normal discovery, counts, model context, NPC scheduling and
+  action/tool targets; Developer Mode can explicitly include them and inspect
+  their retained relationships and history. References from other active game
+  objects, such as inventory items held by that NPC, block deletion until the
+  Storyteller explicitly reassigns or flags those objects too. Owned membership
+  and agent links do not themselves block the flag. Do not automatically flag
+  dependent objects or hide them to repair an invalid request. BeginWorld's
+  validation operates on the remaining active world.
 - Use the GM editing feature's whole-field and exact-text operations for
   Storyteller notes and the editable, spoiler-bearing world summary. Storyteller
   access excludes GM notes. Keep summary distinct from short object notes and
@@ -144,7 +147,7 @@ combine cases rather than require repeated whole-world GPU runs by default.
 | Case | Outcome and evidence |
 | --- | --- |
 | Existing scenario becomes world state | Author Four Brothers through real Storyteller calls. Inspect objects and captured contexts: witnesses have relevant private memories, suspects have motives, and equipment/conditions are recorded. NPC dialogue is generated from that context rather than stored as a script. |
-| Authoring and permissions | Scripted production-path calls create, partially update, edit long text and delete an NPC with owned membership/agent links. An item held by that NPC blocks deletion until explicitly moved/deleted; unrelated objects and historical inspection remain intact. Foreign IDs, dangling references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
+| Authoring and permissions | Scripted production-path calls create, partially update, edit long text and flag an NPC as deleted. Its record, membership/agent links and history remain stored and inspectable when Developer Mode includes deleted objects, but normal discovery/context/scheduling/actions exclude it. An active item held by that NPC blocks the flag until explicitly reassigned or flagged too; unrelated objects remain unchanged. Foreign IDs, dangling active references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
 | Review can change the result | Supply a known omission in persisted state; the review sees it rather than only the intended summary. An edit changes the next captured review input. Check AskQuestions and WorldIsComplete without requiring particular prose. |
 | Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive current summary/artifacts without earlier answer transcripts; private NPC information stays with authorized roles. |
 | Mention reminders | A marked uncreated mention appears as a reminder; creation updates that reminder. Intentionally leaving it uncreated does not block BeginWorld. Unmarked ordinary prose does not manufacture obligations. |

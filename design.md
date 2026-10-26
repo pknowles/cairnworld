@@ -1657,10 +1657,14 @@ Storyteller has Create/Update/Delete tools for Location, Connection, NPC, Group,
 ItemType and Item, plus shared text editing and hierarchical lookup. Create
 supplies all initial fields; Update replaces selected fields by object ID.
 Return assigned IDs, committed changes and object counts. Reuse constructors,
-field access, world-local validation and existing object relationships. Deletion
-handles the object's owned links but rejects references from other game objects
-rather than cascading away those objects. Retain identities needed by recorded
-history and inspection so deletion does not erase past inference evidence.
+field access, world-local validation and existing object relationships. Delete
+only flags an object as deleted; it never removes records, owned links or history.
+Normal discovery, counts, model context, NPC scheduling and action/tool targets
+exclude deleted objects. Developer Mode can explicitly include them with their
+retained relationships and history. References from other active game objects
+block the flag until explicitly reassigned or flagged too; owned membership/agent
+links do not. No dependent object is automatically flagged or removed. World
+validation checks the remaining active objects.
 Create records in dependency order and develop locations/NPCs individually from
 their seeds and the world summary. NPC private backgrounds guide their own agents;
 they are not public descriptions or scripted dialogue. Storyteller notes and the
