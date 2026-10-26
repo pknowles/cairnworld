@@ -921,3 +921,5 @@ with the setting kept as `[game] player_response_timeout`.
 On idle responses for travel: "I think an AFK character would travel with the
 majority of the party, but otherwise do nothing and skip turns." This replaces the
 design's earlier proposal that silent PCs join after 60 seconds.
+
+Ties: "agreed. ties result in players staying".
