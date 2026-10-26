@@ -30,8 +30,8 @@ there yet". Remove and archive only verified completions.
   inference reference and private WorldDetail display.
 - [Model evaluation](model-selection.md): recorded repeated Bread Thief cases,
   measured comparison and default selection for the implemented capabilities.
-- [Rules and travel](playable-rules.md): complete creation/items, suspended
-  consent, persuasion, combat/time and coordinated group travel using the shared
+- [Rules and travel](playable-rules.md): complete creation, player replies
+  (waiting with a stored deadline) and player interventions, items, persuasion, combat/time and coordinated group travel using the shared
   NPC interaction and action paths.
 - [Storyteller gameplay](storyteller-gameplay.md): public/private backgrounds,
   creation approvals, entry placement, encounter guidance, event updates and

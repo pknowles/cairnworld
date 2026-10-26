@@ -889,3 +889,23 @@ it must be accepted", Take/Request/Pickup's player-approval timeout, and Accept)
 are now stale and need the user's update. Also earlier in the same conversation:
 "Many have duplicate names for similar actions... the implementation should merge
 them and have an enum to distinguish", which the `transfer` tool follows.
+
+## 2026-10-26: InterventionCheck asks players; waiting is not pausing
+
+The assistant said InterventionCheck only asked NPCs. The user: "no - this should
+ask players too. can that be done?" (user_declarations.md: "asking players if they
+wish to intervene and which action they will intervene with"). Of the two ways
+offered, the user chose "Ask the human and wait for the answer", with: "Lets have
+a required player response timeout config value. Make it 5 minutes to start with."
+
+On wording: "I don't like the sound of 'pausing'. please make a note of this.
+pausing implies the game is always running in the background, but it isn't. either
+the server stays waiting, or we schedule a wake-up timeout job that chooses a
+default response. the latter may be better in case the server crashes while
+waiting for the timeout because on re-launch it'll recover the turn."
+
+design.md ("Concurrency", "Player replies and coordinated travel") and
+plans/playable-rules.md follow this: a stored deadline, a persisted wake-up that
+records do_nothing, overdue replies answered first on restart, `[game]
+player_response_timeout` required with no code default. The declaration's
+one-minute window for travel and take-from-player is replaced by this setting.

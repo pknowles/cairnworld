@@ -497,9 +497,10 @@ InterventionCheck takes the original action ID and selected characters. Validate
 their world, scene and authority. NPCs return reaction intentions through short
 child decision invocations. These do not execute actions or ask the active GM
 for approval again. Never invoke an agent already active on the stack; its
-original intent is already available. Human non-intervention remains the default;
-blocking for human consent belongs to the later travel consent protocol; item
-transfers use intervention only.
+original intent is already available. This slice asks NPCs only. Asking player characters, who get the
+configured player response time and then do_nothing, belongs to
+[Playable rules](playable-rules.md); until then human non-intervention is the
+default.
 Use the existing child invocation/tool records and pending actions for these
 intentions, applying the same decision validation and eagerness selection rules
 as responses. No npc_discussion/npc_response_collection/npc_candidate rows are needed to hold

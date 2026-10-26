@@ -12,7 +12,7 @@ rounds, interruption and GM-selected intervention; extend those paths here.
 | --- | --- | --- |
 | Creation and item state | [Character creation actions](../user_declarations.md#character-creation-actions), [Game state](../user_declarations.md#game-state) | Rules and action execution |
 | Persuasion and notes | [Character actions](../user_declarations.md#character-actions), [NPC actions](../user_declarations.md#npc-character-actions), [GM tools](../user_declarations.md#gm-tools) | Rules and action execution |
-| Travel | [Character actions](../user_declarations.md#character-actions) | Player replies and coordinated travel |
+| Player replies and travel | [Character actions](../user_declarations.md#character-actions), [GM tools](../user_declarations.md#gm-tools) | Player replies and coordinated travel |
 | Combat and time | [Game turns and time](../user_declarations.md#game-turns-and-time) | Rules and action execution |
 
 The combat order, time lead and travel choices are explicit proposals under
@@ -38,7 +38,20 @@ action/time operations for combat and travel rather than implementing Move again
    ready_to_begin validates the full creation state; the group's initial ready
    barrier performs RollOmens once and then opens play. Test incomplete/duplicate
    creation and the youngest-character omen rule through real agent chat.
-2. Consolidate item holders as specified in design.md. Introduce typed item stats
+2. Add waiting for player replies and use it for InterventionCheck. Add the
+   required `[game] player_response_timeout` setting (300 seconds in default.toml,
+   no code default). Add the concrete pending_reply rows and the
+   `Intervention` continuation. agent.rs returns AwaitingReply while preserving
+   invocation/call IDs, tool ordinals and budgets. Game::process_world releases
+   the current event and accepts the requested character's reply through ordinary
+   chat. The deadline is a persisted wake-up that records do_nothing; nothing
+   counts down in memory, and restart answers overdue replies first, using the
+   earliest-deadline mechanism connection presence already has. Allow
+   InterventionCheck to select player characters as well as NPCs: each gets the
+   question in their chat and answers through their agent. Test two real player
+   chats, a player who intervenes, one who answers do_nothing, a timeout,
+   disconnect, restart with an overdue reply, and a mixed NPC and player check.
+3. Consolidate item holders as specified in design.md. Introduce typed item stats
    for slots, armor, weapon dice and spell references; preserve separate object
    notes. Replace the `take` tool with the `transfer` tool (`kind` take, give,
    drop or place; design.md) and make all four kinds one transactional holder
@@ -54,10 +67,11 @@ action/time operations for combat and travel rather than implementing Move again
    and without a description, committed drop, and repeated approval: exactly one
    holder and no second mutation. Exercise routing of the four kinds on the real
    model.
-   Open question for the user: InterventionCheck asks NPCs. A player-character
-   receiver cannot answer inside the GM's call, so how they get the chance to
-   object to a give or take before it applies is undecided.
-3. Extend the shared speech path with lie's declared WIL/suspicion outcomes and
+   A player-character receiver or holder is asked through InterventionCheck
+   (previous step) and has the configured response time to object. Test a give
+   to a player who objects, one who stays silent until the timeout, and one who
+   consents.
+4. Extend the shared speech path with lie's declared WIL/suspicion outcomes and
    BePersuaded as an NPC-owned save tool.
    Reuse [GM editing and lookup](gm-editing.md) for authorized object-field/note
    access and current GM state; do not expose private notes to NPCs or implement
@@ -69,7 +83,7 @@ action/time operations for combat and travel rather than implementing Move again
    alternatives flow. Test heard/unheard/private conversation, persuasion,
    the existing intervention and no-response paths without a GM
    recursion cycle; inspect actual supplied context, not prose alone.
-4. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
+5. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
    from the bundled core rules. Add attack, retreat, take_damage, begin_combat,
    end_combat and wait. Store combat/participant order, turn flags and time in
    the same action transaction. Compute can_act server-side before accepting a
@@ -90,12 +104,8 @@ action/time operations for combat and travel rather than implementing Move again
    rejection, early Wait followed by an attempted action, repeated Interrupt/
    Never mind, out-of-turn requests with unused flags, armor/STR damage, death
    and environmental damage. Do not add the proposed future combat Delay tool.
-5. Add the concrete pending_reply rows and the Travel continuation. agent.rs
-   returns Suspended while preserving invocation/call IDs, tool ordinals and
-   budgets. Game::process_world releases the current event and accepts the
-   requested character's reply through ordinary chat. Response/deadline events
-   resume a continuation once; recover these rows/timers at startup. Add
-   travel(Connection ID) using it. Collect
+6. Add travel(Connection ID) using the waiting-for-replies machinery from the
+   second step with a `Travel` continuation. Collect
    PC/NPC responses, apply the approved stay/join/object policy and ask the GM
    for final arbitration with all responses visible. On approval, call the real
    group split operation, update the travelling group's location and GM arrival

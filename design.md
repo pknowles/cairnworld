@@ -641,9 +641,10 @@ sequences) so a session is fully replayable as data.
 
 Authority: Scheduling, Agent syntax and tool calls, Character actions' human
 replies. One Tokio task per world processes game events sequentially. An event
-runs until its invocation completes, fails or durably suspends for a player
-reply. Suspension releases the queue; a later reply/deadline event resumes the
-same recorded continuation. Other legal events can run while a reply is pending.
+runs until its invocation completes, fails or is left waiting for a player
+reply. Waiting stores the continuation and releases the queue: nothing runs or
+counts down while it waits. A later reply or deadline event continues the same
+recorded continuation. Other legal events can run while a reply is outstanding.
 Connection presence uses short-lived state locks; membership writes use short
 Store transactions. Both run independently of model work, so a long inference
 cannot postpone a disconnect or ban.
@@ -1309,7 +1310,7 @@ fiction rather than substituting for mechanical state.
 | Move/wait | GM supplies destination description and elapsed game seconds; Rust updates position/time or consumes move/action flags. |
 | Speak/lie | A public speech (the default) is heard by all characters in the group and names no addressee, since who it is for belongs in the words; a private one (`private`) names its hearers. GM approval may override the audience. Commit the speaker's actual words to recipient histories by source reference, then schedule NPC response opportunities. Lie additionally makes each declared WIL roll and sends the suspicion fact only to those who pass. |
 | DoNothing | Explicitly decline an opportunity to respond or intervene; consumes no implied waiting duration. |
-| InterventionCheck/Approve/Reject | GM consults selected characters about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may pause for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
+| InterventionCheck/Approve/Reject | GM consults selected characters, NPCs and players, about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may wait for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Take/give/drop/place | One holder change after the GM approves; no duplicate item on repeated approval. No separate acceptance step: the receiver or a holder may intervene (say or gesture a clear no), and the GM then rejects. A drop or place is approved with the item's new location description. A committed drop is not necessarily rejected, since a character cannot be forced to keep an item, but it may lead to combat. |
 | Save/initiative | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. |
@@ -1582,7 +1583,7 @@ uses the world worker's pending NPC responses after the original stack unwinds.
 This uses the existing action/roll operations, not a ConditionalApprove tool,
 general dependency engine or dynamically generated rule language. Actions that
 can be tentative carry committed intent (Take, Give, Drop and Place, default false): false
-means willing to pause for an objection; true means proceeding despite objections,
+means willing to wait for an objection; true means proceeding despite objections,
 not guaranteed success or permission to bypass physical opposition or turn rules.
 The GM gets this intent in the action request. A prisoner's warning can stop a
 tentative Take, but cannot repeatedly veto a committed retry. A shopkeeper may
@@ -1608,28 +1609,52 @@ rules increment; scheduling controls confer no action allowance.
 
 ## Player replies and coordinated travel
 
-Authority: Travel and Agent syntax's recursion tree. Item transfers do not use
-this protocol; they rely on intervention.
+Authority: InterventionCheck, Travel and Agent syntax's recursion tree. Item
+transfers have no reply protocol of their own; a player who may object to one is
+asked through InterventionCheck.
+
+Wording: a call waiting for a human is not "paused". The game does not run in
+the background, so nothing continues or counts down by itself. A waiting call is
+only stored state plus a stored deadline. Either the server stays up and wakes at
+the deadline, or the deadline is a persisted wake-up that chooses a default
+response, so a crash while waiting loses nothing: on restart the overdue replies
+are answered with their defaults first. Use the persisted form, with the same
+earliest-deadline wake mechanism connection presence already uses; no timer map.
+
+The deadline comes from the required game setting `player_response_timeout`
+(`[game]` in default.toml, seconds, initially 300). It has no code default: a
+missing value is a startup error, so the value is always a deliberate choice.
+
 The action that needs a human response persists
 `pending_reply(action_id, character_id, deadline, status, response_content_id)`;
 its deadline and intended character are explicit. The corresponding
-`pending_action` also holds a typed `Travel` continuation, original
+`pending_action` also holds a typed `Intervention|Travel` continuation, original
 invocation/call IDs and the ordered remaining tool-call ordinals. It retains
 budget consumption. It never serializes a Rust future or re-executes earlier tools.
 
-The agent loop returns `Suspended(action_id)` up through its call stack; each
+The agent loop returns `AwaitingReply(action_id)` up through its call stack; each
 waiting invocation remains recorded. The world queue is then free. Only the
 requested character's ordinary input is accepted as a response to that action;
-their player agent interprets text and calls stay/join/object with
+their player agent interprets text and calls the offered tools (stay/join/object
+for travel; do_nothing or an action for an intervention) with
 that explicit action ID. Other characters may continue legal independent work.
-A response or deadline event updates the pending reply and resumes the stored
+A response or deadline event updates the pending reply and continues the stored
 continuation once; original completed tool results are reused. Recheck mutable
 preconditions before moving. Restart reconstructs these concrete
-continuations from rows and restores outstanding timers.
+continuations from rows and wakes for outstanding deadlines.
+
+InterventionCheck asks players as well as NPCs. NPCs answer at once through child
+decisions; each selected player character gets a pending reply, the question
+(what is about to happen, who is doing it) appears in their chat, and their agent
+returns do_nothing or the action they intervene with. The GM's call continues
+when every selected character has answered or timed out. A timeout is not an
+error: the recorded answer is do_nothing, so the original action then goes ahead
+unless the GM decides otherwise. A reaction that comes back is handled as any
+other (approve it, see its result, then decide the original action).
 
 Travel takes a Connection ID, validates that one endpoint is the source group's
 location, and asks the group's other characters to join/stay/object. NPCs answer
-through their agents; PCs have the declared one-minute window. The proposed
+through their agents; PCs have the configured player response timeout. The proposed
 resolution is in Product decisions. On approval, create the travelling/staying
 partition using the group history operation, update the travelling group's
 location to the other endpoint, and replace its location description with the
