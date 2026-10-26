@@ -4145,6 +4145,28 @@ mod tests {
             asked >= 1,
             "the GM never asked a character whether to intervene"
         );
+        // What each asked character answered, from the call recorded in its
+        // settled decision: exactly one of do_nothing, say or whisper.
+        let answers: Vec<String> = sqlx::query_scalar(
+            "SELECT json_extract(value, '$.name') FROM invocation \
+             JOIN npc_agent ON npc_agent.agent_id = invocation.agent_id \
+             JOIN inference ON inference.invocation_id = invocation.id \
+             JOIN recorded_content ON recorded_content.id = inference.output, \
+             json_each(json_extract(recorded_content.body, '$.content.value')) \
+             WHERE invocation.parent_tool_execution_id IS NOT NULL \
+               AND invocation.outcome = 'settled'",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        println!("INTERVENTION answers: {answers:?}");
+        assert!(
+            !answers.is_empty()
+                && answers
+                    .iter()
+                    .all(|answer| matches!(answer.as_str(), "do_nothing" | "say" | "whisper")),
+            "no asked character gave a valid answer: {answers:?}"
+        );
         let undecided: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pending_action")
             .fetch_one(&store.pool())
             .await

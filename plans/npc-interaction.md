@@ -1,10 +1,21 @@
 # NPC interaction: remaining work and acceptance
 
-Partially implemented. Speech delivery, NPC response selection, individual GM
-approvals, expressive speech, causal inspection and Interrupt/Never mind exist.
-Remaining: restraint and natural stopping (user-owned tuning), responses to other
-perceived events, and tentative/committed intervention. What happens to existing
-raised hands when another player acts is an open policy choice.
+Status 2026-10-26: not complete. All four checkpoints below are built and have
+scripted tests; the device suite and browser checks passed. Speech delivery, NPC
+response selection, GM narration tools, NPC responses to narration, the scene
+and entrance narration, the four request tools, `committed` and
+`intervention_check` exist.
+
+Not done or not verified:
+- Real-model routing of `look`/`investigate`/`open`/`ask` (scripted only), and
+  the shared-detail setting on and off on the real model.
+- Scripted cases for a producer that is paused or fails after delivering
+  narration (follow-ups wait or fail visibly), and for a failing
+  InterventionCheck (shared budget, retained effects).
+- The InterventionCheck cases were written without the user review this plan
+  requires, and the real-model check does not assert what the asked NPC chose.
+- Restraint and natural stopping (user-owned tuning), and the open policy on
+  raised hands when another player acts.
 
 ## Goal and authority
 
@@ -191,6 +202,9 @@ reactions through existing pending actions, then schedule later dialogue.
 The Interrupt choice remains open as described above.
 
 ## Remaining implementation order
+
+All four slices are built (see the status above for what is unverified); the
+table is kept as the record of each slice's finish line.
 
 | Slice | Production change and finish line |
 | --- | --- |
