@@ -1040,13 +1040,7 @@ fn ContentBlock(content: MessageContent) -> impl IntoView {
         MessageContent::ToolResult {
             tool_call_id: _,
             content,
-        } => view! {
-            <div class="flex flex-wrap items-start gap-1">
-                <span class="badge badge-ghost badge-sm">"Tool result"</span>
-                <CopyableText text=content/>
-            </div>
-        }
-        .into_any(),
+        } => view! { <CopyableText text=content/> }.into_any(),
     }
 }
 
@@ -1220,6 +1214,38 @@ fn agent_label(agent_id: i64, agents: RwSignal<Vec<AgentInfo>>) -> String {
         return "Loading agent…".to_string();
     };
     agent_info_label(&agent)
+}
+
+/// What the author of an agent's own messages is called in a history view. To
+/// the model they are all `assistant`; to a reader they are the character, the
+/// player's agent or the GM speaking.
+#[cfg(feature = "hydrate")]
+fn author_label(agent_id: i64, agents: RwSignal<Vec<AgentInfo>>) -> String {
+    let Some(agent) = agents.get().into_iter().find(|agent| agent.id == agent_id) else {
+        return "assistant".to_string();
+    };
+    match (agent.role.as_str(), agent.character_name.as_ref()) {
+        ("npc", Some(name)) => name.clone(),
+        ("player", Some(name)) => format!("{name}'s agent"),
+        ("world_gm", _) => "Game Master".to_string(),
+        _ => agent_info_label(&agent),
+    }
+}
+
+/// One label per message: who wrote it, or that it answers a tool call.
+#[cfg(feature = "hydrate")]
+fn message_label(
+    role: Role,
+    origin: MessageOrigin,
+    agent_id: i64,
+    agents: RwSignal<Vec<AgentInfo>>,
+) -> String {
+    match (origin, role) {
+        (MessageOrigin::Instruction, _) => "instruction".to_string(),
+        (_, Role::Assistant) => author_label(agent_id, agents),
+        (_, Role::Tool) => "Tool result".to_string(),
+        (_, role) => role.as_str().to_string(),
+    }
 }
 
 #[cfg(feature = "hydrate")]
@@ -1517,9 +1543,9 @@ fn InferenceCard(
             <section class="border-t border-base-300 pt-1">
                 <h4 class="font-semibold">"Input"</h4>
                 <ul class="mt-1 space-y-1">
-                    {request_messages.into_iter().map(|message| view! {
+                    {request_messages.into_iter().map(|message| { let (role, origin) = (message.role.clone(), message.origin.clone()); view! {
                         <li>
-                            <span class="font-semibold">{if message.origin == MessageOrigin::Instruction { "instruction" } else { message.role.as_str() }}</span>
+                            <span class="font-semibold">{move || message_label(role.clone(), origin.clone(), agent_id, agents)}</span>
                             <ContentBlock content=message.content/>
                             {(!message.reasoning.is_empty()).then(|| view! {
                                 <details class="text-base-content/60">
@@ -1528,7 +1554,7 @@ fn InferenceCard(
                                 </details>
                             })}
                         </li>
-                    }).collect_view()}
+                    }}).collect_view()}
                 </ul>
             </section>
             <section class="border-t border-base-300 pt-1">
@@ -1597,7 +1623,7 @@ fn AgentHistoryView(
         <div class="flex flex-col gap-3">
             <h3 class="text-sm font-semibold">{move || format!("{} chat history", agent_label(agent_id, agents))}</h3>
             {branches.into_iter().map(|section| view! {
-                <BranchSectionView world_id agent_id section show_heading=!single selection data/>
+                <BranchSectionView world_id agent_id agents section show_heading=!single selection data/>
             }).collect_view()}
         </div>
     }
@@ -1612,6 +1638,7 @@ fn AgentHistoryView(
 fn BranchSectionView(
     world_id: i64,
     agent_id: i64,
+    agents: RwSignal<Vec<AgentInfo>>,
     section: BranchSection,
     show_heading: bool,
     selection: RwSignal<Option<InspectSelection>>,
@@ -1702,7 +1729,7 @@ fn BranchSectionView(
         <div class="flex flex-col gap-2">
             {heading}
             <ul class="flex flex-col gap-1 text-sm">
-                {section.entries.into_iter().map(|entry| view! { <RawHistoryEntryRow entry selection/> }).collect_view()}
+                {section.entries.into_iter().map(|entry| view! { <RawHistoryEntryRow entry agent_id agents selection/> }).collect_view()}
             </ul>
             {section.cursor.map(|cursor| view! {
                 <div node_ref=sentinel class="h-px" aria-hidden="true"></div>
@@ -1725,6 +1752,8 @@ fn BranchSectionView(
 #[component]
 fn RawHistoryEntryRow(
     entry: RawHistoryEntry,
+    agent_id: i64,
+    agents: RwSignal<Vec<AgentInfo>>,
     selection: RwSignal<Option<InspectSelection>>,
 ) -> impl IntoView {
     match entry {
@@ -1739,8 +1768,7 @@ fn RawHistoryEntryRow(
             <li class=move || history_entry_class(id, selection)>
                 <div class="flex flex-wrap items-center gap-2">
                     <span class="badge badge-ghost badge-sm">{format!("message {id}")}</span>
-                    <span class="font-semibold">{if origin == MessageOrigin::Instruction { "instruction" } else { role.as_str() }}</span>
-                    {answers_tool_execution_id.map(|_| view! { <span class="badge badge-ghost badge-sm">"Tool result"</span> })}
+                    <span class="font-semibold">{move || message_label(role.clone(), origin.clone(), agent_id, agents)}</span>
                     {output_rejected.then(|| view! { <span class="badge badge-error badge-sm">"Invalid output rejected - investigate"</span> })}
                     {source_inference_id.filter(|_| answers_tool_execution_id.is_none()).map(|inference_id| view! {
                         <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(inference_id)))>

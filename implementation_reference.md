@@ -970,7 +970,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
     links. The browser appends each requested page and preserves the active
     search while doing so; selecting a relationship reloads its exact target
     and highlights it.
-  `InferenceCard` lists the recorded tool definitions (name, description, schema) in an expandable "Tools" section above the input, shows reconstructed input before output, rendering a GM
+  History and inference views label an agent's own messages by who it is (the character for an NPC, "Name's agent" for a player agent, Game Master) and a tool answer "Tool result", once. `InferenceCard` lists the recorded tool definitions (name, description, schema) in an expandable "Tools" section above the input, shows reconstructed input before output, rendering a GM
   `Current scene packet` as labelled scene fields rather than JSON. Its model
   prompt, token usage and verification evidence live in the top-right `…`
   technical popover. Per-node usage and the cumulative current-Turn total are
