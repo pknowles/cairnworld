@@ -1575,7 +1575,8 @@ response opportunities. Their character facts and heard history supply context;
 GM/Storyteller-only notes remain private. NPCs call do_nothing or an offered
 character action with eagerness. During collection the call records intent, not an
 action. Eagerness is an integer 1–3: low, moderate or strong desire to act now.
-Select the highest eagerness; speech-only highest ties may all speak. Their words
+Select the highest eagerness; speech-only highest ties may all speak, and any
+other tie is broken at random. Their words
 were composed against the same history, without hearing one another's replies.
 The GM approves/rejects each action separately in any order, through ordinary
 approval tools. Finish the selected set before collecting follow-up responses; an earlier

@@ -657,8 +657,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   it. The world worker runs one `NpcStep` at a time at lowest priority
   (`Store::next_npc_step`, none while draining): Refresh (stale
   `group.scene_revision`), Decide (one recorded inference per NPC, exactly one
-  `do_nothing` or `speak`, the player tools plus eagerness 1 to 3), Select (highest
-  eagerness; speech ties all win), Execute (one selected utterance per step:
+  `do_nothing` or an action, the same `action_kinds` a player is offered plus eagerness 1 to 3), Select (highest
+  eagerness; a tie of speech all win, any other tie is picked at random), Execute (one selected utterance per step:
   a pending action for that NPC and an ordinary single-action GM turn through
   `arbitrate`, so tied replies are approved one at a time and the round stays
   selected until all are done; the selected set's own speech does not
@@ -762,7 +762,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   names the presented action and NPCs in the actor's group (not the actor, not
   players). Each NPC is asked in the GM's call as a child invocation
   (`Game::ask_npc`, the same decision a response collection asks for, plus an
-  `npc.intervention_request` in its history), answers do_nothing or speak,
+  `npc.intervention_request` in its history), answers do_nothing or an action,
   and the strongest proposals become pending actions of their own
   (`Store::create_reaction_action`). Those join the turn's `PresentedActions`: the
   GM approves or rejects each with the ordinary tools, and narration is refused

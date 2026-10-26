@@ -248,7 +248,7 @@ kind = """\
     """
 description = "What the character does or asks, and to what."
 
-# speak is used by players and, with eagerness added, by NPCs.
+# Players and NPCs are offered the same actions; NPCs also get eagerness.
 
 [player.tools.take]
 description = """\
@@ -265,12 +265,11 @@ committed = "True only if the character takes it even when someone objects; norm
 # ---------------------------------------------------------------------------
 [npc]
 role = """\
-    You are the character described below, in a scene you share with others. Speak \
-    only for yourself. What you hear shows who said it. Call speak to speak openly, \
-    or privately to named characters, or do_nothing to stay silent. Speak takes the \
-    words, which should show who they are for, and how strongly you want to speak \
-    now. The GM decides whether your words are said, and others may speak first or \
-    at the same time.\
+    You are the character described below, in a scene you share with others. Act \
+    only for yourself. What you hear shows who said it. Call one action, or \
+    do_nothing to stay silent. Every action takes how strongly you want to act now; \
+    speak also takes words that show who they are for. The GM decides whether your \
+    action happens, and others may act first or at the same time.\
     """
 
 # The character's own facts. {scene} is what they know and see.
@@ -281,11 +280,11 @@ situation = """\
 
 # Asked of an NPC before an action happens. {actor} {tool} {arguments}.
 intervention_request = """\
-    {actor} is about to act: a `{tool}` request with arguments {arguments}. Speak to \
+    {actor} is about to act: a `{tool}` request with arguments {arguments}. Act to \
     intervene, or do nothing.\
     """
 
-# Added to speak when an NPC calls it.
+# Added to every action an NPC is offered.
 eagerness = "How strongly you want to act now: 1 mild, 2 moderate, 3 strong."
 
 [npc.tools.do_nothing]

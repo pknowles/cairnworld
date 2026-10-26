@@ -74,6 +74,45 @@ impl std::fmt::Display for FailedTurn {
 
 /// Everything a player-facing action tool needs to submit one action to its
 /// location GM. The tool owns this invocation scope until a model calls it.
+/// A character action as a model sees it: the tool and the check of its
+/// arguments. Players and NPCs are offered the same actions, so a character
+/// has one set of verbs whoever controls it.
+struct ActionKind {
+    definition: ToolDefinition,
+    validate: fn(&str) -> Result<()>,
+}
+
+/// The actions any character can take, in the order they are offered.
+fn action_kinds() -> Result<Vec<ActionKind>> {
+    let prompts = prompts::current()?;
+    Ok(vec![
+        ActionKind {
+            definition: prompts.player.tools.tool(
+                "attempt",
+                serde_json::to_value(schema_for!(AttemptAction))
+                    .expect("attempt action schema should serialize"),
+            )?,
+            validate: validate_attempt_action,
+        },
+        ActionKind {
+            definition: prompts.shared.tools.tool(
+                "speak",
+                serde_json::to_value(schema_for!(SpeakAction))
+                    .expect("speak action schema should serialize"),
+            )?,
+            validate: validate_speak_action,
+        },
+        ActionKind {
+            definition: prompts.player.tools.tool(
+                "take",
+                serde_json::to_value(schema_for!(TakeAction))
+                    .expect("take action schema should serialize"),
+            )?,
+            validate: validate_take_action,
+        },
+    ])
+}
+
 struct PlayerActionTool {
     member: PlayerAgent,
     sequence_id: i64,
@@ -1192,44 +1231,20 @@ where
             },
         );
         let mut tools = vec![party_presence];
-        tools.extend([
-            self.action_tool(PlayerActionTool {
+        for ActionKind {
+            definition,
+            validate,
+        } in action_kinds()?
+        {
+            tools.push(self.action_tool(PlayerActionTool {
                 member: member.clone(),
                 sequence_id,
-                definition: prompts.player.tools.tool(
-                    "attempt",
-                    serde_json::to_value(schema_for!(AttemptAction))
-                        .expect("attempt action schema should serialize"),
-                )?,
-                validate: validate_attempt_action,
+                definition,
+                validate,
                 budget: budget.clone(),
                 call: call.clone(),
-            }),
-            self.action_tool(PlayerActionTool {
-                member: member.clone(),
-                sequence_id,
-                definition: prompts.shared.tools.tool(
-                    "speak",
-                    serde_json::to_value(schema_for!(SpeakAction))
-                        .expect("speak action schema should serialize"),
-                )?,
-                validate: validate_speak_action,
-                budget: budget.clone(),
-                call: call.clone(),
-            }),
-            self.action_tool(PlayerActionTool {
-                member,
-                sequence_id,
-                definition: prompts.player.tools.tool(
-                    "take",
-                    serde_json::to_value(schema_for!(TakeAction))
-                        .expect("take action schema should serialize"),
-                )?,
-                validate: validate_take_action,
-                budget,
-                call,
-            }),
-        ]);
+            }));
+        }
         Ok(tools)
     }
 
@@ -1859,7 +1874,7 @@ where
                                 character_id,
                                 pending.sequence_id,
                                 execution_id,
-                                proposal.tool,
+                                &proposal.tool,
                                 &proposal.arguments,
                             )
                             .await?;
@@ -6709,6 +6724,82 @@ mod tests {
         assert!(
             !chat.iter().any(|line| line.contains("Ask the miller.")),
             "the loser's superseded proposal is never said: {chat:?}"
+        );
+        assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
+    }
+
+    fn propose_taking(item: &str, eagerness: u8) -> Response {
+        tool_call(
+            "take",
+            serde_json::json!({"item": item, "eagerness": eagerness}),
+        )
+    }
+
+    async fn holder_of(scene: &SpeechScene, item: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT character.name FROM item_character              JOIN item ON item.id = item_character.item_id              JOIN character ON character.id = item_character.character_id              WHERE item.name = ?",
+        )
+        .bind(item)
+        .fetch_optional(&scene.store.pool())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_npc_may_take_an_item_through_the_gm_like_a_player() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        talk(
+            &scene,
+            [
+                propose_taking("flour sack", 3),
+                propose("Leave it.", &speaker, 1),
+                // Only the winner reaches the GM.
+                approve(2),
+                narrate("Mara snatches up the flour sack."),
+                do_nothing(),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            holder_of(&scene, "flour sack").await.as_deref(),
+            Some("Mara")
+        );
+        let chat = heard(&scene.store, &scene.first).await;
+        assert!(
+            !chat.iter().any(|line| line.contains("Leave it.")),
+            "the loser's reply is never said: {chat:?}"
+        );
+        assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn an_eagerness_tie_between_an_action_and_speech_has_one_winner() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        talk(
+            &scene,
+            [
+                propose_taking("flour sack", 2),
+                propose("Leave it.", &speaker, 2),
+                approve(2),
+                narrate("One of them acts first."),
+                do_nothing(),
+            ],
+        )
+        .await;
+
+        let most_selected_together: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(winners), 0) FROM (SELECT COUNT(*) AS winners \
+             FROM npc_candidate WHERE selected = 1 GROUP BY collection_id)",
+        )
+        .fetch_one(&scene.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            most_selected_together, 1,
+            "an action tied with speech is not done together with it"
         );
         assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
     }

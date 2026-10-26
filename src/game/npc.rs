@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use schemars::schema_for;
 
 use super::{Budget, CallContext, Game};
 use crate::{
@@ -15,7 +14,7 @@ use crate::{
     inspection::DevEvent,
     llm::{Backend, Message, Role, ToolCall},
     prompts,
-    store::{AgentBranch, Decision, NpcStep, ResponseCollection, SpeakAction, with_eagerness},
+    store::{AgentBranch, Decision, NpcStep, ResponseCollection, with_eagerness},
     world::{ChatChange, World},
 };
 
@@ -127,19 +126,18 @@ where
             .context("serializing the NPC's scene")?;
         let prompts = prompts::current()?;
         let facts = prompts::fill(&prompts.npc.situation, &[("scene", &scene)])?;
-        let mut speak = prompts.shared.tools.tool(
-            "speak",
-            serde_json::to_value(schema_for!(SpeakAction))
-                .expect("speak action schema should serialize"),
-        )?;
-        speak.schema = with_eagerness(speak.schema, &prompts.npc.eagerness);
-        let tools = [
+        let kinds = super::action_kinds()?;
+        let mut tools = vec![
             prompts
                 .npc
                 .tools
                 .tool("do_nothing", prompts::no_arguments())?,
-            speak,
         ];
+        for kind in &kinds {
+            let mut definition = kind.definition.clone();
+            definition.schema = with_eagerness(definition.schema, &prompts.npc.eagerness);
+            tools.push(definition);
+        }
         let completion = context::complete_recorded(
             &self.store,
             &self.backend,
@@ -163,7 +161,16 @@ where
         *inference_id = Some(completion.inference_id);
         let (call, decision) = Decision::parse(&completion.response.content)?;
         if let Decision::Propose(proposal) = &decision {
-            super::validate_speak_action(&proposal.arguments)?;
+            let kind = kinds
+                .iter()
+                .find(|kind| kind.definition.name == proposal.tool)
+                .with_context(|| {
+                    format!(
+                        "the NPC called `{}`, which it was not offered",
+                        proposal.tool
+                    )
+                })?;
+            (kind.validate)(&proposal.arguments)?;
         }
         Ok((completion.inference_id, call, decision))
     }

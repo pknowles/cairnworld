@@ -4,6 +4,7 @@
 //! produce, never copied into a parallel state machine.
 
 use anyhow::{Context, Result, bail, ensure};
+use rand::seq::IndexedRandom;
 use sqlx::{Sqlite, Transaction};
 
 use super::{
@@ -11,12 +12,12 @@ use super::{
 };
 use crate::llm::{Content, Message, MessageContent, ToolCall};
 
-/// A speech action an NPC would take, with how strongly it wants to.
-/// Proposals never act; the GM decides whether the words are said and who
-/// hears them.
-pub struct SpeechProposal {
-    /// The action tool the NPC called: `say` or `whisper`.
-    pub tool: &'static str,
+/// An action an NPC would take, with how strongly it wants to. Proposals
+/// never act; the GM decides whether the action happens (for speech, whether
+/// the words are said and who hears them).
+pub struct ActionProposal {
+    /// The action tool the NPC called, such as `speak`.
+    pub tool: String,
     /// The action's own arguments, exactly as that tool takes them.
     pub arguments: String,
     pub eagerness: u8,
@@ -25,7 +26,7 @@ pub struct SpeechProposal {
 /// The one terminal decision an NPC returns.
 pub enum Decision {
     Nothing,
-    Propose(SpeechProposal),
+    Propose(ActionProposal),
 }
 
 /// The action's own tool schema plus the NPC-only `eagerness` argument.
@@ -45,14 +46,15 @@ pub fn with_eagerness(mut schema: serde_json::Value, description: &str) -> serde
 
 impl Decision {
     /// The decision a model's whole response makes, or why it breaks the
-    /// protocol: exactly one `do_nothing` or `speak` call.
+    /// protocol: exactly one call, `do_nothing` or an action. Whether the action
+    /// is one the NPC was offered is checked where the tools are known.
     pub fn parse(content: &Content) -> Result<(ToolCall, Self)> {
         let Content::ToolCalls(calls) = content else {
-            bail!("the NPC replied with text instead of calling do_nothing or speak");
+            bail!("the NPC replied with text instead of calling do_nothing or an action");
         };
         let [call] = calls.as_slice() else {
             bail!(
-                "the NPC made {} tool calls; exactly one of do_nothing or speak is required",
+                "the NPC made {} tool calls; exactly one, do_nothing or an action, is required",
                 calls.len()
             );
         };
@@ -66,9 +68,10 @@ impl Decision {
                 );
                 Self::Nothing
             }
-            "speak" => {
+            action => {
                 let mut arguments: serde_json::Map<String, serde_json::Value> =
-                    serde_json::from_str(&call.arguments).context("parsing speak arguments")?;
+                    serde_json::from_str(&call.arguments)
+                        .with_context(|| format!("parsing {action} arguments"))?;
                 let eagerness = arguments
                     .remove("eagerness")
                     .context("an eagerness from 1 to 3 is required")?;
@@ -78,13 +81,12 @@ impl Decision {
                     .with_context(|| {
                         format!("eagerness {eagerness} is not an integer from 1 to 3")
                     })?;
-                Self::Propose(SpeechProposal {
-                    tool: "speak",
+                Self::Propose(ActionProposal {
+                    tool: action.to_string(),
                     arguments: serde_json::Value::Object(arguments).to_string(),
                     eagerness: u8::try_from(eagerness).context("eagerness out of range")?,
                 })
             }
-            name => bail!("the NPC called `{name}`, not do_nothing or speak"),
         };
         Ok((call.clone(), decision))
     }
@@ -1048,9 +1050,10 @@ impl Store {
         Ok(decided)
     }
 
-    /// Choose the winners of a fully gathered collection: the highest eagerness,
-    /// with every speech proposal tied at that level winning together. A collection
-    /// where nobody proposed ends without further work.
+    /// Choose the winners of a fully gathered collection: the highest eagerness.
+    /// Proposals tied at that level that are all speech win together; any other
+    /// tie is broken at random (user_declarations.md, "Example actions and
+    /// reactions"). A collection where nobody proposed ends without further work.
     pub async fn select_winning_responses(&self, collection: &ResponseCollection) -> Result<()> {
         let decided = self.collected_decisions(collection.id).await?;
         let top = decided
@@ -1060,13 +1063,23 @@ impl Store {
                 Decision::Nothing => None,
             })
             .max();
-        let winners: Vec<i64> = decided
+        let tied: Vec<(i64, bool)> = decided
             .iter()
-            .filter(|candidate| {
-                matches!(&candidate.decision, Decision::Propose(proposal) if Some(proposal.eagerness) == top)
+            .filter_map(|candidate| match &candidate.decision {
+                Decision::Propose(proposal) if Some(proposal.eagerness) == top => {
+                    Some((candidate.character_id, proposal.tool == "speak"))
+                }
+                _ => None,
             })
-            .map(|candidate| candidate.character_id)
             .collect();
+        let winners: Vec<i64> = if tied.iter().all(|(_, speech)| *speech) {
+            tied.iter().map(|(character_id, _)| *character_id).collect()
+        } else {
+            tied.choose(&mut rand::rng())
+                .map(|(character_id, _)| *character_id)
+                .into_iter()
+                .collect()
+        };
         let mut transaction = self
             .pool
             .begin()
@@ -1188,7 +1201,7 @@ impl Store {
             },
             sequence_id,
             execution_id,
-            (proposal.tool, &proposal.arguments),
+            (proposal.tool.as_str(), &proposal.arguments),
         )
         .await?;
         transaction
