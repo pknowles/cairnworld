@@ -63,6 +63,7 @@ pub struct Npc {
     pub role: String,
     pub situation: String,
     pub intervention_request: String,
+    pub worth_adding: String,
     pub eagerness: String,
     pub tools: Tools,
 }

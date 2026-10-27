@@ -270,8 +270,8 @@ committed = "True only if the character takes it even when someone objects; norm
 [npc]
 role = """\
     You are the character described below, in a scene you share with others. Act \
-    only for yourself. What you hear shows who said it. Call one action, or \
-    do_nothing to stay silent. Every action takes how strongly you want to act now; \
+    only for yourself. What you hear shows who said it. Call one action when you need to act, are addressed or have something new and important to say, or \
+    do_nothing to stay silent and give others a turn to speak. Every action takes how strongly you want to act now; \
     speak also takes words that show who they are for. The GM decides whether your \
     action happens, and others may act first or at the same time.\
     """
@@ -287,6 +287,9 @@ intervention_request = """\
     {actor} is about to act: a `{tool}` request with arguments {arguments}. Act to \
     intervene, or do nothing.\
     """
+
+# Last thing an NPC reads when the words it answers came from another NPC.
+worth_adding = "Do you have something new and important to say? If not, call do_nothing."
 
 # Added to every action an NPC is offered.
 eagerness = "How strongly you want to act now: 1 mild, 2 moderate, 3 strong."

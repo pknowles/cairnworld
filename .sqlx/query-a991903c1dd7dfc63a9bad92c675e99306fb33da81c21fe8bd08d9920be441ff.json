@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM npc_agent WHERE npc_agent.character_id = speech.speaker_character_id) AS \"npc!: bool\" FROM npc_response_source JOIN message ON message.id = npc_response_source.message_id JOIN speech ON speech.action_id = message.action_id WHERE npc_response_source.collection_id = ? ORDER BY npc_response_source.message_id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "npc!: bool",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a991903c1dd7dfc63a9bad92c675e99306fb33da81c21fe8bd08d9920be441ff"
+}

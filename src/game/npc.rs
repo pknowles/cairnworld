@@ -76,6 +76,17 @@ where
         let mut inference_id = None;
         let result: Result<()> = async {
             budget.spend(0).context("the discussion's budget")?;
+            // Another NPC's words invite a reply; ask for something worth adding
+            // before the NPC chooses, so replies to replies die out.
+            if self.store.last_heard_from_npc(&collection).await? {
+                self.store
+                    .append_instruction(
+                        claim.branch,
+                        &Message::text(Role::User, &prompts::current()?.npc.worth_adding),
+                        claim.sequence_id,
+                    )
+                    .await?;
+            }
             let (decision_inference, call, decision) = self
                 .ask_npc(
                     world,

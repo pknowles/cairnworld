@@ -659,7 +659,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   it. The world worker runs one `NpcStep` at a time at lowest priority
   (`Store::next_npc_step`, none while draining): Refresh (stale
   `group.scene_revision`), Decide (one recorded inference per NPC, exactly one
-  `do_nothing` or an action, the same `action_kinds` a player is offered plus eagerness 1 to 3), Select (highest
+  `do_nothing` or an action, the same `action_kinds` a player is offered plus eagerness 1 to 3;
+  when the newest speech answered was an NPC's (`Store::last_heard_from_npc`) the decision
+  ends with the `npc.worth_adding` instruction, which curbs NPC-to-NPC chatter), Select (highest
   eagerness; a tie of speech all win, any other tie is picked at random), Execute (one selected utterance per step:
   a pending action for that NPC and an ordinary single-action GM turn through
   `arbitrate`, so tied replies are approved one at a time and the round stays

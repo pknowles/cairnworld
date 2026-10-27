@@ -6742,6 +6742,37 @@ mod tests {
         assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
     }
 
+    #[tokio::test]
+    async fn an_npc_is_asked_for_something_new_only_when_another_npc_spoke_last() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        talk(
+            &scene,
+            [
+                propose("Ask the miller.", &speaker, 1),
+                propose("It is in the hut.", &speaker, 3),
+                approve(2),
+                narrate("The hut is quiet."),
+                do_nothing(),
+            ],
+        )
+        .await;
+
+        let question = prompts::current().unwrap().npc.worth_adding.clone();
+        let requests = scene.requests.lock().unwrap();
+        let asked: Vec<_> = requests
+            .iter()
+            .filter(|request| request.tools.iter().any(|tool| tool.name == "do_nothing"))
+            .map(|request| match &request.messages.last().unwrap().content {
+                MessageContent::Text(text) => *text == question,
+                _ => false,
+            })
+            .collect();
+        // Both NPCs answer the player's speech without it; the loser then
+        // reconsiders after the winner's speech, with it last.
+        assert_eq!(asked, [false, false, true]);
+    }
+
     fn propose_taking(item: &str, eagerness: u8) -> Response {
         tool_call(
             "take",

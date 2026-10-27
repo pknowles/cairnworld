@@ -637,6 +637,24 @@ impl Store {
         })
     }
 
+    /// Whether the newest speech a collection answers was spoken by an NPC.
+    pub async fn last_heard_from_npc(&self, collection: &ResponseCollection) -> Result<bool> {
+        let heard = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM npc_agent WHERE npc_agent.character_id = speech.speaker_character_id) \
+             AS \"npc!: bool\" \
+             FROM npc_response_source \
+             JOIN message ON message.id = npc_response_source.message_id \
+             JOIN speech ON speech.action_id = message.action_id \
+             WHERE npc_response_source.collection_id = ? \
+             ORDER BY npc_response_source.message_id DESC LIMIT 1",
+            collection.id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("finding who spoke last")?;
+        Ok(heard.unwrap_or(false))
+    }
+
     /// A sequence caused by what a collection answers: the messages it received
     /// (only the one NPC's own, for that NPC's decision), or the winners'
     /// proposals.
