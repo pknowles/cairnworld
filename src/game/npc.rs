@@ -82,7 +82,7 @@ where
                 self.store
                     .append_instruction(
                         claim.branch,
-                        &Message::text(Role::User, &prompts::current()?.npc.worth_adding),
+                        &Message::text(Role::User, &prompts::current()?.npc.after_npc_speech),
                         claim.sequence_id,
                     )
                     .await?;

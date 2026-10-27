@@ -6758,7 +6758,7 @@ mod tests {
         )
         .await;
 
-        let question = prompts::current().unwrap().npc.worth_adding.clone();
+        let question = prompts::current().unwrap().npc.after_npc_speech.clone();
         let requests = scene.requests.lock().unwrap();
         let asked: Vec<_> = requests
             .iter()

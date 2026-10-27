@@ -289,7 +289,7 @@ intervention_request = """\
     """
 
 # Last thing an NPC reads when the words it answers came from another NPC.
-worth_adding = "Do you have something new and important to say? If not, call do_nothing."
+after_npc_speech = "Do you have something new and important to say? If not, call do_nothing."
 
 # Added to every action an NPC is offered.
 eagerness = "How strongly you want to act now: 1 mild, 2 moderate, 3 strong."
