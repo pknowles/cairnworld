@@ -7,9 +7,8 @@ and entrance narration, the four request tools, `committed` and
 `intervention_check` exist.
 
 Not done or not verified:
-- Real-model use of the merged `attempt` kinds and `speak` (public vs
-  `private`; see the whisper-only finding below), and
-  the shared-detail setting on and off on the real model.
+- The shared-detail setting on and off on the real model (the device suite's "routing" check
+  covers the merged `attempt` kinds, public and private `speak` and `take`).
 - The InterventionCheck cases were written without the user review this plan
   requires, and the real-model check does not assert what the asked NPC chose.
 - Natural stopping is measured for two NPCs (experiments/0005-npc-chatter.md); three

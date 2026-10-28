@@ -4035,6 +4035,12 @@ mod tests {
         )
         .await;
         scenario(
+            "routing",
+            120,
+            real_model_player_routes_requests_to_the_right_action(&model),
+        )
+        .await;
+        scenario(
             "committed take",
             120,
             real_model_player_marks_only_a_determined_take_committed(&model),
@@ -4044,6 +4050,46 @@ mod tests {
             "SUITE total: {:.0} s",
             suite_started.elapsed().as_secs_f32()
         );
+    }
+
+    /// The answer of a GM that approves the action it was just presented and then
+    /// narrates as a real one does (nothing for conveyed speech); `None` when the
+    /// request is not the GM's. Only the GM is offered approve_action.
+    fn mechanical_gm(request: &crate::llm::Request) -> Result<Option<Response>> {
+        if !request
+            .tools
+            .iter()
+            .any(|tool| tool.name == "approve_action")
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            match &request
+                .messages
+                .last()
+                .context("an empty GM request")?
+                .content
+            {
+                MessageContent::Text(text) => {
+                    let action_id: i64 = text
+                        .split("takes action ")
+                        .nth(1)
+                        .and_then(|rest| rest.split(':').next())
+                        .and_then(|id| id.trim().parse().ok())
+                        .with_context(|| format!("no action id in the GM request: {text}"))?;
+                    tool_call(
+                        "approve_action",
+                        serde_json::json!({"action_id": action_id}),
+                    )
+                }
+                content
+                    if format!("{content:?}").contains(&prompts::current()?.gm.speech_conveyed) =>
+                {
+                    tool_call("narrate_nothing", serde_json::json!({}))
+                }
+                _ => narrate("It is done."),
+            },
+        ))
     }
 
     /// The player agent and the GM are scripted; the NPCs (and anything else
@@ -4076,44 +4122,8 @@ mod tests {
                     .pop_front()
                     .context("the scripted player agent ran out of responses");
             }
-            // Only the GM is offered approve_action: approve the action it was
-            // just presented, then narrate once the tool result is back.
-            if request
-                .tools
-                .iter()
-                .any(|tool| tool.name == "approve_action")
-            {
-                return Ok(
-                    match &request
-                        .messages
-                        .last()
-                        .context("an empty GM request")?
-                        .content
-                    {
-                        MessageContent::Text(text) => {
-                            let action_id: i64 = text
-                                .split("takes action ")
-                                .nth(1)
-                                .and_then(|rest| rest.split(':').next())
-                                .and_then(|id| id.trim().parse().ok())
-                                .with_context(|| {
-                                    format!("no action id in the GM request: {text}")
-                                })?;
-                            tool_call(
-                                "approve_action",
-                                serde_json::json!({"action_id": action_id}),
-                            )
-                        }
-                        // Like a real GM: nothing to add to speech already conveyed.
-                        content
-                            if format!("{content:?}")
-                                .contains(&prompts::current()?.gm.speech_conveyed) =>
-                        {
-                            tool_call("narrate_nothing", serde_json::json!({}))
-                        }
-                        _ => narrate("It is done."),
-                    },
-                );
+            if let Some(answer) = mechanical_gm(&request)? {
+                return Ok(answer);
             }
             self.real.complete(request, on_token).await
         }
@@ -10342,6 +10352,92 @@ mod tests {
             failed, 0,
             "the discussion failed ({errors:?}); utterances: {utterances:?}"
         );
+    }
+
+    /// The player agent is the real model; the GM and NPCs are mechanical.
+    /// `chosen` collects the player agent's tool calls.
+    struct RealPlayerOnly {
+        real: Arc<MistralRsBackend>,
+        chosen: Arc<Mutex<Vec<ToolCall>>>,
+    }
+
+    impl Backend for RealPlayerOnly {
+        async fn complete(
+            &self,
+            request: crate::llm::Request,
+            on_token: impl FnMut(&str) + Send,
+        ) -> Result<Response> {
+            if request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "party_presence")
+            {
+                let response = self.real.complete(request, on_token).await?;
+                if let Content::ToolCalls(calls) = &response.content {
+                    self.chosen.lock().unwrap().extend(calls.iter().cloned());
+                }
+                return Ok(response);
+            }
+            Ok(mechanical_gm(&request)?.unwrap_or_else(do_nothing))
+        }
+    }
+
+    /// Natural requests reach the right action: each attempt kind, public and
+    /// private speech, and taking. A fresh game per request keeps the context
+    /// small; 5 of 5 repeats of every request matched when this was measured.
+    async fn real_model_player_routes_requests_to_the_right_action(model: &DeviceModel) {
+        let (_, _model_path, _sampling, limits) = model.parts();
+        let requests = [
+            ("Look at the rear window.", "attempt", Some(("kind", "look"))),
+            (
+                "Search the floor by the fire carefully for any clues.",
+                "attempt",
+                Some(("kind", "investigate")),
+            ),
+            ("Open the rear window.", "attempt", Some(("kind", "open"))),
+            (
+                "Ask the GM what the hut is built from.",
+                "attempt",
+                Some(("kind", "ask")),
+            ),
+            ("Say hello to everyone.", "speak", None),
+            (
+                "Quietly tell Toma only that I will help him.",
+                "speak",
+                Some(("private", "true")),
+            ),
+            ("Pick up the flour sack.", "take", None),
+        ];
+        let mut wrong = Vec::new();
+        for (line, tool, expected) in requests {
+            let chosen = Arc::new(Mutex::new(Vec::new()));
+            let backend = RealPlayerOnly {
+                real: Arc::clone(&model.backend),
+                chosen: Arc::clone(&chosen),
+            };
+            let (game, _store, _db, first, second) =
+                two_player_bread_thief_game_with_limits(backend, limits).await;
+            let _first_connection = game.connect(&first).await.unwrap();
+            let _second_connection = game.connect(&second).await.unwrap();
+            game.player_message(first.clone(), line)
+                .await
+                .expect("the player's turn");
+            let first_call = chosen.lock().unwrap().first().cloned();
+            let matches = first_call.as_ref().is_some_and(|call| {
+                let arguments: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_default();
+                call.name == tool
+                    && expected.is_none_or(|(key, value)| {
+                        arguments[key].as_str().unwrap_or("") == value
+                            || arguments[key].to_string() == value
+                    })
+            });
+            if !matches {
+                wrong.push(format!("{line:?} -> {first_call:?}"));
+            }
+            game.shutdown().await.unwrap();
+        }
+        assert!(wrong.is_empty(), "wrong routing: {wrong:#?}");
     }
 
     /// What one player says is understood by the other player's own agent: the
