@@ -6780,6 +6780,120 @@ mod tests {
         }
     }
 
+    /// One player turn: a take is approved and its narration delivered, then the
+    /// player's next action asks Toma to intervene. `hold` stops the player's
+    /// inference that follows the delivered narration.
+    async fn take_then_a_second_take_that_asks_toma(scene: &SpeechScene, toma: i64) {
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            approve(1),
+            narrate("You lift the flour sack."),
+            tool_call(
+                "take",
+                serde_json::json!({"item": "emergency cache", "committed": false}),
+            ),
+            intervention_check(2, &[toma]),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn replies_wait_for_the_enclosing_turn_and_a_failed_check_in_it_keeps_earlier_effects() {
+        let scene = speech_scene().await;
+        let toma = character_id(&scene, "Toma").await;
+        let (reached, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // Request 4 is the player's inference after the GM delivered its narration.
+        *scene.gate.lock().unwrap() = Some(Gate {
+            request: 4,
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        });
+        take_then_a_second_take_that_asks_toma(&scene, toma).await;
+        // Toma's answer to the check is malformed: eagerness outside 1 to 3.
+        scene.responses.lock().unwrap().push_back(tool_call(
+            "speak",
+            serde_json::json!({"words": "Stop.", "eagerness": 4}),
+        ));
+        let playing = {
+            let game = Arc::clone(&scene.game);
+            let member = scene.first.clone();
+            tokio::spawn(async move { game.player_message(member, "Take everything.").await })
+        };
+        reached.notified().await;
+
+        // The narration is delivered, but its replies wait for the turn to end.
+        for npc in ["Mara", "Toma"] {
+            assert_eq!(
+                narrated_to_npc(&scene.store, npc).await,
+                ["You lift the flour sack."]
+            );
+            assert_eq!(decisions_asked(&scene, npc).await, 0);
+        }
+        assert_eq!(requests_made(&scene), 4);
+        release.notify_one();
+        let _ = playing.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // The check failed visibly, attributed to asking Toma.
+        let errors = failed_sequences(&scene).await;
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("whether to intervene") && error.contains("eagerness 4")),
+            "{errors:?}"
+        );
+        // What the turn had already done stays, and nothing unsuccessful follows.
+        assert_eq!(holder_of(&scene, "flour sack").await, Some(scene.names[0].clone()));
+        assert_eq!(holder_of(&scene, "emergency cache").await, None);
+        assert_eq!(
+            narrated_to_npc(&scene.store, "Toma").await,
+            ["You lift the flour sack."]
+        );
+        for npc in ["Mara", "Toma"] {
+            assert_eq!(decisions_asked(&scene, npc).await, 0, "{npc} replied to a failed turn");
+        }
+        let inferences: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inference")
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(inferences, 6, "Toma's failed answer is one of the turn's inferences");
+        // The world still accepts input.
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend([response(Content::Text("Hello again.".into()))]);
+        scene
+            .game
+            .player_message(scene.second.clone(), "Hello?")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_check_inside_a_turn_spends_the_turns_own_budget() {
+        let scene = speech_scene_with_limits(Limits {
+            max_inferences_total: 5,
+            ..Limits::default()
+        })
+        .await;
+        let toma = character_id(&scene, "Toma").await;
+        take_then_a_second_take_that_asks_toma(&scene, toma).await;
+        let _ = scene
+            .game
+            .player_message(scene.first.clone(), "Take everything.")
+            .await;
+
+        let errors = failed_sequences(&scene).await;
+        assert!(
+            errors.iter().any(|error| error.contains("max_inferences_total")),
+            "{errors:?}"
+        );
+        assert_eq!(requests_made(&scene), 5, "Toma was not given a fresh allowance");
+    }
+
     fn propose_taking(item: &str, eagerness: u8) -> Response {
         tool_call(
             "take",

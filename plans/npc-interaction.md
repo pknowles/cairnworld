@@ -10,10 +10,6 @@ Not done or not verified:
 - Real-model use of the merged `attempt` kinds and `speak` (public vs
   `private`; see the whisper-only finding below), and
   the shared-detail setting on and off on the real model.
-- Verify the remaining enclosing-turn admission/failure and InterventionCheck
-  coverage described under Remaining lifecycle checks and their authority.
-  These are existing behaviour checks, not three new production features or
-  a requirement for three separate test scenarios.
 - The InterventionCheck cases were written without the user review this plan
   requires, and the real-model check does not assert what the asked NPC chose.
 - Natural stopping is measured for two NPCs (experiments/0005-npc-chatter.md); three
