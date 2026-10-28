@@ -10,9 +10,10 @@ Not done or not verified:
 - Real-model use of the merged `attempt` kinds and `speak` (public vs
   `private`; see the whisper-only finding below), and
   the shared-detail setting on and off on the real model.
-- Scripted cases for a producer that is paused or fails after delivering
-  narration (follow-ups wait or fail visibly), and for a failing
-  InterventionCheck (shared budget, retained effects).
+- Verify the remaining enclosing-turn admission/failure and InterventionCheck
+  coverage described under Remaining lifecycle checks and their authority.
+  These are existing behaviour checks, not three new production features or
+  a requirement for three separate test scenarios.
 - The InterventionCheck cases were written without the user review this plan
   requires, and the real-model check does not assert what the asked NPC chose.
 - Natural stopping is measured for two NPCs (experiments/0005-npc-chatter.md); three
@@ -423,9 +424,11 @@ rename-only checkpoint is needed.
   dirty flag or checking the last history entry alone cannot represent these
   states. Do not replace working scheduling with recursive calls or detached
   per-NPC tasks.
-- Preserve admission after the originating turn has unwound and completed
-  successfully. Registering a received message does not immediately start an
-  NPC inference inside its producer's tool stack. Resolve readiness from that
+- Preserve automatic follow-up admission after the enclosing originating
+  chat-turn has unwound and completed successfully. The child GM call ends with
+  terminal narration, but an enclosing player turn can continue after delivery.
+  Explicit InterventionCheck decisions still run inside the unresolved turn;
+  they are not automatic follow-ups. Resolve readiness from that
   message's producing inference/sequence or referenced action sequence, including
   standalone narration, rather than retaining the speech-only readiness join.
   A failed originating turn leaves its committed content intact but fails its
@@ -473,7 +476,55 @@ separate suite for every delivery kind:
 | Narration tools and narration without a character action | Group/presence uses `narrate_group` and links replies to received messages and the actual producing inference/text. Exercise all four tools: a standard group narration, actor-and-others, addressed characters and nothing. A mixed response, two narration calls, plain text, an actor tool with no actor, unresolved actions or foreign recipients deliver nothing for that attempt and return the error to the GM, which runs again; prior action effects remain. Any such error fails a real-model test. The narration call needs no closing inference or synthetic action record. No narration-only opportunity is stranded by speech-only queries. |
 | Input arrives during a decision | Two delivered perceptions are retained; stale unexecuted proposals do not run, and the next decision sees the received messages. DoNothing consumes the pending sources; bookkeeping and unchanged history cannot restart the conversation. |
 | Migration and all readers | Existing speech, IDs/frozen names, prefixes, authored/legacy rendering and historical request reconstruction survive migration. Model context, live chat, reload, compaction and Developer Mode show the same received content and its true cause. |
-| Worker and lifecycle | Preserve eagerness/tied selection, other-group progress, raised hands, shutdown between complete steps and crash failure without replay. Pause a producer after delivery: no NPC decision starts before its successful completion, and narration retains the same causal budget. Fail the producer: committed messages remain and follow-ups fail visibly. Disconnecting a browser cannot cancel a queued player turn; check completion and its reply, not only stored input. |
+| Worker and lifecycle | Preserve eagerness/tied selection, other-group progress, raised hands, shutdown between complete steps and crash failure without replay. Automatic follow-ups wait for the enclosing originating turn to succeed; failure retains committed effects and stops its pending follow-ups visibly. Use the concrete checks below rather than inventing a GM inference after terminal narration. Disconnecting a browser cannot cancel a queued player turn; check completion and its reply, not only stored input. |
+
+### Remaining lifecycle checks and their authority
+
+The declarations require response opportunities at the end of a chat-turn
+([Observed Events](../user_declarations.md#observed-events)) and describe following
+up only after the calling stack returns
+([NPC Interaction](../user_declarations.md#npc-interaction)). Errors propagate to
+the user with their causal context
+([Agent syntax](../user_declarations.md#agent-syntax-and-tool-calls)). The user's
+[failure/history clarification](../user_exerpts.md#2026-10-20-failure-results-in-history)
+requires stopping a failed turn without undoing what already happened; the
+[safety-bound instruction](../user_exerpts.md#safety-bounds-on-the-agent-loop)
+includes nested inference in the original total. The design applies those rules
+to queued automatic replies and nested interventions. No new game mechanism is
+authorized by these test cases.
+
+Use the real Store/Game/agent paths with existing ScriptedBackend responses,
+request recording and its existing gate. Gate the enclosing player's inference
+after a completed GM action delivered narration. A GM call cannot narrate and
+then request another inference: the narration tool is terminal. Do not change
+production narration or add a test-only production pause to manufacture that setup.
+
+| Check | Concrete setup and evidence |
+| --- | --- |
+| Successful enclosing turn | Approve a real character action and deliver GM narration, then hold the player's next inference at the existing backend gate. Confirm delivery in recipient histories and that the producing sequence is unfinished. Automatic reply decisions are not yet eligible. Release the player to finish, then observe the initial follow-ups. Script DoNothing to end them; do not assert one NPC inference forever during a legitimate conversation. |
+| Failed enclosing turn | After the same delivered content, fail a later operation in that player turn. The existing sequence/discussion error is visible, committed content/state remains and no automatic replies caused by that failed turn execute. A subsequent player message is still accepted. Do not create new per-NPC error messages or undo delivery. |
+| Failed InterventionCheck | Make an earlier real action succeed within the enclosing player turn, then have a later action's GM request an NPC intervention whose single decision is malformed. Check the actual prior state/message, the nested error's link to InterventionCheck, closed tool history and the original budget accounting including the failed NPC inference. An explicit intervention decision here is permitted; automatic follow-up discussion is not. No hidden retry or fresh allowance. |
+
+"Retained effects" means actual committed changes and deliveries: for example,
+an earlier transfer's item holder and its narration, or approved speech and its
+hearer entries. It does not mean success for the action whose intervention failed,
+an unexecuted proposal, or final narration from that still-unfinished GM call.
+
+These checks are assertions to add to suitable existing scenarios where coverage
+is missing, not a demand for a new suite or one test per row. The failed
+InterventionCheck can supply the failure in the enclosing-turn scenario, covering
+both failure rows together. Reuse existing budget/failure tests where they cover
+the same path. If nesting needs a separate small-limit budget check, use scripted
+decisions, not repeated real-model runs.
+
+Use gate reached/released notifications rather than elapsed sleeps. A request-log
+pause check alone can merely confirm the world's existing serialization: also
+check actual response eligibility through the production Store query when that is
+the missing coverage. Use causal invocation/source links to distinguish automatic
+responses from explicitly requested interventions. A plausible broken readiness
+check, lost prior effect, swallowed nested error or reset shared counter must make
+the corresponding assertion fail. No new scheduler, rollback/recovery framework,
+retry coach or GPU scenario is needed for this verification.
 
 Use scripted Store/Game paths for routing, permission, source links and migration
 checks. Exercise changed tool descriptions/context through the real chat path

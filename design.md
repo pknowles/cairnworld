@@ -1538,10 +1538,25 @@ generated narration is delivered in its own transaction after generation, withou
 holding an action transaction across inference. Forward migrations preserve
 historical attribution and request reconstruction. Do not force speech fields
 onto all action kinds or introduce a new observation table per kind.
-Pending responses become eligible only after their originating turn completes
-successfully and unwinds; changing the source from speech to narration does not
-reset its causal budget. A failed producer retains committed messages but fails
-its pending follow-ups visibly. Resolve readiness through message/action
+Pending automatic responses become eligible only after the enclosing originating
+chat-turn completes successfully and its agent call stack unwinds. This follows
+[Observed Events](user_declarations.md#observed-events) and the scheduling example
+in [NPC Interaction](user_declarations.md#npc-interaction). For narration inside a
+player action, the GM's terminal narration ends the child GM call; the player
+agent can still continue after that narration is delivered. It is completion of
+the enclosing player turn, not merely that GM call, that admits automatic replies.
+Standalone presence work has its own originating turn. InterventionCheck's
+explicit child decisions are different: they run inside the turn to help resolve
+its action, not as automatic follow-up discussion.
+
+Changing the source from speech to narration does not reset its causal budget.
+A failed originating turn retains committed messages/actions but stops its pending
+automatic follow-ups under the existing sequence/discussion failure handling.
+This applies the declared error propagation and the user's
+[no-continuation/history clarification](user_exerpts.md#2026-10-20-failure-results-in-history);
+it adds no rollback, new error subsystem or per-recipient failure notification.
+The error remains visible through the ordinary player/developer paths, and a new
+player input can start a subsequent turn. Resolve readiness through message/action
 provenance, without a speech-only dependency or re-entering an active agent.
 
 Speech is a completed game event, not a call awaiting an answer. GM arbitration
@@ -1655,6 +1670,16 @@ reaction directly, receive its actual result, then decide the original action.
 Record these intentions through existing child invocations and pending actions
 inside the current turn, not scheduled follow-up responses. Only subsequent dialogue
 uses the world worker's pending NPC responses after the original stack unwinds.
+Nested decisions use the same originating-turn budget, including a decision that
+fails to parse, as required by the user's
+[recursive-inference safety bounds](user_exerpts.md#safety-bounds-on-the-agent-loop).
+An NPC single-decision protocol failure propagates with its InterventionCheck
+context and ends that turn. Previously committed effects are the actual approved
+state changes and delivered messages, not mere approvals of unexecuted proposals.
+They may come from an earlier action in the enclosing player turn or an earlier
+approved reaction. A GM call still collecting interventions has not yet delivered
+its final narration. Ordinary GM tool-argument rejection retains its separately
+specified error-result handling; it is not this NPC protocol-failure case.
 This uses the existing action/roll operations, not a ConditionalApprove tool,
 general dependency engine or dynamically generated rule language. Actions that
 can be tentative carry committed intent (Take, Give, Drop and Place, default false): false
