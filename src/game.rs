@@ -4104,7 +4104,14 @@ mod tests {
                                 serde_json::json!({"action_id": action_id}),
                             )
                         }
-                        _ => narrate("It is said."),
+                        // Like a real GM: nothing to add to speech already conveyed.
+                        content
+                            if format!("{content:?}")
+                                .contains(&prompts::current()?.gm.speech_conveyed) =>
+                        {
+                            tool_call("narrate_nothing", serde_json::json!({}))
+                        }
+                        _ => narrate("It is done."),
                     },
                 );
             }
@@ -6740,6 +6747,37 @@ mod tests {
             "the loser's superseded proposal is never said: {chat:?}"
         );
         assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn every_npc_decision_ends_with_the_question_of_whether_it_has_something_new() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        talk(
+            &scene,
+            [
+                propose("Ask the miller.", &speaker, 1),
+                propose("It is in the hut.", &speaker, 3),
+                approve(2),
+                narrate("The hut is quiet."),
+                do_nothing(),
+            ],
+        )
+        .await;
+
+        let question = prompts::current().unwrap().npc.before_deciding.clone();
+        let requests = scene.requests.lock().unwrap();
+        let decisions: Vec<_> = requests
+            .iter()
+            .filter(|request| request.tools.iter().any(|tool| tool.name == "do_nothing"))
+            .collect();
+        assert_eq!(decisions.len(), 3, "two answers and one reconsideration");
+        for decision in decisions {
+            let MessageContent::Text(last) = &decision.messages.last().unwrap().content else {
+                panic!("a decision ended with something other than text");
+            };
+            assert_eq!(*last, question);
+        }
     }
 
     fn propose_taking(item: &str, eagerness: u8) -> Response {

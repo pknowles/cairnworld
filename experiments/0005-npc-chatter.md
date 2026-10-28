@@ -58,6 +58,29 @@ new and important to say? If not, call do_nothing."):
 The last row needs no count of what the NPC has said: a player's speech never
 gets the question, so a player is always answered normally.
 
+## Outcome: the role and the question on every decision
+
+The scripted GM in the tests above narrated "It is said." after every line; a real GM
+adds nothing to speech, so those counts overstate what players see. Re-measured with
+the GM calling `narrate_nothing` for speech. NPC lines until the discussion ends,
+three runs each (the first line answers the player's question to Toma):
+
+| Role | Question before each decision | Lines per run |
+|---|---|---|
+| "You are the character…" | none | 21, 22, 23 (ran until the inference budget) |
+| "You operate a character in an RPG scene…" | none | 15, 13, 14 |
+| "You are the character…" | "Respond as your character would…" | 12, 14, 14 |
+| "You operate a character…" | "Respond as your character would…" | 13, 6, 11 |
+| "You are the character…" | "Do you have something new and important to say? If not, call do_nothing." | 0, 0, 0: the player was not answered |
+| "You operate a character in an RPG scene…" | same | 1, 1, 1 |
+
+The role framing decides whether the question lets an addressed character answer.
+Chosen: the "operate" role (without "scene") and the "Do you have…" question as the
+last message of every NPC decision, for every character, with no check on who spoke.
+Final wording, eight runs, a question put to Toma: 1 line every time (Toma answers,
+Mara stays silent). Four runs putting it to Mara: Mara answered every time; two runs
+ended there, two with Toma and Mara adding one line each.
+
 ## Limits of these tests
 
 Only two NPCs are in the scene, so every NPC line addresses the other NPC and "are

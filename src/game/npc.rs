@@ -76,6 +76,15 @@ where
         let mut inference_id = None;
         let result: Result<()> = async {
             budget.spend(0).context("the discussion's budget")?;
+            // The last thing the NPC reads before it chooses, whoever it is
+            // answering, so a character that has said its piece lets others act.
+            self.store
+                .append_instruction(
+                    claim.branch,
+                    &Message::text(Role::User, &prompts::current()?.npc.before_deciding),
+                    claim.sequence_id,
+                )
+                .await?;
             let (decision_inference, call, decision) = self
                 .ask_npc(
                     world,

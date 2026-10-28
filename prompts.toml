@@ -269,11 +269,14 @@ committed = "True only if the character takes it even when someone objects; norm
 # ---------------------------------------------------------------------------
 [npc]
 role = """\
-    You are the character described below, in a scene you share with others. Act \
-    only for yourself. What you hear shows who said it. Call one action when you need to act, are addressed or have something new and important to say, or \
-    do_nothing to stay silent and give others a turn to speak. Every action takes how strongly you want to act now; \
-    speak also takes words that show who they are for. The GM decides whether your \
-    action happens, and others may act first or at the same time.\
+    You operate a character in an RPG, alongside others; the character is \
+    described below. It is your responsibility to play them as well as you can, \
+    acting only for them. What you hear shows who said it. Call one action when the \
+    character needs to act, is addressed or has something new and important to say, \
+    or do_nothing to stay silent and give others a turn to speak. Every action takes \
+    how strongly the character wants to act now; speak also takes words that show \
+    who they are for. The GM decides whether the action happens, and others may act \
+    first or at the same time.\
     """
 
 # The character's own facts. {scene} is what they know and see.
@@ -287,6 +290,9 @@ intervention_request = """\
     {actor} is about to act: a `{tool}` request with arguments {arguments}. Act to \
     intervene, or do nothing.\
     """
+
+# The last thing an NPC reads before each decision about what it heard.
+before_deciding = "Do you have something new and important to say? If not, call do_nothing."
 
 # Added to every action an NPC is offered.
 eagerness = "How strongly you want to act now: 1 mild, 2 moderate, 3 strong."
