@@ -939,3 +939,26 @@ character; the GM prompts say character where they meant a controller; the
 `[game]` setting is `characters_share_narration`. The player's and NPC's own scene
 packets still differ in shape (`npcs` for a player, `present` for an NPC), and the
 declaration could be updated to state the rule rather than ask it.
+
+## 2026-10-28: NPC chatter: stop when there is nothing new, uniformly for characters
+
+Asked to reduce NPCs endlessly answering each other: "I would ideally like NPCs to
+say at most 2 things before calling do_nothing" (a limit, not a target: saying nothing
+or one line is as good). On what should end a conversation: "once an NPC has said
+what it has to say, there is no point rehashing the same old crap. this is what
+should cause the conversation to wait for a player to respond. this is how
+conversations work in every day life."
+
+On how to frame the NPC: "I also have a hunch we should stop prompting NPCs that
+they *are* the character and instead that they operate/control the character in an
+RPG and it is their responsibility to play the best NPC they can." The measurements
+(experiments/0005-npc-chatter.md) bore this out: the "operate" role is what lets an
+addressed character answer while the closing question ends the exchange.
+
+On the design: "one holistic solution. handle characters. not PCs vs NPCs" and "stopping
+chatter is important though, and finding the right prompts to use is one of the
+current higher priorities, beyond of course writing holistic simple code that does
+not have edge cases and bandaids". So the question ends every NPC decision, with no
+check on who spoke last. Open ideas the user suggested: answer when addressed or
+when "a GM would have the character say or do something", and a "short and
+to-the-point" preference.

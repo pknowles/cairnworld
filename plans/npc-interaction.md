@@ -15,8 +15,9 @@ Not done or not verified:
   InterventionCheck (shared budget, retained effects).
 - The InterventionCheck cases were written without the user review this plan
   requires, and the real-model check does not assert what the asked NPC chose.
-- Restraint and natural stopping (user-owned tuning), and the open policy on
-  raised hands when another player acts.
+- Natural stopping is measured for two NPCs (experiments/0005-npc-chatter.md); three
+  or more NPCs and entrance narration are untested. The open policy on raised hands
+  when another player acts remains user-owned.
 
 ## Goal and authority
 
