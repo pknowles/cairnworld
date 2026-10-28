@@ -40,6 +40,9 @@ there yet". Remove and archive only verified completions.
 - [Storyteller gameplay](storyteller-gameplay.md): public/private backgrounds,
   creation approvals, entry placement, encounter guidance, event updates and
   replacements, reusing initialized world objects and the completed rules.
+- [Agent tuning](agent-tuning.md): measured failures of agent behaviour (GM privacy after a
+  merge, whether the GM can name groups to split and merge) to tune once the features
+  they depend on exist.
 - [Campaign completion](campaign-completion.md): event-driven ending,
   talk-only epilogue choices, final account and closed play.
 

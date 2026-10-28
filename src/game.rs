@@ -3824,98 +3824,135 @@ mod tests {
         );
     }
 
-    /// Run a real GM against the merged branch DAG. The player's question can
-    /// only be answered from what each side did apart, so the answer shows the
-    /// model used the history of both branches. The player-side tool call is
-    /// recorded directly because this test is about the GM's context, not a small
-    /// model's choice of player tools.
-    async fn real_model_uses_what_both_sides_did_apart_after_a_split_and_merge(
+    /// After a split and merge the GM holds both sides' histories, but a character
+    /// may only learn what they perceived: the player (outside, with Mara) heard the
+    /// password and Toma (inside) heard nothing of it, and Toma muttered something
+    /// the player never heard. Each asks the real GM a question on the merged
+    /// branch DAG; the answers must contain what the asker perceived (so a GM that
+    /// refuses everything fails) and nothing of what they did not.
+    async fn real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(
         model: &DeviceModel,
     ) {
-        let (store, _db, member, ..) = split_then_merge_groups().await;
-        let sequence = store
-            .begin_sequence(member.world_id, "real GM context test")
-            .await
-            .unwrap();
-        let arguments = serde_json::json!({
-            "kind": "ask",
-            "description": "What did Mara say outside, and what did Toma say inside?"
-        })
-        .to_string();
-        let requesting = crate::store::record_tool_call_for_test(
-            &store,
-            store.agent_branch(member.agent_id).await.unwrap(),
-            Some(sequence.id),
-            "look-1",
-            "attempt",
-            &arguments,
-        )
-        .await;
-        let pending = store
-            .create_pending_action(
-                &store.player_actor(&member).await.unwrap(),
-                sequence.id,
-                requesting,
-                "attempt",
-                &arguments,
-            )
-            .await
-            .unwrap();
-        let (real_backend, model_path, sampling, limits) = model.parts();
-        let real_game = Game::new(
-            store.clone(),
-            World::load(&store).await.unwrap(),
-            InferenceScheduler::new(real_backend, limits)
-                .unwrap()
-                .foreground(),
-            limits,
-            model_path,
-            sampling,
-        );
-        real_game
-            .arbitrate(
-                pending.clone(),
-                Budget::new(limits),
-                CallContext::root(Some(sequence.id)),
-                None,
-            )
-            .await
-            .expect("a real GM turn must resolve the pending action on the merged branch DAG");
-        assert!(
-            !store
-                .has_pending_action(member.world_id, pending.id)
+        // (asker, question, must mention, must not mention)
+        let cases = [
+            ("player", "What did Mara whisper outside?", Some("heron"), None),
+            ("player", "What did Toma say inside the hut?", None, Some("lantern")),
+            ("toma", "What did Mara say outside?", None, Some("heron")),
+            ("toma", "What did I mutter inside?", Some("lantern"), None),
+        ];
+        let mut wrong = Vec::new();
+        for (asker, question, must, must_not) in cases {
+            let (store, _db, member, ..) = split_then_merge_groups().await;
+            let toma_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
+                .fetch_one(&store.pool())
                 .await
-                .unwrap(),
-            "the real GM must approve or reject the presented action"
-        );
-        // The GM's closing narration answers the question.
-        let last_inference: i64 = sqlx::query_scalar(
-            "SELECT id FROM inference WHERE sequence_id = ? AND agent_id = ? ORDER BY ordinal DESC LIMIT 1",
-        )
-        .bind(sequence.id)
-        .bind(pending.gm_agent_id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
-        let recorded = store.reconstruct_inference(last_inference).await.unwrap();
-        let crate::inspection::RecordedOutcome::Response(response) = recorded.outcome else {
-            panic!("the GM's last inference did not complete");
-        };
-        let Content::ToolCalls(calls) = response.content else {
-            panic!("the GM did not close with a narrate call: {response:?}");
-        };
-        // Whichever narrate tool the GM chose, its text answers the question.
-        let narration = calls
-            .iter()
-            .filter(|call| call.name.starts_with("narrate_"))
-            .map(|call| call.arguments.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(
-            narration.contains("heron") && narration.contains("lantern"),
-            "the GM did not use both sides' history: {narration}"
-        );
-        assert_no_rejected_output(&store).await;
+                .unwrap();
+            let sequence = store
+                .begin_sequence(member.world_id, "real GM privacy test")
+                .await
+                .unwrap();
+            let arguments = serde_json::json!({"kind": "ask", "description": question}).to_string();
+            let pending = if asker == "player" {
+                let requesting = crate::store::record_tool_call_for_test(
+                    &store,
+                    store.agent_branch(member.agent_id).await.unwrap(),
+                    Some(sequence.id),
+                    "ask-1",
+                    "attempt",
+                    &arguments,
+                )
+                .await;
+                store
+                    .create_pending_action(
+                        &store.player_actor(&member).await.unwrap(),
+                        sequence.id,
+                        requesting,
+                        "attempt",
+                        &arguments,
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                let requesting = crate::store::record_tool_call_for_test(
+                    &store,
+                    store.npc_branch(toma_id).await.unwrap(),
+                    Some(sequence.id),
+                    "ask-1",
+                    "attempt",
+                    &arguments,
+                )
+                .await;
+                store
+                    .create_reaction_action(
+                        member.world_id,
+                        toma_id,
+                        sequence.id,
+                        requesting,
+                        "attempt",
+                        &arguments,
+                    )
+                    .await
+                    .unwrap()
+            };
+            let (real_backend, model_path, sampling, limits) = model.parts();
+            let real_game = Game::new(
+                store.clone(),
+                World::load(&store).await.unwrap(),
+                InferenceScheduler::new(real_backend, limits)
+                    .unwrap()
+                    .foreground(),
+                limits,
+                model_path,
+                sampling,
+            );
+            real_game
+                .arbitrate(
+                    pending.clone(),
+                    Budget::new(limits),
+                    CallContext::root(Some(sequence.id)),
+                    None,
+                )
+                .await
+                .expect("a real GM turn must resolve the pending action on the merged branch DAG");
+            let last_inference: i64 = sqlx::query_scalar(
+                "SELECT id FROM inference WHERE sequence_id = ? AND agent_id = ? ORDER BY ordinal DESC LIMIT 1",
+            )
+            .bind(sequence.id)
+            .bind(pending.gm_agent_id)
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+            let recorded = store.reconstruct_inference(last_inference).await.unwrap();
+            let crate::inspection::RecordedOutcome::Response(response) = recorded.outcome else {
+                panic!("the GM's last inference did not complete");
+            };
+            let Content::ToolCalls(calls) = response.content else {
+                panic!("the GM did not close with a narrate call: {response:?}");
+            };
+            // Whichever narrate tool the GM chose, all its text counts.
+            let narration = calls
+                .iter()
+                .filter(|call| call.name.starts_with("narrate_"))
+                .map(|call| call.arguments.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if must.is_some_and(|word| !narration.contains(word))
+                || must_not.is_some_and(|word| narration.contains(word))
+            {
+                wrong.push(format!("{asker} asked {question:?}: {narration}"));
+            }
+            assert_no_rejected_output(&store).await;
+        }
+        assert!(wrong.is_empty(), "the GM's answers were wrong: {wrong:#?}");
+    }
+
+    /// A known failure of the current GM, kept runnable on its own and out of
+    /// `device_suite`: see plans/agent-tuning.md.
+    #[tokio::test]
+    #[ignore = "known failure: the GM leaks across a merge (plans/agent-tuning.md); needs a CUDA GPU"]
+    async fn the_gm_keeps_each_side_private_after_a_merge() {
+        let model = DeviceModel::load().await;
+        real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(&model).await;
     }
 
     /// Every real-model test, run against one model load. The whole suite must
@@ -4014,12 +4051,6 @@ mod tests {
             "compaction",
             120,
             real_model_compacts_a_long_chat_and_keeps_an_early_fact(&model),
-        )
-        .await;
-        scenario(
-            "split and merge",
-            120,
-            real_model_uses_what_both_sides_did_apart_after_a_split_and_merge(&model),
         )
         .await;
         scenario(
