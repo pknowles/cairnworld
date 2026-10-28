@@ -120,3 +120,18 @@ repeating the failing scenarios:
 - Full device suite afterwards: passed (218 s).
 
 - The structured public addressee was then dropped (user declaration: the addressee is up to the character agent, in the text). 	o now only lists a private speech's hearers and is ignored on a public one. Device suite afterwards: passed (232 s).
+
+## Narration tool by the shared-detail setting; the split-and-merge check's failures
+
+Real GM, a player's `look`: with `characters_share_narration` on it called
+`narrate_group` in 5 of 5 runs; off, `narrate_actor_and_others` in the 4 runs seen.
+
+The device suite's "split and merge" check (the GM answers a player's question from
+what each side did apart) fails about one run in four, alone or after the compaction
+check (1 of 6 each). The failing input (3,379 tokens) holds both facts. In the failed
+run the GM approved and narrated in one batch, narrating only the question
+("Adventurer44 asks, ...") instead of the answer. Replaying that exact request 20
+times: 16 answered, 4 did not; with ", then end your turn with a narrate tool." removed
+from the request, 7 approved without narrating (so they would narrate after the
+result) and of the 13 that narrated at once, 10 answered. Neither wording is clearly
+better. The cause is the GM's blind narration, not the NPC changes or the test.

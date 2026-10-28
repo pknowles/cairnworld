@@ -6202,7 +6202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_warning_from_an_npc_can_stop_a_tentative_take_before_it_happens() {
+    async fn an_npcs_spoken_objection_can_stop_a_tentative_take_before_it_happens() {
         let scene = speech_scene().await;
         let toma = character_id(&scene, "Toma").await;
         let speaker = scene.names[0].clone();
