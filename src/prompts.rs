@@ -219,11 +219,37 @@ impl Tools {
                 format!("describing the fields inside `{argument}` of tool {name}")
             })?;
         }
+        strip_generated(&mut schema);
         Ok(ToolDefinition {
             name: name.to_string(),
             description: prompt.description.clone(),
             schema,
         })
+    }
+}
+
+/// Remove what the schema generator adds that says nothing to the model: the
+/// schema URL, the type's title, integer formats and null defaults. They cost
+/// about a tenth of a request (experiments/0006-context-size.md) and replaying
+/// requests without them changed none of the model's choices. The names of an
+/// object's properties are not schema keys, so a property called `format` stays.
+fn strip_generated(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            for key in ["$schema", "title", "format", "default"] {
+                map.remove(key);
+            }
+            for (key, child) in map.iter_mut() {
+                match (key.as_str(), child) {
+                    ("properties", serde_json::Value::Object(properties)) => {
+                        properties.values_mut().for_each(strip_generated)
+                    }
+                    (_, child) => strip_generated(child),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_generated),
+        _ => {}
     }
 }
 
@@ -365,5 +391,25 @@ rolle = \"typo\"",
         });
         assert!(tools.tool("speak", missing).is_err(), "`more` has no text");
         assert!(tools.tool("no_such_tool", schema).is_err());
+    }
+
+    #[test]
+    fn generated_schema_noise_is_removed_but_not_properties_with_the_same_names() {
+        let mut schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Speak",
+            "properties": {
+                "to": {"type": ["integer", "null"], "format": "int64", "default": null},
+                "format": {"type": "string", "title": "Format"},
+            },
+        });
+        strip_generated(&mut schema);
+        assert_eq!(
+            schema,
+            serde_json::json!({"properties": {
+                "to": {"type": ["integer", "null"]},
+                "format": {"type": "string"},
+            }})
+        );
     }
 }
