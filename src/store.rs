@@ -565,13 +565,12 @@ pub struct GmScene {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+/// What the GM adjudicates with. A character's own agent plays its background,
+/// motive and ambition, so the GM is not sent them.
 pub struct GmSceneCharacter {
     pub id: i64,
     pub name: String,
     pub description: String,
-    pub background: String,
-    pub motive: String,
-    pub ambition: String,
     pub sheet: serde_json::Value,
     pub gm_notes: serde_json::Value,
     /// What the character carries, loaded the same way as a player's own scene.
@@ -583,9 +582,6 @@ struct GmSceneCharacterRow {
     id: i64,
     name: String,
     description: String,
-    background: String,
-    motive: String,
-    ambition: String,
     sheet: String,
     gm_notes: String,
 }
@@ -3429,7 +3425,7 @@ impl Store {
     ) -> Result<Vec<GmSceneCharacter>> {
         let rows: Vec<GmSceneCharacterRow> = sqlx::query_as!(
             GmSceneCharacterRow,
-            "SELECT character.id, character.name, character.description, character.background, character.motive, character.ambition, character.sheet, character.gm_notes              FROM character_group JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? ORDER BY character.id",
+            "SELECT character.id, character.name, character.description, character.sheet, character.gm_notes              FROM character_group JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? ORDER BY character.id",
             group_id,
         )
         .fetch_all(pool)
@@ -3442,9 +3438,6 @@ impl Store {
                 id: row.id,
                 name: row.name,
                 description: row.description,
-                background: row.background,
-                motive: row.motive,
-                ambition: row.ambition,
                 sheet: serde_json::from_str(&row.sheet)
                     .context("decoding character sheet for GM")?,
                 gm_notes: serde_json::from_str(&row.gm_notes)
@@ -7677,7 +7670,21 @@ mod tests {
             .iter()
             .find(|character| character.name == "Toma")
             .unwrap();
-        assert!(toma.motive.contains("imprisonment"));
+        assert_eq!(
+            toma.description,
+            scenario
+                .npcs
+                .iter()
+                .find(|npc| npc.name == "Toma")
+                .unwrap()
+                .description,
+            "the GM sees Toma as described"
+        );
+        let sent = serde_json::to_string(&gm_scene).unwrap();
+        assert!(
+            !sent.contains("\"motive\"") && !sent.contains("\"ambition\""),
+            "the GM adjudicates; each character's own agent plays its motive: {sent}"
+        );
         assert!(toma.gm_notes.get("beliefs").is_some());
         assert_eq!(
             store.export_scenario(installed.world_id).await.unwrap(),

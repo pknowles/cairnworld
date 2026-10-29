@@ -78,3 +78,18 @@ JSON stays. The rest of the packet is authored scenario text (location, notes, e
 character's background, motive and ambition), which is most of its weight; trimming that
 changes what the GM knows and needs judging against what the GM uses, not formatting.
 The NPC and player scenes carry the same kind of empty fields; they are not measured yet.
+
+## What the GM is sent about each character, and shorter tool text
+
+The GM is sent no background, motive or ambition for any character: it adjudicates what
+happens and each character's own agent plays those. That cut the request by 150 tokens
+(2,290 to about 2,140) with the same tool choices.
+
+Shortening the GM tool descriptions as well (dropping "Ends your turn." from the narrate
+tools, shorter approve, reject, intervention, split and merge text) saved another 50 to
+60 tokens, but the intervention-check device scenario then failed 7 of 20 runs (the GM
+narrated before deciding every presented action), against 0 of 32 with the original
+text. Each group of trimmed tools passed 10 of 10 alone and the combination did not, and a
+one-step replay of the GM's decision (40 samples) could not see the failure. Kept: the
+original text. Tool text is only worth cutting if the full scenario is run enough times
+to show it does not change the GM's order of work.
