@@ -16,18 +16,41 @@ either claim disappear.
 
 ## At the hut
 
-The player and Mara start outside an old charcoal-burner's hut. Toma is inside
-with the tied sack beside him and a wood axe within reach. He is healthy and
-capable of resisting. The front door is barred; a rear window admits one person
-climbing through. The sack is beyond reach from outside.
+The hut is Toma's home. He has brought the flour home for his household, not
+stopped there on his way somewhere else. The player and Mara start outside its
+barred front door. Toma is in the front room with his wood axe within reach.
+The tied sack is stored in a separate rear room, out of his line of sight.
+
+Walking around the house and examining the rear reveals a window behind bushes,
+with an unlatched shutter. Finding it needs no roll when the player searches
+there. The window admits a person and the sack, passed through separately.
 
 The hut and its surroundings form one game location and group. Sharing a group
 does not remove the walls or put everyone within arm's reach.
 
-The sack is bulky: carrying it occupies both arms, and getting it out through
-the window would require passing it separately. The front door is the easy
-way to carry it out. The axe is a tool Toma brought from work, not something
-he is already swinging.
+The sack is bulky and carrying it occupies both arms. The axe is Toma's work
+tool, not something he is already swinging.
+
+### Sneaking into the rear room
+
+The partition blocks sight, not sound. Climbing in and moving the sack can make
+noise on the wooden floor. The GM should explain that being heard risks a
+confrontation and require a DEX save for the attempted stealth. Searching for
+the window is not the risky part. Use the actual recorded roll, not an invented
+result. On success the player can reach and remove the sack unnoticed, provided
+their described plan remains feasible; do not demand another roll for each
+small movement in that same attempt.
+
+Cairn explicitly lists sneaking under Dexterity: roll a d20 equal to or below
+DEX, with 1 always succeeding and 20 always failing
+([Cairn rules](https://cairnrpg.com/first-edition/cairn-srd/#saves)).
+
+On failure, Toma hears the intrusion and comes to investigate. The player is
+caught entering his home or taking his food. This gives him a concrete reason
+to distrust them and makes later persuasion harder. Confrontation may become
+combat depending on their actions; a failed save does not itself force an
+attack. Mara can occupy him in conversation if persuaded to help, but the
+stealth attempt still risks noise.
 
 ## Mara
 
@@ -44,7 +67,7 @@ he is already swinging.
 
 - **Knows:** the flour was his agreed payment, the repairs are finished, and Mara
   withheld it after the flood.
-- **Wants:** to take his earned food home to his household without violence.
+- **Wants:** to keep his earned food for his household without violence.
 - **Character:** proud of his work, angry at being treated as a thief, distrustful
   of another promise from Mara.
 - **Capabilities:** healthy and able to fight or carry the sack away, but not
@@ -68,8 +91,9 @@ them; a promise of food is not food already delivered.
 Consent, access and possession matter. Saying "I take it" from outside does not
 move the sack past the wall and its unwilling defender. Deception can be
 discovered; an exposed entrant or someone carrying the sack is vulnerable.
-Violence can injure either side or lose the flour. A workable agreement or
-well-prepared plan can succeed without an obligatory roll.
+Violence can injure either side or lose the flour. A workable agreement does
+not require an obligatory roll; sneaking into the rear room while Toma can hear
+does require the stealth save described above.
 
 Let choices and events change the situation. Do not force a fight, invent
 objections to a sensible solution, or keep NPCs arguing to prolong the encounter.
@@ -85,3 +109,7 @@ player empty-handed, harm someone, or lose the food.
 The human-readable encounter is here; `bread_thief.json` contains the playable
 world and each NPC's own background and motives. Changes to either file must
 preserve the same situation.
+
+Runtime limitation: gameplay saves are not yet exposed by the application's
+tools. The stealth save above is an encounter requirement for the rules
+implementation; narration must not substitute for an actual dice result.

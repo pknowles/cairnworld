@@ -75,3 +75,26 @@ production Rust or prompt template was changed here.
 Qwen gameplay has not been measured by these role-play probes. Captured
 production context and actual replies are needed before attributing any future
 model behaviour to a scenario fact or claiming it follows the same choices.
+
+## Home and rear-room revision
+
+The user subsequently identified two missing pieces: Toma needed a reason to
+remain at the hut, and the simplification had removed meaningful stealth.
+The hut is now his home. The flour is in a rear room, separated from Toma's
+front room by a partition. A window found by searching the rear provides access.
+The stealth risk is noise rather than passing directly in front of him.
+
+The user explicitly requires a stealth roll. This maps to Cairn's DEX save;
+failure alerts Toma and can lead to confrontation, reduced trust and possibly
+combat. Combat is not an automatic consequence of failing the save. The NPC's
+own background includes his position and what he can hear. The earlier probes
+concerned the old single-room layout; they are not verification of this change.
+
+The application currently exposes creation rolls, not gameplay saves. This
+scenario requirement therefore remains dependent on the planned rules work.
+
+Follow-up GM/Toma role-play review chose one DEX save for ordinary quiet entry
+and removal, investigation on failure, and distrust after discovery rather
+than an automatic attack. The updated three scenario tests passed in 0.15
+seconds, including the production NPC scene and import/export checks. These
+checks still do not establish Qwen's handling of gameplay rolls.

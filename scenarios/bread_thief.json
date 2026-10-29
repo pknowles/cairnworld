@@ -4,7 +4,7 @@
   "storyteller_summary": "Mara promised Toma a sack of flour for repairing the mill. He finished the work. A flood spoiled the other village stores, so Mara withheld payment to ration the sack among several households. Toma took it anyway; his household also needs food. Both acknowledge the debt. Neither has replacement food in hand.",
   "notes": {
     "gm": {
-      "opening": "The Adventurer and Mara are outside the hut's barred front door. Toma is inside with the flour. Mara wants it returned without anyone being hurt.",
+      "opening": "The Adventurer and Mara are outside Toma's home's barred front door. Toma is in the front room; the flour is stored in a separate rear room. Mara wants it returned without anyone being hurt. The rear window is found by going around and examining the back of the house.",
       "dispute": "The work and promised payment are real. Mara's emergency does not erase Toma's claim; his claim does not feed the other households. What happens depends on the characters' decisions."
     },
     "storyteller": {}
@@ -15,7 +15,7 @@
     {
       "name": "charcoal hut",
       "location": "charcoal hut",
-      "description": "Mara and the Adventurer outside the hut; Toma and the flour inside.",
+      "description": "Mara and the Adventurer outside Toma's home; Toma in the front room, his flour stored in the rear room.",
       "notes": {
         "gm": {
           "grouping": "One group covers the hut and its immediate surroundings. Voices carry through the boards, but walls and distance still constrain sight and access."
@@ -27,12 +27,13 @@
   "locations": [
     {
       "name": "charcoal hut",
-      "kind": "old work hut",
-      "description": "A small charcoal-burner's hut with a barred front door and an open rear window wide enough for one person to climb through.",
+      "kind": "Toma's home",
+      "description": "Toma's small timber home, converted from a charcoal-burner's hut. Its front door is barred; bushes grow behind the house.",
       "notes": {
         "gm": {
-          "interior": "Toma is beside the tied flour sack, beyond reach from the rear window, with his wood axe within reach. The door is barred from inside. Carrying the sack takes both arms; passing it through the window is separate from climbing through.",
-          "exterior": "Mara and the Adventurer start outside the front door. Moving around the hut is local movement."
+          "interior": "Toma is in the front room with his work axe within reach. The tied flour sack is in a separate rear room. The partition blocks his view of it, but he can hear movement on the wooden floor. Carrying the sack takes both arms.",
+          "exterior": "Mara and the Adventurer start outside the barred front door. Going around and examining the rear reveals a window behind bushes with an unlatched shutter. Finding it needs no roll. The window admits a person and the sack, passed through separately. Moving around the house is local movement.",
+          "stealth": "Climbing into the rear room and moving the sack unnoticed requires a DEX save for the stealth attempt: Toma cannot see into the room but can hear noise. Explain the consequence before the actual recorded roll. Success allows the feasible attempt to proceed unnoticed; failure brings Toma to investigate and confront the intruder. Being caught sneaking into his home gives him reason to distrust the player, making later discussion harder. Combat is possible, not automatic. Conversation at the front can occupy him but does not eliminate the noise risk."
         },
         "storyteller": {}
       }
@@ -57,9 +58,9 @@
     {
       "name": "Toma",
       "group": "charcoal hut",
-      "description": "A healthy mill worker in worn clothes, beside the flour inside the hut, with a wood axe within reach.",
-      "background": "Mara promised me this sack of flour as wages for repairing the mill. I finished the work. After a flood ruined the other village stores she withheld payment to ration it among households. I took my wages anyway. My household is also short of food. I am proud of my work, resent being treated as a thief, and distrust another promise from Mara. I have no replacement food in hand.",
-      "motive": "Take my earned food home to my household without violence.",
+      "description": "A healthy mill worker in worn clothes, in the front room of his home, with a wood axe within reach.",
+      "background": "Mara promised me this sack of flour as wages for repairing the mill. I finished the work. After a flood ruined the other village stores she withheld payment to ration it among households. I took my wages home and stored the flour in my rear room. I am in the front room: the partition blocks my view of the flour, but I can hear movement behind it. My household is also short of food. I am proud of my work, resent being treated as a thief, and distrust another promise from Mara. I have no replacement food in hand.",
+      "motive": "Keep my earned food for my household without violence.",
       "ambition": "Have my work respected and my household fed.",
       "sheet": {
         "hp": 6,
@@ -79,7 +80,7 @@
             "The flood was not my fault.",
             "Mara has already broken her promise."
           ],
-          "position": "Toma is healthy and can resist a grab or carry the sack, but cannot wield the axe while carrying it."
+          "position": "Toma is in his front room, with no direct view into the rear room where the flour is stored. Noise can alert him. He is healthy and can confront an intruder; carrying the sack occupies both arms."
         },
         "storyteller": {}
       }
@@ -104,10 +105,10 @@
       "name": "flour sack",
       "item_type": "provisions",
       "location": "charcoal hut",
-      "description": "A tied, bulky sack of flour beside Toma inside the hut, beyond reach from the window. Carrying it occupies both arms.",
+      "description": "A tied, bulky sack of flour. Carrying it occupies both arms.",
       "notes": {
         "gm": {
-          "state": "Toma brought the sack here and considers it his wages. It is guarded, not unattended. Ordinary careful handling preserves the flour; a struggle or a blade can spill it."
+          "state": "Stored in Toma's rear room, out of sight from his front room, accessible through the rear window. Moving it quietly is the stealth challenge. Toma considers it his earned payment. Ordinary careful handling preserves the flour; a struggle or a blade can spill it."
         },
         "storyteller": {}
       }
