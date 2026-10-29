@@ -9,11 +9,13 @@ run, find the cause, change context, replay on the real model.
 ## HIGH SEVERITY: the GM cannot see other groups, so it cannot split or merge correctly
 
 `GmScene` ([src/store.rs](../src/store.rs)) holds the location, the interacting group's
-own description and notes, items, and that group's characters. Four things the GM needs
+own description and notes, items, and that group's characters. Things the GM needs
 are missing, so the `split_group` and `merge_groups` tools exist but a real GM cannot use
 them reliably:
 
-- **Its own group id.** `split_group` needs `group_id`; nothing in the packet gives it.
+- **Its own group id** is not needed by the GM at all: it operates on one group, so
+  `split_group` should drop its `group_id` argument and act on the GM's own group
+  (today the tool asks the model for it, which is a design flaw, not a context gap).
 - **The other groups at its location.** `merge_groups` needs `group_ids`; the GM cannot
   see that another group, its members, or its ids exist.
 - **When to merge.** A merge is due when any two members of different groups could cross
