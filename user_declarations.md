@@ -1,13 +1,16 @@
 # Project Overview
 
-This project is a tiny multiplayer web game.
-Players join and interact just by chatting.
-It is an RPG (role playing game) where the GM (game/dungeon master) and NPCs are LLM agents, and each player chats to an agent to perform actions.
-I want the ruleset to be super simple and promote emergent gameplay.
-The plot will tend to be generated around chatting and detective-like investigation, uncovering plots played out by NPC agents.
-NPC and PC agents may only interact with the world using a strict set of LLM facing tools (like MCP, but without a separate "server").
-This acts as a boundary for LLM hallucinations corrupting game state, means each agent may focus on honestly helping the NPC or player.
-The GM agent then has less responsibility and can focus on its own job without conflating context.
+This project is a tiny multiplayer web game. Players join and interact just by
+chatting. It is an RPG (role playing game) where the GM (game/dungeon master)
+and NPCs are LLM agents, and each player chats to an agent to perform actions. I
+want the ruleset to be super simple and promote emergent gameplay. The plot will
+tend to be generated around chatting and detective-like investigation,
+uncovering plots played out by NPC agents. NPC and PC agents may only interact
+with the world using a strict set of LLM facing tools (like MCP, but without a
+separate "server"). This acts as a boundary for LLM hallucinations corrupting
+game state, means each agent may focus on honestly helping the NPC or player.
+The GM agent then has less responsibility and can focus on its own job without
+conflating context.
 
 Philosophical tangent: most of this could happen in a single chat of a very
 large model (well, ignoring multiplayer), but in practice the context quickly
@@ -36,26 +39,29 @@ realistic RPG world generation or fill gaps in the existing world, setting and
 plot. Either that or respond saying the world is solid and complete enough to
 begin play.
 
-The Storyteller is also given the initial world prompt and the initial Storyteller's questions must answer each question in turn with a high LLM temperature
-(if the model supports it) just as text output to itself. This expands the seed
-and story variance. Once done it is asked to write a world summary. Only the
-summary is returned to the Questioner, which makes follow-up questions. The
-Storyteller runs again, but this time starting only with the world prompt and
-its most recent summary (the answers from the previous session should now be in
-the summary). Again it answers each in turn, then the code asks it to remake or
-make changes to the summary based on the answers and discussion so far. It is
-told that it may drop ideas from the previous summary that no longer make sense
-or work for a cohesive story after reviewing the previous answers. This process
-loops until both the Questioner is satisfied the world feels complete or some
-limit is reached. The final "world summary" and the world/campaign name is the
-product.
+The Storyteller is also given the initial world prompt and the initial
+Storyteller's questions must answer each question in turn with a high LLM
+temperature (if the model supports it) just as text output to itself. This
+expands the seed and story variance. Once done it is asked to write a world
+summary. Only the summary is returned to the Questioner, which makes follow-up
+questions. The Storyteller runs again, but this time starting only with the
+world prompt and its most recent summary (the answers from the previous session
+should now be in the summary). Again it answers each in turn, then the code asks
+it to remake or make changes to the summary based on the answers and discussion
+so far. It is told that it may drop ideas from the previous summary that no
+longer make sense or work for a cohesive story after reviewing the previous
+answers. This process loops until both the Questioner is satisfied the world
+feels complete or some limit is reached. The final "world summary" and the
+world/campaign name is the product.
 
 The looping above is split into the following phases. The questioner is simply
 prompted with these phases, which will flow through to the Storyteller.
 
 - Overall setting, factions, NPCs of high importance, motives
-- Expanding to important locations, where the NPCs start, how many other NPCs in their party, supporting NPCs at each location
-- Expanding to intermediate locations, less important NPCs and world details to make the setting feel alive
+- Expanding to important locations, where the NPCs start, how many other NPCs in
+  their party, supporting NPCs at each location
+- Expanding to intermediate locations, less important NPCs and world details to
+  make the setting feel alive
 
 The storyteller will have access to the standard text editing tools - same as
 the GM (but it gets access to storyteller fields that the GM cannot edit).
@@ -482,9 +488,11 @@ could be quite detailed while others may either receive no narration at all
 (spamming "CharacterName looks around" would be useless and noisy) or a brief
 description of what they see from their perspective ("CharacterName climbs the
 large rock for a better view"). There should be a global game setting for
-whether players all receive the same detailed narration (on by default), so they
-have a shared experience, unless the GM needs to explicitly narrate something
-privately.
+whether players all share detailed narration (on by default), so they have a
+shared experience, unless the GM needs to explicitly narrate something
+privately. This is trivially implemented with one rule: if a player character
+receives a non-private narration, all player characters see it. The GM doesn't
+know.
 
 ## Observed Events
 
@@ -524,6 +532,16 @@ explosions of response and high latency from all the LLM inference for every NPC
 present. An idea for the future is to have the GM route these requests -
 actually it already does with InterventionCheck. Responses may need to happen
 before an action is completed.
+
+Reacting to observations happens after a successful turn completes that produces
+an observable event. If the server closes before NPCs react, they should still
+react on next launch. My expectation is this could be handled with flags that
+can be checked rather than scheduling jobs just for simplicity. If the producing
+turn fails due to an execution error, any committed actions remain as rollback
+would be overengineered. It wouldn't hurt if reactions don't happen since there
+was a failure but I also wouldn't be surprised if an immediate server restart
+makes the NPCs react to the committed actions (again, simplicity in code and
+least surprise).
 
 Some interactions may be preventable by other characters. For example, a
 character may try to pick up some treasure and the GM could ask specific other
@@ -626,6 +644,11 @@ call should be rejected right away. Then the discussion happens as a regular
 follow-up outside it. The discussion does not happen as part of the Take call. A
 player can press interrupt whenever but it should only take effect between tool
 calls so the player cannot accidentally interrupt a tool call.
+
+A core principle is to build the came around characters in general regardless of
+who controls them, i.e. don't special case NPCs and PCs unless we have to.
+Players and NPCs should be able to do and perceive all the same things. This
+keeps the code clean and simple and the game fair.
 
 ## Dynamic Storyteller
 
@@ -739,7 +762,11 @@ before the player(s) see the final response.
 - If compaction has not completed before a chat needs another inference,
   compaction happens inline immediately.
 
-If the size of the messages are too large and we cannot inference anything with them, compaction should take care of it. However, compaction must reduce the total input such that we can inference successfully. If the number of raw messages kept is too high or the message size is too large, we must reduce the number of messages kept.
+If the size of the messages are too large and we cannot inference anything with
+them, compaction should take care of it. However, compaction must reduce the
+total input such that we can inference successfully. If the number of raw
+messages kept is too high or the message size is too large, we must reduce the
+number of messages kept.
 
 If the threshold is overshot when compacting and we cannot even fit the input
 anymore, we must reduce the amount we compact and summarise. For example, lets
@@ -750,7 +777,10 @@ and can iterate until back under the compaction threshold. Slow, but at least
 doable in a fixed GPU allocation and it saves us from the occasional giant
 messages pushing us past both the threshold and input limit in one go.
 
-Ideally compaction fallbacks are only needed in rare cases of very large messages, but a misconfiguration may also trigger it so we need logging for feedback and clear entries in developer mode for when it happens, directly linked to what caused it.
+Ideally compaction fallbacks are only needed in rare cases of very large
+messages, but a misconfiguration may also trigger it so we need logging for
+feedback and clear entries in developer mode for when it happens, directly
+linked to what caused it.
 
 ## Note Editing and Search Tools
 
@@ -850,7 +880,8 @@ Game objects
     to the GM to provide the ID during narration. The ID is visible to the
     player agent but rendered with the connection's name in chat.
 - World state
-  - Summary - written by the Storyteller at world creation and contains lots of spoilers; much larger than storyteller notes and also editable
+  - Summary - written by the Storyteller at world creation and contains lots of
+    spoilers; much larger than storyteller notes and also editable
   - Initial prompt (just for record; unused except for initialization input)
   - Storyteller summary
   - Next free action ID to allocate from
@@ -894,8 +925,6 @@ be overloaded with unnecessary detail.
 ## Game turns and time
 
 (*There are RPG game-turns and LLM agent chat-turns which are separate)
-
-TODO: resolve "turn" and Cairn "round" terminology - currently used interchangably here
 
 Many TTRPGs have concepts for time passing and separate time progression
 handling for in-combat and out-of-combat play. I initially thought I'd follow
@@ -984,7 +1013,8 @@ When one player does something for a few hours, another player may get many
 turns to do something while they wait, e.g. have a conversation with some NPC in
 the same city/town. If a player goes shopping for a new sword for a morning,
 other players should see the narration as they wander off to the shops and then
-their agent should ask them what they want to do in the meantime. They may do the same, wait, whatever.
+their agent should ask them what they want to do in the meantime. They may do
+the same, wait, whatever.
 
 # Tool calls
 
@@ -1019,7 +1049,8 @@ second edition.
 - RollTraits
 - RollBonds
 - RollAge
-- ReadyToBegin - called when the player has finished character creation; rust validates the character sheet is complete
+- ReadyToBegin - called when the player has finished character creation; rust
+  validates the character sheet is complete
 
 ChooseBackground and RollBackground are only available when the Storyteller is
 not being used, e.g. during initial development (see An initial proof of
@@ -1073,23 +1104,37 @@ indirectly explains why this happened to connect the character with the story.
 - Lie - the same as Say, except the speaker and all characters who hear it make
   a WILL roll. Those that pass receive a canned note saying they think
   Speaker-Name may be lying. This opposed check diverts from Cairn rules, but
-  fits the game mechanics here better. Player agents may confirm with the player
-  if they intend to be lying before making this tool call if there is possible
-  ambiguity. NPC agents must use it appropriately/honestly.
+  fits the game mechanics here better. Player agents must confirm with the
+  player if they intend to be lying before making this tool call if there is
+  possible ambiguity. NPC agents must use it appropriately/honestly.
 - Attack - using a particular weapon. Only available when ready (can't attack
-  twice per turn/round) and updates the combat action next ready time.
-- Retreat - implies a DEX save
+  twice per round) and updates the combat action next ready time. If approved,
+  the GM should add any weakness/advantage flags and modifies required by Cairn.
+  Damage rolls and effects are handled by the game code, not the GM. The result
+  is visible to the GM and the character receiving any damage. The GM then
+  narrates the result without giving away the numbers.
+- Retreat - implies a DEX save; the GM should let the character Move/run without
+  consequence only if successful.
 - Give/Drop/Place - initiates an item transfer. If placed/dropped at a location,
-  the GM must approve and provide its new location description with the approval. If to a person
-  it must be accepted. It may also be contested, e.g. when a character tries to
-  leave something undesirable at a location. The GM may choose to not reject a
-  committed drop as it's hard to force a character not to drop something, but it
-  may still lead to combat.
+  the GM must approve and provide its new location description with the
+  approval. If to a person it must be accepted. It may also be contested, e.g.
+  when a character tries to leave something undesirable at a location. The GM
+  may choose to not reject a committed drop as it's hard to force a character
+  not to drop something, but it may still lead to combat.
 - Take/Request/Pickup - sends a request for an item; if from another character,
   the GM may forward that request to the character's agent for approval. If it's
   from a PC, the player's agent must ask for player approval. The triggering
   character agent receives both the timeout error and the narration that the
   other character just stands there motionless.
+- SplitItem - item ID and text description of what the character wants to do to
+  split an item. If the GM approves, it passes two ItemTypes that the code can
+  then instantiate, replacing the split item atomically. Could be used for
+  dissassembly, decanting/portioning.
+- CombineItems - item IDs and text description of what the character is trying
+  to do to combine them. If the GM approves, it adds the reulting ItemType
+  produced that the code instantiates, removing the input items atomically.
+  Could be repairing something with a consumable or combining halves into a
+  whole.
 - Accept - a character's agent must approve an item being given to them or taken
   from them. If it's a player character, the agent would ask the player if they
   accept and make the returning call appropriately.
@@ -1116,7 +1161,7 @@ indirectly explains why this happened to connect the character with the story.
 - EndTurn - sets next-ready time for all combat length actions to at least 10
   seconds from now; if no move/act has been done this is effectively a wait for
   10 seconds; otherwise it signifies an unused move or act is not going to be
-  used this turn/round. A future idea is to add a combat-length Delay call, but
+  used this round. A future idea is to add a combat-length Delay call, but
   not for now.
 
 Many have duplicate names for similar actions, like Say/Whisper/Lie. I'd ideally
@@ -1170,7 +1215,8 @@ the case may be.
 - Approve and Reject - single response to accept or reject a characters's
   action, given as an argument to the tool call. The result applies immediately.
   The GM gets to see the result of whatever they approve, including failures or
-  errors, as it may affect future decisions. If rejecting, the GM must give a reason so that the caller may try something else.
+  errors, as it may affect future decisions. If rejecting, the GM must give a
+  reason so that the caller may try something else.
 - InterventionCheck/TravelRequest - called with an action ID and character(s) as
   arguments, who are then each requested if they wish to intervene before the
   character makes this action. Regardless of whether the action is committed
@@ -1203,6 +1249,12 @@ the case may be.
   be aware of how much damage would be lethal and know that they need to have
   presented sufficient warning to players about consequences before applying
   this.
+- MoraleCheck - as per Cairn rules, the character(s) make a WIL save to avoid
+  running away; handled by the code but visible in the characters' chat and the
+  GM's. This is a rare case of a tool only affects NPCs. The GM does not know
+  this. PCs do not see the roll and nothing happens. If any NPCs fail, their
+  next turn is prefaced by an *instruction* in their chat "As per game rules you
+  failed your WIL save and must flee combat."
 - ReplaceActivity - sets a character's intended long form action. This could be
   used by the GM to mark a player as being knocked out or paralyzed for some
   time. The GM can then reject attemts by the player to do other actions.
@@ -1247,11 +1299,18 @@ complete and review phases until it marks it done and calls BeginWorld. The
 storyteller should receive stats after changes to help it know what might be
 missing, for example connection, npc and item counts.
 
-- CreateLocation/Connection/NPC/Group/ItemType/Item - initial attributes and details for all fields must be given in the tool call.
-- UpdateLocation/Connection/NPC/Group/ItemType/Item - Just like create, but supports replacing individual fields without specifing them all. 
-- DeleteLocation/Connection/NPC/Group/ItemType/Item - flags them as deleted and filters. We don't want to let agents be actually destructive, ever. Still findable in developer mode, but default filtered out.
+- CreateLocation/Connection/NPC/Group/ItemType/Item - initial attributes and
+  details for all fields must be given in the tool call.
+- UpdateLocation/Connection/NPC/Group/ItemType/Item - Just like create, but
+  supports replacing individual fields without specifing them all. 
+- DeleteLocation/Connection/NPC/Group/ItemType/Item - flags them as deleted and
+  filters. We don't want to let agents be actually destructive, ever. Still
+  findable in developer mode, but default filtered out.
 - Storyteller notes text editing tools (See "Game state" section)
-- BeginWorld - called when the storyteller believes they have completed world creation and the state is ready for player characters to enter and play to begin. This ends world creation, but does not start play until characters join.
+- BeginWorld - called when the storyteller believes they have completed world
+  creation and the state is ready for player characters to enter and play to
+  begin. This ends world creation, but does not start play until characters
+  join.
 
 We may need to create some prefab ItemTypes to make it easier for the
 storyteller; not sure yet.
@@ -1266,15 +1325,19 @@ things.
 During world generation the storyteller should be given instructions to
 highlight character names, important items and locations with special syntax. We
 should then parse this and remind the storyteller which it has not created. This
-is non-blocking reminder and the storyteller will be explicitly
-instructed to ignore those it ultimately decides do not need to exist. We help it; we do not force things.
+is non-blocking reminder and the storyteller will be explicitly instructed to
+ignore those it ultimately decides do not need to exist. We help it; we do not
+force things.
 
 The Questioner is far simpler and can only ask questions or make a tool call to
 say it is satisfied. It does not get access to any of the storyteller's answers
 or chat history. All it can see is the elements of the world that the
 storyteller creates. It then must reply with one of two structured responses:
 
-- AskQuestions - the world is implicitly incomplete and the questioner must indirectly ask a question that invites closing the gap. As though a reviewer skips the complaint and jumps straight to a clairfying question that gets at the core of the remaining issue(s).
+- AskQuestions - the world is implicitly incomplete and the questioner must
+  indirectly ask a question that invites closing the gap. As though a reviewer
+  skips the complaint and jumps straight to a clairfying question that gets at
+  the core of the remaining issue(s).
 - WorldIsComplete
 
 Once the game is in progress, the storyteller loses access to BeginWorld and gains:
@@ -1282,7 +1345,8 @@ Once the game is in progress, the storyteller loses access to BeginWorld and gai
 - EndWorld - concludes the game for all players with a text narration of the
   immediate ending and begins the epilogue sequence.
 
-Developer mode should show both Storyteller and Questioner, just like other agents and their interactions.
+Developer mode should show both Storyteller and Questioner, just like other
+agents and their interactions.
 
 World generation happens async to the UI. Players can enter the world; they just
 can't act yet and their player creation cannot begin until world generation
@@ -1302,9 +1366,14 @@ In addition to the Cairn rules, the following spells would be uniquely useful
 given the technology of this game. However, given their utility and power they
 should be later game, volatile or difficult to cast.
 
-- **Read mind** is a tool call that gives the NPC's internal chat history as context to an LLM that produces a stylized summary. NPCs could even cast this on PCs!
-- **Command** can inject a thought directly into the chat of an NPC or PC. Players get to type this directly. If cast on a player it replaces their turn with the injected text.
-- **Erase mind** can delete one or more chat entries from an NPC, depending on dice roll success magnitude.
+- **Read mind** is a tool call that gives the NPC's internal chat history as
+  context to an LLM that produces a stylized summary. NPCs could even cast this
+  on PCs!
+- **Command** can inject a thought directly into the chat of an NPC or PC.
+  Players get to type this directly. If cast on a player it replaces their turn
+  with the injected text.
+- **Erase mind** can delete one or more chat entries from an NPC, depending on
+  dice roll success magnitude.
 
 Future idea: In rare cases the storyteller may create plot-relevant spells that
 can be discovered or learned.
@@ -1312,7 +1381,8 @@ can be discovered or learned.
 # Tech stack
 
 - Rust
-- mistral.rs GPU Inference - we should try a few models to see which fit best out of the box
+- mistral.rs GPU Inference - we should try a few models to see which fit best
+  out of the box
 - Axum
 - Tokio?
 - sqlite
@@ -1327,7 +1397,11 @@ The main/landing page has a banner and description of the game.
 
 Without loggin in there is only a log in button.
 
-After logging in in with OAuth2, e.g. a google account they see more. We only allow oauth; there is no user/password storage and accounts are simply keyed by email address (this is not visible on any page). The main/landing page allows players to change their name, has a button to create a world, lists worlds they have created. Each world takes them to the world detail page.
+After logging in in with OAuth2, e.g. a google account they see more. We only
+allow oauth; there is no user/password storage and accounts are simply keyed by
+email address (this is not visible on any page). The main/landing page allows
+players to change their name, has a button to create a world, lists worlds they
+have created. Each world takes them to the world detail page.
 
 ## World detail page
 
@@ -1369,9 +1443,9 @@ Links can be deleted at any time, revoking their use if accidentally posted
 publicly. Links just allow players to join; there is no relation once joined.
 All players can see the names of all other players who have joined the world.
 This is a tree view and under each player are their list of characters. The
-world creator can deactivate/ban joined users. Their association and characters remain
-but until they get reactivated by the world owner they will be unable to access that
-world.
+world creator can deactivate/ban joined users. Their association and characters
+remain but until they get reactivated by the world owner they will be unable to
+access that world.
 
 Next to each player is a shortcut Join button to enter the world with that
 character.

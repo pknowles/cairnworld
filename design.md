@@ -1306,6 +1306,22 @@ the GM supplies with its approval. Typed item
 stats hold damage dice, armor, slots and spell references; object notes hold
 fiction rather than substituting for mechanical state.
 
+SplitItem takes an item ID and the character's description of the intended split;
+GM approval supplies two existing world-local ItemType IDs, which may be the same.
+CombineItems takes input item IDs and a description; approval supplies one existing
+result ItemType ID and the result's holder/placement through the existing holder
+references. Reuse item construction, authorization, holders and action
+history. Consume the inputs and create the outputs in one transaction, retaining
+the input records and historical references rather than physically deleting them.
+Repeated approval returns the original outcome and IDs. Split outputs retain the
+original holder. CombineItems uses the explicitly approved result holder rather
+than guessing from input order or requiring preliminary transfers. The GM judges
+physical access and consent; Rust checks authority over the inputs and result.
+Prepared ItemTypes can exist without live instances: Bread Thief starts with one
+full sack and prepares a half-sack type for splitting and recombination, following
+the user's [scenario clarification](user_exerpts.md#2026-10-29-bread-thief-item-types-and-attack-damage). This needs
+no fractional inventory system or general crafting/recipe framework.
+
 | Operation | Rust result and GM/NPC responsibility |
 | --- | --- |
 | Look/investigate/open/ask/gesture | GM can answer, request a save/time cost, or reject with a reason. Route timed work through the shared activity/resource rules below; the precise short/free/long cost policy remains a declaration question. No automatic repeated save. |
@@ -1315,8 +1331,10 @@ fiction rather than substituting for mechanical state.
 | InterventionCheck/Approve/Reject | GM consults selected characters, NPCs and players, about an unresolved action. Their intentions do not automatically block it. GM can approve a reaction, observe its result, then approve/reject the original action. Tentative actors may wait for an objection; committed actors proceed unless actually prevented. Open-ended dialogue follows after the original action resolves. |
 | BePersuaded | NPC initiates a WIL save for the named persuader with its modifier; Rust returns the textual success outcome. No GM round trip. |
 | Take/give/drop/place | One holder change after the GM approves; no duplicate item on repeated approval. No separate acceptance step: the receiver or a holder may intervene (say or gesture a clear no), and the GM then rejects. A drop or place is approved with the item's new location description. A committed drop is not necessarily rejected, since a character cannot be forced to keep an item, but it may lead to combat. |
+| SplitItem/CombineItems | GM judges the described operation and supplies the resulting ItemType IDs. Rust atomically consumes inputs and constructs outputs, retaining all records/history and returning the resulting item IDs. |
 | Save | Rust rolls d20; 1 succeeds and 20 fails; otherwise compare with the relevant modified attribute. Store numbers for player/developer display, textual outcome for agents. Initiative uses the declared individual DEX-based ordering, whose exact roll/ranking needs clarification below. |
-| Attack/retreat/damage | Attack damage uses weapon dice and armor, HP then STR, critical damage/scars and death per the linked rules; retreat needs DEX and a valid destination. Environmental harm uses the GM's TakeDamage operation and declared roll/save. |
+| Attack/retreat/damage | GM approval supplies Cairn weakness/advantage flags and applicable modifiers. Rust owns weapon/armor calculations, damage rolls, HP then STR changes, critical damage/scars and death, returning the actual result to the GM and damaged character. The GM narrates without exposing numbers to bystanders; it does not choose or apply attack damage through TakeDamage or field edits. Retreat needs DEX and a valid destination. Environmental harm remains the separate GM TakeDamage operation with its declared roll/save. |
+| MoraleCheck | GM requests checks for characters under Cairn's morale rules. Rust rolls WIL for NPCs and records results in their histories and the GM's. Failed NPCs receive the declared flee instruction before their next turn, as an internal instruction rather than a perceived event. PCs receive no roll or effect. Keep NPC-only handling in code rather than adding a GM-facing instruction about the exception. |
 | EndTurn | At the timestamp of the character's short turn, raise every short resource's ready time to at least that timestamp plus ten seconds. Unused resources cannot grant another turn at the same time. This is a character tool, distinct from ending an LLM chat-turn or GM narration. |
 | ReplaceActivity | GM replaces the named character's long activity, including imposed activities such as unconsciousness. Resolve interruption of the previous activity through the same lifecycle; replacement is not completion. |
 | AddEffect/RemoveEffect | Store a GM-authored character effect with an expiry time, or end it early by explicit effect reference. Expired/removed effects leave active context but remain in recorded evidence. GM interprets their meaning; no new executable modifier language is implied. |
@@ -1832,8 +1850,8 @@ cannot read. Explicitly marked generation mentions supply non-blocking reminders
 of uncreated names; they do not force object creation.
 
 After reviewing actual state, Storyteller calls BeginWorld. Validate connected
-locations, required fields/backgrounds/motives, item-type use, holders and references
-before completing initialization. Narrative readiness belongs to Storyteller;
+locations, required fields/backgrounds/motives, valid item types and holders,
+and world-local references before completing initialization. Narrative readiness belongs to Storyteller;
 Questioner satisfaction alone does not start play. BeginWorld makes character
 creation available without starting an empty-world simulation, and is unavailable
 after initialization. Imported scenarios retain their validated development path.

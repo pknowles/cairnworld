@@ -6,7 +6,10 @@ attention, which is very valuable and limited. Every addition has a cost; make
 sure it earns its place.
 
 In most cases, a failed LLM result can be solved with relatively subtle changes.
-The first thing to look for is subtle or implied contradictions, rules, actions,
+The golden rule is always check the inference input - system prompt, tool
+descriptions, the actual request and recent inserted messages. Why did the LLM
+produce the result it did? Check for ambiguity or contradictions relating to the
+output. These could be subtle or implied contradictions, rules, actions,
 conclusions etc. Investigation must begin with a review of the LLM's context at
 the time it produced inappropriate output.
 

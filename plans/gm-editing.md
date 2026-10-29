@@ -125,11 +125,15 @@ first version; the second checkpoint extends this measurement to retrieval.
 
 ## Second checkpoint: hierarchical lookup, search and bounded notes
 
-- List existing child objects from actual relationships: world locations,
-  location groups/items/connections, group characters and an object's available
+- List existing child objects from actual relationships: world locations and
+  ItemTypes, location groups/items/connections, group characters and an object's available
   fields/note keys. Return IDs, names and bounded orientation data; do not dump
   every body or fabricate a directory tree. Returned references are usable in
   subsequent read/edit calls. Keep World notes in this same object/field model.
+  Include authorized prepared ItemTypes that have no item instance yet, so the
+  GM can read their IDs/descriptions/stats for later SplitItem/CombineItems
+  approval. Mechanical stats are read-only here; their application stays in
+  the action operations, and type authoring stays with the Storyteller.
 - Search literal text in explicitly selected authorized object kinds, fields or
   named note values. Return matching object/field references and bounded context,
   with paging/continuation for more results. Share authorization with reads and

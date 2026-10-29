@@ -88,11 +88,14 @@
   ],
   "item_types": [
     {
-      "name": "provisions",
-      "description": "Food and other consumable supplies.",
-      "stats": {
-        "uses": 1
-      }
+      "name": "flour sack",
+      "description": "One full sack of flour. Carrying it occupies both arms. Two half flour sacks can be combined into this type.",
+      "stats": {}
+    },
+    {
+      "name": "half flour sack",
+      "description": "Half the contents of one full flour sack. Splitting a full sack produces two items of this type; combining those halves restores one full sack.",
+      "stats": {}
     },
     {
       "name": "gear",
@@ -103,7 +106,7 @@
   "items": [
     {
       "name": "flour sack",
-      "item_type": "provisions",
+      "item_type": "flour sack",
       "location": "charcoal hut",
       "description": "A tied, bulky sack of flour. Carrying it occupies both arms.",
       "notes": {

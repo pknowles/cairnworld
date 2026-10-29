@@ -981,3 +981,8 @@ and, after a first misreading (choosing the GM's tools by the setting), clarifie
 > private, the same narration is showing to ALL player characters. done.
 
 Implemented in delivery (`Narration::players_share`), not in the GM's tools or text.
+
+## 2026-10-29: Bread Thief item types and attack damage
+
+> I added MoraleCheck and Split/CombineItem. We'll need half flour sack ItemTypes
+> prepared. Damage from attacks should all be handled by the code and NOT the GM.

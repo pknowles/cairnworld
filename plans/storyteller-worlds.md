@@ -56,6 +56,12 @@ after their rules dependencies. Campaign completion remains a separate plan.
   NPCs and item types/items with existing holders. This is an ordering of needed
   references, not a mandatory extra inference for each record. Every character
   belongs to one group, and every item has one valid location or character holder.
+  Prepare ItemTypes needed for known SplitItem/CombineItems operations even when
+  there are no initial instances. Bread Thief supplies full- and half-sack types
+  but starts with only the full sack; initialization must not create extra flour
+  merely to make every type have a live item. Return these type IDs through the
+  same lookup access as other prepared world objects. Runtime transformations
+  belong to [Rules and travel](playable-rules.md), not the authoring tools.
   Delete only flags the selected object as deleted. Never physically remove
   its record, owned links, agent/history or other related records. Filter deleted
   objects out of normal discovery, counts, model context, NPC scheduling and
@@ -88,8 +94,8 @@ after their rules dependencies. Campaign completion remains a separate plan.
   Enforce this at operation admission, not only in the browser.
 - Implement BeginWorld as the Storyteller's explicit completion tool. Validate
   the declared connected location graph, required fields including NPC
-  backgrounds/motives, item-type use, holders and world-local references before
-  changing state. Missing optional narrative ideas are not structural errors.
+  backgrounds/motives, valid item types and holders, and world-local references
+  before changing state. Missing optional narrative ideas are not structural errors.
   A rejection leaves initialization open for edits; success makes the world
   available for character creation. It does not start NPC simulation or opening
   narration without characters joining. Remove BeginWorld from subsequent tool
@@ -137,9 +143,10 @@ after their rules dependencies. Campaign completion remains a separate plan.
   normal clean-shutdown boundaries and crash handling for active work.
 - Show progress/error and both roles in existing world/Developer Mode views.
   Keep summary and private object information out of the normal WorldDetail
-  display; the seed remains expandable. Optional random-word injection, prefab
-  item types and random seed-question selection remain experiments, not required
-  generation mechanisms.
+  display; the seed remains expandable. Optional random-word injection, a general
+  prefab item-type library and random seed-question selection remain experiments,
+  not required generation mechanisms. Preparing the types an authored scenario
+  actually needs is ordinary world content, not dependent on that library.
 - Measure assembled authoring-tool and review contexts against the configured
   model capacity, following [the context-size plan](llm-context-size.md). Do not
   assume every tool definition and every world object body fits together; agree

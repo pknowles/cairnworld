@@ -11,6 +11,7 @@ rounds, interruption and GM-selected intervention; extend those paths here.
 | Slice | Declaration | Design |
 | --- | --- | --- |
 | Creation and item state | [Character creation actions](../user_declarations.md#character-creation-actions), [Game state](../user_declarations.md#game-state) | Rules and action execution |
+| SplitItem/CombineItems and morale | [Character actions](../user_declarations.md#character-actions), [GM tools](../user_declarations.md#gm-tools) | Rules and action execution |
 | Persuasion and notes | [Character actions](../user_declarations.md#character-actions), [NPC actions](../user_declarations.md#npc-character-actions), [GM tools](../user_declarations.md#gm-tools) | Rules and action execution |
 | Player replies and travel | [Character actions](../user_declarations.md#character-actions), [GM tools](../user_declarations.md#gm-tools) | Player replies and coordinated travel |
 | Damage and timed travel | [Game turns and time](../user_declarations.md#game-turns-and-time) | Unified game time and activities; Rules and action execution |
@@ -76,8 +77,35 @@ and travel rather than implementing movement or scheduling again.
    (previous step) and has the configured response time to object. Test a give
    to a player who objects, one who stays silent until the timeout, and one who
    consents.
-4. Extend the shared speech path with lie's declared WIL/suspicion outcomes and
-   BePersuaded as an NPC-owned save tool.
+   Add SplitItem(item ID, description) and CombineItems(input IDs, description)
+   through the same action/GM approval path. Approval names two existing ItemType
+   IDs for a split (the same type may be used twice), or one for a combination
+   plus the result's holder/placement through the existing holder references.
+   Check live world-local inputs/types and authorization, then consume inputs and
+   instantiate outputs atomically. Keep consumed records and history; filter them
+   from active inventory and action targets. Split outputs retain the original
+   holder; combined outputs use the explicitly approved holder. Reuse normal
+   authorization for inputs and the result instead of forcing preparatory
+   transfers or inferring a holder from argument order. The GM judges physical
+   access and consent through the existing action path. Return
+   new item IDs in the action result, and return those same IDs on repeated approval.
+   Use the prepared full- and half-sack types in Bread Thief: one full becomes two
+   halves; two halves become one full. The prepared half type has no initial item.
+   Make both types discoverable through existing GM lookup before approval needs
+   their IDs. Test split/combine round-trip, an unavailable input or foreign type
+   changing nothing, and repeated approval producing no duplicate outputs. Check
+   a combination with accessible inputs at different holders, an unauthorized
+   result holder, and consumed input IDs still reconstructing in old history.
+   No new crafting framework
+   or arbitrary fractional item ledger.
+4. Implement the shared Rust attribute-save operation before its callers: GM Save
+   takes a character, attribute, short reason and applicable difficulty modifier,
+   and returns the recorded roll/outcome. Characters do not invent or resolve the
+   roll. Use it for Bread Thief's DEX stealth check before approving the theft:
+   success permits feasible quiet removal; failure alerts Toma through narration
+   and leaves his response to his agent. Then extend the shared speech path with
+   lie's declared WIL/suspicion outcomes and BePersuaded as an NPC-owned save tool,
+   reusing the same Rust roll calculation with their declared policies.
    Reuse [GM editing and lookup](gm-editing.md) for authorized object-field/note
    access and current GM state; do not expose private notes to NPCs or implement
    another editing interface. Reuse NPC interaction's hearing rules, proposal selection,
@@ -88,14 +116,25 @@ and travel rather than implementing movement or scheduling again.
    alternatives flow. Test heard/unheard/private conversation, persuasion,
    the existing intervention and no-response paths without a GM
    recursion cycle; inspect actual supplied context, not prose alone.
-5. Implement Rust saves, damage, critical damage/scars, death, armor and recovery
+5. Extend the shared Rust saves with damage, critical damage/scars, death, armor and recovery
    from the bundled core rules. Add actual attack, retreat and take_damage through
    unified timing's admission/resources and GM approval. Attack consumes the short
-   action resource with its approved effect. Use the agreed resource costs for
+   action resource with its approved effect. GM approval supplies the Cairn
+   weakness/advantage flags and applicable modifiers; Rust calculates and rolls
+   damage and applies armor, HP/STR loss, critical-damage saves and resulting
+   conditions/death. Return the result to the GM and damaged character; the GM
+   narrates without giving bystanders the numbers. Attack damage must not be
+   applied again through GM TakeDamage or note/field edits. TakeDamage stays
+   environmental harm, sharing the underlying damage calculations without giving
+   the GM control over attack results. Repeated approval must not roll or damage
+   twice. Use the agreed resource costs for
    other operations; do not add begin_combat/end_combat or reimplement EndTurn,
    Wait, ReplaceActivity or timed effects. Compute can_act at the shared boundary
    and publish it; a disabled button is not enforcement. No intervention,
    Interrupt/Never mind or unused resource grants extra permission.
+   Retreat uses the shared DEX save before the GM permits the described safe
+   Move/run; failure does not grant a consequence-free escape. Apply any allowed
+   movement through the existing movement/timing path.
    Extend NPC interaction's tentative/committed intervention to physical contests:
    committed intent does not bypass a shopkeeper's actual obstruction, initiative
    or consumed allowance. Resolve checks and approved reaction effects before
@@ -106,6 +145,13 @@ and travel rather than implementing movement or scheduling again.
    when damage makes continuing impossible. Verify second-action rejection,
    skipped resources after EndTurn, optional versus forced activity interruption,
    repeated Interrupt/Never mind, armor/STR damage, death and environmental harm.
+   Add the GM's MoraleCheck using the shared WIL save and Cairn's morale triggers.
+   Record each NPC result for that NPC and the GM. A failed NPC gets the declared
+   flee instruction before its next ordinary turn; keep this internal instruction
+   out of perceived-event delivery. PCs have no roll or effect. NPC-only handling
+   belongs in Rust, not extra GM instructions about the exception. Test successful
+   and failed NPC checks and a mixed PC/NPC request, including the failed NPC's
+   next actual inference input. Do not build another response scheduler for morale.
    Distant NPC opportunities use the agreed derived-time policy; do not restore
    hourly processing from a global maximum clock. Delay remains a future idea.
 6. Add Travel/Follow(Connection/action references) using the waiting-for-replies
@@ -133,3 +179,13 @@ reference documentation. Re-read coding_standards.md and prompt_standards.md;
 review the test cases with the user before model-facing implementation, exercise
 real configured-model chats and complete the
 [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist).
+
+For Bread Thief, verify a voluntary resolution, actual portion transfers after
+SplitItem, recombination without creating food, stealth success/failure, a failed
+attempt followed by harder negotiation, and confrontation that can end in combat
+or retreat. Use scripted Store/Game paths for dice/state boundaries and captured
+real-model chats for tool use and perception; do not prescribe either NPC's deal
+or treat recovering all flour as the only valid ending. Combat checks must show
+that Rust, not GM prose, determines damage and that morale failures reach the
+NPC's next turn as instructions. These are acceptance cases for the existing
+steps, not a separate scenario-specific tool suite.

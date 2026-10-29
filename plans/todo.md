@@ -31,8 +31,10 @@ there yet". Remove and archive only verified completions.
 - [Model evaluation](model-selection.md): recorded repeated Bread Thief cases,
   measured comparison and default selection for the implemented capabilities.
 - [Rules and travel](playable-rules.md): complete creation, player-call replies
-  and interventions, items, persuasion, damage and timed Travel/Follow using
-  unified timing, shared NPC interaction and the existing movement/action paths.
+  and interventions, transfers and SplitItem/CombineItems, saves/persuasion,
+  Rust-owned attack damage, MoraleCheck and timed Travel/Follow using unified
+  timing, shared NPC interaction and the existing movement/action paths. Bread
+  Thief is the local acceptance scenario, including its prepared half-sack type.
 - [Storyteller gameplay](storyteller-gameplay.md): public/private backgrounds,
   creation approvals, entry placement, encounter guidance, event updates and
   replacements, reusing initialized world objects and the completed rules.

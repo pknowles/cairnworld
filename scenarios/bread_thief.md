@@ -106,10 +106,43 @@ definition of justice. Letting Toma keep his wages can be a considered resolutio
 Sharing or contributing supplies has its own cost. A failed plan can leave the
 player empty-handed, harm someone, or lose the food.
 
+## Required game operations
+
+These are implementation requirements, not additional instructions deciding
+what either NPC must agree to. Use the existing shared action, GM approval,
+perception and history paths.
+
+| Approach | Operations needed |
+| --- | --- |
+| Question, negotiate, distract or deceive | Speak/private speech, Lie and the NPC's BePersuaded; NPCs choose their own responses. |
+| Find the window, enter or reposition | Investigate/Open/Ask through Attempt, Move and persistent placement/GM notes. |
+| Steal the sack quietly | GM Save(DEX) for noise before approval, then Take; narrate discovery to Toma on failure. |
+| Return, exchange or share flour | Take/Give/Drop/Place and SplitItem/CombineItems. |
+| Fight or flee | Attack, Retreat, EndTurn and the shared timing/initiative, damage and recovery rules; GM MoraleCheck when Cairn calls for it. |
+
+The JSON prepares full `flour sack` and `half flour sack` ItemTypes. Only the
+original full sack exists at the start. If the characters agree to divide it,
+SplitItem creates two half-sack items using the prepared type; Give transfers
+the agreed portion. CombineItems can turn the two halves back into one full
+sack. Rust consumes inputs and creates outputs atomically, retaining their
+records/history. Narrating a division alone must not duplicate food or change
+its holder. No general fractional inventory system is needed for this encounter.
+
+For attacks, the GM supplies applicable Cairn weakness/advantage flags and
+modifiers on approval. Rust rolls and applies all attack damage and its
+mechanical consequences; the GM narrates the returned result. Environmental
+TakeDamage is separate and is not a way to choose or reapply attack damage.
+MoraleCheck rolls NPC WIL in Rust; a failure adds the declared flee instruction
+before that NPC's next turn. PCs are unaffected by morale. A character may
+choose Retreat without first failing morale.
+Retreat still requires its own DEX save before the GM permits a safe Move/run;
+a failed retreat does not automatically move the character away from danger.
+
 The human-readable encounter is here; `bread_thief.json` contains the playable
 world and each NPC's own background and motives. Changes to either file must
 preserve the same situation.
 
-Runtime limitation: gameplay saves are not yet exposed by the application's
-tools. The stealth save above is an encounter requirement for the rules
-implementation; narration must not substitute for an actual dice result.
+Runtime limitation: this table maps the encounter to declared tools; it is not
+a claim that they are all implemented. In particular gameplay saves, item
+transformations and combat/morale still require the planned rules work.
+Narration must not substitute for actual dice or inventory changes.
