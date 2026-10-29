@@ -759,7 +759,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   before the action is approved or rejected. A valid call is captured in
   `NarrationTools` and delivered after the player agent settles as `NarrationText`
   entries (`only` / `except` recipients); `Narration::restrict_to` keeps speech
-  privacy. The GM scene packet carries character ids. The global
+  privacy. The GM scene packet carries character ids and leaves out empty fields (`prompts::drop_blanks`). The global
   `[game] characters_share_narration` rule (`GameSettings`, on by default) is never told to
   the GM: `Narration::players_share` makes `append_group_narration_in` show every perceiving
   player character the first account a player received; `narrate_characters` is exempt.

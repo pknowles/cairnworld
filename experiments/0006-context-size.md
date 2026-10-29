@@ -60,3 +60,21 @@ are already conveyed to them, so there is nothing to narrate. End your turn with
 narrate tool." while action 1 still waited for a decision. The result now ends with
 "Still to decide: action 1." while presented actions remain, and with the narrate
 instruction only when none do. 0 of 14 runs failed afterwards.
+
+## The scene packet
+
+Production-assembled GM requests on the fixed hut scenario (about 3,570 characters of
+packet, 2,450 input tokens), 8 samples per case, GM before and after approval:
+
+| Packet | Input tokens | Choices |
+|---|---|---|
+| compact JSON, as sent | 2,454 (speech) / 2,337 (look) | `approve_action`; then `narrate_nothing` (speech) or `narrate_group` |
+| JSON without empty fields | -55 | identical, every sample |
+| plain text outline, same facts | -49 | `ask`: answered in plain text instead of a narrate tool, 8 of 8 |
+
+Empty fields (`""`, `null`, `[]`, `{}`) were dropped in the GM packet only: 55 tokens, a
+little over 2%, nothing lost. Plain text saved no more and broke the tool call, so the
+JSON stays. The rest of the packet is authored scenario text (location, notes, each
+character's background, motive and ambition), which is most of its weight; trimming that
+changes what the GM knows and needs judging against what the GM uses, not formatting.
+The NPC and player scenes carry the same kind of empty fields; they are not measured yet.

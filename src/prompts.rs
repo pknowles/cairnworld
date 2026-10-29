@@ -227,6 +227,26 @@ impl Tools {
     }
 }
 
+/// Remove the fields of a JSON packet that hold nothing: empty text, lists and
+/// objects, and nulls. A model reads an absent field as nothing there, at a
+/// fraction of the tokens (experiments/0006-context-size.md).
+pub fn drop_blanks(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.values_mut().for_each(drop_blanks);
+            map.retain(|_, field| match field {
+                serde_json::Value::Null => false,
+                serde_json::Value::String(text) => !text.is_empty(),
+                serde_json::Value::Array(items) => !items.is_empty(),
+                serde_json::Value::Object(fields) => !fields.is_empty(),
+                _ => true,
+            });
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(drop_blanks),
+        _ => {}
+    }
+}
+
 /// Remove what the schema generator adds that says nothing to the model: the
 /// schema URL, the type's title, integer formats and null defaults. They cost
 /// about a tenth of a request (experiments/0006-context-size.md) and replaying
@@ -409,6 +429,29 @@ rolle = \"typo\"",
                 "to": {"type": ["integer", "null"]},
                 "format": {"type": "string"},
             }})
+        );
+    }
+
+    #[test]
+    fn blank_fields_are_dropped_but_zero_and_false_are_kept() {
+        let mut packet = serde_json::json!({
+            "name": "Mara",
+            "background": "",
+            "notes": null,
+            "inventory": [],
+            "sheet": {"hp": 0, "armor": null, "flags": {}},
+            "items": [{"name": "sack", "description": ""}],
+            "ready": false,
+        });
+        drop_blanks(&mut packet);
+        assert_eq!(
+            packet,
+            serde_json::json!({
+                "name": "Mara",
+                "sheet": {"hp": 0},
+                "items": [{"name": "sack"}],
+                "ready": false,
+            })
         );
     }
 }

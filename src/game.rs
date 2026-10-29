@@ -26,7 +26,7 @@ use crate::{
     prompts,
     settings::{GameSettings, Limits},
     store::{
-        ActionOutcome, Decision, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration,
+        ActionOutcome, Decision, GmScene, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration,
         PendingAction, PlayerAgent, PresenceNarration, SpeakAction, Store,
     },
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
@@ -719,15 +719,12 @@ where
         if !left.is_empty() {
             change.push_str(&format!("{} left.", left.join(", ")));
         }
-        let scene = serde_json::to_string(
-            &self
-                .store
-                .gm_scene(world_id, gm_history.branch_id)
-                .await
-                .context("loading group GM scene for presence narration")?,
-        )
-        .context("serializing group GM presence scene")?;
-        let scene_packet = Self::gm_packet(&scene);
+        let scene = self
+            .store
+            .gm_scene(world_id, gm_history.branch_id)
+            .await
+            .context("loading group GM scene for presence narration")?;
+        let scene_packet = Self::gm_packet(&scene)?;
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(
@@ -1336,12 +1333,15 @@ where
         })
     }
 
-    /// What the GM is shown of the scene it judges and narrates.
-    fn gm_packet(scene: &str) -> String {
-        format!(
+    /// What the GM is shown of the scene it judges and narrates, without the
+    /// fields that hold nothing.
+    fn gm_packet(scene: &GmScene) -> Result<String> {
+        let mut scene = serde_json::to_value(scene).context("serializing the GM scene")?;
+        prompts::drop_blanks(&mut scene);
+        Ok(format!(
             "Current scene packet:
 {scene}"
-        )
+        ))
     }
 
     /// The location GM, not the player agent, introduces a character who has
@@ -1405,15 +1405,12 @@ where
         let group_id = self.store.character_group_id(member.character_id).await?;
         let gm_history = self.store.player_group_history(member).await?;
         let branch = self.store.group_branch(group_id).await?;
-        let scene = serde_json::to_string(
-            &self
-                .store
-                .gm_scene(member.world_id, gm_history.branch_id)
-                .await
-                .context("loading group GM scene for the opening")?,
-        )
-        .context("serializing group GM opening scene")?;
-        let scene_packet = Self::gm_packet(&scene);
+        let scene = self
+            .store
+            .gm_scene(member.world_id, gm_history.branch_id)
+            .await
+            .context("loading group GM scene for the opening")?;
+        let scene_packet = Self::gm_packet(&scene)?;
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(Role::User, request);
@@ -1936,16 +1933,13 @@ where
         .into_iter()
         .chain(narrate.tools.iter().cloned())
         .collect();
-        let scene = serde_json::to_string(
-            &self
-                .store
-                .gm_scene(pending.world_id, pending.gm_branch_id)
-                .await
-                .context("loading group GM scene for prompt")?,
-        )
-        .context("serializing group GM scene for prompt")?;
+        let scene = self
+            .store
+            .gm_scene(pending.world_id, pending.gm_branch_id)
+            .await
+            .context("loading group GM scene for prompt")?;
         let actor = self.store.character_name(pending.character_id).await?;
-        let scene_packet = Self::gm_packet(&scene);
+        let scene_packet = Self::gm_packet(&scene)?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let note = note.map(|note| format!(" {note}")).unwrap_or_default();
         let request = Message::text(
