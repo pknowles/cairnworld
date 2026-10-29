@@ -12,8 +12,7 @@ Not done or not verified:
 - The InterventionCheck cases were written without the user review this plan
   requires, and the real-model check does not assert what the asked NPC chose.
 - Natural stopping is measured for two NPCs (experiments/0005-npc-chatter.md); three
-  or more NPCs and entrance narration are untested. The open policy on raised hands
-  when another player acts remains user-owned.
+  or more NPCs and entrance narration are untested (moved to agent-tuning.md).
 
 ## Goal and authority
 
@@ -117,13 +116,8 @@ or allowance changes, and is hidden/inert without a hand. Send or final disconne
 lowers the player's hand. Retired-group hands do not affect current groups;
 splits and merges are not restricted by hands.
 
-Current code also lowers every hand in a group when another player's message is
-queued. The latest World game page declaration explicitly leaves this undecided:
-keep the original hand so the player can finish typing, or clear it because the
-conversation moved on. Queueing text is not the same as a successful game action.
-Do not present the current implementation as settled user intent. Once the user
-decides, align design.md, code, regression expectations and implementation
-reference together. This open choice does not require rebuilding Interrupt.
+Another player's message leaves a raised hand up so the player can finish typing
+(decided 2026-10-29; see user_exerpts.md).
 
 ## User-owned tuning
 

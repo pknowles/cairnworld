@@ -533,6 +533,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
   loader/validator and the checked-in Bread Thief setup: a shared hut location,
   Mara, Toma, flour and cache items, typed item data, and pre-written notes.
+  `scenarios/bread_thief.md` describes the encounter: Toma guards the flour;
+  bargaining, stealth and force have distinct obstacles and consequences.
   `Store::owner_starting_group` shares the existing owner-character selection
   between invitation acceptance, extra characters and export, using the caller's
   connection. Export reads both start names from that one selected group.
@@ -856,8 +858,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `Game::interrupt` / `never_mind` / `hand_raised` expose them. `next_npc_step` leaves
   out groups with a hand raised, so a step already running finishes, nothing is
   cancelled and other groups' NPCs continue. A hand comes down when its player sends,
-  says Never mind or disconnects for the last time, and any message in the group lowers
-  every hand in it. Never mind without a hand does nothing. The player-chat socket reads
+  says Never mind or disconnects for the last time; another player's message leaves it
+  up. Never mind without a hand does nothing. The player-chat socket reads
   `interrupt` / `never_mind` while a turn runs and reports `control { hand_raised }`; the
   page swaps Interrupt for Never mind only while the hand is up.
 - `game::tests::device_suite` (ignored) loads the CUDA model once (`DeviceModel`,

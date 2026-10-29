@@ -65,7 +65,7 @@ pub enum ServerEvent {
         value: bool,
     },
     /// Whether this player's hand is raised (they pressed Interrupt and have
-    /// not yet sent, said Never mind, or been moved on by another player).
+    /// not yet sent or said Never mind).
     Control {
         hand_raised: bool,
     },

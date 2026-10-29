@@ -147,19 +147,10 @@ impl World {
     /// Never mind, or the player sending or leaving: lower this character's hand
     /// and wake the worker. Without a raised hand this does nothing at all.
     pub fn lower_hand(&self, character_id: i64) {
-        self.lower(|(_, hand)| *hand == character_id);
-    }
-
-    /// The conversation has moved on: lower every hand in the group.
-    pub fn lower_hands_in(&self, group_id: i64) {
-        self.lower(|(group, _)| *group == group_id);
-    }
-
-    fn lower(&self, matches: impl Fn(&(i64, i64)) -> bool) {
         let lowered = {
             let mut hands = self.hands.lock().expect("hands lock poisoned");
             let before = hands.len();
-            hands.retain(|hand| !matches(hand));
+            hands.retain(|(_, hand)| *hand != character_id);
             hands.len() != before
         };
         if lowered {

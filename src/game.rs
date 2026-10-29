@@ -242,8 +242,8 @@ where
     }
 
     /// Interrupt: raise this player's hand in their group. NPC steps stop
-    /// starting there until the player sends, says Never mind, leaves, or
-    /// another player speaks. Nothing running is cancelled.
+    /// starting there until the player sends, says Never mind or leaves.
+    /// Nothing running is cancelled.
     pub async fn interrupt(&self, member: &PlayerAgent) -> Result<()> {
         ensure!(
             !*self.stopping.borrow(),
@@ -306,21 +306,21 @@ where
             "world {} is no longer accepting input because the server is stopping",
             world.id
         );
-        let group_id = self.store.character_group_id(member.character_id).await?;
         let permit = world
             .sender
             .reserve()
             .await
             .with_context(|| format!("world {} is not accepting input", world.id))
             .context("queueing player message")?;
+        let sender = member.character_id;
         permit.send(WorldEvent::PlayerMessage {
             member,
             text: text.to_string(),
             reply,
         });
-        // The player has spoken, so every hand in the group comes down: the
-        // sender's own, and anyone else's, since the conversation has moved on.
-        world.lower_hands_in(group_id);
+        // Only the sender's own hand comes down; another player's stays up so
+        // they can finish typing.
+        world.lower_hand(sender);
         Ok(receive)
     }
 
@@ -7198,7 +7198,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn another_players_message_lowers_every_hand_so_the_conversation_moves_on() {
+    async fn another_players_message_leaves_a_raised_hand_up_and_the_replies_wait_for_it() {
         let scene = speech_scene().await;
         let speaker = scene.names[0].clone();
         scene
@@ -7214,8 +7214,12 @@ mod tests {
             .await
             .unwrap();
 
-        // The first player had their hand up, but the second spoke first.
-        assert!(!scene.game.hand_raised(&scene.first).await.unwrap());
+        // The first player can still finish typing: the hand stays up and the
+        // NPCs start nothing until it comes down.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(scene.game.hand_raised(&scene.first).await.unwrap());
+        assert_eq!(requests_made(&scene), 4, "no NPC work started with the hand up");
+        scene.game.never_mind(&scene.first).unwrap();
         wait_for_npc_work(&scene).await;
         assert!(
             heard(&scene.store, &scene.second)

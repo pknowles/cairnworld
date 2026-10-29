@@ -671,6 +671,10 @@ and asked for no "paused group" concept, group lock or world lock: Interrupt onl
 stops NPC responses for now, and Never mind lets them continue. This replaces the
 earlier per-character hold protocol with live pause acknowledgement.
 
+Updated 2026-10-29: asked whether another player's message should clear a raised
+hand or leave it up, the user chose to keep it raised ("Keep it raised") so the player
+can finish typing. This replaces the "may need to re-interrupt" expectation above.
+
 ## 2026-10-24 Perceptions and narration audiences
 
 The user clarified that delivery and response must be shared across action kinds:

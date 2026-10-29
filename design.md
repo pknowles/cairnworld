@@ -1657,12 +1657,11 @@ to speak and keep the hand up until they send a message or say Never mind. While
 any hand is raised in a group, no NPC step starts there; a step already running
 finishes and nothing is cancelled, so humans, other groups and every action keep
 working. A hand is the player's own state, kept in memory by the world. It comes
-down when its player sends, says Never mind or disconnects, and a message from
-another player in the group lowers every hand: the conversation has moved on and
-they may Interrupt again. Never mind does nothing, and is not shown, without a
-raised hand. Interrupt and Never mind run no inference and never reset or grant
-game-turn allowance. Queue the message first, then lower the hands, so NPC work
-cannot overtake the input.
+down when its player sends, says Never mind or disconnects; another player's
+message leaves it up, so the player can finish typing. Never mind does nothing,
+and is not shown, without a raised hand. Interrupt and Never mind run no
+inference and never reset or grant game-turn allowance. Queue the message first,
+then lower the sender's hand, so NPC work cannot overtake the input.
 
 InterventionCheck collects reaction intentions before an action resolves. NPC
 decision calls do not invoke the already-active GM. The GM may approve a proposed
