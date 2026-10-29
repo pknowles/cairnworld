@@ -32,6 +32,16 @@ from the packet, resulting groups read from stored membership, for both a split 
 characters go separate ways and a merge when they cross paths. Measure repeat rate;
 keep in `device_suite` only if reliable.
 
+## NPC chatter with three or more NPCs, and NPC reactions to the entrance narration
+
+Measured only for two NPCs in one scene (experiments/0005-npc-chatter.md): with the
+"operate a character" role and `npc.before_deciding` on every decision, a discussion
+ends after about one line per NPC. Not yet measured: three or more NPCs in one group,
+and what the NPCs do when the GM narrates a player's entrance (the declared flow offers
+them a response opportunity with nobody to talk to). Add no filter for it; run the real
+model several times, read the recorded contexts, and record the counts in the experiment
+file.
+
 ## The GM leaks one side of a split to the other after a merge
 
 Declaration: a character may only learn what they perceived

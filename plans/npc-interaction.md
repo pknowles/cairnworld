@@ -12,7 +12,7 @@ Not done or not verified:
 - The InterventionCheck cases were written without the user review this plan
   requires, and the real-model check does not assert what the asked NPC chose.
 - Natural stopping is measured for two NPCs (experiments/0005-npc-chatter.md); three
-  or more NPCs and entrance narration are untested (moved to agent-tuning.md).
+  or more NPCs and entrance narration are untested (recorded in agent-tuning.md).
 
 ## Goal and authority
 

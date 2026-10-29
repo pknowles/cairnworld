@@ -41,8 +41,9 @@ there yet". Remove and archive only verified completions.
   creation approvals, entry placement, encounter guidance, event updates and
   replacements, reusing initialized world objects and the completed rules.
 - [Agent tuning](agent-tuning.md): measured failures of agent behaviour (GM privacy after a
-  merge, whether the GM can name groups to split and merge) to tune once the features
-  they depend on exist.
+  merge, the GM's blindness to other groups when splitting and merging, NPC chatter with
+  three or more NPCs and after the entrance narration) to tune once the features they
+  depend on exist.
 - [Campaign completion](campaign-completion.md): event-driven ending,
   talk-only epilogue choices, final account and closed play.
 
