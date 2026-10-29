@@ -93,3 +93,16 @@ text. Each group of trimmed tools passed 10 of 10 alone and the combination did 
 one-step replay of the GM's decision (40 samples) could not see the failure. Kept: the
 original text. Tool text is only worth cutting if the full scenario is run enough times
 to show it does not change the GM's order of work.
+
+## The request restated for every action
+
+Each presented action reached the GM as "X takes action N: a `tool` request with arguments
+{...}. Judge it from the current scene. Call approve_action with action_id N if it can
+happen, or reject_action with action_id N and a concise reason, then end your turn with a
+narrate tool." The sentences after the arguments (about 210 characters, 55 tokens) were
+the same every time and stay in the GM's history for the whole run. They are now said once
+in the GM's role ("Judge each presented action from the scene: approve it if it can happen,
+or reject it with a concise reason") and the request is the fact alone. Intervention
+scenario: 0 of 20 runs failed (original text 0 of 32, shortened tool text 7 of 20); device
+suite passed. The instruction to end the turn with a narrate tool is no longer repeated in
+every request; the role and every decision's result still say it.

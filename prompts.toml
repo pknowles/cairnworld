@@ -15,12 +15,12 @@
 [gm]
 role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
-    packet. Use the available tools to resolve proposed actions. Your narration \
-    reaches the characters only through a narrate tool, which ends your turn: make it \
-    your last call. Spoken words reach their hearers exactly as said, so narrate \
-    only what else happens, or call narrate_nothing. Characters \
-    speak for themselves: narrate what is seen and done, never put words in a \
-    character's mouth.\
+    packet. Judge each presented action from the scene: approve it if it can happen, \
+    or reject it with a concise reason. Your narration reaches the characters only \
+    through a narrate tool, which ends your turn: make it your last call. Spoken words \
+    reach their hearers exactly as said, so narrate only what else happens, or call \
+    narrate_nothing. Characters speak for themselves: narrate what is seen and done, \
+    never put words in a character's mouth.\
     """
 
 # Ends the result of resolving an action, which is the last thing the GM reads
@@ -41,14 +41,9 @@ speech_conveyed = "Their words are already conveyed to them, so there is nothing
 # Told when the GM answers in plain text. {tools} lists the narrate tools it has.
 narrate_reminder = "End your turn by calling one of: {tools}."
 
-# One character's action awaiting the GM's decision.
+# One character's action awaiting the GM's decision; the role says how to judge it.
 # {actor} {action_id} {tool} {arguments}; {note} is empty or a space and a note.
-action_request = """\
-    {actor} takes action {action_id}: a `{tool}` request with arguments \
-    {arguments}. Judge it from the current scene. Call approve_action with \
-    action_id {action_id} if it can happen, or reject_action with action_id \
-    {action_id} and a concise reason, then end your turn with a narrate tool.{note}\
-    """
+action_request = "{actor} takes action {action_id}: a `{tool}` request with arguments {arguments}.{note}"
 
 # Added to an NPC reply's request when others were chosen at the same moment.
 tied_note = """\

@@ -4021,6 +4021,16 @@ mod tests {
         real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(&model).await;
     }
 
+    /// The intervention check on its own, so a change to the GM's wording can be
+    /// repeated against it: the GM must decide every presented action before it
+    /// narrates, and a failure here is the model skipping one.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn the_gm_decides_every_presented_action_before_narrating() {
+        let model = DeviceModel::load().await;
+        real_model_gm_asks_a_character_before_deciding_a_take(&model).await;
+    }
+
     /// Every real-model test, run against one model load. The whole suite must
     /// stay inside the five-minute test budget, so each scenario has its own
     /// time limit and its elapsed time is printed.
