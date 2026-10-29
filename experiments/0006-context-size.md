@@ -17,7 +17,7 @@ Baseline input tokens: GM request 3,390 (limit 4,096), GM after its approval
 |---|---|---|---|---|
 | remove `$schema`, `title`, `format`, `default` from tool schemas | -345 | -100 | -100 | none |
 | ... and `additionalProperties` | -50 more | -20 | -20 | NPC chose `speak` instead of `attempt` 10/10: kept |
-| offer no `split_group`, `merge_groups`, `intervention_check` | -845 | | | none |
+| offer no `split_group`, `merge_groups`, `intervention_check` | -845 | | | none; rejected, agents must see every tool |
 | `approve_action` without `include`/`exclude`/`prefix` for non-speech | -160 | | | none |
 | `split_group` without `group_id` and `continue_with_character_id`, short text | -165 | | | none |
 | drop empty fields from the scene packet | -46 | | | none (not worth it) |
