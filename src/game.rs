@@ -3830,13 +3830,21 @@ mod tests {
     /// the player never heard. Each asks the real GM a question on the merged
     /// branch DAG; the answers must contain what the asker perceived (so a GM that
     /// refuses everything fails) and nothing of what they did not.
-    async fn real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(
-        model: &DeviceModel,
-    ) {
+    async fn real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(model: &DeviceModel) {
         // (asker, question, must mention, must not mention)
         let cases = [
-            ("player", "What did Mara whisper outside?", Some("heron"), None),
-            ("player", "What did Toma say inside the hut?", None, Some("lantern")),
+            (
+                "player",
+                "What did Mara whisper outside?",
+                Some("heron"),
+                None,
+            ),
+            (
+                "player",
+                "What did Toma say inside the hut?",
+                None,
+                Some("lantern"),
+            ),
             ("toma", "What did Mara say outside?", None, Some("heron")),
             ("toma", "What did I mutter inside?", Some("lantern"), None),
         ];
@@ -6880,26 +6888,36 @@ mod tests {
         // The check failed visibly, attributed to asking Toma.
         let errors = failed_sequences(&scene).await;
         assert!(
-            errors
-                .iter()
-                .any(|error| error.contains("whether to intervene") && error.contains("eagerness 4")),
+            errors.iter().any(
+                |error| error.contains("whether to intervene") && error.contains("eagerness 4")
+            ),
             "{errors:?}"
         );
         // What the turn had already done stays, and nothing unsuccessful follows.
-        assert_eq!(holder_of(&scene, "flour sack").await, Some(scene.names[0].clone()));
+        assert_eq!(
+            holder_of(&scene, "flour sack").await,
+            Some(scene.names[0].clone())
+        );
         assert_eq!(holder_of(&scene, "emergency cache").await, None);
         assert_eq!(
             narrated_to_npc(&scene.store, "Toma").await,
             ["You lift the flour sack."]
         );
         for npc in ["Mara", "Toma"] {
-            assert_eq!(decisions_asked(&scene, npc).await, 0, "{npc} replied to a failed turn");
+            assert_eq!(
+                decisions_asked(&scene, npc).await,
+                0,
+                "{npc} replied to a failed turn"
+            );
         }
         let inferences: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inference")
             .fetch_one(&scene.store.pool())
             .await
             .unwrap();
-        assert_eq!(inferences, 6, "Toma's failed answer is one of the turn's inferences");
+        assert_eq!(
+            inferences, 6,
+            "Toma's failed answer is one of the turn's inferences"
+        );
         // The world still accepts input.
         scene
             .responses
@@ -6929,10 +6947,16 @@ mod tests {
 
         let errors = failed_sequences(&scene).await;
         assert!(
-            errors.iter().any(|error| error.contains("max_inferences_total")),
+            errors
+                .iter()
+                .any(|error| error.contains("max_inferences_total")),
             "{errors:?}"
         );
-        assert_eq!(requests_made(&scene), 5, "Toma was not given a fresh allowance");
+        assert_eq!(
+            requests_made(&scene),
+            5,
+            "Toma was not given a fresh allowance"
+        );
     }
 
     fn propose_taking(item: &str, eagerness: u8) -> Response {
@@ -7128,6 +7152,65 @@ mod tests {
         script
     }
 
+    /// Prints what each agent's request is made of, from the requests the
+    /// production path sent in one player turn and the NPC replies to it
+    /// (plans/llm-context-size.md). Run with `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "prints a measurement table; run with --nocapture"]
+    async fn context_size_by_agent_and_part() {
+        let scene = speech_scene().await;
+        let speaker = scene.names[0].clone();
+        scene
+            .responses
+            .lock()
+            .unwrap()
+            .extend(toma_replies_then_the_talk_ends(&speaker));
+        scene
+            .game
+            .player_message(scene.first.clone(), "Ask Toma about the flour.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+
+        println!("request  agent    tools  system  history   total (characters)");
+        for (number, request) in scene.requests.lock().unwrap().iter().enumerate() {
+            let opening = request
+                .messages
+                .iter()
+                .find_map(|message| match &message.content {
+                    MessageContent::Text(text) if message.role == Role::System => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                });
+            let agent = if request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "approve_action")
+            {
+                "GM"
+            } else if opening.is_some_and(|text| text.contains("alongside others")) {
+                "NPC"
+            } else {
+                "player"
+            };
+            let tools = serde_json::to_string(&request.tools).unwrap().len();
+            let (system, history): (Vec<_>, Vec<_>) = request
+                .messages
+                .iter()
+                .partition(|message| message.role == Role::System);
+            let (system, history) = (
+                serde_json::to_string(&system).unwrap().len(),
+                serde_json::to_string(&history).unwrap().len(),
+            );
+            println!(
+                "{:>7}  {agent:<6} {tools:>6} {system:>7} {history:>8} {:>7}",
+                number + 1,
+                tools + system + history
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_raised_hand_stops_the_next_npc_step_and_never_mind_continues_it() {
         let scene = speech_scene().await;
@@ -7218,7 +7301,11 @@ mod tests {
         // NPCs start nothing until it comes down.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(scene.game.hand_raised(&scene.first).await.unwrap());
-        assert_eq!(requests_made(&scene), 4, "no NPC work started with the hand up");
+        assert_eq!(
+            requests_made(&scene),
+            4,
+            "no NPC work started with the hand up"
+        );
         scene.game.never_mind(&scene.first).unwrap();
         wait_for_npc_work(&scene).await;
         assert!(
@@ -10423,7 +10510,11 @@ mod tests {
     async fn real_model_player_routes_requests_to_the_right_action(model: &DeviceModel) {
         let (_, _model_path, _sampling, limits) = model.parts();
         let requests = [
-            ("Look at the rear window.", "attempt", Some(("kind", "look"))),
+            (
+                "Look at the rear window.",
+                "attempt",
+                Some(("kind", "look")),
+            ),
             (
                 "Search the floor by the fire carefully for any clues.",
                 "attempt",
@@ -10463,8 +10554,11 @@ mod tests {
                     serde_json::from_str(&call.arguments).unwrap_or_default();
                 call.name == tool
                     && expected.is_none_or(|(key, value)| {
-                        arguments[key].as_str().unwrap_or("") == value
-                            || arguments[key].to_string() == value
+                        let shown = match arguments[key].as_str() {
+                            Some(text) => text.to_string(),
+                            None => arguments[key].to_string(),
+                        };
+                        shown == value
                     })
             });
             if !matches {
