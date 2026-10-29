@@ -221,6 +221,42 @@ impl Scenario {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn bread_thief_npc_fields_survive_import_into_npc_context() {
+        use crate::store::{Store, TestDatabase};
+
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let db = TestDatabase::new("bread-thief-context");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("scenario@example.test", "Scenario")
+            .await
+            .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        let group = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let ids = store.group_npc_ids(group).await.unwrap();
+        assert_eq!(ids.len(), scenario.npcs.len());
+        for id in ids {
+            let scene = store.npc_scene(id).await.unwrap();
+            let authored = scenario
+                .npcs
+                .iter()
+                .find(|npc| npc.name == scene.you.name)
+                .unwrap();
+            assert_eq!(scene.background, authored.background);
+            assert_eq!(scene.motive, authored.motive);
+            assert_eq!(scene.ambition, authored.ambition);
+            println!("NPC_PACKET {}", serde_json::to_string(&scene).unwrap());
+        }
+    }
+
     #[test]
     fn rejects_a_reference_to_a_missing_location() {
         let scenario = Scenario {

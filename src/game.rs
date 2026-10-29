@@ -2732,7 +2732,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -2758,7 +2758,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -3092,7 +3092,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -3207,7 +3207,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -3397,7 +3397,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -4389,7 +4389,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -4511,7 +4511,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -5012,7 +5012,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let other = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -5186,7 +5186,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let other = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -9290,7 +9290,7 @@ mod tests {
             .unwrap();
         let scenario = Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
@@ -9764,7 +9764,7 @@ mod tests {
                 .unwrap();
             let mut scenario = Scenario::read(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/scenarios/bread_thief.json"
+                "/testdata/hut_scenario.json"
             ))
             .unwrap();
             let mut second_group = scenario.groups[0].clone();

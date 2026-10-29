@@ -532,9 +532,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   come from their game relationships, not a `kind` switch.
 - `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
   loader/validator and the checked-in Bread Thief setup: a shared hut location,
-  Mara, Toma, flour and cache items, typed item data, and pre-written notes.
-  `scenarios/bread_thief.md` describes the encounter: Toma guards the flour;
-  bargaining, stealth and force have distinct obstacles and consequences.
+  Mara, Toma, flour and axe items, typed item data, and pre-written notes.
+  `scenarios/bread_thief.md` describes the dispute over Toma's earned payment
+  and the village's food shortage; neither NPC has a scripted settlement.
+  Mechanics tests use `testdata/hut_scenario.json`, independently of story edits.
   `Store::owner_starting_group` shares the existing owner-character selection
   between invitation acceptance, extra characters and export, using the caller's
   connection. Export reads both start names from that one selected group.

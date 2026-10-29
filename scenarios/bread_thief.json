@@ -1,14 +1,13 @@
 {
   "name": "The Stolen Flour",
-  "initial_prompt": "Recover as much of the village flour as possible without needlessly harming Toma.",
-  "storyteller_summary": "Toma, an injured former farmhand, took flour because he is hungry and fears the constable. Mara wants the flour returned but does not want Toma badly hurt.",
+  "initial_prompt": "Mara asks you to recover the flour Toma took. Find out what happened and decide what to do.",
+  "storyteller_summary": "Mara promised Toma a sack of flour for repairing the mill. He finished the work. A flood spoiled the other village stores, so Mara withheld payment to ration the sack among several households. Toma took it anyway; his household also needs food. Both acknowledge the debt. Neither has replacement food in hand.",
   "notes": {
     "gm": {
-      "opening": "The Adventurer starts near the hut. Mara and the hut are separate areas within this one location; moving between them is a normal move, not travel."
+      "opening": "The Adventurer and Mara are outside the hut's barred front door. Toma is inside with the flour. Mara wants it returned without anyone being hurt.",
+      "dispute": "The work and promised payment are real. Mara's emergency does not erase Toma's claim; his claim does not feed the other households. What happens depends on the characters' decisions."
     },
-    "storyteller": {
-      "stakes": "The flour feeds several households. Toma values freedom and survival more than the flour."
-    }
+    "storyteller": {}
   },
   "starting_location": "charcoal hut",
   "starting_group": "charcoal hut",
@@ -16,10 +15,10 @@
     {
       "name": "charcoal hut",
       "location": "charcoal hut",
-      "description": "Everyone present at the charcoal hut: the Adventurer, Mara and Toma.",
+      "description": "Mara and the Adventurer outside the hut; Toma and the flour inside.",
       "notes": {
         "gm": {
-          "grouping": "This is one group, not several factions; Mara and Toma are both reachable in the same GM turn."
+          "grouping": "One group covers the hut and its immediate surroundings. Voices carry through the boards, but walls and distance still constrain sight and access."
         },
         "storyteller": {}
       }
@@ -28,16 +27,14 @@
   "locations": [
     {
       "name": "charcoal hut",
-      "kind": "abandoned hut",
-      "description": "A low charcoal-burner's hut of warped boards. The front door is barred from inside; an open rear window is large enough to crawl through. A narrow crawlspace runs beneath the rear wall. Mara can meet the Adventurer outside, while Toma shelters inside.",
+      "kind": "old work hut",
+      "description": "A small charcoal-burner's hut with a barred front door and an open rear window wide enough for one person to climb through.",
       "notes": {
         "gm": {
-          "exterior": "A careful look at the rear reveals a loose floorboard, torn waxed cloth, mouse-chewed crumbs, and old charcoal-burner cache markings. Do not require a roll to notice these signs when examined.",
-          "interior": "Toma sits beside a weak fire. An open sack of flour, scattered flour, flatbread, a wood axe, and his swollen wrapped leg are visible through cracks or the rear window."
+          "interior": "Toma is beside the tied flour sack, beyond reach from the rear window, with his wood axe within reach. The door is barred from inside. Carrying the sack takes both arms; passing it through the window is separate from climbing through.",
+          "exterior": "Mara and the Adventurer start outside the front door. Moving around the hut is local movement."
         },
-        "storyteller": {
-          "constraint": "Mara and the hut remain areas within this location for the proof of concept; the GM must describe distance and movement between them."
-        }
+        "storyteller": {}
       }
     }
   ],
@@ -45,14 +42,14 @@
     {
       "name": "Mara",
       "group": "charcoal hut",
-      "description": "The village storehouse keeper who asks the Adventurer to recover the flour. She is angry but does not want Toma badly hurt.",
-      "background": "Mara knows Toma injured his leg, has struggled to work, has begged for food, and fears the constable.",
-      "motive": "Recover enough flour for the village without making Toma's situation worse.",
-      "ambition": "Keep the settlement fed and avoid needless harm.",
+      "description": "The village storekeeper, outside the hut, worried about the households relying on her.",
+      "background": "I promised Toma a sack of flour for repairing the mill. He completed the work. A flood spoiled the other village stores, so I withheld his payment to ration this sack among several households. He took it anyway. His household also needs food. I know I owe him; I have no replacement food in hand.",
+      "motive": "Recover the flour for the village households without anyone being hurt.",
+      "ambition": "Keep the households depending on me fed. I feel responsible for them and defensive about withholding Toma's payment.",
       "sheet": {},
       "notes": {
         "gm": {
-          "dialogue": "Mara says: Toma took one of the large sacks and ran to the old charcoal hut. We need back whatever remains. Please don't kill him over it."
+          "knowledge": "Mara acknowledges the completed work and the promised payment. She has no authority to promise another household's resources."
         },
         "storyteller": {}
       }
@@ -60,15 +57,15 @@
     {
       "name": "Toma",
       "group": "charcoal hut",
-      "description": "An injured former farmhand sheltering in the hut. His leg is swollen and poorly wrapped; he can walk, stand and fight, but cannot move quickly with the flour or climb through the window with it.",
-      "background": "Toma stole a sack of flour after being unable to find work and fearing imprisonment by the constable.",
-      "motive": "Avoid imprisonment and find enough food, warmth, and help to reach another settlement.",
-      "ambition": "Survive without further injury, keeping as much flour as he can if possible.",
+      "description": "A healthy mill worker in worn clothes, beside the flour inside the hut, with a wood axe within reach.",
+      "background": "Mara promised me this sack of flour as wages for repairing the mill. I finished the work. After a flood ruined the other village stores she withheld payment to ration it among households. I took my wages anyway. My household is also short of food. I am proud of my work, resent being treated as a thief, and distrust another promise from Mara. I have no replacement food in hand.",
+      "motive": "Take my earned food home to my household without violence.",
+      "ambition": "Have my work respected and my household fed.",
       "sheet": {
-        "hp": 5,
-        "str": 10,
+        "hp": 6,
+        "str": 12,
         "dex": 12,
-        "wil": 8,
+        "wil": 10,
         "armor": 0,
         "weapon": {
           "name": "wood axe",
@@ -78,11 +75,11 @@
       "notes": {
         "gm": {
           "beliefs": [
-            "The constable will imprison him.",
-            "Anyone sent by Mara may intend to capture him.",
-            "A verbal promise alone is unreliable.",
-            "Killing the Adventurer would bring worse consequences."
-          ]
+            "The sack is my earned payment.",
+            "The flood was not my fault.",
+            "Mara has already broken her promise."
+          ],
+          "position": "Toma is healthy and can resist a grab or carry the sack, but cannot wield the axe while carrying it."
         },
         "storyteller": {}
       }
@@ -91,7 +88,7 @@
   "item_types": [
     {
       "name": "provisions",
-      "description": "Consumable food or water.",
+      "description": "Food and other consumable supplies.",
       "stats": {
         "uses": 1
       }
@@ -100,11 +97,6 @@
       "name": "gear",
       "description": "Ordinary useful equipment.",
       "stats": {}
-    },
-    {
-      "name": "currency",
-      "description": "Low-value trade currency.",
-      "stats": {}
     }
   ],
   "items": [
@@ -112,22 +104,22 @@
       "name": "flour sack",
       "item_type": "provisions",
       "location": "charcoal hut",
-      "description": "An opened large sack of flour, enough to feed several households when full.",
+      "description": "A tied, bulky sack of flour beside Toma inside the hut, beyond reach from the window. Carrying it occupies both arms.",
       "notes": {
         "gm": {
-          "state": "Some flour is scattered across the hut floor."
+          "state": "Toma brought the sack here and considers it his wages. It is guarded, not unattended. Ordinary careful handling preserves the flour; a struggle or a blade can spill it."
         },
         "storyteller": {}
       }
     },
     {
-      "name": "emergency cache",
+      "name": "wood axe",
       "item_type": "gear",
       "location": "charcoal hut",
-      "description": "A cache beneath the loose floorboard containing dried food, a waterskin, a wool cloak, copper coins, and a rusted charcoal-burner's hook.",
+      "description": "Toma's work axe, within his reach inside the hut.",
       "notes": {
         "gm": {
-          "access": "Reaching into the crawlspace from outside places the Adventurer beneath the rear window and occupies both hands. If Toma is unaware or distracted, taking it may require no save."
+          "state": "An ordinary wood axe, d6 damage. It is beside Toma, not unattended outside."
         },
         "storyteller": {}
       }
