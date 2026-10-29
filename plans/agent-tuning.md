@@ -6,6 +6,30 @@ need prompt/context tuning once the features they depend on exist. Follow the
 [prompt standards](../prompt_standards.md): read the full model input of a failing
 run, find the cause, change context, replay on the real model.
 
+## HIGH SEVERITY: the GM cannot see other groups, so it cannot split or merge correctly
+
+`GmScene` ([src/store.rs](../src/store.rs)) holds the location, the interacting group's
+own description and notes, items, and that group's characters. Four things the GM needs
+are missing, so the `split_group` and `merge_groups` tools exist but a real GM cannot use
+them reliably:
+
+- **Its own group id.** `split_group` needs `group_id`; nothing in the packet gives it.
+- **The other groups at its location.** `merge_groups` needs `group_ids`; the GM cannot
+  see that another group, its members, or its ids exist.
+- **When to merge.** A merge is due when any two members of different groups could cross
+  paths. The GM sees neither the other groups nor where their members are headed, so it
+  has no basis to notice this.
+- **When to split.** A split is due when members of a group part ways. The GM is never
+  shown the characters' intentions or movement as a signal to partition, so it splits
+  or fails to split by chance.
+
+Fix needs context design first (what the packet shows about sibling groups: ids, members,
+descriptions, what each can perceive of the other; a prompt telling the GM when to
+merge and split), then real-model checks of valid calls: partitions complete, ids taken
+from the packet, resulting groups read from stored membership, for both a split when
+characters go separate ways and a merge when they cross paths. Measure repeat rate;
+keep in `device_suite` only if reliable.
+
 ## The GM leaks one side of a split to the other after a merge
 
 Declaration: a character may only learn what they perceived
@@ -28,7 +52,5 @@ Measured 2026-10-28, 6 runs, none passed. Causes seen:
   (3 of 6 runs). It looks as if the GM wanted to address the narration to one character.
 - One empty narration for the player's control question.
 
-To establish first: the GM's scene packet has no list of other groups at its location
-and no group id, so a real GM cannot name the ids `merge_groups` and `split_group`
-require. A real-model check of valid split and merge calls (partitions complete, ids
-from the packet, resulting groups read from the stored state) belongs with this.
+The high-severity group-visibility limitation above should be fixed first: this check's
+setup (the GM merging by guessed ids) depends on it.
