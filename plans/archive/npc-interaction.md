@@ -1,18 +1,11 @@
 # NPC interaction: remaining work and acceptance
 
-Status 2026-10-26: not complete. All four checkpoints below are built and have
-scripted tests; the device suite and browser checks passed. Speech delivery, NPC
-response selection, GM narration tools, NPC responses to narration, the scene
-and entrance narration, the four request tools, `committed` and
-`intervention_check` exist.
-
-Not done or not verified:
-- The shared-detail setting on and off on the real model (the device suite's "routing" check
-  covers the merged `attempt` kinds, public and private `speak` and `take`).
-- The InterventionCheck cases were written without the user review this plan
-  requires, and the real-model check does not assert what the asked NPC chose.
-- Natural stopping is measured for two NPCs (experiments/0005-npc-chatter.md); three
-  or more NPCs and entrance narration are untested (recorded in agent-tuning.md).
+Status 2026-10-29: complete and archived; stale as a reference. The remaining items
+moved: asking player characters in InterventionCheck is step 2 of
+[Rules and travel](../playable-rules.md); NPC chatter with three or more NPCs and after
+the entrance narration is in [Agent tuning](../agent-tuning.md). The shared-detail
+setting was measured on the real model (experiments/0004-gm-narration-validity.md), and
+natural stopping for two NPCs in experiments/0005-npc-chatter.md.
 
 ## Goal and authority
 

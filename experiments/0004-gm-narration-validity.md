@@ -1,6 +1,6 @@
 # How often the GM ends a turn with a valid narrate call
 
-The GM ends each turn with one of four narrate tools (plans/npc-interaction.md).
+The GM ends each turn with one of four narrate tools (plans/archive/npc-interaction.md).
 Qwen3.5-4B, device-test model, configured sampling. A flow is a character
 creation finish with the GM opening and two GM actions; a GM-only run is the
 opening and two `look` actions through real arbitration without the player

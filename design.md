@@ -1701,7 +1701,7 @@ writes: tool receipts, inference records and private GM notes are not new
 perceptions. Expanded action sets and physical/combat reactions follow the
 implemented rules; they are not simulated by speech-only tools.
 
-The [NPC interaction plan](plans/npc-interaction.md#design-choices) compares the
+The [NPC interaction plan](plans/archive/npc-interaction.md#design-choices) compares the
 alternatives and specifies schema, transaction boundaries, raised hands,
 recovery and complete implementation slices. Full combat remains a separate
 rules increment; scheduling controls confer no action allowance.

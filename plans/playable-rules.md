@@ -5,7 +5,7 @@
 Rust enforces the declared creation, character/NPC actions, inventory, damage
 and travel rules through the existing agent tools. Required history/group,
 inspection, membership and presence data already exists. The preceding
-[NPC interaction](npc-interaction.md) feature supplies speech delivery, response
+[NPC interaction](archive/npc-interaction.md) feature supplies speech delivery, response
 rounds, interruption and GM-selected intervention; extend those paths here.
 
 | Slice | Declaration | Design |

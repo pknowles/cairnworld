@@ -6,10 +6,6 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [NPC interaction](npc-interaction.md): consolidate speech and narration into
-  shared perception delivery and message-driven NPC responses, including Take,
-  privacy and causal inspection; then tentative/committed intervention.
-  Interrupt/Never mind exist; restraint and natural stopping are user-owned tuning.
 - [Model context size](llm-context-size.md): measure what each agent's context
   is made of (tool definitions are about 59% of a GM request) and find what does
   not earn its place. Problems to investigate only; no remedy is decided.
