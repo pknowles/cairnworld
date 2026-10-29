@@ -4,7 +4,7 @@ Status: started. Done: schema metadata removed from every tool (-10% of each req
 and `approve_action` slimmed, and the repeatable measurement
 (`context_size_by_agent_and_part`); results in experiments/0006-context-size.md. Next: the scene packet, and the NPC and player agent contexts. Every
 tool stays visible to the agent that can call it, so it can plan ahead (user, 2026-10-29);
-shrink their text, never their number.
+reduce definition overhead without restricting tool visibility.
 
 ## Goal
 
@@ -13,6 +13,10 @@ part earns its place. The model has a fixed context of 4096 tokens in the
 real-model tests, and prompt_standards.md says every addition has a cost. This
 plan finds the waste; it does not choose the remedy yet, but we need figure one
 out. Brainstorm with the user before implementing anything.
+
+Every tool available to an agent's role remains in its context on every request.
+Do not hide tools by action, require tool discovery, or load definitions only on
+demand to save context. Existing role/permission boundaries remain authoritative.
 
 Follow the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
 [coding standards](../coding_standards.md) and
@@ -52,9 +56,6 @@ the 4,096 limit. The player agent's and NPCs' contexts have not been measured.
 - Whether every description sentence is needed. `split_group` is 881 characters
   of description for a rarely used tool. Several narrate tools repeat that they
   end the turn, which the role also says.
-- Whether all nine tools need to be present in every action turn, or whether the
-  ones that apply only sometimes (`split_group`, `merge_groups`,
-  `intervention_check`) have a cost that is worth paying each time.
 - Whether tools that overlap (`approve_action` and `reject_action`;
   `split_group` and `merge_groups`) cost more as separate definitions than the
   clarity they give the model.
@@ -76,6 +77,7 @@ the 4,096 limit. The player agent's and NPCs' contexts have not been measured.
 
 ## Verification
 
+- Captured requests retain the agent role's full tool set after context reductions.
 - A repeatable measurement of the size of each agent's request by part, taken from
   the requests the real chat path produces, so a change can be seen in numbers.
 - Replays of the captured failing requests (the speech turn, the opening, a take,
