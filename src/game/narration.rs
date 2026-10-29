@@ -41,7 +41,10 @@ pub(super) type PresentedActions = Arc<Mutex<Vec<PendingAction>>>;
 /// The narrate tools of one GM turn, and the narration its call captured.
 pub(super) struct NarrationTools {
     pub tools: Vec<Tool>,
-    captured: Arc<Mutex<Option<Vec<NarrationText>>>>,
+    /// What the narrate call said.
+    captured: Arc<Mutex<Option<Draft>>>,
+    /// Whether the game shares one detailed account among the player characters.
+    shares: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -73,6 +76,8 @@ struct NarrateCharacters {
 struct Draft {
     named: Vec<i64>,
     texts: Vec<NarrationText>,
+    /// Addressed to chosen characters, so never shared beyond them.
+    private: bool,
 }
 
 fn nonempty(text: &str) -> Result<()> {
@@ -91,6 +96,7 @@ fn group_draft(arguments: &str) -> Result<Draft> {
             only: None,
             except: call.exclude_character_ids,
         }],
+        private: false,
     })
 }
 
@@ -115,6 +121,7 @@ fn actor_and_others_draft(arguments: &str, actor: i64) -> Result<Draft> {
                 except,
             },
         ],
+        private: false,
     })
 }
 
@@ -125,6 +132,7 @@ fn nothing_draft(arguments: &str) -> Result<Draft> {
     Ok(Draft {
         named: Vec::new(),
         texts: Vec::new(),
+        private: false,
     })
 }
 
@@ -146,6 +154,7 @@ fn characters_draft(arguments: &str) -> Result<Draft> {
             only: Some(call.character_ids),
             except: Vec::new(),
         }],
+        private: true,
     })
 }
 
@@ -190,6 +199,7 @@ impl NarrationTools {
         Ok(Self {
             tools: narrate,
             captured,
+            shares: game.rules.characters_share_narration,
         })
     }
 
@@ -214,7 +224,7 @@ impl NarrationTools {
         inference_id: i64,
         actor: Option<i64>,
     ) -> Result<Narration> {
-        let texts = self
+        let Draft { texts, private, .. } = self
             .captured
             .lock()
             .expect("narration lock poisoned")
@@ -226,6 +236,7 @@ impl NarrationTools {
             sequence_id,
             actor,
             opens_scene: false,
+            players_share: self.shares && !private,
             texts,
         })
     }
@@ -239,7 +250,7 @@ fn narration_tool<B>(
     game: &Arc<Game<B>>,
     definition: ToolDefinition,
     scope: &Arc<NarrationScope>,
-    captured: &Arc<Mutex<Option<Vec<NarrationText>>>>,
+    captured: &Arc<Mutex<Option<Draft>>>,
     parse: Parse,
 ) -> Tool
 where
@@ -285,7 +296,7 @@ where
                 }
             }
             let nothing = draft.texts.is_empty();
-            *captured.lock().expect("narration lock poisoned") = Some(draft.texts);
+            *captured.lock().expect("narration lock poisoned") = Some(draft);
             Ok(ToolOutcome::Completed(
                 if nothing {
                     "Nothing narrated."

@@ -309,6 +309,10 @@ pub struct Narration {
     pub actor: Option<i64>,
     /// Whether this is the narration of the group's initial scene.
     pub opens_scene: bool,
+    /// Whether every player character who perceives any of the texts is shown
+    /// the same one (the global shared-detail rule), which a narration to
+    /// chosen characters is not.
+    pub players_share: bool,
     pub texts: Vec<NarrationText>,
 }
 
@@ -3219,17 +3223,42 @@ impl Store {
             .await
             .context("recording that the group's scene was narrated")?;
         }
-        let mut heard_by_npcs = Vec::new();
-        for text in &narration.texts {
-            let receiving: Vec<_> = recipients
+        let mut receiving: Vec<Vec<&(i64, i64, bool)>> = narration
+            .texts
+            .iter()
+            .map(|text| {
+                recipients
+                    .iter()
+                    .filter(|(_, character_id, _)| {
+                        text.only
+                            .as_ref()
+                            .is_none_or(|only| only.contains(character_id))
+                            && !text.except.contains(character_id)
+                    })
+                    .collect()
+            })
+            .collect();
+        if narration.players_share
+            && let Some(shown) = receiving
                 .iter()
-                .filter(|(_, character_id, _)| {
-                    text.only
-                        .as_ref()
-                        .is_none_or(|only| only.contains(character_id))
-                        && !text.except.contains(character_id)
-                })
-                .collect();
+                .position(|each| each.iter().any(|(_, _, is_npc)| !is_npc))
+        {
+            // Every player character who perceives the event is shown the
+            // first account a player was given; characters keep their own.
+            let mut players: Vec<&(i64, i64, bool)> = Vec::new();
+            for each in &mut receiving {
+                for recipient in std::mem::take(each) {
+                    if recipient.2 {
+                        each.push(recipient);
+                    } else {
+                        players.push(recipient);
+                    }
+                }
+            }
+            receiving[shown].extend(players);
+        }
+        let mut heard_by_npcs = Vec::new();
+        for (text, receiving) in narration.texts.iter().zip(receiving) {
             if receiving.is_empty() {
                 continue;
             }
@@ -8595,6 +8624,7 @@ mod tests {
                     sequence_id: sequence.id,
                     actor: None,
                     opens_scene: false,
+                    players_share: false,
                     texts: vec![
                         NarrationText {
                             text: "A shadow crosses the doorway.".to_string(),

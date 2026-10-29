@@ -1,6 +1,10 @@
 # Model context size: find and justify what is in it
 
-Status: not started. Nothing below has been decided or tried.
+Status: started. Done: schema metadata removed from every tool (-10% of each request), `split_group`
+and `approve_action` slimmed, and the repeatable measurement
+(`context_size_by_agent_and_part`); results in experiments/0006-context-size.md. Next: tools
+offered only when they can be used (`merge_groups` needs other groups the GM can see, see
+agent-tuning.md), the scene packet, and the NPC and player agent contexts.
 
 ## Goal
 

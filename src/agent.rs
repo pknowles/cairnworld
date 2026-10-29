@@ -1546,7 +1546,7 @@ mod tests {
             .unwrap();
         let scenario = crate::scenario::Scenario::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/bread_thief.json"
+            "/testdata/hut_scenario.json"
         ))
         .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();

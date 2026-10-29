@@ -27,22 +27,16 @@ role = """\
 # before narrating it.
 narrate_next = "End your turn with a narrate tool."
 
+# Ends the result of resolving an action while others presented this turn are
+# still undecided, in place of narrate_next. {actions} names them.
+decide_next = "Still to decide: {actions}."
+
 # Added to the result of approving an action that is not speech: its outcome is
 # whatever the GM narrates, since nobody has been told it yet.
 outcome_untold = "The characters have not been told the outcome: narrate it."
 
 # Added to the result of approving speech, before narrate_next.
 speech_conveyed = "Their words are already conveyed to them, so there is nothing to narrate."
-
-# Which of these follows the scene, by the game setting that characters share narration.
-narration_shared = """\
-    Characters receive the same detailed narration of an event unless you narrate \
-    something privately.\
-    """
-narration_separate = """\
-    Narrate each event to the acting character in detail and to the others more \
-    briefly, as they would perceive it.\
-    """
 
 # Told when the GM answers in plain text. {tools} lists the narrate tools it has.
 narrate_reminder = "End your turn by calling one of: {tools}."
@@ -89,12 +83,9 @@ description = """\
 
 [gm.tools.approve_action.arguments]
 action_id = "The visible action id to approve."
-include = "Only for speech; leave out for any other action. Characters who also hear it, by name."
-exclude = "Only for speech; leave out for any other action. Characters who must not hear it, by name."
-prefix = """\
-    Only for speech; leave out for any other action. A short phrase every \
-    hearer is shown before the words, such as how or why only some of them can hear.\
-    """
+include = "Characters who also hear it, by name."
+exclude = "Characters who must not hear it, by name."
+prefix = """    A short phrase every hearer is shown before the words, such as how or why     only some of them can hear.    """
 
 [gm.tools.reject_action]
 description = """\
@@ -148,25 +139,10 @@ action_id = "The visible action id they may intervene in."
 character_ids = "The characters to ask. Not the character taking the action."
 
 [gm.tools.split_group]
-description = """\
-    Split this group into separate groups when characters go their own ways. \
-    Applies after every other call in this turn's batch has run, against the group \
-    the characters were in when this turn began; result is deferred and confirmed \
-    in the reply.\
-    """
+description = "Split this group when characters go their own ways."
 
 [gm.tools.split_group.arguments]
-group_id = "The group id being split - the id of the group currently arbitrating."
-partitions = """\
-    A complete, nonempty, disjoint partition of the group's current characters. \
-    Every character present must appear in exactly one partition; none may be \
-    omitted or duplicated.\
-    """
-continue_with_character_id = """\
-    Required when this call has no single triggering character (a GM event, not a \
-    character's action): which resulting group the next turn in this same invocation \
-    continues as.\
-    """
+partitions = "Every character in the group, in exactly one partition."
 
 [gm.tools.split_group.nested.partitions]
 character_ids = """\

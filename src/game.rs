@@ -727,7 +727,7 @@ where
                 .context("loading group GM scene for presence narration")?,
         )
         .context("serializing group GM presence scene")?;
-        let scene_packet = self.gm_packet(&scene)?;
+        let scene_packet = Self::gm_packet(&scene);
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(
@@ -1336,16 +1336,12 @@ where
         })
     }
 
-    /// What the GM is shown of the scene it judges and narrates, with the
-    /// rule on whether characters share the same narration.
-    fn gm_packet(&self, scene: &str) -> Result<String> {
-        let prompts = prompts::current()?;
-        let narration = if self.rules.characters_share_narration {
-            &prompts.gm.narration_shared
-        } else {
-            &prompts.gm.narration_separate
-        };
-        Ok(format!("Current scene packet:\n{scene}\n\n{narration}"))
+    /// What the GM is shown of the scene it judges and narrates.
+    fn gm_packet(scene: &str) -> String {
+        format!(
+            "Current scene packet:
+{scene}"
+        )
     }
 
     /// The location GM, not the player agent, introduces a character who has
@@ -1417,7 +1413,7 @@ where
                 .context("loading group GM scene for the opening")?,
         )
         .context("serializing group GM opening scene")?;
-        let scene_packet = self.gm_packet(&scene)?;
+        let scene_packet = Self::gm_packet(&scene);
         let prompts = prompts::current()?;
         let role = Message::text(Role::System, &prompts.gm.role);
         let request = Message::text(Role::User, request);
@@ -1497,122 +1493,129 @@ where
         let presented: PresentedActions = Arc::new(Mutex::new(vec![pending.clone()]));
         let game = Arc::clone(self);
         let approval_presented = Arc::clone(&presented);
-        let gm_tool = Tool::new(
-            prompts.gm.tools.tool(
-                "approve_action",
-                serde_json::to_value(schema_for!(ApproveAction))
-                    .expect("approval schema should serialize"),
-            )?,
-            move |context| {
-                let arguments = context.arguments.to_string();
-                let tool_execution_id = context.tool_execution_id;
-                let game = Arc::clone(&game);
-                let presented = Arc::clone(&approval_presented);
-                Box::pin(async move {
-                    let approval: ApproveAction =
-                        match serde_json::from_str(&arguments).context("parsing action approval") {
-                            Ok(approval) => approval,
-                            Err(error) => return Ok(ToolOutcome::rejected(error)),
+        let mut approval = prompts.gm.tools.tool(
+            "approve_action",
+            serde_json::to_value(schema_for!(ApproveAction))
+                .expect("approval schema should serialize"),
+        )?;
+        // Who hears an action is only a choice for speech.
+        if pending.tool != "speak" {
+            let arguments = approval.schema["properties"]
+                .as_object_mut()
+                .expect("approval arguments are properties");
+            for hearing in ["include", "exclude", "prefix"] {
+                arguments.remove(hearing);
+            }
+        }
+        let gm_tool = Tool::new(approval, move |context| {
+            let arguments = context.arguments.to_string();
+            let tool_execution_id = context.tool_execution_id;
+            let game = Arc::clone(&game);
+            let presented = Arc::clone(&approval_presented);
+            Box::pin(async move {
+                let approval: ApproveAction =
+                    match serde_json::from_str(&arguments).context("parsing action approval") {
+                        Ok(approval) => approval,
+                        Err(error) => return Ok(ToolOutcome::rejected(error)),
+                    };
+                // The action it was presented, or a reaction it asked for.
+                let Some(approval_pending) = presented_action(&presented, approval.action_id)
+                else {
+                    return Ok(ToolOutcome::Rejected(format!(
+                        "Tool arguments were rejected: GM approved action {} but was presented {}",
+                        approval.action_id,
+                        presented_ids(&presented)
+                    )));
+                };
+                let action_id = approval_pending.id;
+                if (!approval.include.is_empty()
+                    || !approval.exclude.is_empty()
+                    || approval.prefix.is_some())
+                    && approval_pending.tool != "speak"
+                {
+                    return Ok(ToolOutcome::Rejected(format!(
+                        "Tool arguments were rejected: include, exclude and prefix shape how speech is heard, and action {action_id} is not speech"
+                    )));
+                }
+                let resolved = match game
+                    .store
+                    .resolve_pending_action(
+                        approval_pending.gm_agent_id,
+                        approval_pending.world_id,
+                        action_id,
+                        tool_execution_id,
+                        "approved",
+                        &Hearing {
+                            include: approval.include,
+                            exclude: approval.exclude,
+                            prefix: approval.prefix,
+                        },
+                    )
+                    .await
+                {
+                    Ok(resolved) => resolved,
+                    // Nothing was resolved, so the GM may try again.
+                    Err(error) => match error.downcast_ref::<InvalidHearing>() {
+                        Some(invalid) => {
+                            return Ok(ToolOutcome::Rejected(format!(
+                                "Tool arguments were rejected: {invalid}"
+                            )));
+                        }
+                        None => {
+                            return Err(error.context(format!("approving action {action_id}")));
+                        }
+                    },
+                };
+                if !resolved.heard_by.is_empty() {
+                    let _no_live_viewers = game
+                        .world(approval_pending.world_id)?
+                        .broadcasts
+                        .send(ChatChange::Entries);
+                }
+                game.world(approval_pending.world_id)?.publish(
+                    crate::inspection::DevEvent::Changed {
+                        sequence_id: Some(approval_pending.sequence_id),
+                        inference_id: None,
+                    },
+                );
+                // The result is a report for the GM's later judgements; the
+                // acting player's own call receives its own result.
+                let next = next_step(&game.store, approval_pending.world_id, &presented).await?;
+                match resolved.outcome {
+                    // The GM saw the words in the request; it needs who heard them.
+                    ActionOutcome::Applied(_) if !resolved.heard_by.is_empty() => {
+                        Ok(ToolOutcome::Completed(format!(
+                            "Action {action_id} approved. Delivered as spoken to {}. {} {next}",
+                            resolved.heard_by.join(", "),
+                            prompts::current()?.gm.speech_conveyed
+                        )))
+                    }
+                    ActionOutcome::Applied(result) => {
+                        // What the action did, if it says: "approved: flour sack transferred".
+                        let done = result
+                            .strip_prefix("approved")
+                            .unwrap_or(&result)
+                            .trim_start_matches(':')
+                            .trim();
+                        let done = if done.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {done}.")
                         };
-                    // The action it was presented, or a reaction it asked for.
-                    let Some(approval_pending) = presented_action(&presented, approval.action_id)
-                    else {
-                        return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: GM approved action {} but was presented {}",
-                            approval.action_id,
-                            presented_ids(&presented)
-                        )));
-                    };
-                    let action_id = approval_pending.id;
-                    if (!approval.include.is_empty()
-                        || !approval.exclude.is_empty()
-                        || approval.prefix.is_some())
-                        && approval_pending.tool != "speak"
-                    {
-                        return Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: include, exclude and prefix shape how speech is heard, and action {action_id} is not speech"
-                        )));
+                        Ok(ToolOutcome::Completed(format!(
+                            "Action {action_id} approved.{done} {} {next}",
+                            prompts::current()?.gm.outcome_untold
+                        )))
                     }
-                    let resolved = match game
-                        .store
-                        .resolve_pending_action(
-                            approval_pending.gm_agent_id,
-                            approval_pending.world_id,
-                            action_id,
-                            tool_execution_id,
-                            "approved",
-                            &Hearing {
-                                include: approval.include,
-                                exclude: approval.exclude,
-                                prefix: approval.prefix,
-                            },
-                        )
-                        .await
-                    {
-                        Ok(resolved) => resolved,
-                        // Nothing was resolved, so the GM may try again.
-                        Err(error) => match error.downcast_ref::<InvalidHearing>() {
-                            Some(invalid) => {
-                                return Ok(ToolOutcome::Rejected(format!(
-                                    "Tool arguments were rejected: {invalid}"
-                                )));
-                            }
-                            None => {
-                                return Err(error.context(format!("approving action {action_id}")));
-                            }
-                        },
-                    };
-                    if !resolved.heard_by.is_empty() {
-                        let _no_live_viewers = game
-                            .world(approval_pending.world_id)?
-                            .broadcasts
-                            .send(ChatChange::Entries);
-                    }
-                    game.world(approval_pending.world_id)?.publish(
-                        crate::inspection::DevEvent::Changed {
-                            sequence_id: Some(approval_pending.sequence_id),
-                            inference_id: None,
-                        },
-                    );
-                    // The result is a report for the GM's later judgements; the
-                    // acting player's own call receives its own result.
-                    let next = prompts::current()?.gm.narrate_next.clone();
-                    match resolved.outcome {
-                        // The GM saw the words in the request; it needs who heard them.
-                        ActionOutcome::Applied(_) if !resolved.heard_by.is_empty() => {
-                            Ok(ToolOutcome::Completed(format!(
-                                "Action {action_id} approved. Delivered as spoken to {}. {} {next}",
-                                resolved.heard_by.join(", "),
-                                prompts::current()?.gm.speech_conveyed
-                            )))
-                        }
-                        ActionOutcome::Applied(result) => {
-                            // What the action did, if it says: "approved: flour sack transferred".
-                            let done = result
-                                .strip_prefix("approved")
-                                .unwrap_or(&result)
-                                .trim_start_matches(':')
-                                .trim();
-                            let done = if done.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" {done}.")
-                            };
-                            Ok(ToolOutcome::Completed(format!(
-                                "Action {action_id} approved.{done} {} {next}",
-                                prompts::current()?.gm.outcome_untold
-                            )))
-                        }
-                        ActionOutcome::Failed(reason) => Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} approved, but it could not be applied: {reason} {next}"
-                        ))),
-                        ActionOutcome::Rejected(_) => Ok(ToolOutcome::Rejected(format!(
-                            "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
-                        ))),
-                    }
-                }) as ToolFuture
-            },
-        );
+                    ActionOutcome::Failed(reason) => Ok(ToolOutcome::Completed(format!(
+                        "Action {action_id} approved, but it could not be applied: {reason} {next}"
+                    ))),
+                    ActionOutcome::Rejected(_) => Ok(ToolOutcome::Rejected(format!(
+                        "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
+                    ))),
+                }
+            }) as ToolFuture
+        });
         let game = Arc::clone(self);
         let rejection_presented = Arc::clone(&presented);
         let reject_tool = Tool::new(
@@ -1668,7 +1671,7 @@ where
                         ActionOutcome::Rejected(_) => Ok(ToolOutcome::Completed(format!(
                             "Action {action_id} rejected: {} {}",
                             rejection.reason,
-                            prompts::current()?.gm.narrate_next
+                            next_step(&game.store, pending.world_id, &presented).await?
                         ))),
                         ActionOutcome::Applied(_) | ActionOutcome::Failed(_) => {
                             Ok(ToolOutcome::Rejected(format!(
@@ -1701,7 +1704,7 @@ where
                         ));
                     }
                     Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Split {
-                        group_id: split.group_id,
+                        group_id,
                         partitions: split
                             .partitions
                             .into_iter()
@@ -1711,7 +1714,7 @@ where
                                 description: partition.description,
                             })
                             .collect(),
-                        continue_with_character_id: split.continue_with_character_id,
+                        continue_with_character_id: None,
                     }))
                 }) as ToolFuture
             },
@@ -1942,7 +1945,7 @@ where
         )
         .context("serializing group GM scene for prompt")?;
         let actor = self.store.character_name(pending.character_id).await?;
-        let scene_packet = self.gm_packet(&scene)?;
+        let scene_packet = Self::gm_packet(&scene);
         let role = Message::text(Role::System, &prompts.gm.role);
         let note = note.map(|note| format!(" {note}")).unwrap_or_default();
         let request = Message::text(
@@ -2092,6 +2095,32 @@ fn presented_action(presented: &PresentedActions, id: i64) -> Option<PendingActi
         .cloned()
 }
 
+/// What the GM reads last in a decision's result: the presented actions still
+/// waiting for its decision, or that it can narrate once none are.
+async fn next_step(store: &Store, world_id: i64, presented: &PresentedActions) -> Result<String> {
+    let ids: Vec<i64> = presented
+        .lock()
+        .expect("presented actions lock poisoned")
+        .iter()
+        .map(|action| action.id)
+        .collect();
+    let mut undecided = Vec::new();
+    for id in ids {
+        if store.has_pending_action(world_id, id).await? {
+            undecided.push(id.to_string());
+        }
+    }
+    let prompts = prompts::current()?;
+    if undecided.is_empty() {
+        Ok(prompts.gm.narrate_next.clone())
+    } else {
+        prompts::fill(
+            &prompts.gm.decide_next,
+            &[("actions", &format!("action {}", undecided.join(", ")))],
+        )
+    }
+}
+
 /// Which actions the GM was presented, for telling it when it names another.
 fn presented_ids(presented: &PresentedActions) -> String {
     let ids: Vec<String> = presented
@@ -2164,17 +2193,9 @@ struct SplitGroupPartition {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SplitGroup {
-    // The group id being split - the id of the group currently arbitrating.
-    group_id: i64,
     // A complete, nonempty, disjoint partition of the group's current
-    // characters. Every character present must appear in exactly one
-    // partition; none may be omitted or duplicated.
+    // characters: every character present in exactly one partition.
     partitions: Vec<SplitGroupPartition>,
-    // Required when this call has no single triggering character (a GM
-    // event, not a player action): which resulting group the next turn in
-    // this same invocation continues as.
-    #[serde(default)]
-    continue_with_character_id: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2449,41 +2470,87 @@ mod tests {
         );
     }
 
+    /// The GM is not told about the setting and its tools work as described;
+    /// delivery shares the account among the player characters.
     #[tokio::test]
-    async fn the_gm_is_told_whether_players_share_the_same_narration() {
-        let prompts = prompts::current().unwrap();
-        for (shares, told, not_told) in [
-            (
-                true,
-                &prompts.gm.narration_shared,
-                &prompts.gm.narration_separate,
-            ),
-            (
-                false,
-                &prompts.gm.narration_separate,
-                &prompts.gm.narration_shared,
-            ),
+    async fn sharing_gives_every_player_the_detailed_account_and_leaves_private_narration_alone() {
+        for (shares, second_hears) in [
+            (true, "From the rock you see three guards."),
+            (false, "The adventurer climbs the rock."),
         ] {
-            let db = crate::store::TestDatabase::new("game-test");
-            let store = Store::open(db.path()).await.unwrap();
-            let (backend, _) = ScriptedBackend::recording([]);
-            let game = Game::with_rules(
-                store.clone(),
-                World::load(&store).await.unwrap(),
-                InferenceScheduler::new(backend, Limits::default())
-                    .unwrap()
-                    .foreground(),
+            let scene = speech_scene_with_rules(
                 Limits::default(),
-                "scripted".into(),
-                Sampling::default(),
                 GameSettings {
                     characters_share_narration: shares,
                 },
+            )
+            .await;
+            look_and_narrate(
+                &scene,
+                tool_call(
+                    "narrate_actor_and_others",
+                    serde_json::json!({
+                        "actor_text": "From the rock you see three guards.",
+                        "others_text": "The adventurer climbs the rock.",
+                    }),
+                ),
+                quiet(2),
+            )
+            .await;
+            assert_eq!(
+                narrations(&scene.store, &scene.first).await,
+                ["From the rock you see three guards."]
             );
-            let packet = game.gm_packet("{}").unwrap();
-            assert!(packet.contains(told.as_str()), "{packet}");
-            assert!(!packet.contains(not_told.as_str()), "{packet}");
+            assert_eq!(
+                narrations(&scene.store, &scene.second).await,
+                [second_hears],
+                "sharing {shares}"
+            );
+            // The NPCs are not players: they keep the briefer account.
+            for npc in ["Mara", "Toma"] {
+                assert_eq!(
+                    narrated_to_npc(&scene.store, npc).await,
+                    ["The adventurer climbs the rock."]
+                );
+            }
+            let request = scene
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|request| {
+                    request
+                        .tools
+                        .iter()
+                        .any(|tool| tool.name == "approve_action")
+                })
+                .map(|request| serde_json::to_string(&request.messages).unwrap())
+                .unwrap();
+            assert!(
+                !request.contains("same detailed narration") && !request.contains("more briefly"),
+                "the GM is not told about the setting: {request}"
+            );
         }
+
+        // Narration addressed to chosen characters stays with them.
+        let scene = speech_scene().await;
+        look_and_narrate(
+            &scene,
+            tool_call(
+                "narrate_characters",
+                serde_json::json!({
+                    "character_ids": [scene.first.character_id],
+                    "text": "Only you notice the draught.",
+                }),
+            ),
+            quiet(0),
+        )
+        .await;
+        assert_eq!(
+            narrations(&scene.store, &scene.first).await,
+            ["Only you notice the draught."]
+        );
+        assert!(narrations(&scene.store, &scene.second).await.is_empty());
         assert!(
             crate::settings::Settings::load()
                 .unwrap()
@@ -2626,16 +2693,15 @@ mod tests {
     /// invalid output: an error to investigate, never a path the real-model
     /// scenarios may rely on.
     async fn assert_no_rejected_output(store: &Store) {
-        let inferences: Vec<i64> = sqlx::query_scalar(
-            "SELECT inference_id FROM tool_execution WHERE status = 'rejected' \
-             UNION SELECT source_inference_id FROM message WHERE reply_rejected = 1 ORDER BY 1",
+        let rejected: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT inference_id, COALESCE(error, recorded_content.body) FROM tool_execution              LEFT JOIN recorded_content ON recorded_content.id = result_content_id              WHERE status = 'rejected'              UNION SELECT source_inference_id, 'refused plain-text reply' FROM message              WHERE reply_rejected = 1 ORDER BY 1",
         )
         .fetch_all(&store.pool())
         .await
         .unwrap();
         assert!(
-            inferences.is_empty(),
-            "the model produced invalid output in inferences {inferences:?}; open them in Developer Mode"
+            rejected.is_empty(),
+            "the model produced invalid output (inference, error): {rejected:?}; open them in Developer Mode"
         );
     }
 
@@ -3244,7 +3310,6 @@ mod tests {
             .await
             .unwrap();
         let split_args = serde_json::json!({
-            "group_id": original_group_id,
             "partitions": [
                 {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara", "description": "outside the hut"},
                 {"character_ids": [toma_id], "name": "Toma alone", "description": "inside the hut"},
@@ -3435,7 +3500,6 @@ mod tests {
             .unwrap();
 
         let split_args = serde_json::json!({
-            "group_id": original_group_id,
             "partitions": [
                 {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara", "description": "outside"},
                 {"character_ids": [toma_id], "name": "Toma alone", "description": "inside"},
@@ -4420,7 +4484,6 @@ mod tests {
         // Omits Mara and Toma entirely - not a complete partition of the
         // group's current membership.
         let incomplete_split = serde_json::json!({
-            "group_id": original_group_id,
             "partitions": [
                 {"character_ids": [installed.member.character_id], "name": "alone", "description": "outside"},
             ],
@@ -4519,10 +4582,6 @@ mod tests {
             .mark_character_present(installed.member.character_id)
             .await
             .unwrap();
-        let original_group_id = store
-            .character_group_id(installed.member.character_id)
-            .await
-            .unwrap();
         let toma_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Toma'")
             .fetch_one(&store.pool())
             .await
@@ -4554,7 +4613,6 @@ mod tests {
         // source (design.md: "A stale second topology proposal gets a
         // rejected result").
         let first_split = serde_json::json!({
-            "group_id": original_group_id,
             "partitions": [
                 {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara", "description": "outside"},
                 {"character_ids": [toma_id], "name": "Toma alone", "description": "inside"},
@@ -4562,7 +4620,6 @@ mod tests {
         })
         .to_string();
         let second_split = serde_json::json!({
-            "group_id": original_group_id,
             "partitions": [
                 {"character_ids": [installed.member.character_id], "name": "alone", "description": "elsewhere"},
                 {"character_ids": [mara_id, toma_id], "name": "the other two", "description": "elsewhere"},
@@ -5339,12 +5396,28 @@ mod tests {
     }
 
     async fn speech_scene_with_limits(limits: Limits) -> SpeechScene {
+        speech_scene_with_rules(limits, GameSettings::default()).await
+    }
+
+    /// A speech scene in which the GM gives the acting character a different
+    /// account from the others.
+    async fn separate_narration_scene() -> SpeechScene {
+        speech_scene_with_rules(
+            Limits::default(),
+            GameSettings {
+                characters_share_narration: false,
+            },
+        )
+        .await
+    }
+
+    async fn speech_scene_with_rules(limits: Limits, rules: GameSettings) -> SpeechScene {
         let (backend, requests) = ScriptedBackend::recording([]);
         let responses = Arc::clone(&backend.responses);
         let hang_when_empty = Arc::clone(&backend.hang_when_empty);
         let gate = Arc::clone(&backend.gate);
         let (game, store, db, first, second) =
-            two_player_bread_thief_game_with_limits(backend, limits).await;
+            two_player_bread_thief_game_with_rules(backend, limits, rules).await;
         let names = [
             store.player_scene(&first).await.unwrap().character_name,
             store.player_scene(&second).await.unwrap().character_name,
@@ -5416,18 +5489,23 @@ mod tests {
         );
         // The speaker's and the GM's histories stay valid: every tool call is
         // answered directly after it.
-        let group = scene
-            .store
-            .character_group_id(scene.first.character_id)
-            .await
-            .unwrap();
         for branch in [
             scene
                 .store
                 .agent_branch(scene.first.agent_id)
                 .await
                 .unwrap(),
-            scene.store.group_branch(group).await.unwrap(),
+            scene
+                .store
+                .group_branch(
+                    scene
+                        .store
+                        .character_group_id(scene.first.character_id)
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
         ] {
             let segments = scene.store.live_segments(branch).await.unwrap();
             let messages = scene
@@ -5915,7 +5993,7 @@ mod tests {
 
     #[tokio::test]
     async fn actor_and_others_narration_gives_each_audience_only_its_own_text() {
-        let scene = speech_scene().await;
+        let scene = separate_narration_scene().await;
         look_and_narrate(
             &scene,
             tool_call(
@@ -5944,7 +6022,7 @@ mod tests {
 
     #[tokio::test]
     async fn excluded_and_unnamed_characters_receive_no_narration() {
-        let scene = speech_scene().await;
+        let scene = separate_narration_scene().await;
         look_and_narrate(
             &scene,
             tool_call(
@@ -6288,6 +6366,31 @@ mod tests {
                 .flat_map(tool_results)
                 .any(|result| result.contains("Toma proposes action 2")),
             "the GM was told Toma's reaction and its action id"
+        );
+        // Approving the reaction leaves the take undecided and says so, instead
+        // of telling the GM to narrate; deciding the take last does tell it.
+        let results: Vec<String> = scene
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(tool_results)
+            .collect();
+        let after_reaction = results
+            .iter()
+            .find(|result| result.starts_with("Action 2 approved"))
+            .expect("the reaction's approval result");
+        assert!(
+            after_reaction.ends_with("Still to decide: action 1."),
+            "{after_reaction}"
+        );
+        let after_take = results
+            .iter()
+            .find(|result| result.starts_with("Action 1 rejected"))
+            .expect("the take's rejection result");
+        assert!(
+            after_take.ends_with("End your turn with a narrate tool."),
+            "{after_take}"
         );
         // Toma was asked inside the GM's call, as its child.
         let asked_in_call: i64 = sqlx::query_scalar(
@@ -7211,6 +7314,78 @@ mod tests {
         }
     }
 
+    /// The scenario the product offers is edited on its own; the tests use a
+    /// fixed copy (`testdata/hut_scenario.json`), so this checks the real one.
+    #[tokio::test]
+    async fn the_checked_in_bread_thief_scenario_installs_and_exports_unchanged() {
+        let (backend, _requests) = ScriptedBackend::recording([]);
+        let (_game, store, _db, first, _second) = two_player_bread_thief_game(backend).await;
+        let owner = store
+            .find_or_create_user("scenario-check@example.test", "Scenario check")
+            .await
+            .unwrap();
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/bread_thief.json"
+        ))
+        .unwrap();
+        let installed = store.install_scenario(&owner, &scenario).await.unwrap();
+        assert_ne!(installed.world_id, first.world_id);
+        assert_eq!(
+            store.export_scenario(installed.world_id).await.unwrap(),
+            scenario
+        );
+    }
+
+    #[tokio::test]
+    async fn only_speech_offers_the_gm_a_choice_of_who_hears_it() {
+        let mut offered = Vec::new();
+        for (player_call, line) in [
+            (
+                tool_call(
+                    "speak",
+                    serde_json::json!({"words": "Hello.", "to": ["Toma"]}),
+                ),
+                "Greet Toma.",
+            ),
+            (
+                tool_call(
+                    "attempt",
+                    serde_json::json!({"kind": "look", "description": "the hut"}),
+                ),
+                "Look around.",
+            ),
+        ] {
+            let scene = speech_scene().await;
+            scene.responses.lock().unwrap().extend([
+                player_call,
+                approve(1),
+                narrate("Done."),
+                response(Content::Text(String::new())),
+            ]);
+            scene
+                .game
+                .player_message(scene.first.clone(), line)
+                .await
+                .unwrap();
+            let requests = scene.requests.lock().unwrap();
+            let approval = requests
+                .iter()
+                .flat_map(|request| &request.tools)
+                .find(|tool| tool.name == "approve_action")
+                .expect("the GM was asked to approve");
+            let mut arguments: Vec<&str> = approval.schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            arguments.sort();
+            offered.push(arguments.join(","));
+        }
+        assert_eq!(offered, ["action_id,exclude,include,prefix", "action_id"]);
+    }
+
     #[tokio::test]
     async fn a_raised_hand_stops_the_next_npc_step_and_never_mind_continues_it() {
         let scene = speech_scene().await;
@@ -7441,11 +7616,6 @@ mod tests {
             }
         };
         let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
-        let group = scene
-            .store
-            .character_group_id(scene.first.character_id)
-            .await
-            .unwrap();
         let outside_speaker = scene.names[0].clone();
         let (reached, release) = (
             Arc::new(tokio::sync::Notify::new()),
@@ -7464,7 +7634,6 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "group_id": group,
                         "partitions": [
                             {"character_ids": [scene.first.character_id, mara], "name": "outside", "description": "with Mara"},
                             {"character_ids": [scene.second.character_id, toma], "name": "inside", "description": "with Toma"},
@@ -7953,11 +8122,6 @@ mod tests {
             }
         };
         let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
-        let group = scene
-            .store
-            .character_group_id(scene.first.character_id)
-            .await
-            .unwrap();
         scene
             .responses
             .lock()
@@ -7980,7 +8144,6 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "group_id": group,
                         "partitions": [
                             {"character_ids": [scene.first.character_id, mara], "name": "outside", "description": "with Mara"},
                             {"character_ids": [scene.second.character_id, toma], "name": "inside", "description": "with Toma"},
@@ -8132,11 +8295,6 @@ mod tests {
             }
         };
         let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
-        let group = scene
-            .store
-            .character_group_id(scene.first.character_id)
-            .await
-            .unwrap();
         let call = |name: &str, arguments: serde_json::Value| ToolCall {
             id: name.into(),
             name: name.into(),
@@ -8150,7 +8308,6 @@ mod tests {
                 call(
                     "split_group",
                     serde_json::json!({
-                        "group_id": group,
                         "partitions": [
                             {"character_ids": [scene.first.character_id, mara, toma], "name": "hut", "description": "inside"},
                             {"character_ids": [scene.second.character_id], "name": "yard", "description": "outside"},
@@ -8314,11 +8471,6 @@ mod tests {
             }
         };
         let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
-        let group = scene
-            .store
-            .character_group_id(scene.first.character_id)
-            .await
-            .unwrap();
         // Split first: the first player stays with Mara, the second with Toma.
         scene.responses.lock().unwrap().extend([
             tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
@@ -8332,7 +8484,6 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "group_id": group,
                         "partitions": [
                             {"character_ids": [scene.first.character_id, mara], "name": "outside", "description": "with Mara"},
                             {"character_ids": [scene.second.character_id, toma], "name": "inside", "description": "with Toma"},
@@ -9065,7 +9216,6 @@ mod tests {
                     id: "split-1".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "group_id": original,
                         "partitions": [
                             {"character_ids":members, "name":"players", "description":"outside"},
                             {"character_ids":[toma], "name":"Toma", "description":"inside"}
@@ -9282,6 +9432,23 @@ mod tests {
     where
         B: Backend + Send + Sync + 'static,
     {
+        two_player_bread_thief_game_with_rules(backend, limits, GameSettings::default()).await
+    }
+
+    async fn two_player_bread_thief_game_with_rules<B>(
+        backend: B,
+        limits: Limits,
+        rules: GameSettings,
+    ) -> (
+        Arc<Game<B>>,
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        PlayerAgent,
+    )
+    where
+        B: Backend + Send + Sync + 'static,
+    {
         let db = crate::store::TestDatabase::new("presence-test");
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -9321,7 +9488,7 @@ mod tests {
                 .unwrap();
         }
         let scheduler = InferenceScheduler::new(backend, limits).unwrap();
-        let game = Game::new(
+        let game = Game::with_rules(
             store.clone(),
             World::load(&store).await.unwrap(),
             scheduler.foreground(),
@@ -9331,6 +9498,7 @@ mod tests {
                 temperature: 0.0,
                 ..Default::default()
             },
+            rules,
         );
         (game, store, db, installed.member, companion)
     }
@@ -9754,7 +9922,7 @@ mod tests {
 
     #[tokio::test]
     async fn group_tools_reject_foreign_worlds_before_compaction_or_mutation() {
-        for case in 0..5 {
+        for case in 0..4 {
             let (backend, requests) = ScriptedBackend::recording([]);
             let responses = Arc::clone(&backend.responses);
             let (game, store, _db, member, _) = two_player_bread_thief_game(backend).await;
@@ -9807,12 +9975,10 @@ mod tests {
             .await
             .unwrap();
             let (name, arguments) = match case {
-                0 | 4 => (
+                0 => (
                     "split_group",
                     serde_json::json!({
-                        "group_id": if case == 0 { foreign_groups[0] } else { i64::MAX },
                         "partitions": [{"character_ids": characters, "name": "Changed", "description": "Changed"}],
-                        "continue_with_character_id": other.member.character_id,
                     }),
                 ),
                 _ => (
@@ -9958,7 +10124,6 @@ mod tests {
             .filter(|id| *id != second.character_id)
             .collect();
         let split = serde_json::json!({
-            "group_id": group_id,
             "partitions": [
                 {"character_ids": companions, "name": "first group", "description": "outside"},
                 {"character_ids": [second.character_id], "name": "second group", "description": "inside"}

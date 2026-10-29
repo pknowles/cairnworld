@@ -88,6 +88,6 @@ presence_departure_seconds = 60
 # Rules of play for every world.
 [game]
 # Every character receives the same detailed narration of an event, for a shared
-# experience, unless the GM narrates something privately. When off, the GM
-# narrates each event to the acting character in detail and others more briefly.
+# experience, unless the GM narrates something privately. When off, players get
+# the accounts the GM wrote for them. The GM is not told about this setting.
 characters_share_narration = true

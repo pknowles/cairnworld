@@ -1519,10 +1519,12 @@ speech delivery remains separate from GM narration.
 Observer messages describe what observers perceive, not private results returned
 to the actor. An outcome already conveyed elsewhere need not produce further narration.
 
-The global shared-detail setting defaults on, as declared. Supply it in the GM's
-context so ordinary narration can give players a shared detailed account or
-separate perspectives when disabled. Explicitly private narration always stays
-within its selected audience; code must not widen it because sharing is enabled.
+The global shared-detail setting defaults on, as declared. The GM is not told
+about it and its narrate tools work as described either way. Delivery applies
+it: when a player character perceives a narration that is not addressed to
+chosen characters, every player character who perceives it is shown that same
+account. Narrate_characters is private and never shared; NPCs keep what they
+were given, and exclusions still apply.
 NPC knowledge remains limited to their own delivered perceptions. Schema/context
 changes require the prompt-standards review and real-chat verification.
 

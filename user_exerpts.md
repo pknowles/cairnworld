@@ -966,3 +966,18 @@ not have edge cases and bandaids". So the question ends every NPC decision, with
 check on who spoke last. Open ideas the user suggested: answer when addressed or
 when "a GM would have the character say or do something", and a "short and
 to-the-point" preference.
+
+## 2026-10-29: the shared-detail setting is invisible to the GM
+
+The GM had been told the setting in a sentence of its scene text. The user, on seeing it:
+
+> lol. that's not at all what I intended. how in the world did that happen?? can you
+> remove that entirely and make it implicit? GM doesn't need to know about it at all!!!
+
+and, after a first misreading (choosing the GM's tools by the setting), clarified:
+
+> narrate tools operate the way they're described regardless. ignore sharing entirely.
+> then, adding sharing is simple. if any player character sees a narration that is not
+> private, the same narration is showing to ALL player characters. done.
+
+Implemented in delivery (`Narration::players_share`), not in the GM's tools or text.

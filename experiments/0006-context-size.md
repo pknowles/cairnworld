@@ -40,3 +40,23 @@ the variants combined: `narrate_nothing` for speech, `narrate_group` otherwise.
   rejected the take in one capture and approved it in another (10/10 each), and
   the player agent answered "What do I know about Toma?" with `attempt` in one
   and `speak` in the other. Compare variants only on one capture.
+
+## Slimmer GM tools, and what the intervention check taught
+
+Applied: `split_group` without `group_id` and `continue_with_character_id` and with short
+text, and `approve_action` offering `include`/`exclude`/`prefix` only for speech. On three
+fresh captures (the fixed hut scenario, six samples each) the GM after approval chose
+`narrate_group` 24 of 24 with both the old and the new tools, at 2,420 against 2,715
+input tokens (-11%). A capture of the larger Bread Thief scenario flipped to
+`narrate_characters` with both changes together and to `narrate_group` with either one
+reverted; that is a knife edge on one request, not a regression, and it went away on
+the fixed scenario.
+
+The intervention-check device scenario failed in about 5 of 26 runs with the GM calling
+a narrate tool while the take was still undecided ("action 1 is not yet approved or
+rejected"). Reverting either change above made no difference (8 of 12 and 4 of 12 failed).
+The cause was in what the GM reads: approving Toma's reaction returned "... Their words
+are already conveyed to them, so there is nothing to narrate. End your turn with a
+narrate tool." while action 1 still waited for a decision. The result now ends with
+"Still to decide: action 1." while presented actions remain, and with the narrate
+instruction only when none do. 0 of 14 runs failed afterwards.
