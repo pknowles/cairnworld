@@ -80,7 +80,7 @@ description = """\
 action_id = "The visible action id to approve."
 include = "Only for speech; leave out for any other action. Characters who also hear it, by name."
 exclude = "Only for speech; leave out for any other action. Characters who must not hear it, by name."
-prefix = """    Only for speech; leave out for any other action. A short phrase every     hearer is shown before the words, such as how or why only some of them can hear.    """
+prefix = "Only for speech; leave out for any other action. A short phrase every hearer is shown before the words, such as how or why only some of them can hear."
 
 [gm.tools.reject_action]
 description = """\
