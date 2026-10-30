@@ -76,11 +76,11 @@ after their rules dependencies. Campaign completion remains a separate plan.
   Storyteller notes and the editable, spoiler-bearing world summary. Storyteller
   access excludes GM notes. Keep summary distinct from short object notes and
   preserve the original input prompt as the initialization record.
-  Reuse its shared-note create/read/edit/link/unlink operations for facts that
-  concern several objects. Link one Storyteller note rather than copy its body
+  Reuse its shared-subnote create/read/edit/link/unlink operations for facts that
+  concern several objects. Link one Storyteller subnote rather than copy its body
   into each object; its full read exposes the related objects. Linking a character
   is relevance metadata, not delivery of knowledge to that character. Its private
-  background must still contain what it personally knows. Shared-note storage and
+  background must still contain what it personally knows. Shared-subnote storage and
   scenario import/export already exist from that feature; do not add another
   Storyteller-only note representation.
 - Create each NPC with its public description, private background, motives,

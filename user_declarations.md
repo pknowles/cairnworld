@@ -831,13 +831,15 @@ each note.
 - Subnotes can be much larger and have many details that are accessed
   infrequently.
 
-Some notes belong on multiple objects. For this we introduce a shared note. This
-is either a separate type or a note that is linked by multiple objects. Either
-way, agents should be able to manage linking and unlinking notes. The other
-objects linked should be visible as context when loading the full note.
+Some subnotes belong on multiple objects. For this we introduce a shared
+subnote. This is either a separate type or a subnote that is linked by multiple
+objects. Either way, agents should be able to manage linking and unlinking
+subnotes. The other objects linked should be visible as context when loading the
+full note. Agents see that it it a shared note as opposed to a regular note even
+before loading subnotes.
 
-We may want to introduce a way to archive inconsequential notes, maybe also when
-they become old/stale or when there are too many.
+We may want to introduce a way to archive inconsequential subnotes, maybe also
+when they become old/stale or when there are too many.
 
 ## Consistency Checks
 

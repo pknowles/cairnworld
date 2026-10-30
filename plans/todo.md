@@ -16,7 +16,7 @@ there yet". Remove and archive only verified completions.
   EndTurn, individual initiative, player deadlines and timed effects. Supplies
   timing/admission for the movement and world-authoring features below.
 - [GM editing and lookup](gm-editing.md): whole-field and exact-text editing,
-  persistent within-location placement/local notes, shared notes and object links
+  persistent within-location placement/local notes, shared subnotes and object links
   (also in scenario import/export), hierarchical reads/search
   and bounded tool/context sizes. Incidental detail stays in text; significant
   item creation retains its Storyteller responsibility.

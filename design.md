@@ -346,8 +346,11 @@ columns are an implementation detail; the JSON export format is the stable,
 checked-in representation (Bread Thief lives in `scenarios/` as importable
 JSON).
 
-Notes use named values per object. Both whole-value replacement and exact-text
-editing are supported; whole replacement alone is insufficient for long fields.
+Each object has separate GM and Storyteller notes. Each notes field has a
+top-level header/description and named subnotes as detail grows. Shared subnotes
+are references in that same hierarchy, not shared copies of the entire notes
+field. Both whole-value replacement and exact-text editing are supported; whole
+replacement alone is insufficient for long fields.
 
 ## GM field editing and lookup
 
@@ -363,37 +366,39 @@ Read and edit identified object fields directly rather than virtual files.
 Support whole-field writes and exact literal passage replacement from the outset.
 Require exactly one old-text match for a passage edit, with visible failures for
 missing/ambiguous matches. Use one scoped access path for reads, edits and search.
-Named notes can be created and removed on existing objects through that same
-authorized access; removing a note does not remove the object or a fixed field.
-Removal retains the note and its recorded edits for Developer Mode inspection.
+Named subnotes can be created and removed on existing objects through that same
+authorized access; removing a subnote does not remove the object or its header.
+Removal retains the subnote and its recorded edits for Developer Mode inspection.
 GM edits local descriptions/GM notes and can read authorized local Storyteller
 notes; it cannot edit Storyteller notes. Storyteller access later uses its own
 permissions without exposing GM notes. Field authority is not blanket SQL access.
 
-### Shared notes
+### Shared subnotes
 
-Authority: the shared-note paragraph in
+Authority: the shared-subnote paragraph in
 [Note Editing and Search Tools](user_declarations.md#note-editing-and-search-tools).
-An authoritative note can concern several characters, locations or other game
+An authoritative subnote can concern several characters, locations or other game
 objects. Store its text once and link it to those objects; edits through any
-link change that same note. Ordinary single-object notes remain useful.
+link change that same subnote. Each object's header and other subnotes remain
+independent. Listings show the shared subnote's ID, bounded name/description and
+an explicit shared marker before its body is loaded.
 
 | Representation | Benefit | Cost / decision |
 | --- | --- | --- |
 | Copy the text into each object's notes | Uses existing fields | Copies drift and repeat context; rejected. |
-| Explicit shared note with object links | One authoritative body; leaves ordinary notes alone | Adds note identity and links; selected. |
+| Explicit shared subnote with object links | One authoritative body in the existing hierarchy | Adds subnote identity and links; selected. |
 | Move every existing note into a new linked-note model | Uniform storage | Requires a broad migration without an established need; not required. |
 
-A shared note has a world-local identity, bounded title/body and the existing
+A shared subnote has a world-local identity, bounded title/body and the existing
 GM or Storyteller visibility category. Object links express relevance, not
 character knowledge. The same role permissions apply as for object notes:
 Storyteller cannot access GM notes, and GM reads authorized Storyteller notes
 without editing them. Linking an NPC or player character never inserts private
 notes into its agent context or perception history. Granting character knowledge
-is a separate design question, not implied by shared notes.
+is a separate design question, not implied by shared subnotes.
 
-Object reads/listings expose references to associated authorized notes; full
-note reads also expose the linked object references and names. Links provide
+Object notes expose references to associated authorized shared subnotes; full
+subnote reads also expose the linked object references and names. Links provide
 navigation, not unrestricted access to the other objects' contents. Existing
 world/local authority governs note access and link changes. A GM editing a shared
 GM note changes it for all linked objects, including linked remote objects;
@@ -401,16 +406,16 @@ the tool makes that shared identity and effect explicit. Neither a link nor its
 removal copies or deletes the body. Retain unlinked notes and link-change evidence;
 normal object context omits removed links. Automatic archival is not required.
 
-Context assembly deduplicates shared notes by identity. Being linked does not
+Context assembly deduplicates shared subnotes by identity. Being linked does not
 justify loading every body in the world: use the bounded discovery/read approach
 selected for notes below, and measure which situation facts must be present
 without lookup. Do not remove necessary facts merely because lookup is possible.
 Tools remain visible regardless of which note bodies are loaded.
 
-Scenario import/export represents shared notes and their links explicitly, using
+Scenario import/export represents shared subnotes and their links explicitly, using
 scenario-local references mapped to database identities. Import and future agent
 editing use the same validation/storage operations. A disputed debt can be one
-Storyteller note linked to both participants, available to the local GM, without
+Storyteller subnote linked to both participants, available to the local GM, without
 duplicating the GM-facing account or inventing a plot lifecycle. Each character's
 private background still supplies its own knowledge and perspective.
 
@@ -427,10 +432,11 @@ Hard configured note/field and tool-result bounds protect fixed context/memory
 requirements. Oversized writes fail unchanged; bounded reads/search explicitly
 identify partial results and allow continuation. Calibrate bounds against real
 assembled model inputs before enabling writes, not after an unbounded initial
-release. Compare named notes with bounded key listings and the declaration's
-header/subnote proposal against the same discovery, context-size and editing
-requirements before selecting the representation. Neither is a required default;
-reuse existing object relationships and avoid duplicate authoritative state.
+release. The header and bounded subnote names/descriptions provide orientation;
+tools read/search the larger bodies. Measure this hierarchy against short and
+large-note discovery, context-size and editing requirements. Choose its storage
+mapping using existing JSON fields or normalized records where appropriate;
+the implementation must preserve the same hierarchy and shared identity.
 Individual field/result bounds do not guarantee that accumulated conversation
 fits; request budgeting and compaction retain that responsibility. See
 [the implementation plan](plans/gm-editing.md).
