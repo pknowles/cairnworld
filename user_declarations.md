@@ -809,6 +809,9 @@ Test options and pick one or a combination that works best:
 - Text search, much like grep or maybe SQL.
 - Find/replace like sed, within a text entry.
 
+Better yet, (to coding agents) follow the direct file editing tools you already
+have.
+
 What happens when notes get too big for context? Providing a list of note names
 and a query tool relies on agents knowing to query the name and they might miss
 things. A structured hierarchy of text might be interestin, but LLMs are already
@@ -827,6 +830,14 @@ each note.
   description
 - Subnotes can be much larger and have many details that are accessed
   infrequently.
+
+Some notes belong on multiple objects. For this we introduce a shared note. This
+is either a separate type or a note that is linked by multiple objects. Either
+way, agents should be able to manage linking and unlinking notes. The other
+objects linked should be visible as context when loading the full note.
+
+We may want to introduce a way to archive inconsequential notes, maybe also when
+they become old/stale or when there are too many.
 
 ## Consistency Checks
 

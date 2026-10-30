@@ -52,6 +52,15 @@ operations remain required whichever note representation is selected.
 
 ## Dependencies and initial bounds
 
+Shared notes are part of this feature, not a separate plot/scenario subsystem.
+The [shared-note design](../design.md#shared-notes) follows the declaration that
+one note may belong to multiple objects, with agent-managed links and linked
+objects visible when reading it. Implement storage, scenario integration and
+read/edit/link tools together in the first checkpoint; the second extends their
+navigation/search. Hard-coded scenarios can then use them without waiting for
+the Storyteller executor. This does not reorder todo.md or require a temporary
+import-only implementation.
+
 NPC interaction supplies the terminal narration tools and shared action path;
 code-quality checks and [Unified game time](unified-game-time.md) precede this
 plan in todo.md. Use its agreed action admission, ready-times, EndTurn and activity
@@ -68,6 +77,47 @@ first version; the second checkpoint extends this measurement to retrieval.
 
 ## First checkpoint: read/edit and movement
 
+- Add world-owned shared notes with stable IDs, bounded titles/text bodies and
+  GM/Storyteller categories. Keep existing single-object note fields; a shared
+  note is an explicit choice, not a mandatory migration of every note. Store
+  each shared body once. Link it to existing typed object references (World,
+  Character, Group, Location, Connection, ItemType, Item and supported SpellType
+  references), reusing their world checks. Enforce endpoint existence and unique
+  note/object pairs in storage; do not accept dangling arbitrary table/ID pairs.
+- Extend the same authorized read/write/exact-edit operations to shared-note
+  IDs. Add create, link and unlink operations with explicit note/object IDs;
+  creation includes its initial links in one transaction. Return the assigned
+  ID and committed links. Repeated linking produces one association. Unlinking
+  retains the body and other links, including when the final link is removed;
+  retain evidence for Developer Mode. Do not implement automatic archival or
+  physical note deletion. Keep note edits and link changes in ordinary recorded
+  tool executions rather than adding another audit system.
+- Apply existing role permissions to shared bodies and link operations. A GM
+  accesses notes through authorized local objects or its world reference; a
+  remote link alone does not expand object authority. Editing an authorized
+  shared GM note changes its body for every linked object. Linking/unlinking
+  requires authority over the endpoint and authority to change the note; GM
+  cannot relink read-only Storyteller notes. Character links identify relevance,
+  not permission for that character's agent to read private notes. Full reads
+  return linked object IDs/types/names as well as text; large link lists use the
+  same bounded paging as other reads, with partial results clearly indicated.
+- Add an optional shared-notes collection to the existing scenario format,
+  defaulting to empty for existing files. Each entry defines a scenario-local
+  key, category, title/body and typed object references. Resolve references
+  through the scenario importer's existing object mapping after objects exist;
+  use stable scenario-local keys where names cannot uniquely identify an object.
+  Reject duplicate keys and unresolved/foreign links without a partially
+  installed world. Reuse shared-note validation/storage instead of writing JSON
+  copies into linked objects. Export one body per note with its links and
+  remapped local references, preserving unlinked notes too. Import/export is a
+  development capability, not a prerequisite Storyteller inference.
+- Adapt Bread Thief as the concrete example: one Storyteller note linked to Mara
+  and Toma records the completed mill work, owed flour, flood damage and competing
+  household needs. Each character's private background still supplies its own
+  memories, beliefs and aspirations: shared GM/Storyteller notes do not replace
+  that character's knowledge. Remove redundant GM-facing copies only after captured
+  GM contexts show the situation remains available. Verify this through the real
+  game path; do not count matching tool names as proof of preserved knowledge.
 - Define a small typed set of writable fields on existing object references:
   character placement within its current group, group placement, relevant public
   descriptions and named GM note values. Reuse existing object IDs/types where
@@ -76,7 +126,8 @@ first version; the second checkpoint extends this measurement to retrieval.
   SQL, filesystem paths or model-selected table/column names as executable input.
   A whole-value write may create a named GM note on an existing authorized
   object. Include explicit removal of a named note through the same field access,
-  so obsolete short-term notes do not accumulate as empty keys. Neither operation
+  so obsolete short-term notes do not accumulate as empty keys; retain the old
+  content in recorded evidence. Neither operation
   creates or deletes the game object; fixed fields such as placement can be
   cleared but not removed. Validate permissions and bounds before any change.
 - Provide whole-field write and exact-text edit operations through the same
@@ -109,6 +160,11 @@ first version; the second checkpoint extends this measurement to retrieval.
   at invocation entry. Keep this state separate from chat history and preserve
   captured immutable inputs for historical reconstruction. Tool results and the
   next GM request must agree with the committed database, including after reload.
+  Include shared-note changes and link changes: deduplicate by note ID when
+  several current objects link the same note. Use the measured note discovery
+  representation chosen above; do not automatically expand all linked bodies or
+  silently omit facts needed for the current decision. Editing a shared body
+  invalidates affected current scenes just as edits to local note values do.
 - Add the declared Move/CombatMove through shared character submission and GM
   arbitration. Both use the canonical relative-placement field. CombatMove checks
   and consumes its ready resource and applies its approved short displacement
@@ -139,6 +195,12 @@ first version; the second checkpoint extends this measurement to retrieval.
   with paging/continuation for more results. Share authorization with reads and
   edits; neither search snippets nor counts may expose unauthorized notes.
   No regex language, raw SQL or associative-memory engine is required initially.
+- Include shared-note references in object listings and shared bodies in
+  authorized searches; deduplicate matches by note ID rather than returning one
+  copy per link. Return link context so the caller can understand why a note
+  concerns its current objects. A full read must allow navigation of all linked
+  references through bounded pages. No recursive transitive loading of note or
+  object bodies is implied.
 - Enforce configured hard field/note and response bounds, including note keys
   and their listing, before writes/reads can grow context without limit. Reject
   an oversized edit unchanged with actual size and limit; never silently truncate
@@ -179,6 +241,8 @@ Store/Game/tool paths; no new mock world engine or repeated full GPU suite.
 | Newly invented incidental detail | GM reads existing relevant detail before adding it to descriptions/GM notes, then narrates only after its write result. A subsequent read finds the detail. No forced object creation and no extra after-narration inference. |
 | Permissions and mechanical state | Foreign-world/local-scope violations, GM writes to Storyteller notes and edits to mechanical fields fail without mutation or search leakage. Valid private notes stay out of player/NPC perception histories. |
 | Hierarchical discovery | Starting from world/location references, find a known field/key, read/search its body and edit it through returned IDs. Captured context distinguishes partial reads from complete content and does not include all remote object bodies. |
+| Shared note and unlink | Import a note linked to two characters and a location, edit it through one reference and read the same committed body through another. Full reads expose linked references. Unlink one object: the others keep the note and no body is deleted, including after removing the last link. Reload and export/reimport preserve identity relationships/content without multiplying bodies. |
+| Shared-note authority and context | Foreign links and unauthorized reads/edits fail without mutation or snippets leaking private content. Linking a character grants it no private context or perceived event. Multiple local links contribute one note body; a shared edit reaches the next GM input. Bread Thief retains both NPCs' own knowledge and the GM's dispute facts while remote unrelated notes stay outside the request. |
 | Bounds and failures | Oversized writes fail unchanged with measured size/limit; search/read outputs are bounded and indicate remaining results. SQL/tool errors retain full context and Developer Mode evidence. No correction loop, truncation or synthetic success. |
 | Shared lifecycle | Edits invalidate relevant stale NPC proposals, but note receipts do not start NPC responses. A terminal narration tool ends the GM turn without a closing inference. A later failure retains committed edits and reports failure under existing crash/turn rules. |
 
@@ -186,5 +250,6 @@ Run appropriate Rust/SQL/lint checks and the representative real chat for change
 tools/context. Follow the five-minute testing budget; reserve broad checks for
 complete checkpoints. Update implementation_reference.md only for implemented
 behaviour, self-review and commit each complete checkpoint. Do not mark this plan
-complete until both editing modes, movement, retrieval/limits and verification
+complete until both editing modes, shared-note links/import/export, movement,
+retrieval/limits and verification
 are working. Item creation and Cairn rule lookup are not hidden prerequisites.

@@ -18,6 +18,13 @@ Every tool available to an agent's role remains in its context on every request.
 Do not hide tools by action, require tool discovery, or load definitions only on
 demand to save context. Existing role/permission boundaries remain authoritative.
 
+The planned [shared notes](gm-editing.md) store situation facts once and link
+them to relevant objects. They are not implemented lookup capabilities to rely
+on during current reductions. When available, measure discovery and full reads
+through captured game requests, deduplicate by note identity, and verify decisions
+that depend on the facts. Loading fewer bodies is useful only if the agent can
+still obtain the information it needs; matching tool names alone is insufficient.
+
 Follow the [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist),
 [coding standards](../coding_standards.md) and
 [prompt standards](../prompt_standards.md). Any change to what a model receives
