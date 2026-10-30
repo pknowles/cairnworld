@@ -450,6 +450,15 @@ impl CharacterActor {
     pub fn character_id(&self) -> i64 {
         self.character_id
     }
+
+    /// Any character as an actor, for tests that need an NPC's action.
+    #[cfg(test)]
+    pub fn for_test(world_id: i64, character_id: i64) -> Self {
+        Self {
+            world_id,
+            character_id,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -82,18 +82,13 @@ struct ActionKind {
     validate: fn(&str) -> Result<()>,
 }
 
-/// The actions any character can take, in the order they are offered.
+/// The actions any character can take, in the order they are offered. Speech
+/// comes first: offered after `attempt`, models spoke through `attempt` (kind
+/// `ask`, or a kind that does not exist) in about one decision in ten, and not
+/// once when speech was first (experiments/0008-attempt-misuse.md).
 fn action_kinds() -> Result<Vec<ActionKind>> {
     let prompts = prompts::current()?;
     Ok(vec![
-        ActionKind {
-            definition: prompts.player.tools.tool(
-                "attempt",
-                serde_json::to_value(schema_for!(AttemptAction))
-                    .expect("attempt action schema should serialize"),
-            )?,
-            validate: validate_attempt_action,
-        },
         ActionKind {
             definition: prompts.shared.tools.tool(
                 "speak",
@@ -101,6 +96,14 @@ fn action_kinds() -> Result<Vec<ActionKind>> {
                     .expect("speak action schema should serialize"),
             )?,
             validate: validate_speak_action,
+        },
+        ActionKind {
+            definition: prompts.player.tools.tool(
+                "attempt",
+                serde_json::to_value(schema_for!(AttemptAction))
+                    .expect("attempt action schema should serialize"),
+            )?,
+            validate: validate_attempt_action,
         },
         ActionKind {
             definition: prompts.player.tools.tool(
@@ -1490,20 +1493,13 @@ where
         let presented: PresentedActions = Arc::new(Mutex::new(vec![pending.clone()]));
         let game = Arc::clone(self);
         let approval_presented = Arc::clone(&presented);
-        let mut approval = prompts.gm.tools.tool(
+        // Every approval carries the speech controls, because the turn may also
+        // approve a speech reaction it asked an NPC for.
+        let approval = prompts.gm.tools.tool(
             "approve_action",
             serde_json::to_value(schema_for!(ApproveAction))
                 .expect("approval schema should serialize"),
         )?;
-        // Who hears an action is only a choice for speech.
-        if pending.tool != "speak" {
-            let arguments = approval.schema["properties"]
-                .as_object_mut()
-                .expect("approval arguments are properties");
-            for hearing in ["include", "exclude", "prefix"] {
-                arguments.remove(hearing);
-            }
-        }
         let gm_tool = Tool::new(approval, move |context| {
             let arguments = context.arguments.to_string();
             let tool_execution_id = context.tool_execution_id;
@@ -4236,6 +4232,36 @@ mod tests {
         }
     }
 
+    /// Only the player agent is scripted; the GM and the NPCs are the real model.
+    struct RealGmAndNpcs {
+        real: Arc<MistralRsBackend>,
+        player: Mutex<VecDeque<Response>>,
+    }
+
+    impl Backend for RealGmAndNpcs {
+        async fn complete(
+            &self,
+            request: crate::llm::Request,
+            on_token: impl FnMut(&str) + Send,
+        ) -> Result<Response> {
+            // Only the player agent is offered the party_presence tool, and during
+            // creation the roll tools.
+            let player = request
+                .tools
+                .iter()
+                .any(|tool| matches!(tool.name.as_str(), "party_presence" | "roll_hit_protection"));
+            if player {
+                return self
+                    .player
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .context("the scripted player agent ran out of responses");
+            }
+            self.real.complete(request, on_token).await
+        }
+    }
+
     /// A real GM resolves a run of speech and look actions in one group, so its
     /// history grows with earlier approvals and narration. Targeted regression
     /// coverage: it caught the GM skipping its approval call as history grew, so
@@ -4324,6 +4350,132 @@ mod tests {
         assert_eq!(undecided, 0, "an action was left undecided");
         assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
+    }
+
+    /// `ask` is an explicit question for the GM. The GM answers a question it may
+    /// answer and rejects, with a reason, anything else sent as an ask: speech,
+    /// an action, or a question it cannot or should not answer. The live game
+    /// showed the GM narrating an NPC's speech out of an `ask`.
+    async fn real_model_gm_answers_a_question_and_rejects_any_other_ask(model: &DeviceModel) {
+        let (backend, _model_path, _sampling, limits) = model.parts();
+        let (game, store, _db, first, _second) =
+            two_player_bread_thief_game_with_limits(backend, limits).await;
+        // (who asks, what they send as an ask, whether it is a question to answer)
+        let asks: [(&str, &str, bool); 6] = [
+            ("player", "What is the hut built from?", true),
+            (
+                "player",
+                "Is the rear window big enough for me to crawl through?",
+                true,
+            ),
+            (
+                "Toma",
+                "Toma speaks up, his voice rough from disuse: \"I know you're there. I'm Toma. Leave my door alone.\"",
+                false,
+            ),
+            (
+                "Mara",
+                "Mara asks the Adventurer to retrieve the flour from the hut.",
+                false,
+            ),
+            (
+                "Toma",
+                "Toma steps back from the door and lowers the axe.",
+                false,
+            ),
+            ("player", "What will happen at the end of the story?", false),
+        ];
+        let mut wrong = Vec::new();
+        for (asker, question, should_answer) in asks {
+            let (actor, branch) = if asker == "player" {
+                (
+                    store.player_actor(&first).await.unwrap(),
+                    store.agent_branch(first.agent_id).await.unwrap(),
+                )
+            } else {
+                let id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = ?")
+                    .bind(asker)
+                    .fetch_one(&store.pool())
+                    .await
+                    .unwrap();
+                (
+                    crate::store::CharacterActor::for_test(first.world_id, id),
+                    store.npc_branch(id).await.unwrap(),
+                )
+            };
+            let before: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM inference")
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+            let sequence = store
+                .begin_sequence(first.world_id, "real GM ask")
+                .await
+                .unwrap();
+            let arguments = serde_json::json!({"kind": "ask", "description": question}).to_string();
+            let requesting = crate::store::record_tool_call_for_test(
+                &store,
+                branch,
+                Some(sequence.id),
+                "attempt-ask",
+                "attempt",
+                &arguments,
+            )
+            .await;
+            let pending = store
+                .create_pending_action(&actor, sequence.id, requesting, "attempt", &arguments)
+                .await
+                .unwrap();
+            let narration = game
+                .arbitrate(
+                    pending,
+                    Budget::new(limits),
+                    CallContext::root(Some(sequence.id)),
+                    None,
+                )
+                .await
+                .expect("the GM's turn");
+            game.deliver_narration(first.world_id, &narration)
+                .await
+                .unwrap();
+            let gm_inferences: Vec<i64> = sqlx::query_scalar(
+                "SELECT inference.id FROM inference JOIN world_gm ON world_gm.agent_id = inference.agent_id WHERE inference.id > ? ORDER BY inference.id",
+            )
+            .bind(before)
+            .fetch_all(&store.pool())
+            .await
+            .unwrap();
+            let mut decision = None;
+            for id in gm_inferences {
+                if let crate::inspection::RecordedOutcome::Response(response) =
+                    store.reconstruct_inference(id).await.unwrap().outcome
+                    && let Content::ToolCalls(calls) = response.content
+                {
+                    decision = decision.or(calls
+                        .iter()
+                        .find(|call| {
+                            matches!(call.name.as_str(), "approve_action" | "reject_action")
+                        })
+                        .map(|call| call.name.clone()));
+                }
+            }
+            let answered = decision.as_deref() == Some("approve_action");
+            if answered != should_answer {
+                wrong.push(format!("{asker} asked {question:?}: {decision:?}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the GM treated an ask the wrong way: {wrong:#?}"
+        );
+        game.shutdown().await.unwrap();
+    }
+
+    /// Known failing; see plans/agent-tuning.md.
+    #[tokio::test]
+    #[ignore = "known failure: the GM approves every ask (plans/agent-tuning.md); needs a CUDA GPU"]
+    async fn the_gm_answers_a_question_and_rejects_any_other_ask() {
+        let model = DeviceModel::load().await;
+        real_model_gm_answers_a_question_and_rejects_any_other_ask(&model).await;
     }
 
     /// The take arguments a real player agent sends for what a player says.
@@ -6333,7 +6485,12 @@ mod tests {
             intervention_check(1, &[toma]),
             // Toma answers the check with a warning.
             propose("Don't touch that sack!", &speaker, 2),
-            approve(2),
+            // The take is not speech, but the reaction is: its hearing controls
+            // must still be there to use.
+            tool_call(
+                "approve_action",
+                serde_json::json!({"action_id": 2, "prefix": "Across the room:"}),
+            ),
             tool_call(
                 "reject_action",
                 serde_json::json!({"action_id": 1, "reason": "Toma stops you."}),
@@ -6358,8 +6515,8 @@ mod tests {
         assert!(
             heard(&scene.store, &scene.first)
                 .await
-                .contains(&"Don't touch that sack!".to_string()),
-            "the warning was said before the take was decided"
+                .contains(&"Across the room: Don't touch that sack!".to_string()),
+            "the warning was said, with the GM's prefix, before the take was decided"
         );
         assert!(
             scene
@@ -7339,55 +7496,6 @@ mod tests {
             store.export_scenario(installed.world_id).await.unwrap(),
             scenario
         );
-    }
-
-    #[tokio::test]
-    async fn only_speech_offers_the_gm_a_choice_of_who_hears_it() {
-        let mut offered = Vec::new();
-        for (player_call, line) in [
-            (
-                tool_call(
-                    "speak",
-                    serde_json::json!({"words": "Hello.", "to": ["Toma"]}),
-                ),
-                "Greet Toma.",
-            ),
-            (
-                tool_call(
-                    "attempt",
-                    serde_json::json!({"kind": "look", "description": "the hut"}),
-                ),
-                "Look around.",
-            ),
-        ] {
-            let scene = speech_scene().await;
-            scene.responses.lock().unwrap().extend([
-                player_call,
-                approve(1),
-                narrate("Done."),
-                response(Content::Text(String::new())),
-            ]);
-            scene
-                .game
-                .player_message(scene.first.clone(), line)
-                .await
-                .unwrap();
-            let requests = scene.requests.lock().unwrap();
-            let approval = requests
-                .iter()
-                .flat_map(|request| &request.tools)
-                .find(|tool| tool.name == "approve_action")
-                .expect("the GM was asked to approve");
-            let mut arguments: Vec<&str> = approval.schema["properties"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            arguments.sort();
-            offered.push(arguments.join(","));
-        }
-        assert_eq!(offered, ["action_id,exclude,include,prefix", "action_id"]);
     }
 
     #[tokio::test]
@@ -10603,23 +10711,14 @@ mod tests {
         assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
 
-        let npc_inferences: Vec<i64> = sqlx::query_scalar(
-            "SELECT inference.id FROM inference JOIN npc_agent ON npc_agent.agent_id = inference.agent_id ORDER BY inference.id",
-        )
-        .fetch_all(&store.pool())
-        .await
-        .unwrap();
-        let mut actions = Vec::new();
-        for id in npc_inferences {
-            if let crate::inspection::RecordedOutcome::Response(response) =
-                store.reconstruct_inference(id).await.unwrap().outcome
-            {
-                actions.push(format!("{:?}", response.content));
-            }
-        }
+        let actions = npc_decisions(&store).await;
         assert!(
             reached_player,
             "no NPC speech reached the player within two minutes; utterances: {utterances:?}; actions: {actions:?}"
+        );
+        assert!(
+            !asked_the_gm(&actions),
+            "an NPC answered through a question for the GM: {actions:?}"
         );
         let asked: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM npc_candidate              JOIN character ON character.id = npc_candidate.character_id              WHERE character.name = 'Toma' AND npc_candidate.decision_invocation_id IS NOT NULL",
@@ -10643,6 +10742,118 @@ mod tests {
             failed, 0,
             "the discussion failed ({errors:?}); utterances: {utterances:?}"
         );
+    }
+
+    /// Whether any decision was `attempt` of kind `ask`, the question for the GM.
+    fn asked_the_gm(decisions: &[Content]) -> bool {
+        decisions.iter().any(|decision| match decision {
+            Content::ToolCalls(calls) => calls.iter().any(|call| {
+                call.name == "attempt"
+                    && serde_json::from_str::<serde_json::Value>(&call.arguments)
+                        .is_ok_and(|arguments| arguments["kind"] == "ask")
+            }),
+            Content::Text(_) => false,
+        })
+    }
+
+    /// What each NPC decision was, as recorded.
+    async fn npc_decisions(store: &Store) -> Vec<Content> {
+        let npc_inferences: Vec<i64> = sqlx::query_scalar(
+            "SELECT inference.id FROM inference JOIN npc_agent ON npc_agent.agent_id = inference.agent_id ORDER BY inference.id",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        let mut decisions = Vec::new();
+        for id in npc_inferences {
+            if let crate::inspection::RecordedOutcome::Response(response) =
+                store.reconstruct_inference(id).await.unwrap().outcome
+            {
+                decisions.push(response.content);
+            }
+        }
+        decisions
+    }
+
+    /// The live game started with Toma calling `attempt` (kind `ask`) with his
+    /// words in the description, and the GM then narrated those words as
+    /// speech, which Toma kept imitating. Everything is the real model here, from
+    /// character creation through the scene narration to the NPCs' first
+    /// decisions.
+    async fn real_model_npcs_hearing_the_scene_do_not_speak_through_attempt(model: &DeviceModel) {
+        let (_, model_path, sampling, limits) = model.parts();
+        let backend = RealGmAndNpcs {
+            real: Arc::clone(&model.backend),
+            player: Mutex::new(VecDeque::from([
+                response(Content::Text("Welcome, traveler.".into())),
+                response(Content::ToolCalls(vec![
+                    ToolCall {
+                        id: "hp".into(),
+                        name: "roll_hit_protection".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "attributes".into(),
+                        name: "roll_attributes".into(),
+                        arguments: "{}".into(),
+                    },
+                ])),
+                tool_call("ready_to_begin", serde_json::json!({})),
+                response(Content::Text(String::new())),
+            ])),
+        };
+        let (game, store, _db, member) =
+            opening_game_with_limits(backend, model_path, sampling, limits).await;
+        game.wait_for_opening(member.clone())
+            .await
+            .expect("the opening");
+        game.player_message(member.clone(), "Roll my character, then begin.")
+            .await
+            .expect("the player's creation turn");
+        // The real model is slow: wait until the NPCs have had a quiet moment.
+        let mut quiet = 0;
+        for _ in 0..1200 {
+            let open: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM npc_response_collection WHERE state IN ('collecting', 'selected', 'executing')",
+            )
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+            quiet = if open == 0 { quiet + 1 } else { 0 };
+            if quiet > 30 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let decisions = npc_decisions(&store).await;
+        assert!(
+            !decisions.is_empty(),
+            "the NPCs were never asked; the player's chat: {:#?}",
+            store.player_chat(&member).await.unwrap()
+        );
+        assert!(
+            !asked_the_gm(&decisions),
+            "an NPC spoke through an `ask`, which is a question for the GM: {decisions:#?}"
+        );
+        game.shutdown().await.unwrap();
+    }
+
+    /// Run on its own, not in `device_suite`: the real GM, NPCs and creation take
+    /// a minute or two.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn npcs_hearing_the_scene_do_not_speak_through_attempt() {
+        let model = DeviceModel::load().await;
+        real_model_npcs_hearing_the_scene_do_not_speak_through_attempt(&model).await;
+    }
+
+    /// The answer to a question put to an NPC is speech, not an `ask` for the GM
+    /// with the words inside its description, as the live game showed.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn an_npc_answers_a_question_by_speaking() {
+        let model = DeviceModel::load().await;
+        real_model_npc_answers_a_question_put_to_it(&model).await;
     }
 
     /// The player agent is the real model; the GM and NPCs are mechanical.
@@ -10736,6 +10947,88 @@ mod tests {
             game.shutdown().await.unwrap();
         }
         assert!(wrong.is_empty(), "wrong routing: {wrong:#?}");
+    }
+
+    /// Whether the words a player agent spoke are the player's.
+    type SaidRight = fn(&str) -> bool;
+
+    /// A player's agent says what the player says, once, and then stops: no
+    /// words of its own, no story about how others react. Each line is a fresh
+    /// game; the live failure was the agent narrating Toma's reaction after its
+    /// `speak` call and putting words in the character's mouth the player never
+    /// typed.
+    async fn real_model_player_agent_says_what_the_player_says_and_stops(model: &DeviceModel) {
+        let (_, _model_path, _sampling, limits) = model.parts();
+        // (what the player types, a check on the words spoken)
+        let lines: [(&str, SaidRight); 4] = [
+            ("Say \"I will not let you take it.\"", |words| {
+                words.trim_matches('"') == "I will not let you take it."
+            }),
+            (
+                "Mara, it sounds like Toma earned that fair and square. Do you have anything to trade for it if you want it back?",
+                |words| {
+                    words.contains("Toma earned that fair and square")
+                        && words.contains("anything to trade")
+                },
+            ),
+            ("Tell Toma I'm sorry I said the wrong thing.", |words| {
+                words.to_lowercase().contains("sorry")
+            }),
+            (
+                "Toma, I will defend you if Mara tries to take it.",
+                |words| words.to_lowercase().contains("defend"),
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (line, words_ok) in lines {
+            let chosen = Arc::new(Mutex::new(Vec::new()));
+            let backend = RealPlayerOnly {
+                real: Arc::clone(&model.backend),
+                chosen: Arc::clone(&chosen),
+            };
+            let (game, _store, _db, first, second) =
+                two_player_bread_thief_game_with_limits(backend, limits).await;
+            let _first_connection = game.connect(&first).await.unwrap();
+            let _second_connection = game.connect(&second).await.unwrap();
+            let last = game
+                .player_message(first.clone(), line)
+                .await
+                .expect("the player's turn");
+            let calls = chosen.lock().unwrap().clone();
+            let words: Vec<String> = calls
+                .iter()
+                .filter(|call| call.name == "speak")
+                .filter_map(|call| {
+                    serde_json::from_str::<serde_json::Value>(&call.arguments)
+                        .ok()?
+                        .get("words")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .collect();
+            let said_once = calls.len() == 1 && words.len() == 1 && words_ok(&words[0]);
+            let stopped = matches!(&last.content, Content::Text(text) if text.trim().is_empty());
+            if !said_once || !stopped {
+                wrong.push(format!(
+                    "{line:?} -> calls {calls:?}, final output {:?}",
+                    last.content
+                ));
+            }
+            game.shutdown().await.unwrap();
+        }
+        assert!(
+            wrong.is_empty(),
+            "the player's agent went wrong: {wrong:#?}"
+        );
+    }
+
+    /// Known failing until the player agent's context is fixed; see
+    /// plans/agent-tuning.md.
+    #[tokio::test]
+    #[ignore = "known failure: the player agent narrates and rewrites speech (plans/agent-tuning.md); needs a CUDA GPU"]
+    async fn the_player_agent_says_what_the_player_says_and_stops() {
+        let model = DeviceModel::load().await;
+        real_model_player_agent_says_what_the_player_says_and_stops(&model).await;
     }
 
     /// What one player says is understood by the other player's own agent: the

@@ -32,6 +32,23 @@ from the packet, resulting groups read from stored membership, for both a split 
 characters go separate ways and a merge when they cross paths. Measure repeat rate;
 keep in `device_suite` only if reliable.
 
+## The player agent narrates and rewrites what the player says
+
+Played game: after its `speak` call the agent wrote Toma's and Mara's reactions, spoke
+words the player never typed, and kept doing it when told to stop. Runnable check (not in
+`device_suite`): `cargo test the_player_agent_says_what_the_player_says_and_stops -- --ignored`;
+all four lines fail every run. Measurements and the rewrites that did not help are in
+[experiment 0008](../experiments/0008-attempt-misuse.md). Candidate: end the agent's turn
+after an action tool, since the game shows the player what happens.
+
+## The GM approves an ask that is not a question
+
+`ask` is a question for the GM. The GM approves everything sent as an ask, including
+speech and actions, and then narrates it. Runnable check:
+`cargo test the_gm_answers_a_question_and_rejects_any_other_ask -- --ignored`. Wording,
+presentation and a separate tool did not change the GM's decision (experiment 0008).
+Characters now rarely misuse `ask` because `speak` is offered first.
+
 ## NPC chatter with three or more NPCs, and NPC reactions to the entrance narration
 
 Measured only for two NPCs in one scene (experiments/0005-npc-chatter.md): with the
