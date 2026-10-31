@@ -70,6 +70,31 @@ Until step 2 a generated world has a summary and name but no objects and cannot
 begin. That is an incomplete world, not a fallback: only the authoring tools
 create objects.
 
+### Step 1 data and flow
+
+- `world_generation(world_id, stage, round, questions, error)` exists only for a
+  generated world; no row means ready (scenario worlds). `stage` is one of
+  `meta`, `ask`, `answer`, `summarize`, `concept_done`, `failed`. `questions`
+  holds the Questioner's current list and the next one to answer.
+- `generation_agent(agent_id, world_id, role, round)` names the Questioner (one,
+  persistent history) and one Storyteller per round (fresh history, so a round
+  starts from the seed prompt and latest summary only). Developer Mode lists them
+  by role like the other agents.
+- Each stage is one finite step run by the world worker, like an NPC step; its
+  outputs and the next `stage` commit together, so a restart resumes at the stored
+  stage. `meta`: the Questioner answers the `prompts.toml` meta-questions. `ask`:
+  it is given the seed prompt and latest summary and calls `ask_questions` or
+  `world_is_complete`. `answer`: the round's Storyteller answers one question as
+  plain text. `summarize`: it calls `write_world_summary(name, summary)`, which
+  stores the name and `storyteller_summary` on the world, then `ask` runs again.
+  `world_is_complete` ends in `concept_done`, awaiting step 2.
+
+| Choice | Alternatives | Decision |
+| --- | --- | --- |
+| What runs generation | A task spawned per world needing its own shutdown/crash handling; one long inline world event blocking the queue and shutdown | Steps in the world worker, reusing admission, ordering, shutdown and Developer Mode events |
+| Storyteller history per round | One agent with a branch per round, needing branch lookup in inspection; one agent compacted, which cannot drop earlier answers | A fresh agent per round |
+| Questioner history | A fresh agent per round, re-answering meta-questions each time | One persistent agent: it answers meta-questions once and sees only summaries afterwards |
+
 ## Checkpoint: authoring tools and BeginWorld
 
 - Add initialization state to world creation and run it through the existing
