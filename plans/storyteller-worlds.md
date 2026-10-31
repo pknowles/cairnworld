@@ -46,11 +46,14 @@ after their rules dependencies. Campaign completion remains a separate plan.
 
 1. **Generation from world creation.** The create-world form takes the optional
    [seed prompt](../user_declarations.md#world-detail-page); creation stores it,
-   makes the owner a member with no character yet (character creation begins only
-   after BeginWorld, as declared) and queues initialization through ordinary world
-   execution. Implement the Questioner/Storyteller conceptual loop (Storyteller
-   answers sampled at a higher temperature, as declared), the world summary and
-   the world/campaign name it produces, the in-progress/complete status, the
+   makes the owner a member with the usual placeholder Adventurer, whose player
+   agent does not run until the world is ready (so the player can do nothing; with
+   Developer Mode on they can watch), and queues initialization through ordinary
+   world execution. Implement the Questioner/Storyteller conceptual loop
+   (Storyteller answers use a higher temperature where the model supports it; this
+   is configurable and low priority, dropped if it costs too much quality), the
+   world summary and the world/campaign name it produces, the declared
+   "in-progress or complete" [world status](../user_declarations.md#world-detail-page), the
    admission gating while initializing, and the Developer Mode views of both
    agents, their inferences, the summary and progress. These are the "develop and review"
    checkpoint's loop, progress, failure and visibility bullets. The loop needs no
@@ -166,9 +169,10 @@ create objects.
   records reviewer satisfaction. The Storyteller remains responsible for its
   final review and BeginWorld. Narrative quality is not a Rust puzzle validator
   or a scripted solution test.
-- Use the shared inference budgets and failure handling. Reaching a safety limit
-  before BeginWorld is a visible unfinished/failed initialization, never automatic
-  readiness. Round limits must not substitute for explicit completion.
+- Use the shared inference limits and failure handling: each agent turn is
+  bounded by the per-turn limit, and the whole generation by the existing total
+  limit, with no separate round limit. Reaching a limit before BeginWorld is a
+  visible unfinished/failed initialization, never automatic readiness.
   A failed world stays stuck with its error and recorded progress visible;
   no retry/resume UI or automatic replay is required by this increment. Preserve
   normal clean-shutdown boundaries and crash handling for active work.
