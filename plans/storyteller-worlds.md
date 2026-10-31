@@ -4,10 +4,13 @@ Pending implementation and verification.
 
 ## Goal and authority
 
-Turn a scenario in Storyteller context into a persistent world, then support the
-declared Questioner/Storyteller process that develops that scenario itself.
-The Storyteller declares readiness with BeginWorld after reviewing the actual
-created world. NPCs speak and act through their own agents, not scripted lines.
+Creating a game starts generation immediately: the declared Questioner/Storyteller
+process develops the world, and the Storyteller builds it by calling the authoring
+tools, never by emitting a scenario file. With Developer Mode enabled the owner can
+watch it live in the web UI: both agents and their inferences, the world summary on
+the world, and each object and NPC as it is created. The Storyteller declares
+readiness with BeginWorld after reviewing the actual created world. NPCs speak and
+act through their own agents, not scripted lines.
 
 Authority: [world development](../user_declarations.md#game-setting-and-story-narrative),
 [focused development](../user_declarations.md#storyteller-initialization-output-and-tools),
@@ -35,9 +38,29 @@ after their rules dependencies. Campaign completion remains a separate plan.
 
 | Approach | Benefit | Cost and decision |
 | --- | --- | --- |
-| Generate one complete scenario JSON and import it | Reuses the scenario format | A single output must describe all objects; later edits need another interface. Keep import for development; use the declared incremental tools for the Storyteller. |
+| Generate one complete scenario JSON and import it | Reuses the scenario format | Rejected: the declarations have the Storyteller build the world with tools. Scenario import remains only for hand-written scenarios and is never a generation output. |
 | Extend existing constructors and field access with scoped authoring tools | Reuses identities, validation, recording and editing | Requires explicit authoring permissions and lifecycle checks. Selected. |
 | Add a separate draft-object model or world-generation framework | Could isolate draft data | Duplicates game objects and needs a conversion path. Use ordinary objects inside an initializing world instead. |
+
+## Build order
+
+1. **Generation from world creation.** The create-world form takes the input
+   prompt (and optional seed); creation stores it and queues initialization
+   through ordinary world execution. Implement the Questioner/Storyteller
+   conceptual loop, the world summary and name on the world, the admission gating
+   while initializing, and the Developer Mode views of both agents, their
+   inferences, the summary and progress. These are the "develop and review"
+   checkpoint's loop, progress, failure and visibility bullets. The loop needs no
+   authoring tools.
+2. **Authoring tools.** After [GM editing and lookup](gm-editing.md) is merged:
+   the Create/Update/Delete tools, lookup, mention reminders, focused
+   location/NPC development, persisted-state review and BeginWorld, with created
+   objects appearing live in Developer Mode. These are the remaining bullets of
+   both checkpoints.
+
+Until step 2 a generated world has a summary and name but no objects and cannot
+begin. That is an incomplete world, not a fallback: only the authoring tools
+create objects.
 
 ## Checkpoint: author an existing scenario
 
