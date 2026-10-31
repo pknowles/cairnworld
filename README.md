@@ -4,20 +4,26 @@ A multiplayer text adventure RPG with AI storytelling
 
 ![banner image](media/banner.png)
 
-## Build prerequisites on Windows ARM
+## Build prerequisites
 
-Development tools are installed by the developer in their normal machine/user
+The server runs its language model in-process on one GPU of the machine it runs
+on. The inference backend is a fixed dependency (`mistralrs` with its `cuda`
+feature), so building needs a CUDA toolkit. The platform built and tested so far
+is Windows ARM64, so the steps below are for it; other platforms are not
+exercised.
+
+Development tools are installed by the developer in their normal user
 locations. Keep Cargo's ordinary `target` layout; do not install toolchains,
 download archives, or environment bootstrap scripts under it.
 
-- Native ARM64 Rust through rustup, including rustfmt and Clippy. Browser builds
-  also require the `wasm32-unknown-unknown` target and `cargo-leptos` in the normal
-  Cargo tools directory.
-- Visual Studio C++ ARM64 build tools and Windows SDK, with Clang and CMake
-  available from the normal Visual Studio components. The current HTTPS
-  dependencies compile native cryptographic code on Windows ARM.
-- NVIDIA driver and a Windows ARM64 CUDA toolkit for this GPU. NVIDIA introduced
-  RTX Spark Windows ARM support in CUDA 13.4. The vendored inference dependency
+- Rust through rustup, including rustfmt and Clippy. Browser builds also require
+  the `wasm32-unknown-unknown` target and `cargo-leptos` in the normal Cargo tools
+  directory.
+- A C++ toolchain with Clang and CMake. The current HTTPS dependencies compile
+  native cryptographic code. On Windows ARM64 that is the Visual Studio C++
+  ARM64 build tools and Windows SDK.
+- The NVIDIA driver and a CUDA toolkit that supports your GPU and platform;
+  Windows ARM64 needs CUDA 13.4 or newer. The vendored inference dependency
   combines upstream CUDA 13.4 support with Windows paged-attention compatibility.
 - Node.js/npm for the checked-in Tailwind/DaisyUI stylesheet build. Browser tests
   additionally use an installed Chrome. Python is not a project prerequisite.
@@ -27,8 +33,8 @@ The `wasm-bindgen-cli` version must match `wasm-bindgen` in `Cargo.lock` so
 `cargo-leptos` can use it from `PATH`.
 JavaScript packages use the ordinary project-local `npm ci` installation.
 
-Build in an ARM64 Visual Studio Developer PowerShell with `clang-cl` and `nvcc`
-on `PATH`. Match CUDA's host compiler to Rust's default dynamic C runtime and
+On Windows ARM64, build in an ARM64 Visual Studio Developer PowerShell with
+`clang-cl` and `nvcc` on `PATH`. Match CUDA's host compiler to Rust's default dynamic C runtime and
 use MSVC's conforming preprocessor, including for Candle's kernels:
 
 ```powershell
@@ -42,11 +48,12 @@ those artifacts on subsequent builds.
 
 `HF_HOME` above reuses the downloaded model metadata. CUDA headers, compiler,
 ARM64 import libraries, and runtime DLLs must come from the same toolkit.
-`build.rs` uses `CUDA_PATH` to put ARM64 libraries first for the final application
-link; the binding crate's automatic search still includes x64 directories.
-On Windows unified-memory GPUs, admission uses the CUDA driver's combined
-dedicated/shared budget. `nvidia-smi` reports only the dedicated carveout;
-free CPU RAM is also not the CUDA allocation budget.
+On Windows ARM64, `build.rs` uses `CUDA_PATH` to put ARM64 libraries first for
+the final application link; the binding crate's automatic search still includes
+x64 directories.
+GPU memory admission depends on the GPU. On Windows unified-memory GPUs it uses
+the CUDA driver's combined dedicated/shared budget: `nvidia-smi` reports only the
+dedicated carveout, and free CPU RAM is also not the CUDA allocation budget.
 The backend requires paged attention and reserves the configured context-token
 pool at startup. Model weights, recurrent state, and temporary computation
 buffers also contribute to GPU memory usage. The device test
