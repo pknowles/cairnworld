@@ -1891,10 +1891,15 @@ field access, world-local validation and existing object relationships. Delete
 only flags an object as deleted; it never removes records, owned links or history.
 Normal discovery, counts, model context, NPC scheduling and action/tool targets
 exclude deleted objects. Developer Mode can explicitly include them with their
-retained relationships and history. References from other active game objects
-block the flag until explicitly reassigned or flagged too; owned membership/agent
-links do not. No dependent object is automatically flagged or removed. World
-validation checks the remaining active objects.
+retained relationships and history. Whether a delete blocks, cascades or leaves
+a dependent alone is decided per object type: an Item or Connection is flagged
+alone; an ItemType is blocked while active Items use it; an NPC carrying Items
+takes either a location ID and description written to every carried Item or a
+flag that deletes them too, and is otherwise blocked; a Group is never deleted
+directly (no DeleteGroup tool) and is flagged when its last character is removed;
+a Location is blocked while Groups are there unless a flag also deletes them, and
+its Connections are flagged with it. World validation checks the remaining active
+objects.
 Create records in dependency order and develop locations/NPCs individually from
 their seeds and the world summary. NPC private backgrounds guide their own agents;
 they are not public descriptions or scripted dialogue. Storyteller notes and the

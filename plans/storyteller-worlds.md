@@ -52,7 +52,9 @@ after their rules dependencies. Campaign completion remains a separate plan.
    world execution. Implement the Questioner/Storyteller conceptual loop
    (Storyteller answers use a higher temperature where the model supports it; this
    is configurable and low priority, dropped if it costs too much quality), the
-   world summary and the world/campaign name it produces, the declared
+   world summary and the world/campaign name it produces (the meta-questions are
+   a plain list in `prompts.toml`, edited and reloaded like any prompt so they are
+   easy to change while experimenting), the declared
    "in-progress or complete" [world status](../user_declarations.md#world-detail-page), the
    admission gating while initializing, and the Developer Mode views of both
    agents, their inferences, the summary and progress. These are the "develop and review"
@@ -93,11 +95,11 @@ create objects.
   its record, owned links, agent/history or other related records. Filter deleted
   objects out of normal discovery, counts, model context, NPC scheduling and
   action/tool targets; Developer Mode can explicitly include them and inspect
-  their retained relationships and history. References from other active game
-  objects, such as inventory items held by that NPC, block deletion until the
-  Storyteller explicitly reassigns or flags those objects too. Owned membership
-  and agent links do not themselves block the flag. Do not automatically flag
-  dependent objects or hide them to repair an invalid request. BeginWorld's
+  their retained relationships and history. What a delete does to dependents
+  (block, cascade or leave alone) is per object type as the design states, with
+  the NPC's optional item location/description or delete-items flag and the
+  Location's delete-groups flag as tool arguments; there is no DeleteGroup tool.
+  Nothing else is flagged or hidden to repair an invalid request. BeginWorld's
   validation operates on the remaining active world.
 - Use the GM editing feature's whole-field and exact-text operations for
   Storyteller notes and the editable, spoiler-bearing world summary. Storyteller
@@ -196,7 +198,7 @@ combine cases rather than require repeated whole-world GPU runs by default.
 | Case | Outcome and evidence |
 | --- | --- |
 | Existing scenario becomes world state | Author Four Brothers through real Storyteller calls. Inspect objects and captured contexts: witnesses have relevant private memories, suspects have motives, and equipment/conditions are recorded. NPC dialogue is generated from that context rather than stored as a script. |
-| Authoring and permissions | Scripted production-path calls create, partially update, edit long text and flag an NPC as deleted. Its record, membership/agent links and history remain stored and inspectable when Developer Mode includes deleted objects, but normal discovery/context/scheduling/actions exclude it. An active item held by that NPC blocks the flag until explicitly reassigned or flagged too; unrelated objects remain unchanged. Foreign IDs, dangling active references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
+| Authoring and permissions | Scripted production-path calls create, partially update, edit long text and flag an NPC as deleted. Its record, membership/agent links and history remain stored and inspectable when Developer Mode includes deleted objects, but normal discovery/context/scheduling/actions exclude it. An NPC carrying items is blocked unless the call places the items at a location or deletes them too; a Group is flagged when its last NPC is removed; unrelated objects remain unchanged. Foreign IDs, dangling active references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
 | Review can change the result | Supply a known omission in persisted state; the review sees it rather than only the intended summary. An edit changes the next captured review input. Check AskQuestions and WorldIsComplete without requiring particular prose. |
 | Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive current summary/artifacts without earlier answer transcripts; private NPC information stays with authorized roles. NPC creation uses the same activity/resource state as other characters; initialization causes no autonomous action or resource reset. |
 | Mention reminders | A marked uncreated mention appears as a reminder; creation updates that reminder. Intentionally leaving it uncreated does not block BeginWorld. Unmarked ordinary prose does not manufacture obligations. |
