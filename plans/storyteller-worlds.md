@@ -44,12 +44,15 @@ after their rules dependencies. Campaign completion remains a separate plan.
 
 ## Build order
 
-1. **Generation from world creation.** The create-world form takes the input
-   prompt (and optional seed); creation stores it and queues initialization
-   through ordinary world execution. Implement the Questioner/Storyteller
-   conceptual loop, the world summary and name on the world, the admission gating
-   while initializing, and the Developer Mode views of both agents, their
-   inferences, the summary and progress. These are the "develop and review"
+1. **Generation from world creation.** The create-world form takes the optional
+   [seed prompt](../user_declarations.md#world-detail-page); creation stores it,
+   makes the owner a member with no character yet (character creation begins only
+   after BeginWorld, as declared) and queues initialization through ordinary world
+   execution. Implement the Questioner/Storyteller conceptual loop (Storyteller
+   answers sampled at a higher temperature, as declared), the world summary and
+   the world/campaign name it produces, the in-progress/complete status, the
+   admission gating while initializing, and the Developer Mode views of both
+   agents, their inferences, the summary and progress. These are the "develop and review"
    checkpoint's loop, progress, failure and visibility bullets. The loop needs no
    authoring tools.
 2. **Authoring tools.** After [GM editing and lookup](gm-editing.md) is merged:
@@ -62,7 +65,7 @@ Until step 2 a generated world has a summary and name but no objects and cannot
 begin. That is an incomplete world, not a fallback: only the authoring tools
 create objects.
 
-## Checkpoint: author an existing scenario
+## Checkpoint: authoring tools and BeginWorld
 
 - Add initialization state to world creation and run it through the existing
   world execution/lifecycle path. Store seed, Storyteller history and current
@@ -79,12 +82,10 @@ create objects.
   NPCs and item types/items with existing holders. This is an ordering of needed
   references, not a mandatory extra inference for each record. Every character
   belongs to one group, and every item has one valid location or character holder.
-  Prepare ItemTypes needed for known SplitItem/CombineItems operations even when
-  there are no initial instances. Bread Thief supplies full- and half-sack types
-  but starts with only the full sack; initialization must not create extra flour
-  merely to make every type have a live item. Return these type IDs through the
-  same lookup access as other prepared world objects. Runtime transformations
-  belong to [Rules and travel](playable-rules.md), not the authoring tools.
+  An ItemType may exist with no instances (for example the result type of a
+  later SplitItem); initialization must not create items merely to give every
+  type one. Runtime transformations belong to
+  [Rules and travel](playable-rules.md), not the authoring tools.
   Delete only flags the selected object as deleted. Never physically remove
   its record, owned links, agent/history or other related records. Filter deleted
   objects out of normal discovery, counts, model context, NPC scheduling and
