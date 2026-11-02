@@ -72,28 +72,44 @@ create objects.
 
 ### Step 1 data and flow
 
-- `world_generation(world_id, stage, round, questions, error)` exists only for a
-  generated world; no row means ready (scenario worlds). `stage` is one of
-  `meta`, `ask`, `answer`, `summarize`, `concept_done`, `failed`. `questions`
-  holds the Questioner's current list and the next one to answer.
-- `generation_agent(agent_id, world_id, role, round)` names the Questioner (one,
-  persistent history) and one Storyteller per round (fresh history, so a round
-  starts from the seed prompt and latest summary only). Developer Mode lists them
-  by role like the other agents.
-- Each stage is one finite step run by the world worker, like an NPC step; its
-  outputs and the next `stage` commit together, so a restart resumes at the stored
-  stage. `meta`: the Questioner answers the `prompts.toml` meta-questions. `ask`:
-  it is given the seed prompt and latest summary and calls `ask_questions` or
-  `world_is_complete`. `answer`: the round's Storyteller answers one question as
-  plain text. `summarize`: it calls `write_world_summary(name, summary)`, which
-  stores the name and `storyteller_summary` on the world, then `ask` runs again.
-  `world_is_complete` ends in `concept_done`, awaiting step 2.
+- The Storyteller and Questioner are one agent each per world
+  (`world_role_agent(world_id, role, agent_id)`, like `world_gm`): the Storyteller
+  is declared as a single agent and gameplay reuses it. Each run starts on a new
+  empty history branch of that agent, so a round begins from the seed prompt and
+  latest summary only. Developer Mode lists the branches through the existing
+  branch graph, generalized from GM groups rather than copied.
+- `world_generation(world_id, stage, questions, next_question,
+  questioner_branch_id, storyteller_branch_id)` exists for generated worlds; the
+  stage selects the next finite step, as `next_npc_step` does: `meta`, `ask`,
+  `answer`, `summarize`, `name`, `concept_done`, `failed`. A failed step's error
+  stays on its sequence; the stage only marks the world failed. The round number
+  is the count of the Storyteller's branches, not a column. `questions` copies
+  the arguments of the Questioner's recorded `ask_questions` call: read them from
+  that recording instead, and drop the column, if the store makes that cheap.
+- Each stage is one finite step run by the world worker; its outputs and next
+  stage commit together, so a restart resumes at the stored stage. `meta`: the
+  Questioner answers the `prompts.toml` meta-questions. `ask`: given the seed
+  prompt and latest summary it calls `ask_questions` or `world_is_complete`.
+  `answer`: the Storyteller answers one question as plain text. `summarize`: its
+  text reply is stored as the world summary, then `ask` runs again. After
+  `world_is_complete`, `name`: its text reply is stored as the world name, then
+  `concept_done` waits for step 2. An empty summary or name reply fails its step
+  visibly; it is not replaced or retried. The Storyteller has no tools here; the only
+  tools are the Questioner's two, and step 2's editing tools let the Storyteller
+  revise the summary and name afterwards.
+- Reuse, not copies: split `create_adventurer` into creating the Adventurer and
+  placing it in a group (joining does both; a generated world only the first;
+  entry placement later uses the second); "world is generating" is one check in
+  `Game::admit`, the single admission point; the sequence, budget, failure and
+  Developer Mode handling of an NPC step moves into one function that the
+  generation steps share; new code lives in `store/generation.rs` and
+  `game/generation.rs`, not the 10k-line `store.rs` and `game.rs`.
 
 | Choice | Alternatives | Decision |
 | --- | --- | --- |
 | What runs generation | A task spawned per world needing its own shutdown/crash handling; one long inline world event blocking the queue and shutdown | Steps in the world worker, reusing admission, ordering, shutdown and Developer Mode events |
-| Storyteller history per round | One agent with a branch per round, needing branch lookup in inspection; one agent compacted, which cannot drop earlier answers | A fresh agent per round |
-| Questioner history | A fresh agent per round, re-answering meta-questions each time | One persistent agent: it answers meta-questions once and sees only summaries afterwards |
+| Agents | A new agent per round, contradicting the single declared Storyteller; one agent compacted, which cannot drop earlier answers | One agent per role with a new branch per run, as the GM does per group |
+| Summary and name | A `write_world_summary` tool duplicating the editing plan's field writes; parsing a title out of the reply | The plain-text reply is the field's value; step 2's editing tools revise it |
 
 ## Checkpoint: authoring tools and BeginWorld
 
