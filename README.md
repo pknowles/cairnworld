@@ -34,11 +34,10 @@ The `wasm-bindgen-cli` version must match `wasm-bindgen` in `Cargo.lock` so
 JavaScript packages use the ordinary project-local `npm ci` installation.
 
 On Windows ARM64, build in an ARM64 Visual Studio Developer PowerShell with
-`clang-cl` and `nvcc` on `PATH`. Match CUDA's host compiler to Rust's default dynamic C runtime and
-use MSVC's conforming preprocessor, including for Candle's kernels:
+`clang-cl` and `nvcc` on `PATH` (`nvcc` needs `cl.exe` there). The CUDA compiler
+flags are set in `.cargo/config.toml`.
 
 ```powershell
-$env:NVCC_PREPEND_FLAGS = '-Xcompiler=/Zc:preprocessor -Xcompiler=/MD'
 $env:CUDAFORGE_HOME = "$env:USERPROFILE\.cudaforge" # PowerShell has no HOME; reuses the CUTLASS cache
 $env:HF_HOME = "$PWD/models/huggingface"
 cargo build --locked --bin cairnworld -j 4
