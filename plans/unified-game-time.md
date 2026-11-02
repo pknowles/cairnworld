@@ -68,7 +68,8 @@ turn_time + 10)` update and immediate tool-call order as declared constraints.
   ends the short opportunity without an extra forced move/action; it does not
   replace a long activity merely to close an LLM inference. Apply immediate
   actions in call order, not as a simultaneous outcome batch.
-- Reuse the declared player-response deadline/AFK mechanism from
+- [Player replies](player-replies.md) implements the generic player-response deadline and
+  consecutive-timeout handling first; reuse it. Reuse the declared player-response deadline/AFK mechanism from
   [Player replies and coordinated travel](../design.md#player-replies-and-coordinated-travel)
   when an eligible human blocks progress. Implement the generic deadline and
   consecutive-timeout handling here; Rules and travel adds its Intervention/

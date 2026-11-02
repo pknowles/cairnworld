@@ -986,3 +986,21 @@ Implemented in delivery (`Narration::players_share`), not in the GM's tools or t
 
 > I added MoraleCheck and Split/CombineItem. We'll need half flour sack ItemTypes
 > prepared. Damage from attacks should all be handled by the code and NOT the GM.
+
+## 2026-11-03: separate tools, and evidence before changing a tool
+
+On the GM's approval carrying speech-only options (the model placed them on non-speech
+approvals 8% to 25% of the time; a separate speech approval made it 0 of 60):
+
+> ok, go with separate. I added to user decs.
+
+The declaration added: "LLMs do respond better to separate tool calls particularly when
+optional arguments are involved that can change the meaning - LLMs will often
+unnecessarily fill optionals." On not splitting `attempt` (required arguments only, no
+measured problem):
+
+> yeah if you don't have evidence to do this then we should not be doing it. optionals
+> sound like a proven risk, but not something to blindly change everywhere
+
+On asking players in an InterventionCheck: "yes, ask players now unless you have a good
+reason not to, i.e. it is blocked by a future item" (plans/player-replies.md).

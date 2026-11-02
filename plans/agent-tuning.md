@@ -32,14 +32,13 @@ from the packet, resulting groups read from stored membership, for both a split 
 characters go separate ways and a merge when they cross paths. Measure repeat rate;
 keep in `device_suite` only if reliable.
 
-## The player agent narrates and rewrites what the player says
+## The GM names players in an intervention check
 
-Played game: after its `speak` call the agent wrote Toma's and Mara's reactions, spoke
-words the player never typed, and kept doing it when told to stop. Runnable check (not in
-`device_suite`): `cargo test the_player_agent_says_what_the_player_says_and_stops -- --ignored`;
-all four lines fail every run. Measurements and the rewrites that did not help are in
-[experiment 0008](../experiments/0008-attempt-misuse.md). Candidate: end the agent's turn
-after an action tool, since the game shows the player what happens.
+`intervention_check` can only ask NPCs; the GM sees one list of characters and names a
+player or the actor in about 45% of takes. The check now reports who it did not ask
+instead of refusing, so this is no longer invalid output, but a player who should be asked
+(user_declarations.md, InterventionCheck) is not. Player replies need a saved reply, a
+deadline and AFK counting; see plans/player-replies.md.
 
 ## The GM approves an ask that is not a question
 

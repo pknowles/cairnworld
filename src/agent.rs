@@ -144,9 +144,10 @@ pub struct Turn<'a> {
     pub static_messages: &'a [Message],
     pub dynamic_context: &'a [&'a str],
     pub tools: &'a [Tool],
-    /// Set exactly when `tools` holds a terminal tool: the turn then ends only
+    /// Set only when `tools` holds a terminal tool: the turn then ends only
     /// through one, and an agent that answers in plain text is told this and
-    /// run again. That is an error to investigate, not a path to rely on.
+    /// run again. That is an error to investigate, not a path to rely on. A turn
+    /// with tools that merely end it has no reminder: plain text ends it too.
     pub terminal_reminder: Option<&'a str>,
     pub sampling: Sampling,
     pub model: &'a str,
@@ -267,13 +268,13 @@ pub async fn complete_with_call_context<B: Backend>(
         let definitions =
             tools::definitions(turn.tools).context("validating declared tool schemas")?;
         ensure!(
-            turn.terminal_reminder.is_some() == turn.tools.iter().any(Tool::is_terminal),
-            "a turn must have a terminal reminder exactly when it has a terminal tool"
+            turn.terminal_reminder.is_none() || turn.tools.iter().any(Tool::is_terminal),
+            "a turn can only remind the model to end with a terminal tool if it has one"
         );
         let ending_tools: Vec<String> = turn
             .tools
             .iter()
-            .filter(|tool| tool.is_terminal())
+            .filter(|tool| tool.ends_turn())
             .map(|tool| tool.definition().name)
             .collect();
         let mut chat_spent = 0;
@@ -454,7 +455,7 @@ pub async fn complete_with_call_context<B: Backend>(
                         })?;
                     on_activity(format!("tool result {}: {result}", tool_call.id));
                     ended |=
-                        status == "completed" && tools::is_terminal(turn.tools, &tool_call.name);
+                        status == "completed" && tools::ends_turn(turn.tools, &tool_call.name);
                     batch_rejected |= status == "rejected";
                     if let Some(after_result) = after_result {
                         deliveries.push((tool_call.id.clone(), after_result));
@@ -463,13 +464,26 @@ pub async fn complete_with_call_context<B: Backend>(
                 }
                 .await;
                 if let Err(error) = outcome {
-                    return Err(close_failed_calls(
+                    let error = close_failed_calls(
                         store,
                         completion.inference_id,
                         Some(*tool_execution_id),
                         error,
                     )
-                    .await);
+                    .await;
+                    // Every call has its result now, so the deliveries of the calls
+                    // that did complete go ahead: a failure later in the response
+                    // does not take back what already happened.
+                    for (call_id, delivery) in deliveries {
+                        if let Err(delivery_error) = delivery.await {
+                            tracing::error!(
+                                call_id = %call_id,
+                                error = %format!("{delivery_error:#}"),
+                                "delivering an earlier call's result after a later call failed"
+                            );
+                        }
+                    }
+                    return Err(error);
                 }
             }
             for (call_id, delivery) in deliveries {

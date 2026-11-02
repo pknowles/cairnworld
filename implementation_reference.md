@@ -602,7 +602,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   remains temporary because player chat correctly renders stored user messages
   as player speech. The ordinary agent loop executes any creation-roll
   calls and stores its final completion, including a deliberate empty text
-  completion. Empty player-agent completions end the turn without a chat
+  completion. The player agent's action tools (`speak`, `attempt`, `take`, built
+  with `Tool::ending`) end its turn when a response containing them is done, with no
+  further inference; plain text still ends a turn with no action, such as an answer.
+  The tools are offered speech first (`action_kinds`). A failure later in a response
+  still delivers the narration of the calls that completed. Empty player-agent completions end the turn without a chat
   entry; Developer Mode names them "No player-facing response." in turns,
   inference detail and raw history. `agent::Settled` retains whether tools
   ran and the final inference ID, so an empty first reply logs durable
@@ -628,7 +632,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   against the speaker's group when submitted. On approval
   `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
   (everyone in the group for public speech, the listeners for private, adjusted by the
-  GM's `approve_action` include/exclude, plus an optional short `prefix` shown to every hearer before the words; an
+  GM's `approve_speech` include/exclude (`approve_action` takes only an action id), plus an optional short `prefix` shown to every hearer before the words; an
   unknown or contradictory name, or an overlong prefix, is refused as
   `InvalidHearing` without resolving) and, in the same transaction
   as the action row, records a `speech` row and a `Role::Speech`
@@ -768,8 +772,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - Tentative and committed actions, InterventionCheck (`arbitrate` in
   `src/game.rs`). `take` carries `committed` (default false), which the GM reads in
   the recorded request; Rust does not act on it. The GM's `intervention_check`
-  names the presented action and NPCs in the actor's group (not the actor, not
-  players). Each NPC is asked in the GM's call as a child invocation
+  names the presented action and characters in the actor's group. Only NPCs other than the
+  actor are asked; the result says who was not asked (the actor, and players, who cannot
+  be asked until player replies exist: plans/player-replies.md). Each NPC is asked in the GM's call as a child invocation
   (`Game::ask_npc`, the same decision a response collection asks for, plus an
   `npc.intervention_request` in its history), answers do_nothing or an action,
   and the strongest proposals become pending actions of their own

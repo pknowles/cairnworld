@@ -71,8 +71,11 @@ impl ToolOutcome {
 pub struct Tool {
     definition: ToolDefinition,
     execute: Arc<ToolExecution>,
-    /// A completed call to this tool ends the agent's turn: the model is not
-    /// run again to read its result.
+    /// A completed call to this tool ends the agent's turn once its response is
+    /// done: the model is not run again to read its result.
+    ends_turn: bool,
+    /// The call must also be the last in its response, after calls that all
+    /// succeeded, and the turn can end no other way than through such a call.
     terminal: bool,
 }
 
@@ -90,6 +93,10 @@ impl Tool {
     pub fn is_terminal(&self) -> bool {
         self.terminal
     }
+
+    pub fn ends_turn(&self) -> bool {
+        self.ends_turn
+    }
 }
 
 impl Tool {
@@ -100,7 +107,20 @@ impl Tool {
         Self {
             definition,
             execute: Arc::new(execute),
+            ends_turn: false,
             terminal: false,
+        }
+    }
+
+    /// A tool whose completed call ends the turn, after any other calls in the
+    /// same response. Plain text still ends a turn that has no such call.
+    pub fn ending(
+        definition: ToolDefinition,
+        execute: impl Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            ends_turn: true,
+            ..Self::new(definition, execute)
         }
     }
 
@@ -111,6 +131,7 @@ impl Tool {
         execute: impl Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync + 'static,
     ) -> Self {
         Self {
+            ends_turn: true,
             terminal: true,
             ..Self::new(definition, execute)
         }
@@ -198,10 +219,10 @@ pub fn definitions(tools: &[Tool]) -> Result<Vec<ToolDefinition>> {
 }
 
 /// Whether a call to this tool ends the turn once it completes.
-pub fn is_terminal(tools: &[Tool], name: &str) -> bool {
+pub fn ends_turn(tools: &[Tool], name: &str) -> bool {
     tools
         .iter()
-        .any(|tool| tool.terminal && tool.definition.name == name)
+        .any(|tool| tool.ends_turn && tool.definition.name == name)
 }
 
 /// Run one call. `cannot_end_turn` says why this response cannot end the turn

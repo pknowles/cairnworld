@@ -48,5 +48,60 @@ question rule never enters the judgement it is making.
 player agent. In all 3 runs every line failed: it wrote text after its `speak` call
 (Toma's and Mara's reactions, or a repeat of the tool result), it rewrote the player's
 words ("Mara says: ..."), and for a line addressed to a character by name it made no
-call at all. Rewriting the role and end-of-turn text to say what the agent is for did
-not change that in 2 runs of each of 2 rewrites.
+call at all.
+
+**After the action.** With thinking switched on, the agent's reasoning at that point is
+"Now I need to continue the scene by having Toma respond... Since this is a roleplay
+scenario, I should provide the GM's narration". The role said "Guide the player through
+the current scene". The request after a `speak` call was replayed 10 times for each of
+`speak`, `ask`, `look` and `take`: the original role, a role saying the game tells the
+player what happens next, and the same with an end-of-turn line each produced text of
+its own in 40 of 40, and never an empty reply. A model that does not produce an empty
+reply cannot be told to; ending the turn after an action is deterministic, so the
+code does it (`Tool::ending` on the action tools).
+
+**The first step.** "Toma, I will defend you if Mara tries to take it." got a text reply
+in character in 12 of 12 samples without thinking (the other three lines: `speak` 12 of
+12). The role is what changed it: "The player types what their character does or says,
+and you carry it out with the action tools." made all four lines `speak` 10 of 10, as
+did two longer variants. The check now passes 3 of 3 runs (every line failed before).
+Questions to the agent itself were replayed 8 times each, old role against new: "What
+do you think Toma wants?" is answered in text in both; "Ask the GM what the hut is built
+from." is an `ask` in both; "What should I do next?" was a text answer and now calls
+the read-only `party_presence` tool first (8 of 8; what it writes afterwards was not
+measured). The listener scenario in the device suite, a player asking what the other
+player said, still gets a text answer.
+
+## Correction: the replay sampling
+
+The GM and player-agent replays above were captured from scripted scenes, which use
+temperature 0, so each "12 of 12" was one deterministic answer repeated. The runs
+through the real game (temperature 0.7) are what carry weight: the all-real NPC
+scenario, the player-agent check, the GM ask check and the device suite. With the production
+sampling (40 samples), the GM's first answer to a take named an invalid set of characters
+(a player or the actor) 18 times: the check asks NPCs only, and the GM sees one list of
+characters. The GM's second step put speech controls on the take in 11 of 60 intervention
+turns, with the complete approval schema. Both end as invalid output in the device suite.
+Letting the check skip players was tried and dropped: the declarations ask players
+(user_declarations.md, InterventionCheck and "Players are expected to respond in a timely
+manner"), so a silent skip is not what is declared.
+
+## Speech options on an approval
+
+The GM step after the intervention check, replayed 60 times at the production sampling
+with each form of `approve_action`. Counted: speech options placed on the take (not on
+Toma's spoken warning, which they apply to), which the tool rejects as invalid output.
+
+| Form | On the take | Used on the warning |
+|---|---|---|
+| flat `include`, `exclude`, `prefix` ("Only for speech; leave out...") | 5 of 60 | 19 of 60 |
+| the same, positive wording ("For speech: ...") | 6 of 60 | 38 of 60 |
+| the same, a sentence in the tool description | 6 of 60 | 35 of 60 |
+| both wording changes | 10 of 60 | 38 of 60 |
+| options nested in one `hearing` object | 11 of 60 | 42 of 60 |
+| options renamed `speech_include` and so on | 13 of 60 | 58 of 60 |
+| nested and renamed | 15 of 60 | 28 of 60 |
+| two tools: `approve_action` (id only) and `approve_speech` (id and the options) | **0 of 60** | 24 of 60 through `approve_speech`, the rest through `approve_action` |
+
+Wording and naming do not reduce the misuse, and anything that makes the options more
+visible raises it. The two-tool form removes it; the request is 55 tokens longer.

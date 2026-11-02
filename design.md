@@ -638,7 +638,14 @@ guarantees the distinctions above survive into the prompt.
 
 Per user_declarations.md: send context + tools; if the model returns tool
 calls, validate (serde against the schema), execute, append results, repeat;
-stop on a final text (possibly empty) response.
+stop on a final text (possibly empty) response. Rust can also end a turn itself
+when a tool completes: the GM's narrate tools must be the last call, and the
+player agent's action tools (`speak`, `attempt`, `take`) end its turn once their
+response is done, because the game shows the player what happened. Asked to continue
+after acting, the 4B model wrote the story itself (the NPCs' reactions, even a
+rewrite of the player's words) in every sample, and "reply with nothing" never
+worked: ending a turn the code can end is not left to the model
+(experiments/0008-attempt-misuse.md).
 
 Structural rules, enforced in rust:
 
@@ -1407,8 +1414,10 @@ can actually happen; a new tool name does not itself implement missing mechanics
 Likewise expose take, give, drop and place as one `transfer` tool: a `kind`, the
 `item`, `to` (the receiving character for give, where within the location for
 place; unused for take and drop) and `committed`. Approval goes through the same
-GM approval and intervention path as take; the GM's approve call carries the new
-location description for a drop or place, as it carries the audience for speech.
+GM approval and intervention path as take; the new location description for a drop
+or place travels with its own approval tool, as the audience for speech does with
+`approve_speech`: options that apply to one kind of action are not optional
+arguments of the general approval (experiments/0008-attempt-misuse.md).
 The receiver's agreement is not a protocol: the request is intervenable like any
 tentative or committed action, and a clear refusal from the receiver makes the GM
 reject it.

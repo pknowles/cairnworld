@@ -42,7 +42,8 @@ and travel rather than implementing movement or scheduling again.
    ready_to_begin validates the full creation state; the group's initial ready
    barrier performs RollOmens once and then opens play. Test incomplete/duplicate
    creation and the youngest-character omen rule through real agent chat.
-2. Extend the timing feature's existing human deadlines/AFK handling to calls
+2. Done by [Player replies](player-replies.md), which implements what follows; kept here
+   as the record of the original scope. Extend the timing feature's existing human deadlines/AFK handling to calls
    waiting for player replies, and use it for InterventionCheck. Reuse the
    required `[game] player_response_timeout` setting and consecutive-timeout
    counting. Add the concrete pending_reply rows and the

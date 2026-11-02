@@ -907,16 +907,11 @@ where
         let _no_live_viewers = world
             .broadcasts
             .send(Self::turn_change(&result, sequence.id));
-        let response = result.map_err(|error| {
+        result.map_err(|error| {
             error.context(FailedTurn {
                 sequence_id: sequence.id,
             })
-        })?;
-        ensure!(
-            matches!(response.content, Content::Text(_)),
-            "player agent did not settle after its action"
-        );
-        Ok(response)
+        })
     }
 
     /// The player agent starts the character-creation conversation when the
@@ -1259,7 +1254,9 @@ where
         } = action;
         let tool_name = definition.name.clone();
         let game = Arc::clone(self);
-        Tool::new(definition, move |context| {
+        // Acting ends the player agent's turn: the game shows the player what
+        // happened, so the agent has nothing to add.
+        Tool::ending(definition, move |context| {
             let arguments = context.arguments.to_string();
             let tool_execution_id = context.tool_execution_id;
             let game = Arc::clone(&game);
@@ -1491,124 +1488,144 @@ where
         // earlier approval's result, or vice versa.
         let prompts = prompts::current()?;
         let presented: PresentedActions = Arc::new(Mutex::new(vec![pending.clone()]));
-        let game = Arc::clone(self);
-        let approval_presented = Arc::clone(&presented);
-        // Every approval carries the speech controls, because the turn may also
-        // approve a speech reaction it asked an NPC for.
-        let approval = prompts.gm.tools.tool(
+        // Approving speech is a tool of its own, so approving anything else offers no
+        // speech options to fill in (experiments/0008-attempt-misuse.md).
+        let approval_tool = |name: &'static str,
+                             schema: serde_json::Value,
+                             speech_only: bool,
+                             parse: fn(&str) -> Result<(i64, Hearing)>|
+         -> Result<Tool> {
+            let definition = prompts.gm.tools.tool(name, schema)?;
+            let game = Arc::clone(self);
+            let approval_presented = Arc::clone(&presented);
+            Ok(Tool::new(definition, move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
+                let game = Arc::clone(&game);
+                let presented = Arc::clone(&approval_presented);
+                Box::pin(async move {
+                    let (requested_id, hearing) =
+                        match parse(&arguments).context("parsing action approval") {
+                            Ok(approval) => approval,
+                            Err(error) => return Ok(ToolOutcome::rejected(error)),
+                        };
+                    // The action it was presented, or a reaction it asked for.
+                    let Some(approval_pending) = presented_action(&presented, requested_id) else {
+                        return Ok(ToolOutcome::Rejected(format!(
+                            "Tool arguments were rejected: GM approved action {requested_id} but was presented {}",
+                            presented_ids(&presented)
+                        )));
+                    };
+                    let action_id = approval_pending.id;
+                    if speech_only && approval_pending.tool != "speak" {
+                        return Ok(ToolOutcome::Rejected(format!(
+                            "Tool arguments were rejected: {name} is for speech, and action {action_id} is not speech"
+                        )));
+                    }
+                    let resolved = match game
+                        .store
+                        .resolve_pending_action(
+                            approval_pending.gm_agent_id,
+                            approval_pending.world_id,
+                            action_id,
+                            tool_execution_id,
+                            "approved",
+                            &hearing,
+                        )
+                        .await
+                    {
+                        Ok(resolved) => resolved,
+                        // Nothing was resolved, so the GM may try again.
+                        Err(error) => match error.downcast_ref::<InvalidHearing>() {
+                            Some(invalid) => {
+                                return Ok(ToolOutcome::Rejected(format!(
+                                    "Tool arguments were rejected: {invalid}"
+                                )));
+                            }
+                            None => {
+                                return Err(error.context(format!("approving action {action_id}")));
+                            }
+                        },
+                    };
+                    if !resolved.heard_by.is_empty() {
+                        let _no_live_viewers = game
+                            .world(approval_pending.world_id)?
+                            .broadcasts
+                            .send(ChatChange::Entries);
+                    }
+                    game.world(approval_pending.world_id)?.publish(
+                        crate::inspection::DevEvent::Changed {
+                            sequence_id: Some(approval_pending.sequence_id),
+                            inference_id: None,
+                        },
+                    );
+                    // The result is a report for the GM's later judgements; the
+                    // acting player's own call receives its own result.
+                    let next =
+                        next_step(&game.store, approval_pending.world_id, &presented).await?;
+                    match resolved.outcome {
+                        // The GM saw the words in the request; it needs who heard them.
+                        ActionOutcome::Applied(_) if !resolved.heard_by.is_empty() => {
+                            Ok(ToolOutcome::Completed(format!(
+                                "Action {action_id} approved. Delivered as spoken to {}. {} {next}",
+                                resolved.heard_by.join(", "),
+                                prompts::current()?.gm.speech_conveyed
+                            )))
+                        }
+                        ActionOutcome::Applied(result) => {
+                            // What the action did, if it says: "approved: flour sack transferred".
+                            let done = result
+                                .strip_prefix("approved")
+                                .unwrap_or(&result)
+                                .trim_start_matches(':')
+                                .trim();
+                            let done = if done.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {done}.")
+                            };
+                            Ok(ToolOutcome::Completed(format!(
+                                "Action {action_id} approved.{done} {} {next}",
+                                prompts::current()?.gm.outcome_untold
+                            )))
+                        }
+                        ActionOutcome::Failed(reason) => Ok(ToolOutcome::Completed(format!(
+                            "Action {action_id} approved, but it could not be applied: {reason} {next}"
+                        ))),
+                        ActionOutcome::Rejected(_) => Ok(ToolOutcome::Rejected(format!(
+                            "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
+                        ))),
+                    }
+                }) as ToolFuture
+            }))
+        };
+        let approve_tool = approval_tool(
             "approve_action",
             serde_json::to_value(schema_for!(ApproveAction))
                 .expect("approval schema should serialize"),
+            false,
+            |arguments| {
+                let approval: ApproveAction = serde_json::from_str(arguments)?;
+                Ok((approval.action_id, Hearing::default()))
+            },
         )?;
-        let gm_tool = Tool::new(approval, move |context| {
-            let arguments = context.arguments.to_string();
-            let tool_execution_id = context.tool_execution_id;
-            let game = Arc::clone(&game);
-            let presented = Arc::clone(&approval_presented);
-            Box::pin(async move {
-                let approval: ApproveAction =
-                    match serde_json::from_str(&arguments).context("parsing action approval") {
-                        Ok(approval) => approval,
-                        Err(error) => return Ok(ToolOutcome::rejected(error)),
-                    };
-                // The action it was presented, or a reaction it asked for.
-                let Some(approval_pending) = presented_action(&presented, approval.action_id)
-                else {
-                    return Ok(ToolOutcome::Rejected(format!(
-                        "Tool arguments were rejected: GM approved action {} but was presented {}",
-                        approval.action_id,
-                        presented_ids(&presented)
-                    )));
-                };
-                let action_id = approval_pending.id;
-                if (!approval.include.is_empty()
-                    || !approval.exclude.is_empty()
-                    || approval.prefix.is_some())
-                    && approval_pending.tool != "speak"
-                {
-                    return Ok(ToolOutcome::Rejected(format!(
-                        "Tool arguments were rejected: include, exclude and prefix shape how speech is heard, and action {action_id} is not speech"
-                    )));
-                }
-                let resolved = match game
-                    .store
-                    .resolve_pending_action(
-                        approval_pending.gm_agent_id,
-                        approval_pending.world_id,
-                        action_id,
-                        tool_execution_id,
-                        "approved",
-                        &Hearing {
-                            include: approval.include,
-                            exclude: approval.exclude,
-                            prefix: approval.prefix,
-                        },
-                    )
-                    .await
-                {
-                    Ok(resolved) => resolved,
-                    // Nothing was resolved, so the GM may try again.
-                    Err(error) => match error.downcast_ref::<InvalidHearing>() {
-                        Some(invalid) => {
-                            return Ok(ToolOutcome::Rejected(format!(
-                                "Tool arguments were rejected: {invalid}"
-                            )));
-                        }
-                        None => {
-                            return Err(error.context(format!("approving action {action_id}")));
-                        }
+        let approve_speech_tool = approval_tool(
+            "approve_speech",
+            serde_json::to_value(schema_for!(ApproveSpeech))
+                .expect("speech approval schema should serialize"),
+            true,
+            |arguments| {
+                let approval: ApproveSpeech = serde_json::from_str(arguments)?;
+                Ok((
+                    approval.action_id,
+                    Hearing {
+                        include: approval.include,
+                        exclude: approval.exclude,
+                        prefix: approval.prefix,
                     },
-                };
-                if !resolved.heard_by.is_empty() {
-                    let _no_live_viewers = game
-                        .world(approval_pending.world_id)?
-                        .broadcasts
-                        .send(ChatChange::Entries);
-                }
-                game.world(approval_pending.world_id)?.publish(
-                    crate::inspection::DevEvent::Changed {
-                        sequence_id: Some(approval_pending.sequence_id),
-                        inference_id: None,
-                    },
-                );
-                // The result is a report for the GM's later judgements; the
-                // acting player's own call receives its own result.
-                let next = next_step(&game.store, approval_pending.world_id, &presented).await?;
-                match resolved.outcome {
-                    // The GM saw the words in the request; it needs who heard them.
-                    ActionOutcome::Applied(_) if !resolved.heard_by.is_empty() => {
-                        Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} approved. Delivered as spoken to {}. {} {next}",
-                            resolved.heard_by.join(", "),
-                            prompts::current()?.gm.speech_conveyed
-                        )))
-                    }
-                    ActionOutcome::Applied(result) => {
-                        // What the action did, if it says: "approved: flour sack transferred".
-                        let done = result
-                            .strip_prefix("approved")
-                            .unwrap_or(&result)
-                            .trim_start_matches(':')
-                            .trim();
-                        let done = if done.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {done}.")
-                        };
-                        Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} approved.{done} {} {next}",
-                            prompts::current()?.gm.outcome_untold
-                        )))
-                    }
-                    ActionOutcome::Failed(reason) => Ok(ToolOutcome::Completed(format!(
-                        "Action {action_id} approved, but it could not be applied: {reason} {next}"
-                    ))),
-                    ActionOutcome::Rejected(_) => Ok(ToolOutcome::Rejected(format!(
-                        "Tool arguments were rejected: action {action_id} was already rejected, it cannot now be approved"
-                    ))),
-                }
-            }) as ToolFuture
-        });
+                ))
+            },
+        )?;
         let game = Arc::clone(self);
         let rejection_presented = Arc::clone(&presented);
         let reject_tool = Tool::new(
@@ -1769,28 +1786,48 @@ where
                     }
                     let group_id = game.store.character_group_id(pending.character_id).await?;
                     let npcs = game.store.group_npc_ids(group_id).await?;
-                    let mut asked = Vec::new();
-                    for character_id in check.character_ids {
-                        if character_id == pending.character_id {
-                            return Ok(ToolOutcome::Rejected(format!(
-                                "Tool arguments were rejected: character {character_id} is taking the action, so their intent is the action itself"
-                            )));
-                        }
-                        if !npcs.contains(&character_id) {
-                            return Ok(ToolOutcome::Rejected(format!(
-                                "Tool arguments were rejected: character {character_id} cannot be asked to intervene in this group"
-                            )));
-                        }
-                        if !asked.contains(&character_id) {
-                            asked.push(character_id);
-                        }
-                    }
-                    if asked.is_empty() {
+                    let present = game.store.group_character_ids(group_id).await?;
+                    if check.character_ids.is_empty() {
                         return Ok(ToolOutcome::Rejected(
                             "Tool arguments were rejected: name at least one character to ask"
                                 .to_string(),
                         ));
                     }
+                    // Players are meant to be asked too, through a reply that waits
+                    // for them (design.md, "Player replies"); that does not exist yet.
+                    // Until it does, the GM is told who was not asked and why.
+                    let mut asked = Vec::new();
+                    let mut not_asked = Vec::new();
+                    for character_id in check.character_ids {
+                        if !present.contains(&character_id) {
+                            return Ok(ToolOutcome::Rejected(format!(
+                                "Tool arguments were rejected: character {character_id} is not in this group"
+                            )));
+                        }
+                        if asked.contains(&character_id) {
+                            continue;
+                        }
+                        if character_id == pending.character_id {
+                            not_asked.push((character_id, "taking the action"));
+                        } else if npcs.contains(&character_id) {
+                            asked.push(character_id);
+                        } else {
+                            not_asked.push((
+                                character_id,
+                                "a player character, who cannot be asked yet",
+                            ));
+                        }
+                    }
+                    let mut skipped = Vec::new();
+                    for (character_id, why) in not_asked {
+                        let name = game.store.character_name(character_id).await?;
+                        skipped.push(format!("{name} ({why})"));
+                    }
+                    let skipped = if skipped.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Not asked: {}.", skipped.join(", "))
+                    };
                     let prompts = prompts::current()?;
                     let world = game.world(pending.world_id)?;
                     let mut proposals = Vec::new();
@@ -1898,10 +1935,10 @@ where
                             .push(reaction);
                     }
                     Ok(ToolOutcome::Completed(if reports.is_empty() {
-                        format!("Nobody intervenes in action {}.", pending.id)
+                        format!("Nobody intervenes in action {}.{skipped}", pending.id)
                     } else {
                         format!(
-                            "{} Approve or reject each, then decide action {}; a reaction does not stop it by itself.",
+                            "{} Approve or reject each, then decide action {}; a reaction does not stop it by itself.{skipped}",
                             reports.join(" "),
                             pending.id
                         )
@@ -1920,7 +1957,8 @@ where
         )?;
         let reminder = narrate.reminder()?;
         let tools: Vec<Tool> = [
-            gm_tool,
+            approve_tool,
+            approve_speech_tool,
             reject_tool,
             split_tool,
             merge_tool,
@@ -2146,13 +2184,20 @@ struct InterventionCheck {
 struct ApproveAction {
     // The visible action id to approve.
     action_id: i64,
-    // For speech: characters who also hear it, by name.
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ApproveSpeech {
+    // The visible action id to approve.
+    action_id: i64,
+    // Characters who also hear it, by name.
     #[serde(default)]
     include: Vec<String>,
-    // For speech: characters who must not hear it, by name.
+    // Characters who must not hear it, by name.
     #[serde(default)]
     exclude: Vec<String>,
-    // For speech: a short phrase every hearer is shown before the words, such
+    // A short phrase every hearer is shown before the words, such
     // as how or why only some of them can hear.
     #[serde(default)]
     #[schemars(length(max = MAX_PREFIX_CHARS))]
@@ -2387,6 +2432,7 @@ mod tests {
                     "others_text": "The Adventurer ducks inside.",
                 }),
             ),
+            // The player's agent, finishing its creation turn.
             response(Content::Text(String::new())),
             // Mara and Toma hear both and have nothing to add.
             do_nothing(),
@@ -2683,15 +2729,40 @@ mod tests {
     /// invalid output: an error to investigate, never a path the real-model
     /// scenarios may rely on.
     async fn assert_no_rejected_output(store: &Store) {
-        let rejected: Vec<(i64, Option<String>)> = sqlx::query_as(
-            "SELECT inference_id, COALESCE(error, recorded_content.body) FROM tool_execution              LEFT JOIN recorded_content ON recorded_content.id = result_content_id              WHERE status = 'rejected'              UNION SELECT source_inference_id, 'refused plain-text reply' FROM message              WHERE reply_rejected = 1 ORDER BY 1",
+        let rejected: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT inference_id, ordinal, COALESCE(error, recorded_content.body) FROM tool_execution              LEFT JOIN recorded_content ON recorded_content.id = result_content_id              WHERE status = 'rejected' ORDER BY inference_id, ordinal",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        let mut report = Vec::new();
+        for (inference_id, ordinal, result) in rejected {
+            // The call the model wrote, with the answer it got.
+            let call = match store
+                .reconstruct_inference(inference_id)
+                .await
+                .unwrap()
+                .outcome
+            {
+                crate::inspection::RecordedOutcome::Response(Response {
+                    content: Content::ToolCalls(calls),
+                    ..
+                }) => calls
+                    .get(ordinal as usize)
+                    .map(|call| format!("{}({})", call.name, call.arguments)),
+                _ => None,
+            };
+            report.push(format!("inference {inference_id}: {call:?} -> {result}"));
+        }
+        let refused: Vec<i64> = sqlx::query_scalar(
+            "SELECT source_inference_id FROM message WHERE reply_rejected = 1 ORDER BY 1",
         )
         .fetch_all(&store.pool())
         .await
         .unwrap();
         assert!(
-            rejected.is_empty(),
-            "the model produced invalid output (inference, error): {rejected:?}; open them in Developer Mode"
+            report.is_empty() && refused.is_empty(),
+            "the model produced invalid output: {report:#?}, plain-text replies refused in inferences {refused:?}; open them in Developer Mode"
         );
     }
 
@@ -2868,7 +2939,6 @@ mod tests {
                 arguments: r#"{"action_id":1}"#.into(),
             }])),
             narrate("You lift the flour sack while Toma watches."),
-            response(Content::Text(String::new())),
             // Mara and Toma each decide about what they were told.
             do_nothing(),
             do_nothing(),
@@ -4027,6 +4097,15 @@ mod tests {
         real_model_gm_asks_a_character_before_deciding_a_take(&model).await;
     }
 
+    /// The GM's run of actions on its own, so a change to its wording can be
+    /// repeated against it.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn the_gm_resolves_a_run_of_actions() {
+        let model = DeviceModel::load().await;
+        real_model_gm_resolves_a_run_of_actions(&model).await;
+    }
+
     /// Every real-model test, run against one model load. The whole suite must
     /// stay inside the five-minute test budget, so each scenario has its own
     /// time limit and its elapsed time is printed.
@@ -4147,6 +4226,12 @@ mod tests {
             "committed take",
             120,
             real_model_player_marks_only_a_determined_take_committed(&model),
+        )
+        .await;
+        scenario(
+            "player speech",
+            120,
+            real_model_player_agent_says_what_the_player_says_and_stops(&model),
         )
         .await;
         println!(
@@ -4523,6 +4608,14 @@ mod tests {
                     .all(|arguments| !arguments.contains("\"committed\":true")),
             "a tentative take was marked committed: {tentative:?}"
         );
+    }
+
+    /// The committed-take check on its own, so it can be repeated.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn the_player_marks_only_a_determined_take_committed() {
+        let model = DeviceModel::load().await;
+        real_model_player_marks_only_a_determined_take_committed(&model).await;
     }
 
     async fn real_model_gm_resolves_a_run_of_actions(model: &DeviceModel) {
@@ -5325,7 +5418,6 @@ mod tests {
                 arguments: r#"{"action_id":1}"#.into(),
             }])),
             narrate("The shelf is bare."),
-            response(Content::Text(String::new())),
         ]);
         let (game, store, _db, member) = blank_opening_game(backend).await;
         let _connection = game.connect(&member).await.unwrap();
@@ -5360,10 +5452,16 @@ mod tests {
                 })
                 .collect()
         };
-        let (gm_report, player_result) = {
-            let requests = requests.lock().unwrap();
-            (tool_results(&requests[2]), tool_results(&requests[3]))
-        };
+        let gm_report = tool_results(&requests.lock().unwrap()[2]);
+        // The player's agent is not run again, but its history holds the result.
+        let branch = store.agent_branch(member.agent_id).await.unwrap();
+        let segments = store.live_segments(branch).await.unwrap();
+        let player_result = tool_results(
+            &store
+                .request_for_segments(branch.agent_id(), &segments, Sampling::default())
+                .await
+                .unwrap(),
+        );
         assert!(
             matches!(gm_report.as_slice(), [report]
                 if report.contains("approved, but it could not be applied")
@@ -5594,13 +5692,20 @@ mod tests {
 
     impl SpeechScene {
         /// `first` speaks as `speech`, the GM approves with `approval`,
-        /// narrates, and the player agent finishes.
+        /// and narrates.
         async fn speak(&self, speech: Response, approval: serde_json::Value) {
             self.responses.lock().unwrap().extend([
                 speech,
-                tool_call("approve_action", approval),
+                // Hearing options belong to the speech approval.
+                tool_call(
+                    if approval.as_object().is_some_and(|keys| keys.len() > 1) {
+                        "approve_speech"
+                    } else {
+                        "approve_action"
+                    },
+                    approval,
+                ),
                 narrate("The room goes quiet."),
-                response(Content::Text(String::new())),
             ]);
             self.game
                 .player_message(self.first.clone(), "Say something.")
@@ -5838,12 +5943,11 @@ mod tests {
         scene.responses.lock().unwrap().extend([
             tool_call("speak", serde_json::json!({"words": "Hello."})),
             tool_call(
-                "approve_action",
+                "approve_speech",
                 serde_json::json!({"action_id": 1, "include": ["Nobody"]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("A greeting."),
-            response(Content::Text(String::new())),
         ]);
 
         scene
@@ -5874,16 +5978,15 @@ mod tests {
         scene.responses.lock().unwrap().extend([
             tool_call("speak", serde_json::json!({"words": "Hello."})),
             tool_call(
-                "approve_action",
+                "approve_speech",
                 serde_json::json!({"action_id": 1, "include": [listener], "exclude": [listener]}),
             ),
             tool_call(
-                "approve_action",
+                "approve_speech",
                 serde_json::json!({"action_id": 1, "exclude": [speaker]}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("A greeting."),
-            response(Content::Text(String::new())),
         ]);
 
         scene
@@ -5925,6 +6028,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_speech_approval_offers_the_gm_a_choice_of_who_hears() {
+        let scene = speech_scene().await;
+        scene
+            .speak(
+                tool_call("speak", serde_json::json!({"words": "Hello."})),
+                serde_json::json!({"action_id": 1}),
+            )
+            .await;
+        let requests = scene.requests.lock().unwrap();
+        let gm = requests
+            .iter()
+            .find(|request| {
+                request
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == "approve_action")
+            })
+            .expect("the GM was asked to approve");
+        let arguments = |name: &str| {
+            let tool = gm.tools.iter().find(|tool| tool.name == name).unwrap();
+            let mut keys: Vec<&str> = tool.schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort();
+            keys.join(",")
+        };
+        assert_eq!(arguments("approve_action"), "action_id");
+        assert_eq!(
+            arguments("approve_speech"),
+            "action_id,exclude,include,prefix"
+        );
+    }
+
+    #[tokio::test]
     async fn a_prefix_on_something_that_is_not_speech_is_refused() {
         let scene = speech_scene().await;
         scene.responses.lock().unwrap().extend([
@@ -5933,12 +6073,11 @@ mod tests {
                 serde_json::json!({"kind": "look", "description": "the room"}),
             ),
             tool_call(
-                "approve_action",
+                "approve_speech",
                 serde_json::json!({"action_id": 1, "prefix": "(Quietly)"}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("A bare room."),
-            response(Content::Text(String::new())),
         ]);
 
         scene
@@ -6005,12 +6144,11 @@ mod tests {
         scene.responses.lock().unwrap().extend([
             tool_call("speak", serde_json::json!({"words": "Hello."})),
             tool_call(
-                "approve_action",
+                "approve_speech",
                 serde_json::json!({"action_id": 1, "prefix": "x".repeat(300)}),
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("A greeting."),
-            response(Content::Text(String::new())),
         ]);
 
         scene
@@ -6136,7 +6274,6 @@ mod tests {
             ),
             approve(1),
             narration,
-            response(Content::Text(String::new())),
         ]);
         scene.responses.lock().unwrap().extend(npc_script);
         scene
@@ -6171,9 +6308,9 @@ mod tests {
             narrations(&scene.store, &scene.second).await,
             ["The adventurer climbs the rock."]
         );
-        // The player's request, two GM calls, the player's finish, then Mara and
-        // Toma: the GM's turn ended with its narration, with no closing inference.
-        assert_eq!(scene.requests.lock().unwrap().len(), 6);
+        // The player's request, two GM calls, then Mara and Toma: the GM's turn ended
+        // with its narration, with no closing inference.
+        assert_eq!(scene.requests.lock().unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -6211,7 +6348,6 @@ mod tests {
                     "text": "A cold wind touches only you.",
                 }),
             ),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -6252,7 +6388,6 @@ mod tests {
                     arguments: serde_json::json!({"text": "The room is bare."}).to_string(),
                 },
             ])),
-            response(Content::Text(String::new())),
             do_nothing(),
             do_nothing(),
         ]);
@@ -6267,9 +6402,9 @@ mod tests {
             narrations(&scene.store, &scene.second).await,
             ["The room is bare."]
         );
-        // The player's request, one GM response holding both calls, the
-        // player's finish, then Mara and Toma.
-        assert_eq!(scene.requests.lock().unwrap().len(), 5);
+        // The player's request, one GM response holding both calls, then Mara and
+        // Toma.
+        assert_eq!(scene.requests.lock().unwrap().len(), 4);
         let rejected: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM tool_execution WHERE status = 'rejected'")
                 .fetch_one(&scene.store.pool())
@@ -6290,7 +6425,7 @@ mod tests {
 
         assert!(narrations(&scene.store, &scene.first).await.is_empty());
         assert!(narrations(&scene.store, &scene.second).await.is_empty());
-        assert_eq!(scene.requests.lock().unwrap().len(), 4);
+        assert_eq!(scene.requests.lock().unwrap().len(), 3);
         assert!(failed_sequences(&scene).await.is_empty());
     }
 
@@ -6333,7 +6468,6 @@ mod tests {
             // Plain text instead of a narrate tool.
             response(Content::Text("The room is empty.".into())),
             narrate("The room is bare."),
-            response(Content::Text(String::new())),
             do_nothing(),
             do_nothing(),
         ]);
@@ -6407,7 +6541,6 @@ mod tests {
                 ),
                 approve(i64::try_from(index).unwrap() + 1),
                 tool_call("narrate_nothing", serde_json::json!({})),
-                response(Content::Text(String::new())),
             ]);
             scene
                 .game
@@ -6488,7 +6621,7 @@ mod tests {
             // The take is not speech, but the reaction is: its hearing controls
             // must still be there to use.
             tool_call(
-                "approve_action",
+                "approve_speech",
                 serde_json::json!({"action_id": 2, "prefix": "Across the room:"}),
             ),
             tool_call(
@@ -6496,7 +6629,6 @@ mod tests {
                 serde_json::json!({"action_id": 1, "reason": "Toma stops you."}),
             ),
             tool_call("narrate_nothing", serde_json::json!({})),
-            response(Content::Text(String::new())),
             // Mara hears Toma's warning and has nothing to add.
             do_nothing(),
         ]);
@@ -6574,7 +6706,6 @@ mod tests {
             take_flour(true),
             approve(1),
             tool_call("narrate_nothing", serde_json::json!({})),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -6591,8 +6722,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_intervention_check_only_asks_npcs_other_than_the_actor_about_the_presented_action()
-    {
+    async fn an_intervention_check_asks_npcs_and_says_who_it_did_not_ask_instead_of_refusing() {
         let scene = speech_scene().await;
         let player = scene.first.character_id;
         let toma = character_id(&scene, "Toma").await;
@@ -6602,9 +6732,9 @@ mod tests {
             intervention_check(1, &[scene.second.character_id]),
             intervention_check(9, &[toma]),
             intervention_check(1, &[]),
+            intervention_check(1, &[i64::MAX]),
             approve(1),
             tool_call("narrate_nothing", serde_json::json!({})),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -6618,8 +6748,28 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(
-            rejected, 4,
-            "the actor, another player, another action and nobody were all refused"
+            rejected, 3,
+            "another action, nobody and a stranger are refused; the actor and a player are reported"
+        );
+        let results: Vec<String> = scene
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(tool_results)
+            .collect();
+        assert!(
+            results.iter().any(
+                |result| result.starts_with("Nobody intervenes in action 1.")
+                    && result.contains("(taking the action)")
+            ),
+            "{results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.contains("a player character, who cannot be asked yet")),
+            "{results:?}"
         );
         assert_eq!(decisions_asked(&scene, "Toma").await, 0);
         assert!(failed_sequences(&scene).await.is_empty());
@@ -6639,7 +6789,6 @@ mod tests {
             tool_call("narrate_nothing", serde_json::json!({})),
             approve(2),
             tool_call("narrate_nothing", serde_json::json!({})),
-            response(Content::Text(String::new())),
             do_nothing(),
         ]);
         scene
@@ -6682,7 +6831,6 @@ mod tests {
             do_nothing(),
             approve(1),
             tool_call("narrate_nothing", serde_json::json!({})),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -6784,7 +6932,6 @@ mod tests {
             ),
             approve(1),
             narrate("Toma looks up."),
-            response(Content::Text(String::new())),
             // Mara answers and Toma stays quiet; the GM then narrates Mara's words.
             propose("In the hut.", &speaker, 2),
             do_nothing(),
@@ -6862,7 +7009,6 @@ mod tests {
             narrate("The first lands."),
             tool_call("approve_action", serde_json::json!({"action_id": 2})),
             narrate("The second lands."),
-            response(Content::Text(String::new())),
         ]);
 
         scene
@@ -6935,7 +7081,6 @@ mod tests {
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("Toma looks up."),
-            response(Content::Text(String::new())),
             // Mara, then Toma, each decide for themselves.
             tool_call("do_nothing", serde_json::json!({})),
             propose("In the hut.", &speaker, 2),
@@ -6969,7 +7114,7 @@ mod tests {
             "Toma keeps what it said"
         );
         let calls = scene.requests.lock().unwrap().len();
-        assert_eq!(calls, 9, "the talk stops once nobody wants to add anything");
+        assert_eq!(calls, 8, "the talk stops once nobody wants to add anything");
         let causes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sequence_cause")
             .fetch_one(&scene.store.pool())
             .await
@@ -6986,14 +7131,13 @@ mod tests {
         assert_eq!(failed, 0);
     }
 
-    /// The scripted model responses of a player saying `words` to Toma, the GM
-    /// approving and narrating, and the player agent finishing.
+    /// The scripted model responses of a player saying `words` to Toma, then the GM
+    /// approving and narrating.
     fn say_to_toma(words: &str) -> Vec<Response> {
         vec![
             tool_call("speak", serde_json::json!({"words": words, "to": ["Toma"]})),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("Toma looks up."),
-            response(Content::Text(String::new())),
         ]
     }
 
@@ -7096,57 +7240,120 @@ mod tests {
     /// One player turn: a take is approved and its narration delivered, then the
     /// player's next action asks Toma to intervene. `hold` stops the player's
     /// inference that follows the delivered narration.
+    /// One player turn of two takes: the first is approved and narrated, and the
+    /// GM then asks Toma about the second.
     async fn take_then_a_second_take_that_asks_toma(scene: &SpeechScene, toma: i64) {
+        let take = |id: &str, item: &str| ToolCall {
+            id: id.into(),
+            name: "take".into(),
+            arguments: serde_json::json!({"item": item, "committed": false}).to_string(),
+        };
         scene.responses.lock().unwrap().extend([
-            take_flour(false),
+            response(Content::ToolCalls(vec![
+                take("take-1", "flour sack"),
+                take("take-2", "emergency cache"),
+            ])),
             approve(1),
             narrate("You lift the flour sack."),
-            tool_call(
-                "take",
-                serde_json::json!({"item": "emergency cache", "committed": false}),
-            ),
             intervention_check(2, &[toma]),
         ]);
     }
 
     #[tokio::test]
-    async fn replies_wait_for_the_enclosing_turn_and_a_failed_check_in_it_keeps_earlier_effects() {
-        let scene = speech_scene().await;
-        let toma = character_id(&scene, "Toma").await;
+    async fn replies_to_delivered_narration_wait_for_the_turn_that_caused_it_to_end() {
+        let (backend, requests) = ScriptedBackend::recording([
+            response(Content::ToolCalls(vec![ToolCall {
+                id: "ready-1".into(),
+                name: "ready_to_begin".into(),
+                arguments: "{}".into(),
+            }])),
+            narrate("The hut stands silent."),
+            tool_call(
+                "narrate_actor_and_others",
+                serde_json::json!({
+                    "actor_text": "The charcoal hut is quiet.",
+                    "others_text": "The Adventurer ducks inside.",
+                }),
+            ),
+            response(Content::Text(String::new())),
+            do_nothing(),
+            do_nothing(),
+        ]);
         let (reached, release) = (
             Arc::new(tokio::sync::Notify::new()),
             Arc::new(tokio::sync::Notify::new()),
         );
-        // Request 4 is the player's inference after the GM delivered its narration.
-        *scene.gate.lock().unwrap() = Some(Gate {
+        let gate = Arc::clone(&backend.gate);
+        // Request 4 is the player agent's inference after the narration was delivered.
+        *gate.lock().unwrap() = Some(Gate {
             request: 4,
             reached: Arc::clone(&reached),
             release: Arc::clone(&release),
         });
+        let (game, store, _db, member) = blank_opening_game(backend).await;
+        let creation = store
+            .begin_sequence(member.world_id, "complete creation")
+            .await
+            .unwrap();
+        store
+            .roll_hit_protection(&member, creation.id, None)
+            .await
+            .unwrap();
+        store
+            .roll_attributes(&member, creation.id, None)
+            .await
+            .unwrap();
+        let _connection = game.connect(&member).await.unwrap();
+        let playing = {
+            let game = Arc::clone(&game);
+            let member = member.clone();
+            tokio::spawn(async move { game.player_message(member, "Begin play.").await })
+        };
+        reached.notified().await;
+
+        // The narration is in the NPCs' histories, but nobody has been asked yet.
+        let asked = |npc: &'static str| {
+            let pool = store.pool();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM npc_candidate JOIN character ON character.id = npc_candidate.character_id WHERE character.name = ? AND npc_candidate.decision_invocation_id IS NOT NULL",
+                )
+                .bind(npc)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        for npc in ["Mara", "Toma"] {
+            assert!(
+                !narrated_to_npc(&store, npc).await.is_empty(),
+                "{npc} has the narration"
+            );
+            assert_eq!(asked(npc).await, 0, "{npc} replied before the turn ended");
+        }
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        release.notify_one();
+        playing.await.unwrap().unwrap();
+        wait_for_npc_work_of(&game, &store, &member).await;
+        for npc in ["Mara", "Toma"] {
+            assert_eq!(asked(npc).await, 1, "{npc} is asked once the turn ends");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_in_a_turn_keeps_what_the_turn_already_did_and_starts_no_replies() {
+        let scene = speech_scene().await;
+        let toma = character_id(&scene, "Toma").await;
         take_then_a_second_take_that_asks_toma(&scene, toma).await;
         // Toma's answer to the check is malformed: eagerness outside 1 to 3.
         scene.responses.lock().unwrap().push_back(tool_call(
             "speak",
             serde_json::json!({"words": "Stop.", "eagerness": 4}),
         ));
-        let playing = {
-            let game = Arc::clone(&scene.game);
-            let member = scene.first.clone();
-            tokio::spawn(async move { game.player_message(member, "Take everything.").await })
-        };
-        reached.notified().await;
-
-        // The narration is delivered, but its replies wait for the turn to end.
-        for npc in ["Mara", "Toma"] {
-            assert_eq!(
-                narrated_to_npc(&scene.store, npc).await,
-                ["You lift the flour sack."]
-            );
-            assert_eq!(decisions_asked(&scene, npc).await, 0);
-        }
-        assert_eq!(requests_made(&scene), 4);
-        release.notify_one();
-        let _ = playing.await.unwrap();
+        let _ = scene
+            .game
+            .player_message(scene.first.clone(), "Take everything.")
+            .await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // The check failed visibly, attributed to asking Toma.
@@ -7179,7 +7386,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            inferences, 6,
+            inferences, 5,
             "Toma's failed answer is one of the turn's inferences"
         );
         // The world still accepts input.
@@ -7198,7 +7405,7 @@ mod tests {
     #[tokio::test]
     async fn a_check_inside_a_turn_spends_the_turns_own_budget() {
         let scene = speech_scene_with_limits(Limits {
-            max_inferences_total: 5,
+            max_inferences_total: 4,
             ..Limits::default()
         })
         .await;
@@ -7218,7 +7425,7 @@ mod tests {
         );
         assert_eq!(
             requests_made(&scene),
-            5,
+            4,
             "Toma was not given a fresh allowance"
         );
     }
@@ -7335,7 +7542,7 @@ mod tests {
                 approve(2),
                 narrate("Mara speaks over Toma."),
                 tool_call(
-                    "approve_action",
+                    "approve_speech",
                     serde_json::json!({"action_id": 3, "prefix": "(Together)"}),
                 ),
                 narrate("Toma speaks over Mara."),
@@ -7399,7 +7606,7 @@ mod tests {
             gm_requests, 4,
             "two GM turns, each with a tool and a narration request"
         );
-        assert_eq!(requests.len(), 12);
+        assert_eq!(requests.len(), 11);
     }
 
     /// The scripted answers of a talk where Toma replies and Mara has nothing to
@@ -7506,9 +7713,9 @@ mod tests {
             Arc::new(tokio::sync::Notify::new()),
             Arc::new(tokio::sync::Notify::new()),
         );
-        // Request 5 is the first NPC's decision, after the player's own four.
+        // Request 5 is the first NPC's decision, after the player's own three.
         *scene.gate.lock().unwrap() = Some(Gate {
-            request: 5,
+            request: 4,
             reached: Arc::clone(&reached),
             release: Arc::clone(&release),
         });
@@ -7530,7 +7737,7 @@ mod tests {
 
         // The decision in flight finishes; nothing else starts.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(requests_made(&scene), 5);
+        assert_eq!(requests_made(&scene), 4);
         scene.game.never_mind(&scene.first).unwrap();
         assert!(!scene.game.hand_raised(&scene.first).await.unwrap());
         wait_for_npc_work(&scene).await;
@@ -7539,7 +7746,7 @@ mod tests {
                 .await
                 .contains(&"In the hut.".to_string())
         );
-        assert_eq!(requests_made(&scene), 9);
+        assert_eq!(requests_made(&scene), 8);
     }
 
     #[tokio::test]
@@ -7590,7 +7797,7 @@ mod tests {
         assert!(scene.game.hand_raised(&scene.first).await.unwrap());
         assert_eq!(
             requests_made(&scene),
-            4,
+            3,
             "no NPC work started with the hand up"
         );
         scene.game.never_mind(&scene.first).unwrap();
@@ -7691,7 +7898,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(
             requests_made(&scene),
-            4,
+            3,
             "no NPC work started with the hand up"
         );
         scene.game.never_mind(&scene.first).unwrap();
@@ -7755,7 +7962,6 @@ mod tests {
                 },
             ])),
             narrate("The group parts."),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -7767,7 +7973,7 @@ mod tests {
         // Inside, the second player speaks to Toma, whose decision is held in flight.
         // Request numbers continue from the split turn.
         *scene.gate.lock().unwrap() = Some(Gate {
-            request: before + 5,
+            request: before + 4,
             reached: Arc::clone(&reached),
             release: Arc::clone(&release),
         });
@@ -7778,7 +7984,6 @@ mod tests {
             ),
             approve(2),
             narrate("Toma looks up."),
-            response(Content::Text(String::new())),
             // Toma decides (held in flight below), and has nothing to say.
             do_nothing(),
         ]);
@@ -7798,7 +8003,6 @@ mod tests {
             ),
             approve(3),
             narrate("Mara looks up."),
-            response(Content::Text(String::new())),
             // Mara, outside, answers; nobody else is left to react.
             propose("It is in the hut.", &outside_speaker, 2),
             approve(4),
@@ -7851,9 +8055,9 @@ mod tests {
             Arc::new(tokio::sync::Notify::new()),
             Arc::new(tokio::sync::Notify::new()),
         );
-        // Request 8 is the GM narrating Mara's approved reply.
+        // Request 7 is the GM narrating Mara's approved reply.
         *scene.gate.lock().unwrap() = Some(Gate {
-            request: 8,
+            request: 7,
             reached: Arc::clone(&reached),
             release: Arc::clone(&release),
         });
@@ -7888,7 +8092,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((executed, state.as_str()), (1, "selected"));
-        assert_eq!(requests_made(&scene), 8, "no step started while stopping");
+        assert_eq!(requests_made(&scene), 7, "no step started while stopping");
 
         // A new process picks up the remaining reply and nothing is replayed.
         scene.store.close_interrupted_turns().await.unwrap();
@@ -7952,9 +8156,9 @@ mod tests {
             Arc::new(tokio::sync::Notify::new()),
             Arc::new(tokio::sync::Notify::new()),
         );
-        // Request 8 is the GM narrating Mara's approved reply.
+        // Request 7 is the GM narrating Mara's approved reply.
         *scene.gate.lock().unwrap() = Some(Gate {
-            request: 8,
+            request: 7,
             reached: Arc::clone(&reached),
             release: Arc::clone(&release),
         });
@@ -7972,7 +8176,6 @@ mod tests {
             tool_call("speak", serde_json::json!({"words": "Hold on."})),
             approve(3),
             narrate("The room stills."),
-            response(Content::Text(String::new())),
             do_nothing(),
             do_nothing(),
         ]);
@@ -8072,7 +8275,6 @@ mod tests {
                 serde_json::json!({"action_id": 1, "reason": "Toma cannot hear over the noise."}),
             ),
             narrate("You whisper about the key under the stone, but Toma cannot hear you."),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -8219,7 +8421,7 @@ mod tests {
             Arc::new(tokio::sync::Notify::new()),
         );
         *scene.gate.lock().unwrap() = Some(Gate {
-            request: 8,
+            request: 7,
             reached: Arc::clone(&reached),
             release: Arc::clone(&release),
         });
@@ -8265,7 +8467,6 @@ mod tests {
                 },
             ])),
             narrate("The group parts."),
-            response(Content::Text(String::new())),
             // Toma, left with the other player, hears the narration.
             do_nothing(),
         ]);
@@ -8327,7 +8528,7 @@ mod tests {
             Arc::new(tokio::sync::Notify::new()),
         );
         *scene.gate.lock().unwrap() = Some(Gate {
-            request: 8,
+            request: 7,
             reached: Arc::clone(&reached),
             release: Arc::clone(&release),
         });
@@ -8428,7 +8629,6 @@ mod tests {
                 ),
             ])),
             narrate("The group parts."),
-            response(Content::Text(String::new())),
             // Mara and Toma, left in the hut, hear the narration.
             do_nothing(),
             do_nothing(),
@@ -8451,9 +8651,9 @@ mod tests {
             Arc::new(tokio::sync::Notify::new()),
             Arc::new(tokio::sync::Notify::new()),
         );
-        // Four requests for the speech turn, two decisions, then the GM turn
-        // narrating Mara's approved reply.
-        let held = scene.requests.lock().unwrap().len() + 8;
+        // Three requests for the speech turn, two decisions, then the GM turn
+        // approving and narrating Mara's reply.
+        let held = scene.requests.lock().unwrap().len() + 7;
         *scene.gate.lock().unwrap() = Some(Gate {
             request: held,
             reached: Arc::clone(&reached),
@@ -8466,7 +8666,6 @@ mod tests {
             ),
             approve(2),
             narrate("Toma looks up."),
-            response(Content::Text(String::new())),
             propose("Ask the miller.", &speaker, 2),
             propose("It is in the hut.", &speaker, 2),
             approve(3),
@@ -8480,7 +8679,6 @@ mod tests {
                 ),
             ])),
             narrate("They come together."),
-            response(Content::Text(String::new())),
             // Mara and Toma hear the narration.
             do_nothing(),
             do_nothing(),
@@ -8536,7 +8734,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        assert_eq!(requests_made(&scene), 7, "the approval is in flight");
+        assert_eq!(requests_made(&scene), 6, "the approval is in flight");
 
         scene.store.close_interrupted_turns().await.unwrap();
 
@@ -8605,7 +8803,6 @@ mod tests {
                 },
             ])),
             narrate("The group parts."),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -8620,7 +8817,6 @@ mod tests {
             ),
             approve(2),
             narrate("Mara listens."),
-            response(Content::Text(String::new())),
             do_nothing(),
         ]);
         let before = scene.requests.lock().unwrap().len();
@@ -8633,8 +8829,8 @@ mod tests {
 
         assert_eq!(
             scene.requests.lock().unwrap().len() - before,
-            5,
-            "four turn inferences and one decision, only Mara's"
+            4,
+            "the player, two GM calls and one decision, only Mara's"
         );
         let toma_heard = heard_by_npc(&scene.store, "Toma").await;
         assert!(toma_heard.is_empty(), "{toma_heard:?}");
@@ -8764,7 +8960,7 @@ mod tests {
 
         assert_eq!(
             scene.requests.lock().unwrap().len(),
-            6,
+            5,
             "four turn inferences plus one decision for each NPC, nothing more"
         );
         assert_eq!(failed_sequences(&scene).await, Vec::<String>::new());
@@ -8809,7 +9005,7 @@ mod tests {
             "the player is shown the failure where they spoke: {shown:?}"
         );
         // No further model work followed, and the world still accepts input.
-        assert_eq!(scene.requests.lock().unwrap().len(), 6);
+        assert_eq!(scene.requests.lock().unwrap().len(), 5);
         scene
             .responses
             .lock()
@@ -8941,7 +9137,6 @@ mod tests {
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("Toma leans in."),
-            response(Content::Text(String::new())),
             // Only Toma heard it, so only Toma decides.
             do_nothing(),
         ]);
@@ -8952,7 +9147,7 @@ mod tests {
             .unwrap();
         wait_for_npc_work(&scene).await;
 
-        assert_eq!(scene.requests.lock().unwrap().len(), 5);
+        assert_eq!(scene.requests.lock().unwrap().len(), 4);
         let candidates: i64 =
             sqlx::query_scalar("SELECT COUNT(DISTINCT character_id) FROM npc_candidate")
                 .fetch_one(&scene.store.pool())
@@ -8971,7 +9166,6 @@ mod tests {
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 1})),
             narrate("A quiet word."),
-            response(Content::Text(String::new())),
         ]);
         scene
             .game
@@ -8984,7 +9178,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(collections, 0);
-        assert_eq!(scene.requests.lock().unwrap().len(), 4);
+        assert_eq!(scene.requests.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -9004,7 +9198,6 @@ mod tests {
             ),
             tool_call("approve_action", serde_json::json!({"action_id": 2})),
             narrate("Toma listens."),
-            response(Content::Text(String::new())),
             // One decision each for Mara and Toma, about both things said.
             do_nothing(),
             propose("Fine, I will answer.", &first_name, 1),
@@ -9048,7 +9241,7 @@ mod tests {
     #[tokio::test]
     async fn an_exhausted_budget_fails_the_discussion_without_a_fresh_allowance() {
         let scene = speech_scene_with_limits(Limits {
-            max_inferences_total: 6,
+            max_inferences_total: 5,
             ..Limits::default()
         })
         .await;
@@ -9058,7 +9251,7 @@ mod tests {
             [
                 propose("Ask the miller.", &speaker, 2),
                 propose("It is in the hut.", &speaker, 2),
-                // The GM's judging would be the seventh inference.
+                // The GM's judging would be the sixth inference.
             ],
         )
         .await;
@@ -9102,7 +9295,7 @@ mod tests {
         }
         assert_eq!(
             scene.requests.lock().unwrap().len(),
-            5,
+            4,
             "a decision is in flight"
         );
 
@@ -10170,7 +10363,7 @@ mod tests {
             assert_eq!(summaries, 0, "case {case} ran compaction");
             assert_eq!(
                 requests.lock().unwrap().len(),
-                4,
+                3,
                 "case {case} ran extra model work"
             );
             let statuses: Vec<String> = sqlx::query_scalar("SELECT tool_execution.status FROM tool_execution JOIN inference ON inference.id = tool_execution.inference_id WHERE inference.agent_id = ? ORDER BY tool_execution.ordinal")
@@ -10260,7 +10453,6 @@ mod tests {
                 },
             ])),
             narrate("The group splits up."),
-            response(Content::Text(String::new())),
             // Mara and Toma, left with the first group, hear it.
             do_nothing(),
             do_nothing(),
@@ -10275,7 +10467,6 @@ mod tests {
                 arguments: r#"{"action_id":2}"#.into(),
             }])),
             narrate("Only the first group should see this."),
-            response(Content::Text(String::new())),
             do_nothing(),
             do_nothing(),
         ]);
@@ -10651,13 +10842,10 @@ mod tests {
         let (_, _model_path, _sampling, limits) = model.parts();
         let hybrid = RealNpcsOnly {
             real: Arc::clone(&model.backend),
-            player: Mutex::new(VecDeque::from([
-                tool_call(
-                    "speak",
-                    serde_json::json!({"words": "Toma, where did the bread go?", "to": ["Toma"]}),
-                ),
-                response(Content::Text(String::new())),
-            ])),
+            player: Mutex::new(VecDeque::from([tool_call(
+                "speak",
+                serde_json::json!({"words": "Toma, where did the bread go?", "to": ["Toma"]}),
+            )])),
         };
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_limits(hybrid, limits).await;
@@ -11007,7 +11195,8 @@ mod tests {
                 })
                 .collect();
             let said_once = calls.len() == 1 && words.len() == 1 && words_ok(&words[0]);
-            let stopped = matches!(&last.content, Content::Text(text) if text.trim().is_empty());
+            // Acting ends the agent's turn, so what it answered last is the action.
+            let stopped = matches!(&last.content, Content::ToolCalls(_));
             if !said_once || !stopped {
                 wrong.push(format!(
                     "{line:?} -> calls {calls:?}, final output {:?}",
@@ -11022,10 +11211,8 @@ mod tests {
         );
     }
 
-    /// Known failing until the player agent's context is fixed; see
-    /// plans/agent-tuning.md.
     #[tokio::test]
-    #[ignore = "known failure: the player agent narrates and rewrites speech (plans/agent-tuning.md); needs a CUDA GPU"]
+    #[ignore = "needs a CUDA GPU"]
     async fn the_player_agent_says_what_the_player_says_and_stops() {
         let model = DeviceModel::load().await;
         real_model_player_agent_says_what_the_player_says_and_stops(&model).await;
