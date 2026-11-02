@@ -120,8 +120,10 @@ create objects.
   stage before starting inference. Keep only the progress needed to select the
   next stage/object and reference committed outputs; use ordinary recordings for
   inference inputs/results, not another transcript or per-tool replay journal.
-- Provide Create, Update and Delete variants for Location, Connection, NPC,
-  Group, ItemType and Item. Create requires all initial fields; Update names the
+- Provide Create and Update variants for Location, Connection, NPC, Group,
+  ItemType and Item, and Delete variants for all but Group (a Group goes when its
+  last NPC does; this departs from the declarations' DeleteGroup and awaits the
+  user's decision). Create requires all initial fields; Update names the
   object ID and only fields being replaced. Return assigned IDs, real changes
   and current location/connection/group/NPC/item counts. Use world-scoped typed
   arguments and shared constructors/validation. Return full validation errors as
