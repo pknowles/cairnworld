@@ -1903,8 +1903,8 @@ impl Store {
             .context("loading world starting group")?
             .with_context(|| format!("world {world_id} has no starting group"))?;
         let (character_id, agent_id, _) =
-            Self::create_adventurer(&mut transaction, member_id, world_id, starting_group_id)
-                .await?;
+            Self::create_adventurer(&mut transaction, member_id, world_id).await?;
+        Self::place_adventurer(&mut transaction, character_id, starting_group_id).await?;
         transaction
             .commit()
             .await
@@ -4162,6 +4162,18 @@ impl Store {
         world_id: i64,
         starting_group_id: i64,
     ) -> Result<JoinedWorld> {
+        let joined = Self::join_world_unplaced(transaction, user, world_id).await?;
+        Self::place_adventurer(transaction, joined.character_id, starting_group_id).await?;
+        Ok(joined)
+    }
+
+    /// Join with a blank Adventurer that is in no group yet: a world still being
+    /// initialized has none to offer. `place_adventurer` completes the join.
+    async fn join_world_unplaced(
+        transaction: &mut Transaction<'_, Sqlite>,
+        user: &User,
+        world_id: i64,
+    ) -> Result<JoinedWorld> {
         let member_id = sqlx::query!(
             "INSERT INTO world_member (world_id, user_id, access) VALUES (?, ?, 'active')",
             world_id,
@@ -4172,7 +4184,7 @@ impl Store {
         .with_context(|| format!("joining user {} to world {world_id}", user.email))?
         .last_insert_rowid();
         let (character_id, agent_id, character_tool_id) =
-            Self::create_adventurer(transaction, member_id, world_id, starting_group_id).await?;
+            Self::create_adventurer(transaction, member_id, world_id).await?;
         Ok(JoinedWorld {
             member_id,
             character_id,
@@ -4185,7 +4197,6 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         member_id: i64,
         world_id: i64,
-        starting_group_id: i64,
     ) -> Result<(i64, i64, i64)> {
         let agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id,)
             .execute(&mut **transaction)
@@ -4222,17 +4233,25 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("linking Adventurer for world {world_id}"))?;
+        Ok((character_id, agent_id, tool_id))
+    }
+
+    async fn place_adventurer(
+        transaction: &mut Transaction<'_, Sqlite>,
+        character_id: i64,
+        group_id: i64,
+    ) -> Result<()> {
         sqlx::query!(
             "INSERT INTO character_group (character_id, group_id, description) VALUES (?, ?, '')",
             character_id,
-            starting_group_id,
+            group_id,
         )
         .execute(&mut **transaction)
         .await
-        .with_context(|| format!("placing Adventurer in world {world_id}"))?;
+        .with_context(|| format!("placing Adventurer {character_id} in group {group_id}"))?;
         // NPCs in the group now see one more character present.
-        Self::advance_scene_revision(transaction, starting_group_id).await?;
-        Ok((character_id, agent_id, tool_id))
+        Self::advance_scene_revision(transaction, group_id).await?;
+        Ok(())
     }
 
     async fn player_sheet(
