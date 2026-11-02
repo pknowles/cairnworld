@@ -23,6 +23,8 @@ CREATE TABLE world_generation (
     world_id INTEGER PRIMARY KEY NOT NULL REFERENCES world(id),
     questions TEXT NOT NULL DEFAULT '[]',
     next_question INTEGER NOT NULL DEFAULT 0,
+    -- Inferences spent so far, restored into the shared Budget for each step.
+    spent INTEGER NOT NULL DEFAULT 0,
     questioner_branch_id INTEGER NOT NULL REFERENCES history_branch(id),
     storyteller_branch_id INTEGER NOT NULL REFERENCES history_branch(id)
 );

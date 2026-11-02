@@ -83,8 +83,10 @@ create objects.
   it). Otherwise it selects the next finite step, as `next_npc_step` does: `meta`,
   `ask`, `answer`, `summarize`, `name`, `concept_done`, `failed`. A failed step's
   error stays on its sequence; the stage only marks the world failed.
-- `world_generation(world_id, questions, next_question, questioner_branch_id,
-  storyteller_branch_id)` is the loop's working data. The round number is the
+- `world_generation(world_id, questions, next_question, spent,
+  questioner_branch_id, storyteller_branch_id)` is the loop's working data;
+  `spent` is restored into the shared `Budget` each step, as NPC discussions do
+  with `Budget::restore`, so the total limit bounds the whole generation. The round number is the
   count of the Storyteller's branches, not a column. `questions` copies the
   arguments of the Questioner's recorded `ask_questions` call: read them from
   that recording instead, and drop the column, if the store makes that cheap.
