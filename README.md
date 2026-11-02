@@ -39,6 +39,7 @@ use MSVC's conforming preprocessor, including for Candle's kernels:
 
 ```powershell
 $env:NVCC_PREPEND_FLAGS = '-Xcompiler=/Zc:preprocessor -Xcompiler=/MD'
+$env:CUDAFORGE_HOME = "$env:USERPROFILE\.cudaforge" # PowerShell has no HOME; reuses the CUTLASS cache
 $env:HF_HOME = "$PWD/models/huggingface"
 cargo build --locked --bin cairnworld -j 4
 ```
@@ -64,6 +65,23 @@ requests, and verifies fixed-cache rejection followed by a valid request.
 References: [NVIDIA CUDA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html),
 [ring build requirements](https://github.com/briansmith/ring/blob/main/BUILDING.md),
 and [mistral.rs paged attention](https://docs.mistralrs.dev/guides/perf/paged-attention/).
+
+## New worktree
+
+Submodules start empty. Clone them from the main checkout, not GitHub (which
+prompts for credentials):
+
+```sh
+git worktree add -b <branch> ../<dir> <commit> && cd ../<dir>
+main=<path to main checkout>
+export GIT_TERMINAL_PROMPT=0
+git -c protocol.file.allow=always \
+    -c submodule.cairn.url=$main/cairn \
+    -c submodule.third_party/mistral.rs.url=$main/third_party/mistral.rs \
+    submodule update --init
+```
+
+Then build as above, in PowerShell with `CUDAFORGE_HOME` set.
 
 ## Browser development
 
