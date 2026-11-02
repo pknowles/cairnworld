@@ -66,8 +66,8 @@ after their rules dependencies. Campaign completion remains a separate plan.
    objects appearing live in Developer Mode. These are the remaining bullets of
    both checkpoints.
 
-Until step 2 a generated world has a summary and name but no objects and cannot
-begin. That is an incomplete world, not a fallback: only the authoring tools
+Until step 2 a world finishing the loop has a summary and name but no objects and
+cannot begin. That is an incomplete world, not a fallback: only the authoring tools
 create objects.
 
 ### Step 1 data and flow
@@ -78,13 +78,15 @@ create objects.
   empty history branch of that agent, so a round begins from the seed prompt and
   latest summary only. Developer Mode lists the branches through the existing
   branch graph, generalized from GM groups rather than copied.
-- `world_generation(world_id, stage, questions, next_question,
-  questioner_branch_id, storyteller_branch_id)` exists for generated worlds; the
-  stage selects the next finite step, as `next_npc_step` does: `meta`, `ask`,
-  `answer`, `summarize`, `name`, `concept_done`, `failed`. A failed step's error
-  stays on its sequence; the stage only marks the world failed. The round number
-  is the count of the Storyteller's branches, not a column. `questions` copies
-  the arguments of the Questioner's recorded `ask_questions` call: read them from
+- Every world has `generation_stage`, whatever filled it in: `complete` means
+  ready to play (a scenario import is `complete` at once, and BeginWorld will set
+  it). Otherwise it selects the next finite step, as `next_npc_step` does: `meta`,
+  `ask`, `answer`, `summarize`, `name`, `concept_done`, `failed`. A failed step's
+  error stays on its sequence; the stage only marks the world failed.
+- `world_generation(world_id, questions, next_question, questioner_branch_id,
+  storyteller_branch_id)` is the loop's working data. The round number is the
+  count of the Storyteller's branches, not a column. `questions` copies the
+  arguments of the Questioner's recorded `ask_questions` call: read them from
   that recording instead, and drop the column, if the store makes that cheap.
 - Each stage is one finite step run by the world worker; its outputs and next
   stage commit together, so a restart resumes at the stored stage. `meta`: the
@@ -98,9 +100,9 @@ create objects.
   tools are the Questioner's two, and step 2's editing tools let the Storyteller
   revise the summary and name afterwards.
 - Reuse, not copies: split `create_adventurer` into creating the Adventurer and
-  placing it in a group (joining does both; a generated world only the first;
-  entry placement later uses the second); "world is generating" is one check in
-  `Game::admit`, the single admission point; the sequence, budget, failure and
+  placing it in a group (joining a ready world does both; one still initializing only the first;
+  entry placement later uses the second); readiness (`generation_stage` is
+  `complete`) is one check in `Game::admit`, the single admission point; the sequence, budget, failure and
   Developer Mode handling of an NPC step moves into one function that the
   generation steps share; new code lives in `store/generation.rs` and
   `game/generation.rs`, not the 10k-line `store.rs` and `game.rs`.
