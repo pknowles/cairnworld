@@ -88,7 +88,10 @@ async function checkBrowser(server, check) {
   let browser;
   try {
     await Promise.race([new Promise(resolve => server.listen(0, "127.0.0.1", resolve)), failure]);
-    browser = await chromium.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] });
+    // Playwright finds the installed Google Chrome on any platform; CHROME
+    // selects a different executable.
+    const chosen = process.env.CHROME ? { executablePath: process.env.CHROME } : { channel: "chrome" };
+    browser = await chromium.launch({ ...chosen, headless: true, args: ["--no-sandbox"] });
     const context = await browser.newContext();
     // Copy-to-clipboard buttons in Developer Mode need this to be readable
     // back for verification; harmless for checks that never touch it.
