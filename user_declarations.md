@@ -31,11 +31,21 @@ stories. This will be easier. Later I want the world to be completely LLM
 generated and evolve during play.
 
 The world, setting and plot are built by the Storyteller agent (there is only
-one) with a Questioner agent (a concept possibly used to refine results in
-multiple situations). The intent of the questioner is to ask
-questions that:
+one) with a Questioner agent (an adversary-like concept possibly used to refine
+results in multiple situations). My thinking is the Questioner is like an
+explicit reasoning model where we have fine grain control over how much thinking
+is done before the final output is accepted. Maybe there's already technologies
+that could do this more robustly. I'd be interested to know.
 
-1. Enrich the world with interest and depth
+I'd like to break up world generation into three phases:
+
+1. World Summary - the top level setting and plot
+2. Core object creation - implementing the world summary
+3. Detail object creation - adding minor encounters, supporting NPCs etc.
+
+The intent of the questioner is to ask questions that, in order of priority:
+
+1. Enrich the world with interest, depth, internal connections
 2. Establish multiple pathways for player character objectives, conflict with
    NPCs and setting engagement
 3. Point out problems, outright contradictions in the ideas, weak coupling in
@@ -51,20 +61,21 @@ other's role and the process so that they understand what they should be doing.
 World building is done through iterations of meta-questions and questions.
 answers and summaries.
 
-The Questioner runs first and is actually the top level agent guiding world
-generation. It is given the input world prompt from the user (if there is one),
-some example questions and some hard coded meta-questions which the questioner
-itself is initially asked by the system. It gets one round to answer the meta
-questions. This seeds its context in preparation for storyteller questions. It
-is then asked in a second inference to ask the Storyteller questions to fulfil
-the above list in that order/priority depending on the progress of the world
-generation. The intent is to first build an RPG world, setting and initial
-plot(s) that players would want to play in and then refine it by removing crud
-and adding intriguing detail. The Questioner should switch to using more
-critical review style questions when appropriate. Once the questioner deems the
-world ready it can respond saying the world is solid and complete enough to
-begin play. The Storyteller needs to be able to name the world too. The final
-"world summary" and the world/campaign name is the product.
+The Questioner runs first and is actually the top level agent guiding and
+reviewing world generation. It is given the input world prompt from the user (if
+there is one), some example questions and some hard coded meta-questions which
+the questioner itself is initially asked by the system. It gets one round to
+answer the meta questions. This seeds its context in preparation for storyteller
+questions. It is then asked in a second inference to ask the Storyteller
+questions to fulfil the above list in that order/priority depending on the
+progress of the world generation. The intent is to first build an RPG world,
+setting and initial plot(s) that players would want to play in and then refine
+it by removing crud and adding intriguing detail. The Questioner should switch
+to using more critical review style questions when appropriate. Once the
+questioner deems the world ready it can respond saying the world is solid and
+complete enough to begin play. The Storyteller needs to be able to name the
+world too. The final "world summary" and the world/campaign name is the product
+of the first phase of world generation.
 
 The Storyteller is also given the initial world prompt. It is first run with the
 Questioner's questions, asked one at a time. We should experiment with a high
@@ -76,28 +87,31 @@ I'd like to avoid the Storyteller's context getting overloaded and confused with
 multiple world summaries, so we must only present it with one version and remove
 old versions from its context.
 
-The looping above is split into the following phases. The questioner is simply
-prompted with these phases, which will flow through to the Storyteller.
+The world summary should define the overall setting, factions, NPCs of high
+importance, motives, possible player interaction. The next phases need to turn
+the summary into a playable world. The storyteller must expand on what it has
+written to make concrete objects in the world's database. The initial
+Storyteller prompts may not need the Questioner and could be injected as part of
+the Questioner's phase-complete tool call. It might be good to have the
+Questioner then continue in the next phase to review the result and again be the
+one to say when the next phases are complete.
 
-- Overall setting, factions, NPCs of high importance, motives
-- Expanding to important locations, where the NPCs start, how many other NPCs in
-  their party, supporting NPCs at each location
-- Expanding to intermediate locations, less important NPCs and world details to
-  make the setting feel alive
+**Core object creation:** Create important locations, where the NPCs start,
+backgrounds, items, rewards, any lock and key mechanics, what they're currently
+doing, any no. 2 NPCs, henchmen etc.
+
+**Detail object creation** Create intermediate locations, less important NPCs,
+shops, towns/cities, bars/taverns, side quests, treasure, all the non-core stuff
+that makes the setting feel alive
 
 The storyteller will have access to the standard text editing tools - same as
 the GM (but it gets access to storyteller fields that the GM cannot edit).
 
-My thinking is the Questioner is like an explicit reasoning model where we have
-fine grain control over how much thinking is done before the final output is
-accepted. Maybe there's already technologies that could do this more robustly.
-I'd be interested to know.
-
 The Questoiner and Storyteller behave a little as adversaries, working to
-improve the world and setting until both are satisified. This will likely need
-tuning so they do actually settle eventually. I expect getting the prompts to
-request the right scope and depth for the local LLM sizes we can support will be
-key. It must implicitly know the right balance of NPC background, location description to request.
+improve the world and setting. This will likely need tuning so they do actually
+settle eventually. I expect getting the prompts to request the right scope and
+depth for the local LLM sizes we can support will be key. It must implicitly
+know the right balance of NPC background, location description to request.
 
 Some examples of meta-questions and questions are below. Testing the
 initialization loop with a few of these and evaluating would be important. Maybe
@@ -231,17 +245,13 @@ story. This must be done in stages, especially NPCs, one at a time to allow the
 model to give focused descriptions to each. Rust should validate as much as it
 can, where explicit relations/IDs are given.
 
-For each NPCs location, the Questioner concept is again executed to add
+For each NPC's location, the Questioner concept is again executed to add
 detail to each. The Questioner is given the world summary and the seed prompt
 provided by the Storyteller.
 
-Introducing randomness in LLMs is difficult. One thing I'm tempted to try is
-injecting a pile of random nouns, adjectives (and maybe a few numbers in
-different scales) into the prompt that may trigger more variance without relying
-on LLM "temperature" to do all the work. They would simply be declared as random
-items to draw from. Maybe it'd just confuse the LLM but worth checking. Another
-idea is to randomly pick seed questions from above which would ideally add new
-concepts.
+Introducing randomness in LLMs is difficult. My favorite idea so far is to
+choose questions and meta-questions at random. Maybe also a small list of random
+nouns labelled to draw creative inspiration from.
 
 Ideally the story should start small and simple. We get that working well first.
 Later, the world and setting can grow during gameplay, with the storyteller
@@ -1343,10 +1353,6 @@ missing, for example connection, npc and item counts.
   filters. We don't want to let agents be actually destructive, ever. Still
   findable in developer mode, but default filtered out.
 - Storyteller notes text editing tools (See "Game state" section)
-- BeginWorld - called when the storyteller believes they have completed world
-  creation and the state is ready for player characters to enter and play to
-  begin. This ends world creation, but does not start play until characters
-  join.
 
 We may need to create some prefab ItemTypes to make it easier for the
 storyteller; not sure yet.
@@ -1370,13 +1376,21 @@ say it is satisfied. It does not get access to any of the storyteller's answers
 or chat history. All it can see is the elements of the world that the
 storyteller creates. It then must reply with one of two structured responses:
 
-- AskQuestions - the world is implicitly incomplete and the questioner must
-  indirectly ask a question that invites closing the gap. As though a reviewer
-  skips the complaint and jumps straight to a clairfying question that gets at
-  the core of the remaining issue(s).
-- WorldIsComplete
+- AskQuestions - the world generation phase is implicitly incomplete and the
+  questioner must indirectly ask a question that invites closing the gap. As
+  though a reviewer skips the complaint and jumps straight to a clairfying
+  question that gets at the core of the remaining issue(s).
+- WorldSummaryComplete - asks the Storyteller for the world title, saves it and
+  the summary, them prompts the Storyteller to create all world summary objects.
+  The Questioner then sees the result, all created objects is provided (e.g. in
+  the system prompt) and it can continue questioning.
+- CoreObjectsCreated - prompt the Storyteller to create detail objects. TODO: I
+  think the Storyteller should have to write some detail text with the
+  Questioner before diving into creating the final detail objects.
+- DetailObjectsCreated - ends world creation, marks the world ready and implies
+  play can begin, but does not start play until a player joins.
 
-Once the game is in progress, the storyteller loses access to BeginWorld and gains:
+Once the game is in progress, the storyteller gains:
 
 - EndWorld - concludes the game for all players with a text narration of the
   immediate ending and begins the epilogue sequence.
