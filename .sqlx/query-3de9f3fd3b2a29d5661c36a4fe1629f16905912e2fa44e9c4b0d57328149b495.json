@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world SET storyteller_summary = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3de9f3fd3b2a29d5661c36a4fe1629f16905912e2fa44e9c4b0d57328149b495"
+}

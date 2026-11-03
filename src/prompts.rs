@@ -27,6 +27,40 @@ pub struct Prompts {
     pub compaction: Compaction,
     /// Tools players and NPCs both call.
     pub shared: Shared,
+    pub world: WorldTexts,
+    pub questioner: Questioner,
+    pub storyteller: Storyteller,
+}
+
+/// Stand-ins for what world generation has not been given yet.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldTexts {
+    pub no_seed: String,
+    pub no_summary: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Questioner {
+    pub role: String,
+    pub meta_request: String,
+    pub world_state: String,
+    pub ask_request: String,
+    pub ask_reminder: String,
+    pub example_questions: Vec<String>,
+    pub meta_questions: Vec<String>,
+    pub tools: Tools,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Storyteller {
+    pub role: String,
+    pub round_start: String,
+    pub next_question: String,
+    pub summary_request: String,
+    pub name_request: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,7 +354,11 @@ mod tests {
     fn an_edit_to_the_file_applies_to_the_next_request_and_a_mistake_names_itself() {
         let scratch = crate::store::ScratchDir::new("prompts-test");
         let path = scratch.path().join("prompts.toml");
-        let original = std::fs::read_to_string(DEFAULT_PATH).unwrap();
+        // The search below looks for a blank line, so it needs the file with
+        // `\n` endings whatever the checkout converted them to.
+        let original = std::fs::read_to_string(DEFAULT_PATH)
+            .unwrap()
+            .replace("\r\n", "\n");
         std::fs::write(&path, &original).unwrap();
         let before = load(&path).unwrap().npc.role.clone();
 

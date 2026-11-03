@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world_generation SET storyteller_branch_id = ? WHERE world_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2d4eac9f219771c79fcf0574486b9a7704afae36b180c49cdb5e01221f26a999"
+}

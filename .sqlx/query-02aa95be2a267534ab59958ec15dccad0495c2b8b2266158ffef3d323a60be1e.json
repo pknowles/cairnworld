@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT generation_stage = ? AS \"ready!: bool\" FROM world WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "ready!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "02aa95be2a267534ab59958ec15dccad0495c2b8b2266158ffef3d323a60be1e"
+}

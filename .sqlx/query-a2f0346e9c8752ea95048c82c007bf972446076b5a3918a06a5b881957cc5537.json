@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO world_role_agent (world_id, role, agent_id) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a2f0346e9c8752ea95048c82c007bf972446076b5a3918a06a5b881957cc5537"
+}

@@ -22,37 +22,59 @@ real dice rolls.
 
 # Game setting and story narrative
 
-The setting must make sense for the rules of the game. It doesn't always have to
-be a "dark and mysterious Wood". The world, setting and plot are built by the
-Storyteller agent (there is only one) with a Questioner agent (a concept used
-frequently in this project). In practice these are just roles in chats that may
-not see the entire history from each other. However they should be aware of each
+The setting could be anything. It doesn't always have to be Cairn's "dark and
+mysterious Wood". It just needs to fit the game rules. I expect it will work
+well with NPC interaction and investigation.
+
+At first we may want some hard coded worlds - the setting settings, NPCs, plot,
+stories. This will be easier. Later I want the world to be completely LLM
+generated and evolve during play.
+
+The world, setting and plot are built by the Storyteller agent (there is only
+one) with a Questioner agent (a concept possibly used to refine results in
+multiple situations). The intent of the questioner is to ask
+questions that:
+
+1. Enrich the world with interest and depth
+2. Establish multiple pathways for player character objectives, conflict with
+   NPCs and setting engagement
+3. Point out problems, outright contradictions in the ideas, weak coupling in
+   the ideas (i.e. elements that have no relation or little connection with
+   other elements), encourage dropping and rewriting elements that don't fit, no
+   longer make sense or don't work for a cohesive story
+4. Resolving ambiguity and adding detail, but the primary goal is to have a
+   solid setting foundation first
+
+In practice, the Storyteller and Questioner are just roles in chats that may not
+see the entire history from each other. However they should be aware of each
 other's role and the process so that they understand what they should be doing.
 World building is done through iterations of meta-questions and questions.
 answers and summaries.
 
-The Questioner is first given the input world prompt, some example questions and
-some hard coded meta-questions which the questioner itself is initially asked by
-the system. It gets one round to answer the meta questions. It is then asked in
-a second inference to ask the Storyteller questions that either prompt a
-realistic RPG world generation or fill gaps in the existing world, setting and
-plot. Either that or respond saying the world is solid and complete enough to
-begin play.
+The Questioner runs first and is actually the top level agent guiding world
+generation. It is given the input world prompt from the user (if there is one),
+some example questions and some hard coded meta-questions which the questioner
+itself is initially asked by the system. It gets one round to answer the meta
+questions. This seeds its context in preparation for storyteller questions. It
+is then asked in a second inference to ask the Storyteller questions to fulfil
+the above list in that order/priority depending on the progress of the world
+generation. The intent is to first build an RPG world, setting and initial
+plot(s) that players would want to play in and then refine it by removing crud
+and adding intriguing detail. The Questioner should switch to using more
+critical review style questions when appropriate. Once the questioner deems the
+world ready it can respond saying the world is solid and complete enough to
+begin play. The Storyteller needs to be able to name the world too. The final
+"world summary" and the world/campaign name is the product.
 
-The Storyteller is also given the initial world prompt and the initial
-Storyteller's questions must answer each question in turn with a high LLM
-temperature (if the model supports it) just as text output to itself. This
-expands the seed and story variance. Once done it is asked to write a world
-summary. Only the summary is returned to the Questioner, which makes follow-up
-questions. The Storyteller runs again, but this time starting only with the
-world prompt and its most recent summary (the answers from the previous session
-should now be in the summary). Again it answers each in turn, then the code asks
-it to remake or make changes to the summary based on the answers and discussion
-so far. It is told that it may drop ideas from the previous summary that no
-longer make sense or work for a cohesive story after reviewing the previous
-answers. This process loops until both the Questioner is satisfied the world
-feels complete or some limit is reached. The final "world summary" and the
-world/campaign name is the product.
+The Storyteller is also given the initial world prompt. It is first run with the
+Questioner's questions, asked one at a time. We should experiment with a high
+LLM temperature (if the model supports it) just for the initial round of
+questions. This expands the seed and story variance. Once done it is asked to
+write a world summary, which gets stored and returned as the result to the
+Questioner. The Questioner then asks follow-up questions until it's satisfied.
+I'd like to avoid the Storyteller's context getting overloaded and confused with
+multiple world summaries, so we must only present it with one version and remove
+old versions from its context.
 
 The looping above is split into the following phases. The questioner is simply
 prompted with these phases, which will flow through to the Storyteller.
@@ -195,6 +217,7 @@ trying to further consolidate too.
   - What ideas are unbelievable and is that a good thing or a bad thing?
   - If you were to rewrite this from scratch, which things would you most like to change?
   - If you had to cut this down a lot, what would you keep and what important aspects would be lost? Why are they important?
+  - Rate each element of the setting by how well connected it is to other elements. What remains when removing the ones that don't have a solid reason to exist?
 
 ## Storyteller initialization output and tools
 
@@ -1361,11 +1384,13 @@ Once the game is in progress, the storyteller loses access to BeginWorld and gai
 Developer mode should show both Storyteller and Questioner, just like other
 agents and their interactions.
 
-World generation happens async to the UI. Players can enter the world; they just
-can't act yet and their player creation cannot begin until world generation
-completes. If there is an error during world creation, players see this as they
-would other errors and the world is simply stuck. They can enable developer mode
-and inspect how far world generation got and exactly where it went wrong.
+World generation happens async to the UI. Developer mode could be visible in the
+world detail page if enabled so that world generation can be inspected more
+easily. Players can enter the world; they just can't act yet and their player
+creation cannot begin until world generation completes. If there is an error
+during world creation, players see this as they would other errors and the world
+is simply stuck. They can enable developer mode and inspect how far world
+generation got and exactly where it went wrong.
 
 The questioner could come in handy during gameplay, e.g. to prompt the
 storyteller to see which game style the players gravitate towards, what they

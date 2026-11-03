@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+mod generation;
 mod narration;
 mod npc;
 
@@ -309,6 +310,7 @@ where
             "world {} is no longer accepting input because the server is stopping",
             world.id
         );
+        self.ensure_world_ready(world.id).await?;
         let permit = world
             .sender
             .reserve()
@@ -339,6 +341,16 @@ where
             .context("world stopped processing world entry")?
     }
 
+    /// Players can open a world that is still being created, but nothing they do
+    /// reaches it until it is ready.
+    async fn ensure_world_ready(&self, world_id: i64) -> Result<()> {
+        ensure!(
+            self.store.world_is_ready(world_id).await?,
+            "world {world_id} is still being created"
+        );
+        Ok(())
+    }
+
     /// The one admission point for external game input. Shutdown refuses new
     /// input at once; the world's queue then closes, so input that raced the
     /// refusal is either queued ahead of the close and finished, or refused.
@@ -348,6 +360,7 @@ where
             "world {} is no longer accepting input because the server is stopping",
             world.id
         );
+        self.ensure_world_ready(world.id).await?;
         world
             .sender
             .send(event)
@@ -523,6 +536,19 @@ where
                     }
                 }
             };
+            // A world still being initialized takes its next finite step the
+            // same way.
+            let mut generation = if draining {
+                None
+            } else {
+                match store.next_generation(world_id).await {
+                    Ok(generation) => generation,
+                    Err(error) => {
+                        tracing::error!(world_id, error = %format!("{error:#}"), "looking for world generation work");
+                        break;
+                    }
+                }
+            };
             let deadline = async {
                 match next {
                     Some((group_id, generation, seconds)) => {
@@ -570,6 +596,18 @@ where
                     let Some(game) = game.upgrade() else { break };
                     if let Some(step) = npc_step.take() {
                         game.run_npc_step_logged(&state, step).await;
+                    }
+                    continue;
+                }
+                _ = std::future::ready(()), if generation.is_some() => {
+                    let Some(game) = game.upgrade() else { break };
+                    if let Some(generation) = generation.take() {
+                        // Only a failure that could not be recorded comes back;
+                        // the same step would run again, so stop the worker.
+                        if let Err(error) = game.run_generation_step(&state, generation).await {
+                            tracing::error!(world_id, error = %format!("{error:#}"), "recording a world generation failure");
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -2345,6 +2383,145 @@ mod tests {
                 output_tokens: 1,
             },
         }
+    }
+
+    /// Everything the model was shown in one request: each message's text, its
+    /// own earlier tool calls and their results, and the names of the tools it
+    /// could call.
+    fn shown(request: &crate::llm::Request) -> String {
+        let mut shown = String::new();
+        for message in &request.messages {
+            match &message.content {
+                MessageContent::Text(text) => shown.push_str(text),
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        shown.push_str(&format!("[called {} {}]", call.name, call.arguments));
+                    }
+                }
+                MessageContent::ToolResult { content, .. } => {
+                    shown.push_str(&format!("[result {content}]"))
+                }
+                MessageContent::Speech(speech) => shown.push_str(&speech.text),
+            }
+            shown.push('\n');
+        }
+        for tool in &request.tools {
+            shown.push_str(&tool.name);
+            shown.push('\n');
+        }
+        shown
+    }
+
+    #[tokio::test]
+    async fn a_world_is_generated_from_a_seed_and_refuses_play_until_ready() {
+        let db = crate::store::TestDatabase::new("generation-test");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("maker@example.test", "Maker")
+            .await
+            .unwrap();
+        let member = store
+            .create_world_to_generate(&owner, "A drowned city")
+            .await
+            .unwrap();
+        let call = |name: &str, arguments: &str| {
+            response(Content::ToolCalls(vec![ToolCall {
+                id: name.into(),
+                name: name.into(),
+                arguments: arguments.into(),
+            }]))
+        };
+        let text = |text: &str| response(Content::Text(text.into()));
+        let (scripted, requests) = ScriptedBackend::recording([
+            text("Meta answers."),
+            call(
+                "ask_questions",
+                r#"{"questions":["Who rules?","What is feared?"]}"#,
+            ),
+            text("The tide-wardens rule."),
+            text("The drowned bell."),
+            text("Summary: a city ruled by tide-wardens."),
+            call("world_is_complete", "{}"),
+            text("  The Drowned Bell \n"),
+        ]);
+        let backend = InferenceScheduler::new(scripted, Limits::default()).unwrap();
+        // Listen before the worker starts so no step goes unseen.
+        let worlds = World::load(&store).await.unwrap();
+        let mut events = World::get(&worlds, member.world_id)
+            .unwrap()
+            .events
+            .subscribe();
+        let game = Game::new(
+            store.clone(),
+            worlds,
+            backend.foreground(),
+            Limits::default(),
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        );
+
+        // Seven steps: meta, ask, two answers, summary, ask, name.
+        let mut finished = 0;
+        while finished < 7 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                .await
+                .expect("a generation step did not finish")
+                .unwrap();
+            // Each step ends with a change that names no inference; the
+            // inferences announce their own.
+            if matches!(
+                event,
+                crate::inspection::DevEvent::Changed {
+                    inference_id: None,
+                    ..
+                }
+            ) {
+                finished += 1;
+            }
+        }
+
+        assert!(
+            store
+                .next_generation(member.world_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "no step is left once the concept is done"
+        );
+        let world = store.world(member.world_id).await.unwrap().unwrap();
+        assert_eq!(world.name, "The Drowned Bell");
+        assert!(!world.ready, "the concept alone does not open play");
+        assert!(world.failure.is_none());
+
+        let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
+        assert_eq!(shown.len(), 7);
+        assert!(shown[0].contains("A drowned city") && shown[0].contains("real personality"));
+        assert!(shown[1].contains("ask_questions") && shown[1].contains("world_is_complete"));
+        // The Storyteller never sees the Questioner's meta-questions.
+        assert!(shown[2].contains("Who rules?") && !shown[2].contains("real personality"));
+        assert!(shown[3].contains("What is feared?"));
+        // Only the summary reaches the Questioner, not the Storyteller's answers.
+        assert!(shown[5].contains("Summary: a city ruled by tide-wardens."));
+        assert!(
+            !shown[5].contains("The tide-wardens rule.") && !shown[5].contains("The drowned bell.")
+        );
+
+        // A player can open the world but nothing reaches it until it is ready.
+        let entered = game.enter(member.clone()).await.unwrap_err();
+        assert!(format!("{entered:#}").contains("still being created"));
+        let spoke = game
+            .player_message(member.clone(), "hello")
+            .await
+            .unwrap_err();
+        assert!(format!("{spoke:#}").contains("still being created"));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            7,
+            "refused input ran no inference"
+        );
     }
 
     #[tokio::test]

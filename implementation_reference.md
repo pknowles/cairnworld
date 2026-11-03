@@ -656,6 +656,28 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   "Name says to X: ..." text so recorded requests reconstruct exactly.
   Presence narration keeps its
   connected-PC audience.
+- World generation (design.md: Storyteller world creation; plans/storyteller-worlds.md
+  step 1; migration 0016; `src/store/generation.rs`, `src/game/generation.rs`). Every
+  world has `world.generation_stage` (`complete` for scenario imports by column default).
+  `Store::create_world_to_generate` (web `POST /worlds/generate`, optional seed prompt)
+  creates the world, its owner's membership with a blank Adventurer in no group
+  (`join_world_unplaced`; `place_adventurer` completes a join), and one Questioner and
+  one Storyteller agent (`world_role_agent`) with loop progress in `world_generation`.
+  The world worker takes one step per stage after NPC steps (`Store::next_generation`,
+  `Game::run_generation_step`, restoring `spent` into the shared `Budget`): the
+  Questioner answers `questioner.example_questions` and `meta_questions` once (its
+  history keeps them), then each round asks (`ask_questions` or `world_is_complete`)
+  with the seed and current summary as per-request context, not stored history; the
+  Storyteller answers each question as text, the first round in the history its
+  agent was created with and each later round in a new one (the inspector labels
+  them "Round N"), its reply becomes `storyteller_summary`, and after
+  `world_is_complete` its reply becomes the name. `Store::advance_generation` is the
+  one transition table; a failing step fails the world with the error on its
+  sequence. `Game::admit`/`queue_player_message` refuse input until `world_is_ready`,
+  and the play page redirects to the world page. The world page shows the status,
+  failure and expandable seed, and with Developer Mode on hosts the Inspect panel
+  (`WorldInspector` island; `ui.rs`'s `Inspector` is shared with `PlayerChat`).
+  Not built yet: authoring tools and BeginWorld, so a world stops at `concept_done`.
 - NPC speech responses (design.md: Character perceptions and NPC responses; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
   (`commit_speech`) opens an `npc_response_collection` whose candidates are the NPCs who heard

@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world.generation_stage, world.initial_prompt, world.storyteller_summary, world_generation.questions, world_generation.next_question, world_generation.spent, world_generation.questioner_branch_id, world_generation.storyteller_branch_id, questioner.agent_id AS questioner_agent_id, storyteller.agent_id AS storyteller_agent_id FROM world JOIN world_generation ON world_generation.world_id = world.id JOIN world_role_agent AS questioner ON questioner.world_id = world.id AND questioner.role = 'questioner' JOIN world_role_agent AS storyteller ON storyteller.world_id = world.id AND storyteller.role = 'storyteller' WHERE world.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation_stage",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "initial_prompt",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_summary",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "questions",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "next_question",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "spent",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "questioner_branch_id",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "storyteller_branch_id",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "questioner_agent_id",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "storyteller_agent_id",
+        "ordinal": 9,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "22b4232ba481c7555fd9ecc827f0eb7cdba5ac07dddc13a4d91b1c2386ef5a69"
+}

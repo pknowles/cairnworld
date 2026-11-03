@@ -1,9 +1,11 @@
 mod content;
+mod generation;
 mod history;
 mod interruption;
 mod npc;
 mod prompt;
 mod speech;
+pub use generation::{Advance, Generation, GenerationStage};
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
 pub use npc::{Decision, NpcStep, ResponseCollection, with_eagerness};
@@ -371,6 +373,12 @@ pub struct World {
     pub owner_id: i64,
     /// Owner-controlled inspection toggle. See `set_developer_mode`.
     pub developer_mode: bool,
+    /// The optional seed prompt the owner gave when creating the world.
+    pub seed: String,
+    /// Initialization is finished and players can act.
+    pub ready: bool,
+    /// Why initialization stopped, once it failed.
+    pub failure: Option<String>,
 }
 
 #[derive(Clone, Debug, FromRow, PartialEq)]
@@ -1504,23 +1512,33 @@ impl Store {
     }
 
     pub async fn owned_worlds(&self, owner_id: i64) -> Result<Vec<World>> {
-        sqlx::query_as!(
-            World,
-            "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\" FROM world \
-             JOIN world_owner ON world_owner.world_id = world.id \
-             WHERE world_owner.user_id = ? ORDER BY world.id",
+        let world_ids = sqlx::query_scalar!(
+            "SELECT world_id FROM world_owner WHERE user_id = ? ORDER BY world_id",
             owner_id,
         )
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("loading worlds owned by user {owner_id}"))
+        .with_context(|| format!("loading worlds owned by user {owner_id}"))?;
+        let mut worlds = Vec::with_capacity(world_ids.len());
+        for world_id in world_ids {
+            worlds.push(
+                self.world(world_id)
+                    .await?
+                    .with_context(|| format!("owner references missing world {world_id}"))?,
+            );
+        }
+        Ok(worlds)
     }
 
     pub async fn world(&self, world_id: i64) -> Result<Option<World>> {
         sqlx::query_as!(
             World,
-            "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\" FROM world \
-             JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
+            "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\", \
+                    world.initial_prompt AS seed, world.generation_stage = 'complete' AS \"ready!: bool\", \
+                    (SELECT sequence.error FROM sequence WHERE sequence.world_id = world.id \
+                       AND sequence.trigger = 'world generation' AND sequence.error IS NOT NULL \
+                       ORDER BY sequence.id DESC LIMIT 1) AS failure \
+             FROM world JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
             world_id,
         )
         .fetch_optional(&self.pool)
@@ -5904,9 +5922,8 @@ impl Store {
         self.reconstruct_inference(inference_id).await
     }
 
-    /// Every chat agent in a world - player, NPC and location GM - with its
-    /// game role, for the inspection navigation tree. (The Storyteller is
-    /// world data, not a chat agent.)
+    /// Every chat agent in a world - player, NPC, location GM, Storyteller and
+    /// Questioner - with its game role, for the inspection navigation tree.
     pub async fn world_agents(&self, viewer_id: i64, world_id: i64) -> Result<Vec<AgentInfo>> {
         self.inspecting(viewer_id, world_id).await?;
         sqlx::query_as!(
@@ -5916,7 +5933,8 @@ impl Store {
                       WHEN player_character.agent_id IS NOT NULL THEN 'player' \
                       WHEN npc_agent.agent_id IS NOT NULL THEN 'npc' \
                       WHEN world_gm.agent_id IS NOT NULL THEN 'world_gm' \
-                      ELSE 'unknown' END AS role, \
+                      WHEN world_role_agent.agent_id IS NOT NULL THEN world_role_agent.role \
+                      ELSE 'unknown' END AS \"role!: String\", \
                     COALESCE(pc.name, npc.name) AS character_name, \
                     NULL AS \"location_name?: String\" \
              FROM agent \
@@ -5925,6 +5943,7 @@ impl Store {
              LEFT JOIN npc_agent ON npc_agent.agent_id = agent.id \
              LEFT JOIN character AS npc ON npc.id = npc_agent.character_id \
              LEFT JOIN world_gm ON world_gm.agent_id = agent.id \
+             LEFT JOIN world_role_agent ON world_role_agent.agent_id = agent.id \
              WHERE agent.world_id = ? ORDER BY agent.id",
             world_id,
         )

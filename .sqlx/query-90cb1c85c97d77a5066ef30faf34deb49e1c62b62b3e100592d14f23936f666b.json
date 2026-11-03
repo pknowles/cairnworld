@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world SET generation_stage = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "90cb1c85c97d77a5066ef30faf34deb49e1c62b62b3e100592d14f23936f666b"
+}

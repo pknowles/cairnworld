@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world_generation SET questions = ?, next_question = 0 WHERE world_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "45741151be12bbbead2aa5e0240fc2978d54706e8df4b86dd3f1f7ee356db3f4"
+}

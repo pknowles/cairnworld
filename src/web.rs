@@ -13,7 +13,7 @@ use axum::{
 };
 use cairnworld::ui::{
     ChatActivity, ChatEntry, ChatRole, ChatTranscript, ClientEvent, DeveloperModeEnableButton,
-    GameLoading, PlayerChat, ServerEvent,
+    GameLoading, PlayerChat, ServerEvent, WorldInspector,
 };
 use hydration_context::SsrSharedContext;
 use leptos::prelude::*;
@@ -253,6 +253,7 @@ fn router(app: App, sessions: SqliteStore, secure_cookies: bool) -> Router {
         .route("/logout", post(logout))
         .route("/profile", post(update_display_name))
         .route("/worlds", post(create_bread_thief_world))
+        .route("/worlds/generate", post(create_generated_world))
         .route("/world/{world_id}", get(world_detail))
         .route("/world/{world_id}/developer-mode", post(set_developer_mode))
         .route(
@@ -561,6 +562,33 @@ async fn create_bread_thief_world(
         game.start_world(world);
     }
     Ok(Redirect::to(&format!("/world/{}", installed.world_id)))
+}
+
+#[derive(Deserialize)]
+struct SeedForm {
+    seed: String,
+}
+
+/// Create a world and start the Questioner and Storyteller developing it from
+/// the owner's optional seed prompt.
+async fn create_generated_world(
+    State(app): State<App>,
+    session: Session,
+    Form(form): Form<SeedForm>,
+) -> Result<Redirect, WebError> {
+    let user = session_user(&app.store, &session).await?;
+    // Serialize creation with model readiness so a world created during
+    // loading is included before generation starts.
+    let state = app.game.state.write().await;
+    let member = app
+        .store
+        .create_world_to_generate(&user, form.seed.trim())
+        .await?;
+    let world = crate::world::World::install(&app.game.worlds, member.world_id);
+    if let GameLoadState::Ready(game) = &*state {
+        game.start_world(world);
+    }
+    Ok(Redirect::to(&format!("/world/{}", member.world_id)))
 }
 
 async fn world_detail(
@@ -1043,8 +1071,13 @@ async fn game_page(
     State(app): State<App>,
     session: Session,
     Path((world_id, character_id)): Path<(i64, i64)>,
-) -> Result<Html<String>, WebError> {
+) -> Result<axum::response::Response, WebError> {
     let member = active_player_character(&app.store, &session, world_id, character_id).await?;
+    // A world still being created has nothing to play yet: its own page shows
+    // the progress.
+    if !app.store.world_is_ready(world_id).await? {
+        return Ok(Redirect::to(&format!("/world/{world_id}")).into_response());
+    }
     Ok(Html(match app.game.availability().await {
         GameAvailability::Loading => {
             render_page("Cairnworld", true, || view! { <GameLoadingPage/> })
@@ -1064,7 +1097,8 @@ async fn game_page(
             )
         }
         GameAvailability::Failed(error) => return Err(WebError::unavailable(error)),
-    }))
+    })
+    .into_response())
 }
 
 async fn game_status(State(app): State<App>) -> Result<StatusCode, WebError> {
@@ -1542,7 +1576,11 @@ fn Landing(user: Option<crate::store::User>, worlds: Vec<World>) -> impl IntoVie
                         <input class="input join-item w-full" name="display_name" value=name.clone() aria-label="Display name"/>
                         <button class="btn join-item" type="submit">"Save name"</button>
                     </form>
-                    <form class="mb-5" action="/worlds" method="post"><button class="btn btn-primary" type="submit">"Create Bread Thief world"</button></form>
+                    <form class="mb-5" action="/worlds/generate" method="post">
+                        <textarea class="textarea textarea-bordered w-full" name="seed" rows="3" placeholder="Optional seed prompt for a new world" aria-label="Seed prompt"></textarea>
+                        <button class="btn btn-primary mt-2" type="submit">"Create world"</button>
+                    </form>
+                    <form class="mb-5" action="/worlds" method="post"><button class="btn" type="submit">"Create Bread Thief world"</button></form>
                     <ul class="menu mb-5 rounded-box bg-base-200">{worlds.into_iter().map(|world| view! {
                         <li><a href=format!("/world/{}", world.id)>{world.name}</a></li>
                     }).collect_view()}</ul>
@@ -1566,14 +1604,23 @@ fn WorldDetail(
 ) -> impl IntoView {
     let is_owner = world.owner_id == viewer_id;
     let world_id = world.id;
+    let ready = world.ready;
+    let developer_mode = world.developer_mode;
     let world_path = format!("/world/{world_id}");
     let member_path = format!("{world_path}/members");
     let invitation_path = format!("{world_path}/invitations");
     let developer_mode_path = format!("{world_path}/developer-mode");
     view! {
-        <main class="min-h-dvh bg-base-200 p-4 sm:p-8">
-            <section class="card mx-auto max-w-5xl bg-base-100 shadow-xl"><div class="card-body gap-6">
-            <div class="flex flex-wrap items-center justify-between gap-4"><h1 class="card-title text-3xl">{world.name}</h1></div>
+        <main class="flex min-h-dvh flex-wrap items-start justify-center gap-4 bg-base-200 p-4 sm:p-8">
+            <section class="card w-full max-w-5xl bg-base-100 shadow-xl"><div class="card-body gap-6">
+            <div class="flex flex-wrap items-center justify-between gap-4">
+                <h1 class="card-title text-3xl">{world.name}</h1>
+                <span class="badge badge-lg">{if world.ready { "Complete" } else if world.failure.is_some() { "Failed" } else { "In progress" }}</span>
+            </div>
+            {world.failure.map(|failure| view! { <div class="alert alert-error whitespace-pre-wrap">{failure}</div> })}
+            {(!world.seed.is_empty()).then(|| view! {
+                <details><summary class="cursor-pointer">"Seed prompt"</summary><p class="whitespace-pre-wrap">{world.seed}</p></details>
+            })}
             {world.developer_mode.then(|| view! {
                 <div class="alert alert-error">"Developer Mode is on: every player can see complete internal game state."</div>
             })}
@@ -1593,8 +1640,8 @@ fn WorldDetail(
             <ul class="space-y-2">{members.into_iter().map(move |member| {
                 let is_active = member.access == "active";
                 let remove = is_owner && member.user_id != viewer_id && is_active;
-                let enter = member.user_id == viewer_id && is_active;
-                let create = member.user_id == viewer_id && is_active;
+                let enter = member.user_id == viewer_id && is_active && ready;
+                let create = member.user_id == viewer_id && is_active && ready;
                 let player = format!("{} ({})", member.display_name, member.access);
                 let remove_path = format!("{member_path}/{}", member.user_id);
                 view! { <li class=WORLD_DETAIL_ROW_CLASSES>
@@ -1633,6 +1680,7 @@ fn WorldDetail(
                 </section>
             })}
             </div></section>
+            {developer_mode.then(|| view! { <WorldInspector world_id developer_mode/> })}
         </main>
     }
 }
@@ -2822,6 +2870,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_world_being_created_shows_its_progress_and_inspection_on_its_own_page() {
+        let (app, store, _db, _game) = test_app_with_game().await;
+        let owner = store
+            .find_or_create_user("owner@example.test", "Owner")
+            .await
+            .unwrap();
+        let cookie = session_cookie(&store, owner.id).await;
+        assert_eq!(
+            form_request(
+                &app,
+                "POST",
+                "/worlds/generate",
+                Some(&cookie),
+                Some("seed=A+port+town+where+the+tide+is+wrong")
+            )
+            .await,
+            StatusCode::SEE_OTHER
+        );
+        let world = store.owned_worlds(owner.id).await.unwrap().remove(0);
+        assert!(!world.ready);
+        assert_eq!(world.seed, "A port town where the tide is wrong");
+        let path = format!("/world/{}", world.id);
+
+        let (status, html) = page(&app, &path, &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("In progress"));
+        assert!(html.contains("Seed prompt"));
+        assert!(
+            !html.contains("Enter world") && !html.contains("Create character"),
+            "nothing can be played yet"
+        );
+        assert!(
+            !html.contains("WorldInspector"),
+            "inspection is Developer Mode only"
+        );
+
+        form_request(
+            &app,
+            "POST",
+            &format!("{path}/developer-mode"),
+            Some(&cookie),
+            Some("enabled=true"),
+        )
+        .await;
+        let (_, html) = page(&app, &path, &cookie).await;
+        assert!(
+            html.contains("WorldInspector"),
+            "Developer Mode puts the inspection panel on the world's own page"
+        );
+        assert!(!html.contains("Enter world"));
+
+        // The play page is not for a world being created: it sends the player back.
+        let member = store.world_members(world.id).await.unwrap().remove(0);
+        let play = format!("{path}/characters/{}/play", member.characters[0].id);
+        let (status, _) = page(&app, &play, &cookie).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
     async fn shutdown_waits_for_open_streams_to_finish() {
         let (_app, _store, _db, game) = test_app_with_game().await;
         let mut stream = game.open_stream();
@@ -2909,6 +3016,22 @@ mod tests {
         cookie: Option<&str>,
     ) -> axum::http::StatusCode {
         form_request(app, method, uri, cookie, None).await
+    }
+
+    /// A page as the signed-in user's browser would receive it.
+    async fn page(app: &Router, uri: &str, cookie: &str) -> (StatusCode, String) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .uri(uri)
+            .header("cookie", cookie)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
     }
 
     /// `form` is sent as an `application/x-www-form-urlencoded` body, matching
@@ -3178,7 +3301,7 @@ mod tests {
         fn detail(viewer_id: i64) -> String {
             render_page("Cairnworld", false, move || {
                 view! { <WorldDetail
-                    world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode: false }
+                    world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode: false, seed: String::new(), ready: true, failure: None }
                     members=vec![
                         WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 8, name: "Rook".into() }, crate::store::WorldCharacter { id: 11, name: "Lark".into() }] },
                         WorldMember { user_id: 2, display_name: "Invitee".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 9, name: "Moth".into() }] },
@@ -3219,7 +3342,7 @@ mod tests {
         fn detail(developer_mode: bool, viewer_id: i64) -> String {
             render_page("Cairnworld", true, move || {
                 view! { <WorldDetail
-                    world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode }
+                    world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode, seed: String::new(), ready: true, failure: None }
                     members=vec![]
                     invitations=vec![]
                     viewer_id

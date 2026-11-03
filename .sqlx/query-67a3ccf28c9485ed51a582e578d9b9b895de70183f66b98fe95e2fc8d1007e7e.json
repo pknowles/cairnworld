@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\", world.initial_prompt AS seed, world.generation_stage = 'complete' AS \"ready!: bool\", (SELECT sequence.error FROM sequence WHERE sequence.world_id = world.id AND sequence.trigger = 'world generation' AND sequence.error IS NOT NULL ORDER BY sequence.id DESC LIMIT 1) AS failure FROM world JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "owner_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "developer_mode: bool",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "seed",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "ready!: bool",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "failure",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "67a3ccf28c9485ed51a582e578d9b9b895de70183f66b98fe95e2fc8d1007e7e"
+}

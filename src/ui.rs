@@ -382,6 +382,163 @@ struct PaneState {
     restore_scroll: RwSignal<Option<i32>>,
 }
 
+/// Everything the Inspect panel needs, created once per page so the chat page
+/// and the world page share one inspector.
+#[derive(Clone, Copy)]
+struct Inspector {
+    world_id: i64,
+    pane: PaneState,
+    narrow: RwSignal<bool>,
+    developer_mode: RwSignal<bool>,
+    events: RwSignal<Option<DevEvent>>,
+    error: RwSignal<Option<String>>,
+    reconnect_nonce: RwSignal<u32>,
+}
+
+impl Inspector {
+    fn new(world_id: i64, developer_mode: bool) -> Self {
+        let error = RwSignal::new(None::<String>);
+        #[cfg(feature = "hydrate")]
+        let initial_selection = match InspectSelection::from_location() {
+            Ok(selection) => selection,
+            Err(failure) => {
+                error.set(Some(format!("Invalid inspect URL: {failure}")));
+                None
+            }
+        };
+        #[cfg(not(feature = "hydrate"))]
+        let initial_selection = None;
+        let selection = RwSignal::new(initial_selection);
+        let restore_scroll = RwSignal::new(None::<i32>);
+        // Hydrate the same closed layout the server rendered; the selection
+        // effect opens it afterward, including when restoring an inspect URL.
+        let open = RwSignal::new(false);
+        let last_selection = RwSignal::new(initial_selection);
+        // Narrow screens show one of the already-mounted panes. This is distinct
+        // from `open`: Close still collapses Inspect to its edge strip, whereas
+        // the chat page's tabs only choose which pane CSS makes visible below `sm`.
+        let narrow = RwSignal::new(false);
+        // A signal, not the plain prop: an owner may toggle Developer Mode while
+        // this page stays open, and every active member's page must reflect it
+        // immediately (user_declarations.md), not only on reload.
+        let developer_mode = RwSignal::new(developer_mode);
+        // The most recent live event from /inspect/events, for the currently
+        // open inspect pane to patch itself with instead of a network re-fetch.
+        let events = RwSignal::new(None::<DevEvent>);
+        let reconnect_nonce = RwSignal::new(0u32);
+        let scroll = NodeRef::<leptos::html::Aside>::new();
+
+        #[cfg(feature = "hydrate")]
+        connect_dev_events(world_id, developer_mode, events, error, reconnect_nonce);
+
+        #[cfg(feature = "hydrate")]
+        {
+            // A normal selection writes one browser-history entry. A popstate
+            // selection skips that write, so Back/Forward changes only the pane
+            // and never makes another entry to bounce through.
+            let applying_popstate = RwSignal::new(false);
+            Effect::new(move |_| {
+                let selected = selection.get();
+                if applying_popstate.get_untracked() {
+                    applying_popstate.set(false);
+                    return;
+                }
+                if let Some(inspect) = scroll.get() {
+                    let inspect: HtmlElement = inspect.unchecked_into();
+                    if let Err(failure) = InspectSelection::remember_scroll(inspect.scroll_top()) {
+                        error.set(Some(failure));
+                        return;
+                    }
+                }
+                if let Err(failure) = InspectSelection::write_to_location(selected) {
+                    error.set(Some(failure));
+                }
+            });
+            Effect::new(move |_| {
+                if let Some(selected) = selection.get() {
+                    last_selection.set(Some(selected));
+                    open.set(true);
+                    narrow.set(true);
+                }
+            });
+            Effect::new(move |_| {
+                if error.get().is_some() {
+                    open.set(true);
+                }
+            });
+            Effect::new(move |_| {
+                if !developer_mode.get() {
+                    open.set(false);
+                    selection.set(None);
+                }
+            });
+            let on_popstate = Closure::<dyn Fn(Event)>::new(move |_| {
+                applying_popstate.set(true);
+                restore_scroll.set(InspectSelection::scroll_position());
+                match InspectSelection::from_location() {
+                    Ok(chosen) => {
+                        error.set(None);
+                        selection.set(chosen);
+                    }
+                    Err(failure) => {
+                        error.set(Some(format!("Invalid inspect URL: {failure}")));
+                        selection.set(None);
+                    }
+                }
+            });
+            if let Some(window) = web_sys::window() {
+                match window.add_event_listener_with_callback(
+                    "popstate",
+                    on_popstate.as_ref().unchecked_ref(),
+                ) {
+                    Ok(()) => on_popstate.forget(),
+                    Err(failure) => error.set(Some(format!(
+                        "Could not listen for browser history changes: {failure:?}"
+                    ))),
+                }
+            } else {
+                error.set(Some(
+                    "Could not listen for browser history changes: no browser window is available."
+                        .into(),
+                ));
+            }
+        }
+
+        Self {
+            world_id,
+            pane: PaneState {
+                selection,
+                open,
+                last_selection,
+                scroll,
+                restore_scroll,
+            },
+            narrow,
+            developer_mode,
+            events,
+            error,
+            reconnect_nonce,
+        }
+    }
+
+    /// The side panel, present while Developer Mode is on.
+    fn panel(self) -> impl IntoView {
+        move || {
+            self.developer_mode.get().then(|| {
+                inspect_pane(
+                    self.world_id,
+                    self.pane,
+                    self.narrow,
+                    self.events,
+                    self.developer_mode,
+                    self.error,
+                    self.reconnect_nonce,
+                )
+            })
+        }
+    }
+}
+
 /// The pane is owned by the chat island, so switching views only changes
 /// this local state; the mounted chat and its websocket stay intact
 /// (user_declarations.md: "Links between views are important for
@@ -1262,6 +1419,8 @@ fn agent_info_label(agent: &AgentInfo) -> String {
             .map(|name| format!("NPC agent — {name}"))
             .unwrap_or_else(|| "NPC agent".to_string()),
         "world_gm" => "Game Master".to_string(),
+        "questioner" => "Questioner".to_string(),
+        "storyteller" => "Storyteller".to_string(),
         role => format!("Unknown agent role ({role})"),
     }
 }
@@ -1619,11 +1778,12 @@ fn AgentHistoryView(
     data: RwSignal<Option<InspectData>>,
 ) -> impl IntoView {
     let single = branches.len() == 1;
+    let total = branches.len();
     view! {
         <div class="flex flex-col gap-3">
             <h3 class="text-sm font-semibold">{move || format!("{} chat history", agent_label(agent_id, agents))}</h3>
-            {branches.into_iter().map(|section| view! {
-                <BranchSectionView world_id agent_id agents section show_heading=!single selection data/>
+            {branches.into_iter().enumerate().map(|(position, section)| view! {
+                <BranchSectionView world_id agent_id agents section position total show_heading=!single selection data/>
             }).collect_view()}
         </div>
     }
@@ -1640,6 +1800,8 @@ fn BranchSectionView(
     agent_id: i64,
     agents: RwSignal<Vec<AgentInfo>>,
     section: BranchSection,
+    position: usize,
+    total: usize,
     show_heading: bool,
     selection: RwSignal<Option<InspectSelection>>,
     data: RwSignal<Option<InspectData>>,
@@ -1703,9 +1865,20 @@ fn BranchSectionView(
         });
     }
     let heading = show_heading.then(|| {
-        let label = match &section.head {
-            Some(head) => format!("Branch {branch_id} - {} (current)", head.group_name),
-            None => format!("Branch {branch_id} - retired"),
+        // A GM history belongs to a group; the Storyteller starts a fresh
+        // history for each round of questions.
+        let group_name = section.head.as_ref().map(|head| head.group_name.clone());
+        let label = move || {
+            let storyteller = agents
+                .get()
+                .iter()
+                .any(|agent| agent.id == agent_id && agent.role == "storyteller");
+            match (storyteller, &group_name) {
+                (true, _) if position + 1 == total => format!("Round {} (current)", position + 1),
+                (true, _) => format!("Round {}", position + 1),
+                (false, Some(name)) => format!("Branch {branch_id} - {name} (current)"),
+                (false, None) => format!("Branch {branch_id} - retired"),
+            }
         };
         let parents = section.parents.clone();
         view! {
@@ -2092,37 +2265,17 @@ pub fn PlayerChat(
     let hand_raised = RwSignal::new(false);
     let disconnected = RwSignal::new(false);
     let chat = NodeRef::<leptos::html::Ol>::new();
-    let inspect_scroll = NodeRef::<leptos::html::Aside>::new();
     let input = NodeRef::<leptos::html::Input>::new();
-    let dev_error = RwSignal::new(None::<String>);
+    let inspector = Inspector::new(world_id, developer_mode);
+    let PaneState {
+        selection: inspecting,
+        open: inspect_open,
+        last_selection: last_inspecting,
+        ..
+    } = inspector.pane;
+    let (narrow_inspect, developer_mode) = (inspector.narrow, inspector.developer_mode);
     #[cfg(feature = "hydrate")]
-    let initial_inspecting = match InspectSelection::from_location() {
-        Ok(selection) => selection,
-        Err(error) => {
-            dev_error.set(Some(format!("Invalid inspect URL: {error}")));
-            None
-        }
-    };
-    #[cfg(not(feature = "hydrate"))]
-    let initial_inspecting = None;
-    let inspecting = RwSignal::new(initial_inspecting);
-    let restore_inspect_scroll = RwSignal::new(None::<i32>);
-    // Hydrate the same closed layout the server rendered; the selection
-    // effect opens it afterward, including when restoring an inspect URL.
-    let inspect_open = RwSignal::new(false);
-    let last_inspecting = RwSignal::new(initial_inspecting);
-    // Narrow screens show one of the already-mounted panes. This is distinct
-    // from `inspect_open`: Close still collapses Inspect to its edge strip,
-    // whereas these tabs only choose which pane CSS makes visible below `sm`.
-    let narrow_inspect = RwSignal::new(false);
-    // A signal, not the plain prop: an owner may toggle Developer Mode while
-    // this page stays open, and every active member's page must reflect it
-    // immediately (user_declarations.md), not only on reload.
-    let developer_mode = RwSignal::new(developer_mode);
-    // The most recent live event from /inspect/events, for the currently
-    // open inspect pane to patch itself with instead of a network re-fetch.
-    let dev_events = RwSignal::new(None::<DevEvent>);
-    let dev_reconnect_nonce = RwSignal::new(0u32);
+    let dev_error = inspector.error;
 
     #[cfg(feature = "hydrate")]
     let socket = connect_player_chat(
@@ -2142,87 +2295,6 @@ pub fn PlayerChat(
     let interrupt_socket = socket.clone();
     #[cfg(feature = "hydrate")]
     let never_mind_socket = socket.clone();
-
-    #[cfg(feature = "hydrate")]
-    connect_dev_events(
-        world_id,
-        developer_mode,
-        dev_events,
-        dev_error,
-        dev_reconnect_nonce,
-    );
-
-    #[cfg(feature = "hydrate")]
-    {
-        // A normal selection writes one browser-history entry. A popstate
-        // selection skips that write, so Back/Forward changes only the pane
-        // and never makes another entry to bounce through.
-        let applying_popstate = RwSignal::new(false);
-        Effect::new(move |_| {
-            let selected = inspecting.get();
-            if applying_popstate.get_untracked() {
-                applying_popstate.set(false);
-                return;
-            }
-            if let Some(inspect) = inspect_scroll.get() {
-                let inspect: HtmlElement = inspect.unchecked_into();
-                if let Err(error) = InspectSelection::remember_scroll(inspect.scroll_top()) {
-                    dev_error.set(Some(error));
-                    return;
-                }
-            }
-            if let Err(error) = InspectSelection::write_to_location(selected) {
-                dev_error.set(Some(error));
-            }
-        });
-        Effect::new(move |_| {
-            if let Some(selected) = inspecting.get() {
-                last_inspecting.set(Some(selected));
-                inspect_open.set(true);
-                narrow_inspect.set(true);
-            }
-        });
-        Effect::new(move |_| {
-            if dev_error.get().is_some() {
-                inspect_open.set(true);
-            }
-        });
-        Effect::new(move |_| {
-            if !developer_mode.get() {
-                inspect_open.set(false);
-                inspecting.set(None);
-            }
-        });
-        let on_popstate = Closure::<dyn Fn(Event)>::new(move |_| {
-            applying_popstate.set(true);
-            restore_inspect_scroll.set(InspectSelection::scroll_position());
-            match InspectSelection::from_location() {
-                Ok(selection) => {
-                    dev_error.set(None);
-                    inspecting.set(selection);
-                }
-                Err(error) => {
-                    dev_error.set(Some(format!("Invalid inspect URL: {error}")));
-                    inspecting.set(None);
-                }
-            }
-        });
-        if let Some(window) = web_sys::window() {
-            match window
-                .add_event_listener_with_callback("popstate", on_popstate.as_ref().unchecked_ref())
-            {
-                Ok(()) => on_popstate.forget(),
-                Err(error) => dev_error.set(Some(format!(
-                    "Could not listen for browser history changes: {error:?}"
-                ))),
-            }
-        } else {
-            dev_error.set(Some(
-                "Could not listen for browser history changes: no browser window is available."
-                    .into(),
-            ));
-        }
-    }
 
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
@@ -2323,18 +2395,7 @@ pub fn PlayerChat(
                     <button class="btn btn-primary join-item" type="submit" disabled=move || !can_act.get() || disconnected.get()>"Send"</button>
                 </form>
             </div>
-            {move || {
-                let pane = PaneState {
-                    selection: inspecting,
-                    open: inspect_open,
-                    last_selection: last_inspecting,
-                    scroll: inspect_scroll,
-                    restore_scroll: restore_inspect_scroll,
-                };
-                developer_mode.get().then(|| {
-                    inspect_pane(world_id, pane, narrow_inspect, dev_events, developer_mode, dev_error, dev_reconnect_nonce)
-                })
-            }}
+            {inspector.panel()}
         </div>
     }
     .into_any();
@@ -2423,6 +2484,24 @@ fn watch_inspect_clicks(
             ))),
         }
     });
+}
+
+/// The Inspect panel on a world's own page, so Developer Mode can follow a
+/// world that has no group to play in yet. It starts open on the agent list.
+#[island]
+pub fn WorldInspector(world_id: i64, developer_mode: bool) -> impl IntoView {
+    let inspector = Inspector::new(world_id, developer_mode);
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        if inspector.developer_mode.get() {
+            inspector.pane.open.set(true);
+            inspector.narrow.set(true);
+            if inspector.pane.selection.get_untracked().is_none() {
+                inspector.pane.selection.set(Some(InspectSelection::Agents));
+            }
+        }
+    });
+    inspector.panel()
 }
 
 fn chat_status_line(

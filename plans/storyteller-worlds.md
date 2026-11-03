@@ -74,10 +74,12 @@ create objects.
 
 - The Storyteller and Questioner are one agent each per world
   (`world_role_agent(world_id, role, agent_id)`, like `world_gm`): the Storyteller
-  is declared as a single agent and gameplay reuses it. Each run starts on a new
-  empty history branch of that agent, so a round begins from the seed prompt and
-  latest summary only. Developer Mode lists the branches through the existing
-  branch graph, generalized from GM groups rather than copied.
+  is declared as a single agent and gameplay reuses it. The first round uses the
+  history the agent was created with and each later round a new empty one, so a
+  round begins from the seed prompt and latest summary only. Developer Mode lists
+  them as "Round N" through the existing branch graph, generalized from GM groups
+  rather than copied. The Inspect panel is hosted by the world's own page (the
+  shared `Inspector`), so a world with nothing to play yet needs no player page.
 - Every world has `generation_stage`, whatever filled it in: `complete` means
   ready to play (a scenario import is `complete` at once, and BeginWorld will set
   it). Otherwise it selects the next finite step, as `next_npc_step` does: `meta`,
@@ -92,8 +94,12 @@ create objects.
   that recording instead, and drop the column, if the store makes that cheap.
 - Each stage is one finite step run by the world worker; its outputs and next
   stage commit together, so a restart resumes at the stored stage. `meta`: the
-  Questioner answers the `prompts.toml` meta-questions. `ask`: given the seed
-  prompt and latest summary it calls `ask_questions` or `world_is_complete`.
+  Questioner is given the seed, example questions and meta-questions from
+  `prompts.toml` and answers the meta-questions. `ask`: given the seed prompt and
+  latest summary as per-request context (replaced each round, so it does not pile
+  up in its history) it asks thought-provoking questions with `ask_questions`, or
+  calls `world_is_complete` once the summary has a solid foundation across the
+  declared phases.
   `answer`: the Storyteller answers one question as plain text. `summarize`: its
   text reply is stored as the world summary, then `ask` runs again. After
   `world_is_complete`, `name`: its text reply is stored as the world name, then
@@ -104,10 +110,11 @@ create objects.
 - Reuse, not copies: split `create_adventurer` into creating the Adventurer and
   placing it in a group (joining a ready world does both; one still initializing only the first;
   entry placement later uses the second); readiness (`generation_stage` is
-  `complete`) is one check in `Game::admit`, the single admission point; the sequence, budget, failure and
-  Developer Mode handling of an NPC step moves into one function that the
-  generation steps share; new code lives in `store/generation.rs` and
-  `game/generation.rs`, not the 10k-line `store.rs` and `game.rs`.
+  `complete`) is one check shared by the two admission paths; new code lives in
+  `store/generation.rs` and `game/generation.rs`, not the 10k-line `store.rs` and
+  `game.rs`. An NPC step and a generation step share only `Budget::restore` and the
+  sequence calls: the NPC step is built on claims and response collections, so no
+  common step runner was extracted.
 
 | Choice | Alternatives | Decision |
 | --- | --- | --- |

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT spent FROM world_generation WHERE world_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "spent",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "751054aa5f17b6dc73e73704433e50a9a186f1a4e4dcd68ee84dfc3804e5e785"
+}

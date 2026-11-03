@@ -151,8 +151,9 @@ must use the same rendering mode or hydration expects different HTML markers.
 
 Everything the models are told lives in `prompts.toml` (roles, per-event
 requests, tool descriptions and tool-argument descriptions), grouped by agent:
-the GM, the player agent, NPCs, compaction, and the speech tools players and
-NPCs share. The server rereads the file whenever it changes, so an edit applies
+the GM, the player agent, NPCs, the Questioner and Storyteller that create a
+world (including the Questioner's `meta_questions` list), compaction, and the
+speech tools players and NPCs share. The server rereads the file whenever it changes, so an edit applies
 to the next model request with no rebuild or restart. A mistake (unknown key,
 missing argument text, wrong `{placeholder}`) fails the request that needs it
 and names the problem. `CAIRNWORLD_PROMPTS` selects another file. Text the game

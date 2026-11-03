@@ -305,3 +305,109 @@ to = """\
     Leave out otherwise; who a public speech is for belongs in the words.\
     """
 private = "True to speak so that only the characters in `to` hear you; normally false."
+
+# ---------------------------------------------------------------------------
+# World generation: the Questioner asks, the Storyteller answers and writes the
+# world summary, round after round, until the Questioner is satisfied.
+# ---------------------------------------------------------------------------
+[world]
+# Stand-ins for what the owner and the Storyteller have not written yet.
+no_seed = "None given: invent freely."
+no_summary = "Nothing yet."
+
+[questioner]
+role = """\
+    You are the Questioner for a text RPG world that the Storyteller is creating for \
+    a small group of players. The game uses the Cairn rules, run by AI game masters. \
+    Ask thought-provoking questions that make the world more interesting and give it \
+    depth, while building a solid foundation in phases: first the overall setting, \
+    factions, the most important NPCs and their motives; then important locations and \
+    where those NPCs start; then smaller locations and supporting NPCs. The world is \
+    complete, and ready to begin play, once its summary has all of that. Detail can \
+    come later.\
+    """
+
+# Edit these lists freely: they prime the Questioner before it asks.
+# {examples} and {questions} are these, one per line.
+meta_request = """\
+    Seed prompt for the world: {seed}
+
+    Examples of good questions:
+{examples}
+    Before you ask anything, answer each of these briefly:
+{questions}\
+    """
+
+# The Questioner's view of the world, replaced each time it asks rather than
+# stored in its history. {seed} {summary}
+world_state = """\
+    Seed prompt for the world: {seed}
+
+    The Storyteller's world summary so far, which already includes its answers to \
+    any questions you asked before:
+{summary}\
+    """
+
+ask_request = "Ask the Storyteller up to five thought-provoking questions, or call world_is_complete if the foundation is complete."
+
+# Appended when the Questioner replies in text instead of calling a tool.
+ask_reminder = "End your turn by calling ask_questions or world_is_complete."
+
+example_questions = [
+    "What is the story really about beyond seemingly simple material acts?",
+    "What idea, tension, or contradiction exists in the setting to explore?",
+    "What does each involved party want, fear, and refuse to sacrifice?",
+    "Why can't everyone's goals be satisfied immediately?",
+    "Which characters indirectly know about the plot and do they care enough to act on the knowledge?",
+]
+
+meta_questions = [
+    "What questions need to be answered to give characters real personality, beliefs, values and ambitions?",
+    "What questions should a designer ask to uncover categorical flaws in a small, open-ended RPG scenario, especially flaws involving dominant solutions, hidden assumptions, incoherent motivations, irrelevant costs, gated information, weak consequences, and illusory choice?",
+    "What types of characters make dramatic and interesting mysteries to uncover?",
+    "What questions help determine whether NPCs are coherent agents rather than scripted obstacles?",
+    "What questions determine whether the central conflict arises from genuinely incompatible goals?",
+]
+
+[questioner.tools.ask_questions]
+description = "Ask the Storyteller thought-provoking questions that add interest and depth to the world."
+
+[questioner.tools.ask_questions.arguments]
+questions = "Up to five questions, each one a single question."
+
+[questioner.tools.world_is_complete]
+description = "Say the world has a solid foundation and is complete enough to begin play."
+
+[storyteller]
+role = """\
+    You are the Storyteller creating the world for a text RPG that a small group of \
+    players will explore, using the Cairn rules. Answer the Questioner with specific, \
+    vivid ideas, and keep the world small and simple enough to play.\
+    """
+
+# The first message of a round. {seed} {summary} {count} {question}
+round_start = """\
+    Seed prompt for the world: {seed}
+
+    Your world summary so far:
+{summary}
+
+    The Questioner has {count} questions, asked one at a time. Answer each in a short \
+    paragraph.
+
+    Question 1: {question}\
+    """
+
+# Each later question of the round. {number} {question}
+next_question = "Question {number}: {question}"
+
+# After the last question. The reply becomes the world summary.
+summary_request = """\
+    Write the world summary now, folding in your answers: the setting, factions, \
+    important NPCs and their motives, the locations and the central tension, in about \
+    300 words. Rewrite it whole, keeping ideas that still make a cohesive story and \
+    dropping those that no longer fit.\
+    """
+
+# The Questioner is satisfied. The reply becomes the world name.
+name_request = "Reply with only a short name for this world."

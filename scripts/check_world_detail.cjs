@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { createServer } = require("node:http");
-const { fixture, forward, checkBrowser } = require("./browser_check.cjs");
+const { fixture, forward, forwardWebSocket, checkBrowser } = require("./browser_check.cjs");
 
 // Real production route: /world/:id resolves the real session and real
 // store data (the browser_checks fixture's owner, world and developer_mode
@@ -8,6 +8,9 @@ const { fixture, forward, checkBrowser } = require("./browser_check.cjs");
 const server = createServer((request, response) => {
   forward(request, response).catch(error => server.emit("error", error));
 });
+
+// With Developer Mode on, the page opens the live inspection socket.
+server.on("upgrade", forwardWebSocket(server, `/world/${fixture.modal_world_id}/inspect/events`));
 
 checkBrowser(server, async (tab, port) => {
   // Server-rendered controls must work before hydration attaches handlers.
@@ -48,6 +51,10 @@ checkBrowser(server, async (tab, port) => {
     assert.equal((await enableRedirect).status(), 303);
     await tab.getByText("Developer Mode is on", { exact: false }).waitFor();
     assert.equal(tab.url(), `http://127.0.0.1:${port}/world/${fixture.modal_world_id}`, "the redirect lands back on world detail");
+
+    // The world's own page hosts the inspection panel, listing its agents.
+    await tab.getByRole("heading", { name: "Inspect", exact: true }).waitFor();
+    await tab.getByText("Game Master", { exact: false }).first().waitFor();
   } finally {
     allowScripts();
     await tab.waitForLoadState("networkidle");
