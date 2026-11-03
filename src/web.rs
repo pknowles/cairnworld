@@ -2187,10 +2187,10 @@ mod tests {
                         .collect();
                     hearing_npcs.retain(|id| members.contains(id));
                     calls.push(ToolCall {id: "split-chat".into(), name: "split_group".into(), arguments: serde_json::json!({
-                        "group_id": group, "partitions": [
+                        "partitions": [
                             {"character_ids": members, "name": "chat players", "description": "together"},
                             {"character_ids": [mara_id, isolated.character_id], "name": "chat companions", "description": "apart"}
-                        ], "continue_with_character_id": actor.character_id
+                        ]
                     }).to_string()});
                 } else if stage == 3 {
                     let other = store
@@ -2238,7 +2238,15 @@ mod tests {
                             arguments: "{}".into(),
                         }]))
                     }));
+                let (actor_id, isolated_id) = (actor.character_id, isolated.character_id);
                 game.player_message(actor, "Look around.").await.unwrap();
+                let separated = store.character_group_id(actor_id).await.unwrap()
+                    != store.character_group_id(isolated_id).await.unwrap();
+                assert_eq!(
+                    separated,
+                    stage != 3,
+                    "stage {stage}: the scripted split (stage 0) and merge (stage 3) must change who is together"
+                );
                 // The next stage queues its own responses, so the NPCs' must
                 // be used first.
                 for _ in 0..400 {
