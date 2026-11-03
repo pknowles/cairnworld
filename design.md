@@ -1878,7 +1878,7 @@ starts from the seed and current summary without earlier answer transcripts.
 Questioner reviews world artifacts, including that summary and the objects
 created so far, not Storyteller's answer history. During conceptual development
 the summary supplies the artifact under review; construction review includes
-persisted objects. The three declared phases and focused location/NPC development
+persisted objects. The four declared phases and focused location/NPC development
 reuse these roles and bounded context assembly. Questioner is an invocation role,
 not a separate autonomous agent. A safety limit is a visible incomplete-generation
 failure, not permission to declare readiness or advance automatically.
@@ -1911,7 +1911,12 @@ The Questioner leads four phases: world summary, core objects, extended summary
 and detail objects. It reads created objects one at a time (ReadObject), flags each
 reviewed (MarkObjectReviewed) and ends a phase with its completion tool
 (WorldSummaryComplete, CoreObjectsCreated, ExtendedWorldSummaryComplete,
-DetailObjectsCreated), each of which verifies all objects are reviewed.
+DetailObjectsCreated). Only top-level objects are listed with a Reviewed flag; an
+NPC's items are read as part of the NPC. Modifying an object, or anything it
+contains, resets its Reviewed flag, and CoreObjectsCreated and
+DetailObjectsCreated verify every flag. CoreObjectsCreated starts the
+extended-summary cycle (canned message to both agents, Questioner-led questions
+and review) before ExtendedWorldSummaryComplete prompts detail objects.
 DetailObjectsCreated validates connected locations, required
 fields/backgrounds/motives, valid item types and holders, and world-local
 references, then makes character creation available without starting an

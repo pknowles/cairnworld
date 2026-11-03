@@ -64,16 +64,23 @@ after their rules dependencies. Campaign completion remains a separate plan.
    views of both agents, their inferences, the summary and progress. These are the
    "develop and review" checkpoint's loop, progress, failure and visibility
    bullets. The loop needs no authoring tools.
-2. **Authoring and review tools.** After [GM editing and lookup](gm-editing.md) is
-   merged: the Storyteller's Create/Update/Delete tools and lookup, the
-   Questioner's ReadObject/MarkObjectReviewed and phase tools (CoreObjectsCreated,
-   ExtendedWorldSummaryComplete, DetailObjectsCreated), mention reminders and
-   focused location/NPC development, with created objects appearing live in
-   Developer Mode. These are the remaining bullets of both checkpoints.
+2. **Core objects (phases 1 and 2).** After [GM editing and lookup](gm-editing.md)
+   is merged: the Storyteller's Create/Update/Delete tools and lookup, the
+   Questioner's ReadObject, MarkObjectReviewed and CoreObjectsCreated, mention
+   reminders and focused location/NPC development, with created objects appearing
+   live in Developer Mode. A world can be run with only its core objects, so until
+   step 3 CoreObjectsCreated validates the world and makes it ready. This departs
+   from the declarations (DetailObjectsCreated marks the world ready) and needs
+   the user's sign-off.
+3. **Extended summary and detail objects (phases 3 and 4).** CoreObjectsCreated
+   instead starts the extended-summary cycle; then ExtendedWorldSummaryComplete,
+   detail object creation and review, and DetailObjectsCreated as the point that
+   marks the world ready. A UI option to skip these for a smaller world is
+   undecided.
 
 Until step 2 a world finishing step 1 has a summary and name but no objects and is
-never ready. That is an incomplete world, not a fallback: only DetailObjectsCreated
-makes a generated world ready.
+never ready. That is an incomplete world, not a fallback: only the tool that ends
+the last implemented phase makes a generated world ready.
 
 ### Step 1 data and flow
 
@@ -193,12 +200,17 @@ makes a generated world ready.
   admission, not only in the browser.
 - The Questioner's phase tools follow the declarations. `world_summary_complete`
   (step 1) saves the summary, takes the title and prompts core object creation.
-  After that the Questioner lists the created objects with their Reviewed flag,
+  After that the Questioner lists the created top-level objects (not those
+  reached through another, such as an NPC's items) with their Reviewed flag,
   reads them one at a time with ReadObject, and records its progress with
-  MarkObjectReviewed. CoreObjectsCreated verifies every object is reviewed and
-  prompts detail objects; ExtendedWorldSummaryComplete saves the extended summary
-  and prompts objects for it; DetailObjectsCreated verifies every object is
-  reviewed, validates the declared connected location graph, required fields
+  MarkObjectReviewed. Modifying an object, or anything it contains such as an
+  NPC's item, resets that object's flag, so a stale review can never satisfy
+  completion and items need no flags of their own. CoreObjectsCreated verifies
+  every flag, then inserts the canned message to the Storyteller that the
+  extended summary begins and gives the Questioner the same, so it first asks
+  questions that produce a good extended summary and reviews it (step 3);
+  ExtendedWorldSummaryComplete saves that summary and prompts detail objects;
+  DetailObjectsCreated verifies every flag, validates the declared connected location graph, required fields
   including NPC backgrounds/motives, valid item types and holders, and
   world-local references, then sets `generation_stage` to `complete`. Missing
   optional narrative ideas are not structural errors. A rejection leaves the
@@ -273,6 +285,7 @@ combine cases rather than require repeated whole-world GPU runs by default.
 | Authoring and permissions | Scripted production-path calls create, partially update, edit long text and flag an NPC as deleted. Its record, membership/agent links and history remain stored and inspectable when Developer Mode includes deleted objects, but normal discovery/context/scheduling/actions exclude it. An NPC carrying items is blocked unless the call places the items at a location or deletes them too; a Group is flagged when its last NPC is removed; unrelated objects remain unchanged. Foreign IDs, dangling active references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
 | Review can change the result | Supply a known omission in persisted state; the review sees it rather than only the intended summary. An edit changes the next captured review input. Check AskQuestions and each phase completion tool without requiring particular prose. |
 | Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive current summary/artifacts without earlier answer transcripts; private NPC information stays with authorized roles. NPC creation uses the same activity/resource state as other characters; initialization causes no autonomous action or resource reset. |
+| Review state | Reviewing an NPC lists its items inside the NPC with no flag of their own. Editing one of its items resets the NPC's flag; CoreObjectsCreated is refused until it is reviewed again. An object listed unreviewed keeps the phase open. |
 | Mention reminders | A marked uncreated mention appears as a reminder; creation updates that reminder. Intentionally leaving it uncreated does not block DetailObjectsCreated. Unmarked ordinary prose does not manufacture obligations. |
 | Readiness and lifecycle | Entering during generation allows status inspection but no character creation/action/NPC response. DetailObjectsCreated with unreviewed objects or an invalid world changes nothing; a successful one opens character creation without starting an empty-world simulation. An inference failure or budget exhaustion remains visible and never opens play. Clean shutdown and crash use the existing lifecycle without replaying committed edits. |
 

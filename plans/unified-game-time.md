@@ -124,7 +124,7 @@ turn_time + 10)` update and immediate tool-call order as declared constraints.
   Cross-group synchronization and mid-travel placement need explicit policy;
   they are not solved by automatically completing activities when groups merge.
 - [Storyteller initialization](storyteller-worlds.md) uses the resulting character
-  constructors and fields, with all gameplay inactive before BeginWorld.
+  constructors and fields, with all gameplay inactive until world generation completes.
 - Retain natural conversation stopping as user-owned tuning; a dialogue-initiation
   cost does not prove replies terminate. Group drift by hours, time jumps on
   merge, combat-length Delay and out-of-turn action queues remain exploratory.

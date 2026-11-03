@@ -31,7 +31,7 @@ define their development access scope before implementing the transport.
    D2; leave/close releases them through that same implementation.
    Preserve world initialization admission: an initializing world can be
    inspected, but MCP entry/chat cannot start character creation, GM narration
-   or NPC play before BeginWorld. Reuse the browser/game lifecycle checks.
+   or NPC play before world generation completes. Reuse the browser/game lifecycle checks.
 3. Move import/export/replay command bodies from main.rs into server library
    functions callable by CLI and MCP. import creates a new owned world; export
    uses the same scenario serializer. replay accepts explicit replacement segment

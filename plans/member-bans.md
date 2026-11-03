@@ -17,7 +17,7 @@ Developer Mode has already established live access revocation; reuse it.
    transaction, a first acceptance consumes one slot and creates the initial
    membership/character/group/history relationships.
    For an initializing world, accept membership and allow status inspection but
-   defer character creation/group entry to the normal post-BeginWorld path.
+   defer character creation/group entry to the normal post-generation path.
    Reuse the initialization gate rather than bypassing it in invitation handling.
 2. Replace remove_member with ban_member and add reactivate_member. Both validate
    owner/world/target, reject self-ban, update the existing row and publish the
