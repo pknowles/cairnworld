@@ -1828,32 +1828,34 @@ A character whose player has timed out or is away does nothing and skips its
 short turns through EndTurn, without resetting its ready times. For travel it goes with
 a strict majority of the party, and otherwise, including a tie, stays where it is.
 
-The action that needs a human response persists
-`pending_reply(action_id, character_id, deadline, status, response_content_id)`;
-its deadline and intended character are explicit. The corresponding
-`pending_action` also holds a typed `Intervention|Travel` continuation, original
-invocation/call IDs and the ordered remaining tool-call ordinals. It retains
-budget consumption. It never serializes a Rust future or re-executes earlier tools.
-
-The agent loop returns `AwaitingReply(action_id)` up through its call stack; each
-waiting invocation remains recorded. The world queue is then free. Only the
+A reply that needs a human persists
+`pending_reply(action_id, character_id, deadline, status, response_content_id)`; its
+deadline and intended character are explicit. Nothing is suspended and nothing
+is resumed mid-response: the asking agent's turn simply ends with a result saying
+who it is waiting for, and the answers later reach it as a new message that starts
+a new turn of the same agent on the same pending action. State lives in rows and
+agent histories, never in a stored continuation, a serialized future or an
+unwound call stack. The world queue is free while players think. Only the
 requested character's ordinary input is accepted as a response to that action;
 their player agent interprets text and calls the offered tools (stay/join/object
-for travel; do_nothing or an action for an intervention) with
-that explicit action ID. Other characters may continue legal independent work.
-A response or deadline event updates the pending reply and continues the stored
-continuation once; original completed tool results are reused. Recheck mutable
-preconditions before moving. Restart reconstructs these concrete
-continuations from rows and wakes for outstanding deadlines.
+for travel; do_nothing or an action for an intervention) with that explicit
+action ID. Other characters may continue legal independent work. A response or a
+deadline updates the pending reply; when the last reply of the question settles,
+exactly one message carrying all the answers is appended to the asking agent's
+history and its turn runs. Restart re-evaluates settled questions and wakes for
+outstanding deadlines. Recheck mutable preconditions before acting on an answer.
 
-InterventionCheck asks players as well as NPCs. NPCs answer at once through child
-decisions; each selected player character gets a pending reply, the question
-(what is about to happen, who is doing it) appears in their chat, and their agent
-returns do_nothing or the action they intervene with. The GM's call continues
-when every selected character has answered or timed out. A timeout is not an
-error: the recorded answer is do_nothing, so the original action then goes ahead
-unless the GM decides otherwise. A reaction that comes back is handled as any
-other (approve it, see its result, then decide the original action).
+InterventionCheck asks players as well as NPCs, all at once: the question (what is
+about to happen, who is doing it) appears in every selected player's chat and their
+deadlines start together, while the NPCs' decisions run in the meantime and are
+recorded in any order (they do not depend on each other). Players are never asked
+one after another. The GM's next turn starts when every selected character has
+answered or timed out, and it receives all the answers together. A timeout is not
+an error: the recorded answer is do_nothing, so the original action then goes
+ahead unless the GM decides otherwise. A reaction that comes back is handled as
+any other (approve it, see its result, then decide the original action). Calls
+that follow the check in the same response are not run, and say so in their
+result, because the model wrote them before seeing the answers.
 
 Travel takes a Connection ID, validates that one endpoint is the source group's
 location, and asks the group's other characters to Follow/stay/object through

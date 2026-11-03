@@ -1022,3 +1022,18 @@ strict question to the GM", and an ask that "isn't a question or isn't something
 or is allowed to answer" should be rejected with a reason. The GM now judges an ask in a
 request of its own (answer or reject only); how reliably it rejects speech and requests to
 other characters is not solved there.
+
+## 2026-11-04: Player replies run in parallel and join; no stored continuation
+
+Alternatives for waiting on a human in an InterventionCheck: (a) design.md's original
+stored continuation, unwinding the GM loop, the player's `attempt` tool and the player agent
+loop and resuming mid-response; (b) the GM's turn ends and a new turn runs on the answers.
+Chosen (b), after the user's direction:
+
+> This actually matches how we handle NPCs too I think where we first record all NPC
+> responses and can do that in any order. The player responses (remember that we can have
+> multiple) can be shown in parallel (do NOT serialize this) while we also run NPC
+> inference. Then we join them all, waiting with a timeout for players that do not respond
+> in time and finally process all responses.
+
+design.md (Player replies and coordinated travel) and plans/player-replies.md updated to match.
