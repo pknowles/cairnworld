@@ -124,6 +124,12 @@ impl Tool {
         }
     }
 
+    /// This tool, but a completed call ends the turn like `ending`.
+    pub fn into_ending(mut self) -> Self {
+        self.ends_turn = true;
+        self
+    }
+
     /// A tool whose completed call ends the turn. It must be the last call in
     /// its response, after calls that all succeeded.
     pub fn terminal(

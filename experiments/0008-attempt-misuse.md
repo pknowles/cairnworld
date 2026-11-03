@@ -129,3 +129,25 @@ non-question 0 times in 100 under every wording, and rejected the unanswerable q
 reject. Reading its reasoning (thinking switched on): it treats the description as the
 character's action, judges whether that could happen in the scene, and plans to narrate
 what Toma says.
+
+## A request of its own for an ask
+
+The ask is judged in a request that offers only `answer` (delivered to the asker alone, which
+approves the ask) and `reject_action`, with the role "A character sent you this as a question.
+Answer it from the scene. If it is not a question to you, such as speech to another character,
+a request or an action, or you cannot or may not answer it, reject it...". 20 samples each at
+the production sampling, on the request the product sends; answered / rejected:
+
+| Request | Real question | Toma speaking | Mara addressing the Adventurer | An action | Story-end question |
+|---|---|---|---|---|---|
+| as the product sends it | 20 / 0 | 17 / 0 (3 plain text) | 20 / 0 | 0 / 20 | 0 / 20 |
+| request line neutral ("sent this as an ask") instead of "asks you" | 20 / 0 | 20 / 0 | 20 / 0 | 7 / 13 | 0 / 20 |
+| criterion on the `answer` and `reject_action` descriptions | 20 / 0 | 14 / 6 | 20 / 0 | 0 / 20 | 20 / 0 |
+| neutral line and tool descriptions | 20 / 0 | 20 / 0 | 20 / 0 | 0 / 20 | 20 / 0 |
+
+The hypothesis that the request line "X asks you" made the GM treat the text as a question was
+not supported: the neutral line did not improve speech or requests. Thinking-mode reasoning shows
+the GM often recognising that the text is speech to another character and still choosing to
+respond to it as the GM. The speech and request cases remain unsolved here; the decision was to
+fix the characters misusing `ask` rather than add rules to the GM (user_exerpts.md, 2026-11-03).
+

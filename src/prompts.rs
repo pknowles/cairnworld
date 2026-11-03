@@ -33,6 +33,8 @@ pub struct Prompts {
 #[serde(deny_unknown_fields)]
 pub struct Gm {
     pub role: String,
+    pub ask_role: String,
+    pub ask_request: String,
     pub narrate_reminder: String,
     pub narrate_next: String,
     pub decide_next: String,

@@ -1004,3 +1004,21 @@ measured problem):
 
 On asking players in an InterventionCheck: "yes, ask players now unless you have a good
 reason not to, i.e. it is blocked by a future item" (plans/player-replies.md).
+
+## 2026-11-03: `ask` misuse is fixed at the source, not by a page of GM rules
+
+The GM was approving anything sent as an `ask` (speech, actions, requests to others), and
+tuning its judgement of what is a question did not hold across cases (experiments/0008).
+
+> the initial failure is an agent using "ask" incorrectly. that should be the focus. it would
+> be nice to have the GM get things back on track when they go wrong, but making them not go
+> wrong in the first place is better
+>
+> lets keep what works best on balance (i.e. a page of rules is just not worth it as the GM
+> already has a lot to contend with)
+
+Earlier the same day, for the requirement itself: "ask invites an answer only - this is a
+strict question to the GM", and an ask that "isn't a question or isn't something the gm can
+or is allowed to answer" should be rejected with a reason. The GM now judges an ask in a
+request of its own (answer or reject only); how reliably it rejects speech and requests to
+other characters is not solved there.

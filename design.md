@@ -1408,7 +1408,11 @@ the model-facing tool definitions small (four near-identical definitions were
 44% of a player agent's tool text). Preserve the chosen kind and description in
 the recorded request and GM context. Shared submission, authorization and
 arbitration do not imply identical fictional effects or separate executors. Ask
-addresses the GM; spoken questions to characters still use Speak. Existing action rules and world-state operations determine what
+addresses the GM; spoken questions to characters still use Speak. An ask is judged in a
+request of its own that offers the GM only `answer` (delivered to the asker alone, and it
+approves the ask) and `reject_action` (its reason is delivered to the asker alone); the GM's
+other decisions and narration are not offered, so an ask cannot be approved and narrated
+to the group. Existing action rules and world-state operations determine what
 can actually happen; a new tool name does not itself implement missing mechanics.
 
 Likewise expose take, give, drop and place as one `transfer` tool: a `kind`, the

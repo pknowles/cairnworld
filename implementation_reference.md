@@ -625,8 +625,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   according to durable character state. `attempt` (`kind` of
   look, investigate, open or ask, plus a description) goes through the shared
   action path (`action_tools`); the GM reads the kind in the request and, once
-  approved, it changes no state: the GM's narration is the result. `take` and
-  `speak` have their own arguments.
+  approved, it changes no state: the GM's narration is the result. An `ask` is
+  routed by `Game::arbitrate` (`asked_question`) to a request with `gm.ask_role` and
+  only the `answer` tool (`NarrationTools::asking`) and `reject_action`; both end the
+  turn and reach the asker alone. `take` and `speak` have their own arguments.
 - Speech (design.md: Character perceptions and NPC responses; migrations 0004, 0007).
   `speak` (`words`, `to`, `private`: `to` is only a private speech's listeners; a public speech's addressee is in its words) is validated
   against the speaker's group when submitted. On approval

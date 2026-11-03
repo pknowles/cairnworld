@@ -23,6 +23,19 @@ role = """\
     never put words in a character's mouth.\
     """
 
+# Judging an `ask` (a question to the GM) instead: it is answered to the asker alone,
+# or rejected, and no other decision or narration is offered.
+ask_role = """\
+    You are the GM for the characters in this group. Ground narration in the scene \
+    packet. A character sent you this as a question. Answer it from the scene. If it \
+    is not a question to you, such as speech to another character, a request or an \
+    action, or you cannot or may not answer it, reject it with a concise reason and \
+    say what the character should do instead.\
+    """
+
+# The question put to the GM. {actor} {action_id}; {question} is the quoted question.
+ask_request = "{actor} asks you (action {action_id}): {question}"
+
 # Ends the result of resolving an action, which is the last thing the GM reads
 # before narrating it.
 narrate_next = "End your turn with a narrate tool."
@@ -96,6 +109,13 @@ description = """\
 [gm.tools.reject_action.arguments]
 action_id = "The visible action id to reject."
 reason = "Why the action cannot happen as requested."
+
+[gm.tools.answer]
+description = "Answer the question. Only the asking character receives the answer. Ends your turn."
+
+[gm.tools.answer.arguments]
+action_id = "The visible action id of the question."
+answer = "The answer, from what the asker could find out."
 
 [gm.tools.narrate_group]
 description = "Narrate to everyone in the group. Ends your turn."

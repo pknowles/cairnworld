@@ -1488,6 +1488,21 @@ where
         // earlier approval's result, or vice versa.
         let prompts = prompts::current()?;
         let presented: PresentedActions = Arc::new(Mutex::new(vec![pending.clone()]));
+        let question = asked_question(&pending);
+        let asking = question.is_some();
+        let scope = NarrationScope {
+            world_id: pending.world_id,
+            in_group: pending.character_id,
+            actor: Some(pending.character_id),
+            presented: Arc::clone(&presented),
+        };
+        // A question to the GM is answered to the asker or rejected, nothing else.
+        let narrate = if asking {
+            NarrationTools::asking(self, scope)?
+        } else {
+            NarrationTools::new(self, scope)?
+        };
+        let rejection_notice = asking.then(|| narrate.rejection_notice(pending.character_id));
         // Approving speech is a tool of its own, so approving anything else offers no
         // speech options to fill in (experiments/0008-attempt-misuse.md).
         let approval_tool = |name: &'static str,
@@ -1639,6 +1654,7 @@ where
                 let tool_execution_id = context.tool_execution_id;
                 let game = Arc::clone(&game);
                 let presented = Arc::clone(&rejection_presented);
+                let notice = rejection_notice.clone();
                 Box::pin(async move {
                     let rejection: RejectAction = match serde_json::from_str(&arguments)
                         .context("parsing action rejection")
@@ -1678,11 +1694,23 @@ where
                             inference_id: None,
                         });
                     match resolved.outcome {
-                        ActionOutcome::Rejected(_) => Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} rejected: {} {}",
+                        ActionOutcome::Rejected(_) => {
+                            if let Some(notice) = &notice {
+                                notice(&rejection.reason);
+                            }
+                            Ok(ToolOutcome::Completed(format!(
+                            "Action {action_id} rejected: {}{}",
                             rejection.reason,
-                            next_step(&game.store, pending.world_id, &presented).await?
-                        ))),
+                            if asking {
+                                String::new()
+                            } else {
+                                format!(
+                                    " {}",
+                                    next_step(&game.store, pending.world_id, &presented).await?
+                                )
+                            }
+                        )))
+                        }
                         ActionOutcome::Applied(_) | ActionOutcome::Failed(_) => {
                             Ok(ToolOutcome::Rejected(format!(
                                 "Tool arguments were rejected: action {action_id} was already approved, it cannot now be rejected"
@@ -1692,6 +1720,12 @@ where
                 }) as ToolFuture
             },
         );
+        // Rejecting an ask is all the GM has to do with it.
+        let reject_tool = if asking {
+            reject_tool.into_ending()
+        } else {
+            reject_tool
+        };
         let split_tool = Tool::new(
             prompts.gm.tools.tool(
                 "split_group",
@@ -1946,27 +1980,22 @@ where
                 }) as ToolFuture
             },
         );
-        let narrate = NarrationTools::new(
-            self,
-            NarrationScope {
-                world_id: pending.world_id,
-                in_group: pending.character_id,
-                actor: Some(pending.character_id),
-                presented: Arc::clone(&presented),
-            },
-        )?;
-        let reminder = narrate.reminder()?;
-        let tools: Vec<Tool> = [
-            approve_tool,
-            approve_speech_tool,
-            reject_tool,
-            split_tool,
-            merge_tool,
-            intervention_tool,
-        ]
-        .into_iter()
-        .chain(narrate.tools.iter().cloned())
-        .collect();
+        let (tools, reminder): (Vec<Tool>, Option<String>) = if asking {
+            (vec![narrate.tools[0].clone(), reject_tool], None)
+        } else {
+            let tools = [
+                approve_tool,
+                approve_speech_tool,
+                reject_tool,
+                split_tool,
+                merge_tool,
+                intervention_tool,
+            ]
+            .into_iter()
+            .chain(narrate.tools.iter().cloned())
+            .collect();
+            (tools, Some(narrate.reminder()?))
+        };
         let scene = self
             .store
             .gm_scene(pending.world_id, pending.gm_branch_id)
@@ -1974,20 +2003,37 @@ where
             .context("loading group GM scene for prompt")?;
         let actor = self.store.character_name(pending.character_id).await?;
         let scene_packet = Self::gm_packet(&scene)?;
-        let role = Message::text(Role::System, &prompts.gm.role);
+        let role = Message::text(
+            Role::System,
+            if asking {
+                &prompts.gm.ask_role
+            } else {
+                &prompts.gm.role
+            },
+        );
         let note = note.map(|note| format!(" {note}")).unwrap_or_default();
         let request = Message::text(
             Role::User,
-            prompts::fill(
-                &prompts.gm.action_request,
-                &[
-                    ("actor", &actor),
-                    ("action_id", &action_id.to_string()),
-                    ("tool", &pending.tool),
-                    ("arguments", &pending.args),
-                    ("note", &note),
-                ],
-            )?,
+            match &question {
+                Some(question) => prompts::fill(
+                    &prompts.gm.ask_request,
+                    &[
+                        ("actor", &actor),
+                        ("action_id", &action_id.to_string()),
+                        ("question", &serde_json::to_string(question)?),
+                    ],
+                )?,
+                None => prompts::fill(
+                    &prompts.gm.action_request,
+                    &[
+                        ("actor", &actor),
+                        ("action_id", &action_id.to_string()),
+                        ("tool", &pending.tool),
+                        ("arguments", &pending.args),
+                        ("note", &note),
+                    ],
+                )?,
+            },
         );
         self.store
             .append_instruction(branch, &request, pending.sequence_id)
@@ -2003,7 +2049,7 @@ where
                 static_messages: &[role],
                 dynamic_context: &[scene_packet.as_str()],
                 tools: &tools,
-                terminal_reminder: Some(&reminder),
+                terminal_reminder: reminder.as_deref(),
                 sampling: self.sampling.clone(),
                 model: &self.model,
             },
@@ -2044,15 +2090,14 @@ where
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AttemptAction {
-    // The GM reads it in the request; Rust does not act on it.
-    #[serde(rename = "kind")]
-    _kind: AttemptKind,
+    // The GM reads it in the request; Rust only routes an `ask`.
+    kind: AttemptKind,
     // What the character does, and to what.
     description: String,
 }
 
 // The ways to attempt something; they differ only in the intent the GM reads.
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[schemars(inline)]
 enum AttemptKind {
@@ -2071,6 +2116,15 @@ struct TakeAction {
     // the request; Rust does not act on it.
     #[serde(default, rename = "committed")]
     _committed: bool,
+}
+
+/// The question, when this action is an `ask` of the GM.
+fn asked_question(pending: &PendingAction) -> Option<String> {
+    if pending.tool != "attempt" {
+        return None;
+    }
+    let action: AttemptAction = serde_json::from_str(&pending.args).ok()?;
+    (action.kind == AttemptKind::Ask).then_some(action.description)
 }
 
 fn validate_attempt_action(arguments: &str) -> Result<()> {
@@ -4244,6 +4298,13 @@ mod tests {
     /// narrates as a real one does (nothing for conveyed speech); `None` when the
     /// request is not the GM's. Only the GM is offered approve_action.
     fn mechanical_gm(request: &crate::llm::Request) -> Result<Option<Response>> {
+        // An ask is judged in a request that offers only `answer` and `reject_action`.
+        if request.tools.iter().any(|tool| tool.name == "answer") {
+            return Ok(Some(tool_call(
+                "answer",
+                serde_json::json!({"action_id": 1, "answer": "It is done."}),
+            )));
+        }
         if !request
             .tools
             .iter()
@@ -4538,12 +4599,12 @@ mod tests {
                     decision = decision.or(calls
                         .iter()
                         .find(|call| {
-                            matches!(call.name.as_str(), "approve_action" | "reject_action")
+                            matches!(call.name.as_str(), "answer" | "reject_action")
                         })
                         .map(|call| call.name.clone()));
                 }
             }
-            let answered = decision.as_deref() == Some("approve_action");
+            let answered = decision.as_deref() == Some("answer");
             if answered != should_answer {
                 wrong.push(format!("{asker} asked {question:?}: {decision:?}"));
             }
@@ -4557,7 +4618,7 @@ mod tests {
 
     /// Known failing; see plans/agent-tuning.md.
     #[tokio::test]
-    #[ignore = "known failure: the GM approves every ask (plans/agent-tuning.md); needs a CUDA GPU"]
+    #[ignore = "open requirement: the GM must reject any ask that is not a question it may answer (plans/agent-tuning.md); needs a CUDA GPU"]
     async fn the_gm_answers_a_question_and_rejects_any_other_ask() {
         let model = DeviceModel::load().await;
         real_model_gm_answers_a_question_and_rejects_any_other_ask(&model).await;
@@ -6361,6 +6422,76 @@ mod tests {
         assert_eq!(narrations(&scene.store, &scene.first).await.len(), 1);
     }
 
+    /// An `ask` is a question to the GM: it offers only `answer` and
+    /// `reject_action`, and the answer reaches the asker alone.
+    #[tokio::test]
+    async fn the_gm_answers_an_ask_to_the_asker_alone_or_rejects_it() {
+        let scene = speech_scene().await;
+        for member in [&scene.first, &scene.second] {
+            scene
+                .store
+                .mark_character_present(member.character_id)
+                .await
+                .unwrap();
+        }
+        let ask = |question: &str| {
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "ask", "description": question}),
+            )
+        };
+        scene.responses.lock().unwrap().extend([
+            ask("What is the hut built from?"),
+            tool_call(
+                "answer",
+                serde_json::json!({"action_id": 1, "answer": "Warped boards."}),
+            ),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "What is the hut built from?")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+        assert_eq!(
+            narrations(&scene.store, &scene.first).await,
+            ["Warped boards."]
+        );
+        assert!(narrations(&scene.store, &scene.second).await.is_empty());
+        {
+            let requests = scene.requests.lock().unwrap();
+            let gm = &requests[1];
+            let mut tools: Vec<_> = gm.tools.iter().map(|tool| tool.name.as_str()).collect();
+            tools.sort();
+            assert_eq!(tools, ["answer", "reject_action"]);
+        }
+
+        scene.responses.lock().unwrap().extend([
+            ask("Toma speaks up: \"Leave my door alone.\""),
+            tool_call(
+                "reject_action",
+                serde_json::json!({"action_id": 2, "reason": "That is speech; use speak."}),
+            ),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Say something.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+        assert_eq!(
+            narrations(&scene.store, &scene.first).await,
+            ["Warped boards.", "That is speech; use speak."]
+        );
+        assert!(narrations(&scene.store, &scene.second).await.is_empty());
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pending_action")
+            .fetch_one(&scene.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+        assert_no_rejected_output(&scene.store).await;
+    }
+
     #[tokio::test]
     async fn the_gm_may_approve_and_narrate_in_one_response() {
         let scene = speech_scene().await;
@@ -6527,7 +6658,8 @@ mod tests {
     #[tokio::test]
     async fn each_attempt_kind_reaches_the_gm_with_its_kind_and_is_resolved_like_any_action() {
         let scene = speech_scene().await;
-        let kinds = ["look", "investigate", "open", "ask"];
+        // An ask is a question to the GM, judged in its own request.
+        let kinds = ["look", "investigate", "open"];
         let approved_before: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM action WHERE approved = 1")
                 .fetch_one(&scene.store.pool())
@@ -6574,7 +6706,7 @@ mod tests {
             .fetch_one(&scene.store.pool())
             .await
             .unwrap();
-        assert_eq!(approved - approved_before, 4);
+        assert_eq!(approved - approved_before, 3);
         assert!(failed_sequences(&scene).await.is_empty());
     }
 

@@ -42,11 +42,22 @@ deadline and AFK counting; see plans/player-replies.md.
 
 ## The GM approves an ask that is not a question
 
-`ask` is a question for the GM. The GM approves everything sent as an ask, including
-speech and actions, and then narrates it. Runnable check:
-`cargo test the_gm_answers_a_question_and_rejects_any_other_ask -- --ignored`. Wording,
-presentation and a separate tool did not change the GM's decision (experiment 0008).
-Characters now rarely misuse `ask` because `speak` is offered first.
+Direction (user, 2026-11-03): fix the characters misusing `ask` first; the GM correcting
+it is a bonus, and no page of rules is worth adding to the GM. Requirement: `ask` is an
+explicit question to the GM, and the GM rejects, with a reason, an ask that is not a
+question or that it cannot or may not answer.
+
+Now: an ask is judged in a request of its own that offers only `answer` and `reject_action`
+(`gm.ask_role`). Measured on the real model at production sampling, 20 samples each: a real
+question answered 20/20, an unanswerable question (the story's end) rejected 20/20, an action
+rejected 20/20, but speech sent as an ask answered 17/20 and a request to another character
+20/20. Before this request existed the GM approved nearly everything sent as an ask.
+
+Tried without gain (experiment 0008): GM role and tool wording, a separate tool, "is it a
+question" framing, a neutral instead of an asserting request line (an action then answered
+13/20), and the criterion on the tool descriptions (the unanswerable question then answered
+20/20). Not tried: `answer` requiring the question it answers to be quoted.
+Runnable check: `cargo test the_gm_answers_a_question_and_rejects_any_other_ask -- --ignored`.
 
 ## NPC chatter with three or more NPCs, and NPC reactions to the entrance narration
 
