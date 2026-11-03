@@ -20,9 +20,12 @@ there yet". Remove and archive only verified completions.
   (also in scenario import/export), hierarchical reads/search
   and bounded tool/context sizes. Incidental detail stays in text; significant
   item creation retains its Storyteller responsibility.
-- [Storyteller world initialization](storyteller-worlds.md): create/edit/delete
-  world objects, develop locations/NPCs individually, review persisted state
-  with the Questioner, which ends creation with DetailObjectsCreated.
+- [One GM agent per group](gm-per-group.md): fixes a design mistake (one GM
+  agent holding a chat per group); each group gets its own GM agent with one chat.
+  Needs the user's sign-off on the design change first.
+- [Storyteller world initialization](storyteller-worlds.md): core objects
+  (create/edit/delete tools, Questioner review that ends with CoreObjectsCreated),
+  then the extended summary and detail objects ending with DetailObjectsCreated.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and

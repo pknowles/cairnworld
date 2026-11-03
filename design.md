@@ -488,6 +488,11 @@ one transaction before exposing them to play.
 
 ### Groups and shared GM history
 
+> **DESIGN MISTAKE, to be fixed by [One GM agent per group](plans/gm-per-group.md).**
+> The declarations ask for one GM per group, each with one chat. The text below
+> instead has a single world GM agent holding many chats (a history branch per
+> group). Do not extend it, copy it for other agents, or treat it as correct.
+
 Authority: GM interaction, Game state / Group, Character actions / Travel,
 and Developer Mode's GM history DAG. `world_gm(world_id PRIMARY KEY, agent_id
 UNIQUE)` owns the world's GM agent. `character_group(character_id PRIMARY KEY,

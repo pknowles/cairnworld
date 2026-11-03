@@ -85,23 +85,24 @@ the last implemented phase makes a generated world ready.
 ### Step 1 data and flow
 
 - The Storyteller and Questioner are one agent each per world
-  (`world_role_agent(world_id, role, agent_id)`, like `world_gm`): the Storyteller
-  is declared as a single agent and gameplay reuses it. The first round uses the
-  history the agent was created with and each later round a new empty one, so a
-  round begins from the seed prompt and latest summary only. Developer Mode shows
-  them as ordinary branch sections of an ordinary agent, with no role-specific
-  inspector code. The Inspect panel is hosted by the world's own page (the
+  (`world_role_agent(world_id, role, agent_id)`): the Storyteller is declared as a
+  single agent and gameplay reuses it. Each has exactly one chat for the whole
+  world, compacted as necessary like any agent's; a fresh history per round was a
+  mistake (it made one agent hold several chats, which the declarations do not
+  have) and is removed. Developer Mode shows them as ordinary agents with
+  ordinary chats, with no role-specific inspector code. The Storyteller never sees
+  a stale world summary: the declarations require one version only (see
+  "Replacing the summary" below). The Inspect panel is hosted by the world's own page (the
   shared `Inspector`), so a world with nothing to play yet needs no player page.
 - Every world has `generation_stage`, whatever filled it in: `complete` means
   ready to play (a scenario import is `complete` at once, and DetailObjectsCreated
   will set it). Otherwise it selects the next finite step, as `next_npc_step` does: `meta`,
   `ask`, `answer`, `summarize`, `name`, `concept_done`, `failed`. A failed step's
   error stays on its sequence; the stage only marks the world failed.
-- `world_generation(world_id, questions, next_question, spent,
-  questioner_branch_id, storyteller_branch_id)` is the loop's working data;
-  `spent` is restored into the shared `Budget` each step, as NPC discussions do
-  with `Budget::restore`, so the total limit bounds the whole generation. The round number is the
-  count of the Storyteller's branches, not a column. `questions` copies the
+- `world_generation(world_id, questions, next_question, spent)` is the loop's
+  working data; `spent` is restored into the shared `Budget` each step, as NPC
+  discussions do with `Budget::restore`, so the total limit bounds the whole
+  generation. The two chats are found through `world_role_agent`. `questions` copies the
   arguments of the Questioner's recorded `ask_questions` call: read them from
   that recording instead, and drop the column, if the store makes that cheap.
 - Each stage is one finite step run by the world worker; its outputs and next
@@ -131,10 +132,24 @@ the last implemented phase makes a generated world ready.
   sequence calls: the NPC step is built on claims and response collections, so no
   common step runner was extracted.
 
+**Replacing the summary.** [The declarations](../user_declarations.md#game-setting-and-story-narrative)
+require the Storyteller's context never to hold more than one world summary, so
+that several versions cannot overload or confuse it. The current summary is
+supplied as per-request context. The difficulty is the Storyteller's own reply
+that wrote it: kept in the chat it becomes a stale summary in the next round.
+
+| Option | Cost |
+| --- | --- |
+| The summary-writing request and reply never enter the Storyteller's chat: a recorded side inference over the chat (as compaction already is), whose reply is stored only as the world summary and shown in Developer Mode as an inference | A turn variant that appends nothing; the chat does not remember writing it, which per-request context makes irrelevant |
+| Mark the summary exchange superseded when the next summary is saved, and have context assembly skip superseded entries (still visible in Developer Mode) | Changes the history model and every context builder for a single case |
+| Replace the old exchange with a stub through the compaction mechanism | Compaction text comes from an inference, not a given string; awkward |
+
+Recommended: the first. Pending the user's decision.
+
 | Choice | Alternatives | Decision |
 | --- | --- | --- |
 | What runs generation | A task spawned per world needing its own shutdown/crash handling; one long inline world event blocking the queue and shutdown | Steps in the world worker, reusing admission, ordering, shutdown and Developer Mode events |
-| Agents | A new agent per round, contradicting the single declared Storyteller; one agent compacted, which cannot drop earlier answers | One agent per role with a new branch per run, as the GM does per group |
+| Agents | A new agent per round, contradicting the single declared Storyteller; a new chat per round in one agent, which gives an agent several chats (rejected: the declarations give every agent one chat) | One agent per role with one compacted chat |
 | Summary and name | A `write_world_summary` tool duplicating the editing plan's field writes; parsing a title out of the reply | The plain-text reply is the field's value; step 2's editing tools revise it |
 
 ## Checkpoint: authoring tools and readiness
@@ -230,8 +245,8 @@ the last implemented phase makes a generated world ready.
   WorldSummaryComplete in the next. Record this reasoning separately from the world
   state; expose it through normal Developer Mode inspection.
 - Run Storyteller answers one question at a time as text to itself, then request
-  a world-summary write/update. The next round starts with the input prompt and
-  latest summary, not all prior answers. The Questioner receives the current
+  a world-summary write/update. Every round shows the input prompt and the one
+  latest summary; no earlier summary version is ever in its context. The Questioner receives the current
   world artifacts, including the world summary, not the Storyteller's answer
   history. During conceptual development the summary is the available artifact;
   during construction review include the actual persisted objects as well.
@@ -284,7 +299,7 @@ combine cases rather than require repeated whole-world GPU runs by default.
 | Existing scenario becomes world state | Author Four Brothers through real Storyteller calls. Inspect objects and captured contexts: witnesses have relevant private memories, suspects have motives, and equipment/conditions are recorded. NPC dialogue is generated from that context rather than stored as a script. |
 | Authoring and permissions | Scripted production-path calls create, partially update, edit long text and flag an NPC as deleted. Its record, membership/agent links and history remain stored and inspectable when Developer Mode includes deleted objects, but normal discovery/context/scheduling/actions exclude it. An NPC carrying items is blocked unless the call places the items at a location or deletes them too; a Group is flagged when its last NPC is removed; unrelated objects remain unchanged. Foreign IDs, dangling active references, incomplete NPCs, invalid holders and writes/reads of GM notes fail unchanged with recorded errors. |
 | Review can change the result | Supply a known omission in persisted state; the review sees it rather than only the intended summary. An edit changes the next captured review input. Check AskQuestions and each phase completion tool without requiring particular prose. |
-| Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive current summary/artifacts without earlier answer transcripts; private NPC information stays with authorized roles. NPC creation uses the same activity/resource state as other characters; initialization causes no autonomous action or resource reset. |
+| Focused development and context | Captured inputs show the meta-question inference, separate question output, individual answers and focused location/NPC work. Later rounds receive the current summary/artifacts and no earlier summary version; private NPC information stays with authorized roles. NPC creation uses the same activity/resource state as other characters; initialization causes no autonomous action or resource reset. |
 | Review state | Reviewing an NPC lists its items inside the NPC with no flag of their own. Editing one of its items resets the NPC's flag; CoreObjectsCreated is refused until it is reviewed again. An object listed unreviewed keeps the phase open. |
 | Mention reminders | A marked uncreated mention appears as a reminder; creation updates that reminder. Intentionally leaving it uncreated does not block DetailObjectsCreated. Unmarked ordinary prose does not manufacture obligations. |
 | Readiness and lifecycle | Entering during generation allows status inspection but no character creation/action/NPC response. DetailObjectsCreated with unreviewed objects or an invalid world changes nothing; a successful one opens character creation without starting an empty-world simulation. An inference failure or budget exhaustion remains visible and never opens play. Clean shutdown and crash use the existing lifecycle without replaying committed edits. |
