@@ -105,3 +105,27 @@ Toma's spoken warning, which they apply to), which the tool rejects as invalid o
 
 Wording and naming do not reduce the misuse, and anything that makes the options more
 visible raises it. The two-tool form removes it; the request is 55 tokens longer.
+
+## The GM and asks, at the production sampling
+
+The earlier GM-ask replays ran at temperature 0 (see the correction above), so they are
+repeated here with 20 samples per ask at the production sampling. Each cell is how many of
+the 20 first answers were the approving call. The last column is the story-end question
+sent as an ask, which is a question but not one the GM can answer.
+
+| Wording | Toma speaking | Mara addressing the Adventurer | An action | Story-end question rejected |
+|---|---|---|---|---|
+| as it is | 12 | 6 | 15 | 0 |
+| a sentence in the role | 11 | 14 | 14 | refuses in text (not a rejection) |
+| `ask_gm` rename | 13 | 20 | 20 | 0 |
+| `ask_gm(question)` as its own tool | 12 | 20 | 12 | refuses in text |
+| the rule in the role, the request, the approve tool and the reject tool | 20 | 20 | 20 | **19** |
+| request framed as "a question for the GM: ... answer it, or reject it with a reason if it is not a question you can answer" | 4 | 10 | 0 (it narrates instead) | **18** |
+
+Where the GM did not approve, it narrated the speech or the action (for example
+`narrate_characters` addressed to Toma) or called `intervention_check`. It rejected a
+non-question 0 times in 100 under every wording, and rejected the unanswerable question in
+19 of 20 only when the rule was said in four places or the request asked it to answer or
+reject. Reading its reasoning (thinking switched on): it treats the description as the
+character's action, judges whether that could happen in the scene, and plans to narrate
+what Toma says.
