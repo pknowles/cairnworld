@@ -1611,8 +1611,8 @@ fn WorldDetail(
     let invitation_path = format!("{world_path}/invitations");
     let developer_mode_path = format!("{world_path}/developer-mode");
     view! {
-        <main class="flex min-h-dvh flex-wrap items-start justify-center gap-4 bg-base-200 p-4 sm:p-8">
-            <section class="card w-full max-w-5xl bg-base-100 shadow-xl"><div class="card-body gap-6">
+        <main class="flex min-h-dvh flex-wrap items-start justify-center gap-4 bg-base-200 p-4 sm:p-8 lg:flex-nowrap">
+            <section class="card w-full min-w-0 max-w-5xl bg-base-100 shadow-xl"><div class="card-body gap-6">
             <div class="flex flex-wrap items-center justify-between gap-4">
                 <h1 class="card-title text-3xl">{world.name}</h1>
                 <span class="badge badge-lg">{if world.ready { "Complete" } else if world.failure.is_some() { "Failed" } else { "In progress" }}</span>
@@ -1680,7 +1680,13 @@ fn WorldDetail(
                 </section>
             })}
             </div></section>
-            {developer_mode.then(|| view! { <WorldInspector world_id developer_mode/> })}
+            // Beside the page on wide screens, below it on narrow ones; the
+            // island element itself takes no box so the panel is the flex item.
+            {developer_mode.then(|| view! {
+                <div class="w-full lg:sticky lg:top-8 lg:flex lg:h-[calc(100dvh-4rem)] lg:w-[28rem] lg:shrink-0 [&>leptos-island]:contents">
+                    <WorldInspector world_id developer_mode/>
+                </div>
+            })}
         </main>
     }
 }

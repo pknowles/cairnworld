@@ -55,6 +55,12 @@ checkBrowser(server, async (tab, port) => {
     // The world's own page hosts the inspection panel, listing its agents.
     await tab.getByRole("heading", { name: "Inspect", exact: true }).waitFor();
     await tab.getByText("Game Master", { exact: false }).first().waitFor();
+    // Its starting view is not a choice the visitor made, so it leaves the
+    // address (and the Back button) alone; the panel is beside the page.
+    assert.equal(tab.url(), `http://127.0.0.1:${port}/world/${fixture.modal_world_id}`, "opening the panel does not rewrite the address");
+    const panel = await tab.locator("aside").boundingBox();
+    const page = await tab.locator("section.card").boundingBox();
+    assert.ok(panel.x >= page.x + page.width, "the panel sits beside the page, not below it");
   } finally {
     allowScripts();
     await tab.waitForLoadState("networkidle");

@@ -396,18 +396,24 @@ struct Inspector {
 }
 
 impl Inspector {
-    fn new(world_id: i64, developer_mode: bool) -> Self {
+    /// `default_selection` is what the panel shows when the address names none.
+    /// It is the page's own starting view, so it never writes the address.
+    fn new(
+        world_id: i64,
+        developer_mode: bool,
+        default_selection: Option<InspectSelection>,
+    ) -> Self {
         let error = RwSignal::new(None::<String>);
         #[cfg(feature = "hydrate")]
         let initial_selection = match InspectSelection::from_location() {
-            Ok(selection) => selection,
+            Ok(selection) => selection.or(default_selection),
             Err(failure) => {
                 error.set(Some(format!("Invalid inspect URL: {failure}")));
                 None
             }
         };
         #[cfg(not(feature = "hydrate"))]
-        let initial_selection = None;
+        let initial_selection = default_selection;
         let selection = RwSignal::new(initial_selection);
         let restore_scroll = RwSignal::new(None::<i32>);
         // Hydrate the same closed layout the server rendered; the selection
@@ -449,6 +455,11 @@ impl Inspector {
                         error.set(Some(failure));
                         return;
                     }
+                }
+                if selected == default_selection
+                    && matches!(InspectSelection::from_location(), Ok(None))
+                {
+                    return;
                 }
                 if let Err(failure) = InspectSelection::write_to_location(selected) {
                     error.set(Some(failure));
@@ -2266,7 +2277,7 @@ pub fn PlayerChat(
     let disconnected = RwSignal::new(false);
     let chat = NodeRef::<leptos::html::Ol>::new();
     let input = NodeRef::<leptos::html::Input>::new();
-    let inspector = Inspector::new(world_id, developer_mode);
+    let inspector = Inspector::new(world_id, developer_mode, None);
     let PaneState {
         selection: inspecting,
         open: inspect_open,
@@ -2490,15 +2501,12 @@ fn watch_inspect_clicks(
 /// world that has no group to play in yet. It starts open on the agent list.
 #[island]
 pub fn WorldInspector(world_id: i64, developer_mode: bool) -> impl IntoView {
-    let inspector = Inspector::new(world_id, developer_mode);
+    let inspector = Inspector::new(world_id, developer_mode, Some(InspectSelection::Agents));
     #[cfg(feature = "hydrate")]
     Effect::new(move |_| {
         if inspector.developer_mode.get() {
             inspector.pane.open.set(true);
             inspector.narrow.set(true);
-            if inspector.pane.selection.get_untracked().is_none() {
-                inspector.pane.selection.set(Some(InspectSelection::Agents));
-            }
         }
     });
     inspector.panel()
