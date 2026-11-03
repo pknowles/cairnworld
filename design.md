@@ -1872,7 +1872,7 @@ expandable seed, not the spoiler-bearing summary. Developer Mode exposes world
 objects, progress and both roles' recorded interactions.
 
 Questioner first answers supplied meta-questions in one inference, then emits
-AskQuestions or WorldIsComplete in the next. Storyteller answers questions one
+AskQuestions or WorldSummaryComplete in the next. Storyteller answers questions one
 at a time as text to itself, then writes/edits the world summary. Its next round
 starts from the seed and current summary without earlier answer transcripts.
 Questioner reviews world artifacts, including that summary and the objects
@@ -1907,12 +1907,16 @@ large editable world summary remain separate from GM notes, which Storyteller
 cannot read. Explicitly marked generation mentions supply non-blocking reminders
 of uncreated names; they do not force object creation.
 
-After reviewing actual state, Storyteller calls BeginWorld. Validate connected
-locations, required fields/backgrounds/motives, valid item types and holders,
-and world-local references before completing initialization. Narrative readiness belongs to Storyteller;
-Questioner satisfaction alone does not start play. BeginWorld makes character
-creation available without starting an empty-world simulation, and is unavailable
-after initialization. Imported scenarios retain their validated development path.
+The Questioner leads four phases: world summary, core objects, extended summary
+and detail objects. It reads created objects one at a time (ReadObject), flags each
+reviewed (MarkObjectReviewed) and ends a phase with its completion tool
+(WorldSummaryComplete, CoreObjectsCreated, ExtendedWorldSummaryComplete,
+DetailObjectsCreated), each of which verifies all objects are reviewed.
+DetailObjectsCreated validates connected locations, required
+fields/backgrounds/motives, valid item types and holders, and world-local
+references, then makes character creation available without starting an
+empty-world simulation. There is no BeginWorld tool. Imported scenarios retain
+their validated development path.
 See [world initialization](plans/storyteller-worlds.md); gameplay support below is
 tracked separately in [Storyteller gameplay](plans/storyteller-gameplay.md).
 

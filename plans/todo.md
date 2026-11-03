@@ -22,7 +22,7 @@ there yet". Remove and archive only verified completions.
   item creation retains its Storyteller responsibility.
 - [Storyteller world initialization](storyteller-worlds.md): create/edit/delete
   world objects, develop locations/NPCs individually, review persisted state
-  with the Questioner and finish explicitly with BeginWorld.
+  with the Questioner, which ends creation with DetailObjectsCreated.
 - [Coding-agent playtesting](mcp-development-interface.md): RMCP transport to
   the running game, shared play/query operations and explicit edited replay.
 - [Member bans](member-bans.md): invitation rejection, owner Ban list and

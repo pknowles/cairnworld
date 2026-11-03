@@ -669,15 +669,15 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   history keeps them), then each round asks (`ask_questions` or `world_is_complete`)
   with the seed and current summary as per-request context, not stored history; the
   Storyteller answers each question as text, the first round in the history its
-  agent was created with and each later round in a new one (the inspector labels
-  them "Round N"), its reply becomes `storyteller_summary`, and after
+  agent was created with and each later round in a new history branch (shown by the
+  inspector's ordinary branch sections), its reply becomes `storyteller_summary`, and after
   `world_is_complete` its reply becomes the name. `Store::advance_generation` is the
   one transition table; a failing step fails the world with the error on its
   sequence. `Game::admit`/`queue_player_message` refuse input until `world_is_ready`,
   and the play page redirects to the world page. The world page shows the status,
   failure and expandable seed, and with Developer Mode on hosts the Inspect panel
   (`WorldInspector` island; `ui.rs`'s `Inspector` is shared with `PlayerChat`).
-  Not built yet: authoring tools and BeginWorld, so a world stops at `concept_done`.
+  Not built yet: authoring tools and the Questioner's later phases, so a world stops at `concept_done`.
 - NPC speech responses (design.md: Character perceptions and NPC responses; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
   (`commit_speech`) opens an `npc_response_collection` whose candidates are the NPCs who heard
