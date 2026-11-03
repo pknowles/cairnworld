@@ -233,10 +233,10 @@ checkBrowser(server, async (tab, port) => {
   await tab.locator("aside").getByText("Agents", { exact: true }).click();
   await tab.locator("aside button").getByText("Game Master", { exact: true }).click();
   assert.equal((await branchesResponse).status(), 200);
-  await tab.locator("aside").getByText("retired", { exact: false }).first().waitFor();
+  await tab.locator("aside").getByText("earlier", { exact: false }).first().waitFor();
   await tab.locator("aside").getByText("player side (current)", { exact: false }).first().waitFor();
   await tab.locator("aside").getByText("Toma side (current)", { exact: false }).first().waitFor();
-  await tab.locator("aside").getByText("continues from branch", { exact: false }).first().waitFor();
+  await tab.locator("aside").getByText("continues from chat",{ exact: false }).first().waitFor();
 
   // Rapid selection changes: switching Agents -> Objects -> Agents faster
   // than any one fetch can land must still end on Agents' own data, not a

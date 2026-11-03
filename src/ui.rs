@@ -80,6 +80,7 @@ pub enum ServerEvent {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatActivity {
+    WorldBeingCreated,
     PreparingOpening,
     Responding,
 }
@@ -1789,20 +1790,21 @@ fn AgentHistoryView(
     data: RwSignal<Option<InspectData>>,
 ) -> impl IntoView {
     let single = branches.len() == 1;
+    let order: Vec<i64> = branches.iter().map(|section| section.branch_id).collect();
     view! {
         <div class="flex flex-col gap-3">
             <h3 class="text-sm font-semibold">{move || format!("{} chat history", agent_label(agent_id, agents))}</h3>
             {branches.into_iter().map(|section| view! {
-                <BranchSectionView world_id agent_id agents section show_heading=!single selection data/>
+                <BranchSectionView world_id agent_id agents section order=order.clone() show_heading=!single selection data/>
             }).collect_view()}
         </div>
     }
 }
 
-/// One branch's own section: its entries, its own independent load-more
-/// state, and - only when the parent view is showing more than one branch -
-/// a heading naming its current group head (or "retired" for a split/merge
-/// source) and links to the branches it continues from.
+/// One chat's own section: its entries, its own independent load-more
+/// state, and - only when the agent has more than one chat - a numbered
+/// heading naming the group it is currently the chat for (or "earlier" for a
+/// split/merge source) and the chats it continues from.
 #[cfg(feature = "hydrate")]
 #[component]
 fn BranchSectionView(
@@ -1810,6 +1812,7 @@ fn BranchSectionView(
     agent_id: i64,
     agents: RwSignal<Vec<AgentInfo>>,
     section: BranchSection,
+    order: Vec<i64>,
     show_heading: bool,
     selection: RwSignal<Option<InspectSelection>>,
     data: RwSignal<Option<InspectData>>,
@@ -1873,9 +1876,10 @@ fn BranchSectionView(
         });
     }
     let heading = show_heading.then(|| {
+        let number = |id: i64| order.iter().position(|&other| other == id).map_or(0, |index| index + 1);
         let label = match section.head.as_ref() {
-            Some(head) => format!("Branch {branch_id} - {} (current)", head.group_name),
-            None => format!("Branch {branch_id} - retired"),
+            Some(head) => format!("Chat {} - {} (current)", number(branch_id), head.group_name),
+            None => format!("Chat {} - earlier", number(branch_id)),
         };
         let parents = section.parents.clone();
         view! {
@@ -1886,7 +1890,7 @@ fn BranchSectionView(
                         {format!(
                             "continues from {}",
                             parents.iter()
-                                .map(|parent| format!("branch {} @{}", parent.branch_id, parent.through_position))
+                                .map(|parent| format!("chat {} @{}", number(parent.branch_id), parent.through_position))
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         )}
@@ -2535,6 +2539,7 @@ fn chat_status_line(
 
 fn chat_activity_text(activity: ChatActivity) -> &'static str {
     match activity {
+        ChatActivity::WorldBeingCreated => "This world is still being created. You can start once it is ready.",
         ChatActivity::PreparingOpening => "The game is preparing its first response…",
         ChatActivity::Responding => "The game is responding…",
     }

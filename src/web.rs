@@ -1073,11 +1073,6 @@ async fn game_page(
     Path((world_id, character_id)): Path<(i64, i64)>,
 ) -> Result<axum::response::Response, WebError> {
     let member = active_player_character(&app.store, &session, world_id, character_id).await?;
-    // A world still being created has nothing to play yet: its own page shows
-    // the progress.
-    if !app.store.world_is_ready(world_id).await? {
-        return Ok(Redirect::to(&format!("/world/{world_id}")).into_response());
-    }
     Ok(Html(match app.game.availability().await {
         GameAvailability::Loading => {
             render_page("Cairnworld", true, || view! { <GameLoadingPage/> })
@@ -1234,6 +1229,18 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
             return Ok(());
         }
     };
+    // Players can enter a world that is still being created; nothing starts
+    // until it is ready.
+    while !game.world_is_ready(member.world_id).await? {
+        send_event(
+            socket,
+            &ServerEvent::Activity {
+                activity: ChatActivity::WorldBeingCreated,
+            },
+        )
+        .await?;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
     match game.opening_complete(member).await {
         Ok(true) => {}
         Ok(false) => {
@@ -1640,7 +1647,7 @@ fn WorldDetail(
             <ul class="space-y-2">{members.into_iter().map(move |member| {
                 let is_active = member.access == "active";
                 let remove = is_owner && member.user_id != viewer_id && is_active;
-                let enter = member.user_id == viewer_id && is_active && ready;
+                let enter = member.user_id == viewer_id && is_active;
                 let create = member.user_id == viewer_id && is_active && ready;
                 let player = format!("{} ({})", member.display_name, member.access);
                 let remove_path = format!("{member_path}/{}", member.user_id);
@@ -2912,8 +2919,8 @@ mod tests {
         assert!(html.contains("In progress"));
         assert!(html.contains("Seed prompt"));
         assert!(
-            !html.contains("Enter world") && !html.contains("Create character"),
-            "nothing can be played yet"
+            html.contains("Enter world") && !html.contains("Create character"),
+            "players can enter, but not make a character yet"
         );
         assert!(
             !html.contains("WorldInspector"),
@@ -2933,13 +2940,12 @@ mod tests {
             html.contains("WorldInspector"),
             "Developer Mode puts the inspection panel on the world's own page"
         );
-        assert!(!html.contains("Enter world"));
 
-        // The play page is not for a world being created: it sends the player back.
+        // The play page opens; its chat reports the world is being created.
         let member = store.world_members(world.id).await.unwrap().remove(0);
         let play = format!("{path}/characters/{}/play", member.characters[0].id);
         let (status, _) = page(&app, &play, &cookie).await;
-        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

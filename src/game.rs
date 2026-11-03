@@ -345,10 +345,14 @@ where
     /// reaches it until it is ready.
     async fn ensure_world_ready(&self, world_id: i64) -> Result<()> {
         ensure!(
-            self.store.world_is_ready(world_id).await?,
+            self.world_is_ready(world_id).await?,
             "world {world_id} is still being created"
         );
         Ok(())
+    }
+
+    pub async fn world_is_ready(&self, world_id: i64) -> Result<bool> {
+        self.store.world_is_ready(world_id).await
     }
 
     /// The one admission point for external game input. Shutdown refuses new

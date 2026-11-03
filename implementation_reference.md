@@ -354,7 +354,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   single-branch agent (`branches.len() == 1`) renders with no heading,
   identical to the pre-D6 view, while a real DAG renders each branch as its
   own `BranchSectionView` (its own independent "Load more" state) labelled
-  by its current group head or "retired", with a "continues from branch ...
+  by its number and current group head or "earlier", with a "continues from chat ...
   @position" note naming its parents - a shared ancestor branch is one
   `BranchSection`, never duplicated across the children that continue from
   it.
@@ -989,8 +989,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
     only to that branch's section. A plain player/NPC/Storyteller agent has exactly one
     branch and renders with no heading, identical to the view before D6; a
     world_gm agent whose groups have split/merged renders every branch as
-    its own section labelled by its current group head or "retired", with a
-    "continues from branch ... @position" note - a shared ancestor branch
+    its own section labelled by its number and current group head or "earlier", with a
+    "continues from chat ... @position" note - a shared ancestor branch
     is one section, never duplicated across the children that continue from
     it. A summary entry's heading names every one of its `covered_ranges` as
     `branch {id} #{first}-#{last}` - each range's own branch_id and
