@@ -61,6 +61,15 @@ checkBrowser(server, async (tab, port) => {
     const panel = await tab.locator("aside").boundingBox();
     const page = await tab.locator("section.card").boundingBox();
     assert.ok(panel.x >= page.x + page.width, "the panel sits beside the page, not below it");
+
+    // Closing it gives the space back, leaving only the reopen strip.
+    await tab.getByRole("button", { name: "Close", exact: true }).click();
+    const strip = tab.locator("#inspect-strip");
+    await strip.waitFor();
+    const reserved = await strip.locator("xpath=ancestor::div[contains(@class,'lg:sticky')]").boundingBox();
+    assert.ok(reserved.width < 80, "the closed panel reserves only a narrow strip");
+    await strip.click();
+    await tab.getByRole("heading", { name: "Inspect", exact: true }).waitFor();
   } finally {
     allowScripts();
     await tab.waitForLoadState("networkidle");

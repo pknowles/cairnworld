@@ -1789,12 +1789,11 @@ fn AgentHistoryView(
     data: RwSignal<Option<InspectData>>,
 ) -> impl IntoView {
     let single = branches.len() == 1;
-    let total = branches.len();
     view! {
         <div class="flex flex-col gap-3">
             <h3 class="text-sm font-semibold">{move || format!("{} chat history", agent_label(agent_id, agents))}</h3>
-            {branches.into_iter().enumerate().map(|(position, section)| view! {
-                <BranchSectionView world_id agent_id agents section position total show_heading=!single selection data/>
+            {branches.into_iter().map(|section| view! {
+                <BranchSectionView world_id agent_id agents section show_heading=!single selection data/>
             }).collect_view()}
         </div>
     }
@@ -1811,8 +1810,6 @@ fn BranchSectionView(
     agent_id: i64,
     agents: RwSignal<Vec<AgentInfo>>,
     section: BranchSection,
-    position: usize,
-    total: usize,
     show_heading: bool,
     selection: RwSignal<Option<InspectSelection>>,
     data: RwSignal<Option<InspectData>>,
@@ -1876,20 +1873,9 @@ fn BranchSectionView(
         });
     }
     let heading = show_heading.then(|| {
-        // A GM history belongs to a group; the Storyteller starts a fresh
-        // history for each round of questions.
-        let group_name = section.head.as_ref().map(|head| head.group_name.clone());
-        let label = move || {
-            let storyteller = agents
-                .get()
-                .iter()
-                .any(|agent| agent.id == agent_id && agent.role == "storyteller");
-            match (storyteller, &group_name) {
-                (true, _) if position + 1 == total => format!("Round {} (current)", position + 1),
-                (true, _) => format!("Round {}", position + 1),
-                (false, Some(name)) => format!("Branch {branch_id} - {name} (current)"),
-                (false, None) => format!("Branch {branch_id} - retired"),
-            }
+        let label = match section.head.as_ref() {
+            Some(head) => format!("Branch {branch_id} - {} (current)", head.group_name),
+            None => format!("Branch {branch_id} - retired"),
         };
         let parents = section.parents.clone();
         view! {

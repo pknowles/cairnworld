@@ -1683,7 +1683,7 @@ fn WorldDetail(
             // Beside the page on wide screens, below it on narrow ones; the
             // island element itself takes no box so the panel is the flex item.
             {developer_mode.then(|| view! {
-                <div class="w-full lg:sticky lg:top-8 lg:flex lg:h-[calc(100dvh-4rem)] lg:w-[28rem] lg:shrink-0 [&>leptos-island]:contents">
+                <div class="w-full lg:sticky lg:top-8 lg:flex lg:h-[calc(100dvh-4rem)] lg:w-auto lg:shrink-0 [&>leptos-island]:contents">
                     <WorldInspector world_id developer_mode/>
                 </div>
             })}
