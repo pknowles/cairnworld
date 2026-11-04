@@ -130,6 +130,13 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   template that silently drops tool definitions, so its tool surface is unusable
   without it. `[models.hermes]` supplies it automatically. It renders a stored
   tool call's object `arguments` with `| tojson`, matching the other templates.
+- `templates/experimental/qwen35-lean-tools.jinja` - EXPERIMENTAL, off by default. Qwen3.5's own
+  template, copied whole (the setting takes a whole file), with only the tool loop changed: each
+  tool is one JSON object of name, description, parameters and required (plus `$defs`), without
+  the OpenAI wrapper, `type: object` or `additionalProperties`. Used only when chosen with
+  a `--chat-template` flag (`serve`, chat and replay) or `CAIRNWORLD_CHAT_TEMPLATE` for the device
+  tests. It cuts the tool block 8 to 13% (experiments/0006-context-size.md). Remove it by deleting
+  the folder.
 - `src/context.rs` - the only model-call boundary. It assembles a request from
   stored static prompt text and persisted agent messages, records the bounded
   input recipe before execution, then completes that same inference ID with

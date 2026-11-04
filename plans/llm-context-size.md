@@ -1,8 +1,12 @@
 # Model context size: find and justify what is in it
 
 Status: started. Done: schema metadata removed from every tool (-10% of each request), `split_group`
-and `approve_action` slimmed, and the repeatable measurement
-(`context_size_by_agent_and_part`); results in experiments/0006-context-size.md. Next: the scene packet, and the NPC and player agent contexts. Every
+and `approve_action` slimmed, the repeatable measurement
+(`context_size_by_agent_and_part`), and the chat template's rendering of the tools measured; results in experiments/0006-context-size.md.
+A lean JSON rendering (-8 to -13% of the tool block) is kept as an optional, experimental
+`--chat-template` file, because any rendering change needs a copy of Qwen's template; the user wants it
+separate and removable (2026-11-05). Next: find which part of the text rendering (-31%) changed the player
+agent's choices, one change at a time, with no description changes. Then the scene packet. Every
 tool stays visible to the agent that can call it, so it can plan ahead (user, 2026-10-29);
 reduce definition overhead without restricting tool visibility.
 

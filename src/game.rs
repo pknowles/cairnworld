@@ -3140,6 +3140,14 @@ mod tests {
     /// invalid output: an error to investigate, never a path the real-model
     /// scenarios may rely on.
     async fn assert_no_rejected_output(store: &Store) {
+        if let Some(problem) = rejected_output(store).await {
+            panic!("{problem}");
+        }
+    }
+
+    /// What `assert_no_rejected_output` would fail with, for a scenario that
+    /// counts failures over repeated runs instead of stopping at the first.
+    async fn rejected_output(store: &Store) -> Option<String> {
         let rejected: Vec<(i64, i64, String)> = sqlx::query_as(
             "SELECT inference_id, ordinal, COALESCE(error, recorded_content.body) FROM tool_execution              LEFT JOIN recorded_content ON recorded_content.id = result_content_id              WHERE status = 'rejected' ORDER BY inference_id, ordinal",
         )
@@ -3171,10 +3179,9 @@ mod tests {
         .fetch_all(&store.pool())
         .await
         .unwrap();
-        assert!(
-            report.is_empty() && refused.is_empty(),
-            "the model produced invalid output: {report:#?}, plain-text replies refused in inferences {refused:?}; open them in Developer Mode"
-        );
+        (!report.is_empty() || !refused.is_empty()).then(|| {
+            format!("the model produced invalid output: {report:#?}, plain-text replies refused in inferences {refused:?}; open them in Developer Mode")
+        })
     }
 
     /// The device-test model, loaded once and shared by every scenario in
@@ -3221,9 +3228,13 @@ mod tests {
             let model = settings
                 .model(None)
                 .expect("default.toml should configure the device-test model");
+            // `CAIRNWORLD_CHAT_TEMPLATE` tries another chat template, such as one in
+            // `templates/experimental/`, with the same model.
+            let template =
+                std::env::var_os("CAIRNWORLD_CHAT_TEMPLATE").map(std::path::PathBuf::from);
             let backend = MistralRsBackend::load(
                 &model.path,
-                model.chat_template.as_deref(),
+                template.as_deref().or(model.chat_template.as_deref()),
                 model.source_model.as_deref(),
                 settings.limits,
                 false,
@@ -4947,7 +4958,9 @@ mod tests {
                         "{typed:?} #{repeat}: {undecided} actions undecided"
                     ));
                 }
-                assert_no_rejected_output(&store).await;
+                if let Some(problem) = rejected_output(&store).await {
+                    wrong.push(format!("{typed:?} #{repeat}: {problem}"));
+                }
                 game.shutdown().await.unwrap();
             }
         }

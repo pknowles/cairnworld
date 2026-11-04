@@ -120,3 +120,44 @@ Tool definitions are 60% of the GM request and 52% of the player agent's, and ar
 the GM's history adds about 500 characters per action before compaction. The player agent
 and NPC contexts have the same shape as the GM's, with no overhead of their own that the
 GM's does not also have.
+
+## How the chat template shows the tools
+
+The model does not read our tool JSON. The Qwen3.5 template renders each tool as
+`{"type":"function","function":{"name":...,"parameters":{"required":[...],"additionalProperties":false,
+"type":"object","properties":{...}}}}` inside `<tools>`. Rendered offline with the real template and
+tokenizer (the GM's tools, 10 of them; the player's 4; the NPC's 4):
+
+| Rendering | GM tokens | Player tokens | NPC tokens |
+|---|---|---|---|
+| Original template (JSON) | 1,315 | 663 | 783 |
+| Lean JSON (experimental, `templates/experimental/`): no wrapper, no `type: object`, no `additionalProperties` | 1,146 | 597 | 717 |
+| Text signatures with a line per parameter | 912 | 524 | 608 |
+| Text signature with the description on the same line | 907 | 527 | 623 |
+
+Behaviour on the real model, player agent, 4B (`CAIRNWORLD_REPEATS`-style repeats):
+
+| Rendering | "I don't mind. Let him take it." answers do-nothing | Speaks the player's words to Mara |
+|---|---|---|
+| Original | 20 of 20 | 12 of 12 lines |
+| Text signatures, line per parameter | 10 of 20 | not measured |
+| Text signature, description on the line | 8 of 8 | 0 of 3 runs clean (the agent speaks as Mara) |
+| Lean JSON | 8 of 8 | 12 of 12 lines |
+
+GM side, intervention scenario (the GM asks the player it was told to ask, 30 runs per rendering):
+original 28 of 30 (2 not asked), text signatures 30 of 30. The whole real-model suite also passed
+once with the text signatures (189 s), after the compaction scenario's trigger was lowered from 700
+to 500 input tokens because the shorter tool block no longer reached 700. The player-only runs
+(question put straight to the player, GM skipped) are the ones that separated the renderings.
+
+The text forms save another 15 to 20% but changed what the 4B player agent does in two
+scenarios, so they are not used. One guess is that the plain-text `words` note, whose example is
+`Mara says in a low voice: ...`, is imitated more literally than the same text inside JSON; it is
+untested. The whole real-model suite passed with the lean template and with the first text form. The lean
+template is kept as an optional `--chat-template`, not the default, because it needs a full
+copy of Qwen's template (153 lines, 12 changed). The compaction scenario's trigger (700 input
+tokens) is not reached under it, so that scenario needs 500 with the lean template.
+`approve_speech`, `reject_action`, `split_group`, `merge_groups`, `party_presence` and
+`do_nothing` are not called by any passing real-model scenario, so their rendering is checked
+only by reading it.
+
