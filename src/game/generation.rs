@@ -112,6 +112,10 @@ impl<'a> Request<'a> {
             terminal_reminder: None,
         }
     }
+
+    fn context_refs(&self) -> Vec<&str> {
+        self.context.iter().map(String::as_str).collect()
+    }
 }
 
 impl<B> Game<B>
@@ -177,6 +181,17 @@ where
         };
         let questioner = &prompts.questioner;
         let storyteller = &prompts.storyteller;
+        // Every Storyteller request is shown the seed and the one current
+        // summary as context, never as part of its chat.
+        let storyteller_request = |text: String| -> Result<Request<'_>> {
+            Ok(Request {
+                context: vec![prompts::fill(
+                    &storyteller.world_state,
+                    &[("seed", seed), ("summary", summary)],
+                )?],
+                ..Request::reply(generation.storyteller, &storyteller.role, text)
+            })
+        };
         match generation.stage {
             GenerationStage::Meta => {
                 let text = prompts::fill(
@@ -231,8 +246,6 @@ where
                     prompts::fill(
                         &storyteller.round_start,
                         &[
-                            ("seed", seed),
-                            ("summary", summary),
                             ("count", &generation.questions.len().to_string()),
                             ("question", question),
                         ],
@@ -243,22 +256,18 @@ where
                         &[("number", &number.to_string()), ("question", question)],
                     )?
                 };
-                self.generation_turn(
-                    scope,
-                    Request::reply(generation.storyteller, &storyteller.role, text),
-                )
-                .await?;
+                self.generation_turn(scope, storyteller_request(text)?)
+                    .await?;
                 Ok(Advance::QuestionAnswered)
             }
             GenerationStage::Summarize => {
+                // A side inference: the new summary replaces the old one, so the
+                // request and reply stay out of the chat, and the Storyteller
+                // never has two versions in its context.
                 let settled = self
-                    .generation_turn(
+                    .generation_aside(
                         scope,
-                        Request::reply(
-                            generation.storyteller,
-                            &storyteller.role,
-                            storyteller.summary_request.clone(),
-                        ),
+                        storyteller_request(storyteller.summary_request.clone())?,
                     )
                     .await?;
                 Ok(Advance::Summary(reply_text(&settled)?.to_string()))
@@ -267,11 +276,7 @@ where
                 let settled = self
                     .generation_turn(
                         scope,
-                        Request::reply(
-                            generation.storyteller,
-                            &storyteller.role,
-                            storyteller.name_request.clone(),
-                        ),
+                        storyteller_request(storyteller.name_request.clone())?,
                     )
                     .await?;
                 Ok(Advance::Name(reply_text(&settled)?.to_string()))
@@ -295,34 +300,63 @@ where
         self.store
             .append_instruction(
                 request.branch,
-                &Message::text(Role::User, request.text),
+                &Message::text(Role::User, request.text.clone()),
                 scope.sequence_id,
             )
             .await
             .context("storing the generation request")?;
+        let role = [Message::text(Role::System, request.role)];
+        let context = request.context_refs();
         agent::complete_with_call_context(
             &self.store,
             &self.backend,
             scope.budget,
-            agent::Turn {
-                events: scope.world.events.clone(),
-                branch: request.branch,
-                static_messages: &[Message::text(Role::System, request.role)],
-                dynamic_context: &request
-                    .context
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                tools: &request.tools,
-                terminal_reminder: request.terminal_reminder,
-                sampling: self.sampling.clone(),
-                model: &self.model,
-            },
+            self.turn(scope, &request, &role, &context),
             &CallContext::root(Some(scope.sequence_id)),
             |_| {},
             |_| {},
         )
         .await
         .context("running a generation turn")
+    }
+
+    /// The request is asked of the agent without entering its chat, and so is
+    /// its reply.
+    async fn generation_aside(
+        &self,
+        scope: &StepScope<'_>,
+        request: Request<'_>,
+    ) -> Result<Settled> {
+        let role = [Message::text(Role::System, request.role)];
+        let context = request.context_refs();
+        agent::complete_aside(
+            &self.store,
+            &self.backend,
+            scope.budget,
+            self.turn(scope, &request, &role, &context),
+            &request.text,
+            &CallContext::root(Some(scope.sequence_id)),
+        )
+        .await
+        .context("running a generation side inference")
+    }
+
+    fn turn<'a>(
+        &'a self,
+        scope: &StepScope<'_>,
+        request: &'a Request<'_>,
+        role: &'a [Message],
+        context: &'a [&'a str],
+    ) -> agent::Turn<'a> {
+        agent::Turn {
+            events: scope.world.events.clone(),
+            branch: request.branch,
+            static_messages: role,
+            dynamic_context: context,
+            tools: &request.tools,
+            terminal_reminder: request.terminal_reminder,
+            sampling: self.sampling.clone(),
+            model: &self.model,
+        }
     }
 }

@@ -57,6 +57,7 @@ pub struct Questioner {
 #[serde(deny_unknown_fields)]
 pub struct Storyteller {
     pub role: String,
+    pub world_state: String,
     pub round_start: String,
     pub next_question: String,
     pub summary_request: String,

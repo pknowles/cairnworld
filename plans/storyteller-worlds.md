@@ -144,7 +144,8 @@ that wrote it: kept in the chat it becomes a stale summary in the next round.
 | Mark the summary exchange superseded when the next summary is saved, and have context assembly skip superseded entries (still visible in Developer Mode) | Changes the history model and every context builder for a single case |
 | Replace the old exchange with a stub through the compaction mechanism | Compaction text comes from an inference, not a given string; awkward |
 
-Recommended: the first. Pending the user's decision.
+Decided: the first. The Storyteller's other requests (answers, name) stay in its
+chat and are compacted like any chat's.
 
 | Choice | Alternatives | Decision |
 | --- | --- | --- |

@@ -418,10 +418,15 @@ pub enum RawHistoryEntry {
         /// of a capacity recovery, or the reply that crossed the threshold.
         cause_inference_id: Option<i64>,
     },
+    /// An inference of this agent that is not in its chat. A failed one shows
+    /// its error; a successful side inference shows its reply, which the agent
+    /// never sees in later calls. Any other successful inference is shown by
+    /// the reply message it wrote.
     Inference {
         id: i64,
         history_entry_id: i64,
         error: Option<String>,
+        aside: Option<MessageContent>,
     },
 }
 

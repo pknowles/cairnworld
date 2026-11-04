@@ -6,7 +6,7 @@ use crate::{
     context,
     llm::{Backend, Content, Message, Response, Role, Sampling},
     settings::Limits,
-    store::{AgentBranch, CompactionPolicy, Store},
+    store::{AgentBranch, CompactionPolicy, Segment, Store},
     tools::{self, Tool},
 };
 
@@ -222,6 +222,87 @@ impl Drop for InvocationGuard<'_> {
             self.invocation_id
         );
     }
+}
+
+/// A recorded side inference over an agent's chat: the agent sees its chat,
+/// its static and dynamic context, then `request`, and replies in plain text.
+/// Neither the request nor the reply enters the chat, so the agent never sees
+/// them again; the reply is the caller's to store. Developer Mode lists it in
+/// the agent's history as a labelled side inference.
+pub async fn complete_aside<B: Backend>(
+    store: &Store,
+    backend: &B,
+    budget: &Budget,
+    turn: Turn<'_>,
+    request: &str,
+    call: &CallContext,
+) -> Result<Settled> {
+    ensure!(
+        turn.tools.is_empty() && turn.terminal_reminder.is_none(),
+        "a side inference has no tools"
+    );
+    let _active = call.enter(turn.branch.agent_id())?;
+    let invocation = InvocationGuard::start(
+        store,
+        call.sequence_id,
+        turn.branch,
+        call.parent_tool_execution_id,
+    )
+    .await?;
+    let invocation_id = invocation.invocation_id;
+    let result: Result<Settled> = async {
+        budget.spend(0).context("resolving this side inference")?;
+        backend
+            .before_agent(store, turn.branch, &turn.events)
+            .await
+            .context("waiting for earlier deferred work for this agent")?;
+        let mut segments = context::segments(
+            store,
+            turn.branch,
+            turn.static_messages,
+            turn.dynamic_context,
+            &[],
+        )
+        .await?;
+        segments.push(Segment::Text {
+            text: store
+                .store_prompt_text(request)
+                .await
+                .context("storing the side request")?,
+            role: Role::User,
+        });
+        let run = context::run_recipe(
+            store,
+            backend,
+            context::RecipeCompletion {
+                events: turn.events.clone(),
+                agent_id: turn.branch.agent_id(),
+                sequence_id: call.sequence_id,
+                invocation_id,
+                segments: &segments,
+                sampling: turn.sampling.clone(),
+                model: turn.model,
+            },
+            |_| {},
+        )
+        .await
+        .context("running the side inference")?;
+        let inference_id = run.inference.id;
+        run.inference
+            .finish(store, run.outcome, run.duration_ms)
+            .await
+            .context("recording the side inference")?;
+        Ok(Settled {
+            response: run.result.context("running the side inference")?,
+            inference_id,
+            used_tools: false,
+        })
+    }
+    .await;
+    invocation
+        .finish(if result.is_ok() { "settled" } else { "error" })
+        .await?;
+    result
 }
 
 /// Resolve one chat turn, recording every model response and tool result in order.

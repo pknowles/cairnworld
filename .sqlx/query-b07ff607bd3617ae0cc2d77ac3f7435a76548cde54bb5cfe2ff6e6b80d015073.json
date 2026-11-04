@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT world.generation_stage, world.initial_prompt, world.storyteller_summary, world_generation.questions, world_generation.next_question, world_generation.spent, world_generation.questioner_branch_id, world_generation.storyteller_branch_id, questioner.agent_id AS questioner_agent_id, storyteller.agent_id AS storyteller_agent_id FROM world JOIN world_generation ON world_generation.world_id = world.id JOIN world_role_agent AS questioner ON questioner.world_id = world.id AND questioner.role = 'questioner' JOIN world_role_agent AS storyteller ON storyteller.world_id = world.id AND storyteller.role = 'storyteller' WHERE world.id = ?",
+  "query": "SELECT world.generation_stage, world.initial_prompt, world.storyteller_summary, world_generation.questions, world_generation.next_question, world_generation.spent, questioner.agent_id AS questioner_agent_id, questioner_chat.branch_id AS questioner_branch_id, storyteller.agent_id AS storyteller_agent_id, storyteller_chat.branch_id AS storyteller_branch_id FROM world JOIN world_generation ON world_generation.world_id = world.id JOIN world_role_agent AS questioner ON questioner.world_id = world.id AND questioner.role = 'questioner' JOIN agent_history AS questioner_chat ON questioner_chat.agent_id = questioner.agent_id JOIN world_role_agent AS storyteller ON storyteller.world_id = world.id AND storyteller.role = 'storyteller' JOIN agent_history AS storyteller_chat ON storyteller_chat.agent_id = storyteller.agent_id WHERE world.id = ?",
   "describe": {
     "columns": [
       {
@@ -34,22 +34,22 @@
         "type_info": "Integer"
       },
       {
-        "name": "questioner_branch_id",
+        "name": "questioner_agent_id",
         "ordinal": 6,
         "type_info": "Integer"
       },
       {
-        "name": "storyteller_branch_id",
+        "name": "questioner_branch_id",
         "ordinal": 7,
         "type_info": "Integer"
       },
       {
-        "name": "questioner_agent_id",
+        "name": "storyteller_agent_id",
         "ordinal": 8,
         "type_info": "Integer"
       },
       {
-        "name": "storyteller_agent_id",
+        "name": "storyteller_branch_id",
         "ordinal": 9,
         "type_info": "Integer"
       }
@@ -70,5 +70,5 @@
       false
     ]
   },
-  "hash": "22b4232ba481c7555fd9ecc827f0eb7cdba5ac07dddc13a4d91b1c2386ef5a69"
+  "hash": "b07ff607bd3617ae0cc2d77ac3f7435a76548cde54bb5cfe2ff6e6b80d015073"
 }

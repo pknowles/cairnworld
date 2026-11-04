@@ -2529,6 +2529,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_storyteller_never_sees_a_replaced_summary_and_developer_mode_labels_the_side_inference()
+     {
+        let db = crate::store::TestDatabase::new("generation-aside-test");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("maker@example.test", "Maker")
+            .await
+            .unwrap();
+        let member = store
+            .create_world_to_generate(&owner, "A drowned city")
+            .await
+            .unwrap();
+        store
+            .set_developer_mode(owner.id, member.world_id, true)
+            .await
+            .unwrap();
+        let call = |name: &str, arguments: &str| {
+            response(Content::ToolCalls(vec![ToolCall {
+                id: name.into(),
+                name: name.into(),
+                arguments: arguments.into(),
+            }]))
+        };
+        let text = |text: &str| response(Content::Text(text.into()));
+        let (scripted, requests) = ScriptedBackend::recording([
+            text("Meta answers."),
+            call("ask_questions", r#"{"questions":["Q one?"]}"#),
+            text("Answer one."),
+            text("SUMMARY-ONE"),
+            call("ask_questions", r#"{"questions":["Q two?"]}"#),
+            text("Answer two."),
+            text("SUMMARY-TWO"),
+            call("world_is_complete", "{}"),
+            text("The Drowned Bell"),
+        ]);
+        let backend = InferenceScheduler::new(scripted, Limits::default()).unwrap();
+        let worlds = World::load(&store).await.unwrap();
+        let mut events = World::get(&worlds, member.world_id)
+            .unwrap()
+            .events
+            .subscribe();
+        let _game = Game::new(
+            store.clone(),
+            worlds,
+            backend.foreground(),
+            Limits::default(),
+            "scripted".into(),
+            Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+        );
+        let mut finished = 0;
+        while finished < 9 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                .await
+                .expect("a generation step did not finish")
+                .unwrap();
+            if matches!(
+                event,
+                crate::inspection::DevEvent::Changed {
+                    inference_id: None,
+                    ..
+                }
+            ) {
+                finished += 1;
+            }
+        }
+
+        let summary_request = crate::prompts::current()
+            .unwrap()
+            .storyteller
+            .summary_request
+            .clone();
+        let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
+        assert_eq!(shown.len(), 9);
+        // Request 3 is the first summary, asked beside the chat; request 5 is
+        // the second round's answer and sees only the first summary, once.
+        assert!(shown[3].contains(&summary_request));
+        assert!(shown[5].contains("Q two?") && shown[5].contains("Answer one."));
+        assert_eq!(shown[5].matches("SUMMARY-ONE").count(), 1);
+        assert!(!shown[5].contains(&summary_request));
+        // The second summary sees the first, once, and none of the second.
+        assert_eq!(shown[6].matches("SUMMARY-ONE").count(), 1);
+        assert!(!shown[6].contains("SUMMARY-TWO"));
+        // The name sees only the latest.
+        assert_eq!(shown[8].matches("SUMMARY-TWO").count(), 1);
+        assert!(!shown[8].contains("SUMMARY-ONE"));
+
+        // Developer Mode lists each side inference in the Storyteller's history.
+        let storyteller = store
+            .world_agents(owner.id, member.world_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.role == "storyteller")
+            .unwrap();
+        let cursor = store
+            .first_raw_history_cursor(owner.id, member.world_id, storyteller.id, None)
+            .await
+            .unwrap();
+        let (entries, _) = store
+            .agent_raw_history(owner.id, cursor, 100)
+            .await
+            .unwrap();
+        let asides: Vec<String> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                crate::inspection::RawHistoryEntry::Inference {
+                    aside: Some(MessageContent::Text(text)),
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asides, ["SUMMARY-ONE", "SUMMARY-TWO"]);
+    }
+
+    #[tokio::test]
     async fn player_prompt_allows_a_silent_finish_after_a_player_visible_result() {
         let (backend, _) = ScriptedBackend::recording([]);
         let (game, _store, _db, member) = blank_opening_game(backend).await;

@@ -6114,18 +6114,29 @@ impl Store {
                 }
             }
             history::EntryKind::Inference => {
-                let (inference_id, error): (i64, Option<String>) = sqlx::query!(
-                    "SELECT id, error FROM inference WHERE history_entry_id = ?",
+                // A successful inference that wrote no message and no summary
+                // is a side inference: its reply never entered this chat.
+                let row = sqlx::query!(
+                    "SELECT inference.id, inference.error, \
+                            CASE WHEN inference.output IS NOT NULL \
+                                  AND NOT EXISTS (SELECT 1 FROM message WHERE message.source_inference_id = inference.id) \
+                                  AND NOT EXISTS (SELECT 1 FROM summary WHERE summary.inference_id = inference.id) \
+                                 THEN inference.output END AS \"aside_content?: i64\" \
+                     FROM inference WHERE inference.history_entry_id = ?",
                     entry.id
                 )
-                .map(|row| (row.id, row.error))
                 .fetch_one(&self.pool)
                 .await
                 .with_context(|| format!("loading raw history inference {}", entry.id))?;
+                let aside = match row.aside_content {
+                    Some(content) => Some(self.recorded_content(content).await?.0),
+                    None => None,
+                };
                 RawHistoryEntry::Inference {
-                    id: inference_id,
+                    id: row.id,
                     history_entry_id: entry.id,
-                    error,
+                    error: row.error,
+                    aside,
                 }
             }
         })

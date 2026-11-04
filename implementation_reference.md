@@ -668,13 +668,17 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   Questioner answers `questioner.example_questions` and `meta_questions` once (its
   history keeps them), then each round asks (`ask_questions` or `world_is_complete`)
   with the seed and current summary as per-request context, not stored history; the
-  Storyteller answers each question as text, the first round in the history its
-  agent was created with and each later round in a new history branch (shown by the
-  inspector's ordinary branch sections), its reply becomes `storyteller_summary`, and after
+  Storyteller answers each question as text in its one chat (migration 0017; both
+  roles have exactly one chat), seeing the seed and the one current summary as
+  per-request context. Its summary is a side inference (`agent::complete_aside`):
+  the request and reply never enter its chat, so it never sees a replaced summary;
+  Developer Mode lists it in its history as a labelled "Side inference"
+  (`RawHistoryEntry::Inference.aside`). The reply becomes `storyteller_summary`, and after
   `world_is_complete` its reply becomes the name. `Store::advance_generation` is the
   one transition table; a failing step fails the world with the error on its
-  sequence. `Game::admit`/`queue_player_message` refuse input until `world_is_ready`,
-  and the play page redirects to the world page. The world page shows the status,
+  sequence. `Game::admit`/`queue_player_message` refuse input until `world_is_ready`;
+  players can open the play page, whose chat says the world is being created until
+  it is ready (`play_connected`). The world page shows the status,
   failure and expandable seed, and with Developer Mode on hosts the Inspect panel
   (`WorldInspector` island; `ui.rs`'s `Inspector` is shared with `PlayerChat`).
   Not built yet: authoring tools and the Questioner's later phases, so a world stops at `concept_done`.

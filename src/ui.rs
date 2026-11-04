@@ -1969,7 +1969,21 @@ fn RawHistoryEntryRow(
                 <CompactionCard inference_id cause_inference_id text covered_ranges selection reason retained_messages/>
             </li>
         }.into_any(),
-        RawHistoryEntry::Inference { id, history_entry_id, error } => {
+        RawHistoryEntry::Inference { id, history_entry_id, error, aside } => {
+            if let Some(content) = aside {
+                return view! {
+                <li class=move || format!("rounded border border-dashed border-warning p-2 {}", if history_entry_selected(history_entry_id, selection) { "ring-2 ring-primary" } else { "" })>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="badge badge-warning badge-sm">"Side inference"</span>
+                        <span class="text-xs">"Not part of this agent's chat: it is not shown to the agent in later calls."</span>
+                        <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>
+                            "View inference"
+                        </button>
+                    </div>
+                    <ContentBlock content/>
+                </li>
+                }.into_any();
+            }
             let Some(error) = error else { return ().into_any(); };
             view! {
             <li class=move || format!("alert alert-error text-sm {}", if history_entry_selected(history_entry_id, selection) { "ring-2 ring-primary" } else { "" })>

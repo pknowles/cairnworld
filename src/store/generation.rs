@@ -63,7 +63,7 @@ impl GenerationStage {
 /// What one finished step produced, which decides the next stage.
 pub enum Advance {
     MetaQuestionsAnswered,
-    /// The Questioner's questions; the Storyteller begins a round on a new branch.
+    /// The Questioner's questions for the Storyteller to answer.
     Questions(Vec<String>),
     /// The Questioner is satisfied.
     WorldIsComplete,
@@ -117,17 +117,9 @@ impl Store {
         .await
         .with_context(|| format!("recording owner for world {world_id}"))?;
         let joined = Self::join_world_unplaced(&mut transaction, owner, world_id).await?;
-        let (_, questioner_branch_id) =
-            Self::create_role_agent(&mut transaction, world_id, "questioner").await?;
-        let (_, storyteller_branch_id) =
-            Self::create_role_agent(&mut transaction, world_id, "storyteller").await?;
-        sqlx::query!(
-            "INSERT INTO world_generation (world_id, questioner_branch_id, storyteller_branch_id) \
-             VALUES (?, ?, ?)",
-            world_id,
-            questioner_branch_id,
-            storyteller_branch_id,
-        )
+        Self::create_role_agent(&mut transaction, world_id, "questioner").await?;
+        Self::create_role_agent(&mut transaction, world_id, "storyteller").await?;
+        sqlx::query!("INSERT INTO world_generation (world_id) VALUES (?)", world_id)
         .execute(&mut *transaction)
         .await
         .with_context(|| format!("recording generation progress for world {world_id}"))?;
@@ -144,19 +136,18 @@ impl Store {
         })
     }
 
-    /// The agent for one of a world's two generation roles, with its first
-    /// history branch.
+    /// The agent for one of a world's two generation roles, with its one chat.
     async fn create_role_agent(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
         role: &str,
-    ) -> Result<(i64, i64)> {
+    ) -> Result<()> {
         let agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id)
             .execute(&mut **transaction)
             .await
             .with_context(|| format!("creating the {role} agent for world {world_id}"))?
             .last_insert_rowid();
-        let branch_id = Self::create_agent_history(transaction, agent_id).await?;
+        Self::create_agent_history(transaction, agent_id).await?;
         sqlx::query!(
             "INSERT INTO world_role_agent (world_id, role, agent_id) VALUES (?, ?, ?)",
             world_id,
@@ -166,7 +157,7 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("linking the {role} agent for world {world_id}"))?;
-        Ok((agent_id, branch_id))
+        Ok(())
     }
 
     /// Whether the world is ready to play, however it was filled in.
@@ -187,16 +178,19 @@ impl Store {
         let Some(row) = sqlx::query!(
             "SELECT world.generation_stage, world.initial_prompt, world.storyteller_summary, \
                     world_generation.questions, world_generation.next_question, \
-                    world_generation.spent, world_generation.questioner_branch_id, \
-                    world_generation.storyteller_branch_id, \
+                    world_generation.spent, \
                     questioner.agent_id AS questioner_agent_id, \
-                    storyteller.agent_id AS storyteller_agent_id \
+                    questioner_chat.branch_id AS questioner_branch_id, \
+                    storyteller.agent_id AS storyteller_agent_id, \
+                    storyteller_chat.branch_id AS storyteller_branch_id \
              FROM world \
              JOIN world_generation ON world_generation.world_id = world.id \
              JOIN world_role_agent AS questioner \
                ON questioner.world_id = world.id AND questioner.role = 'questioner' \
+             JOIN agent_history AS questioner_chat ON questioner_chat.agent_id = questioner.agent_id \
              JOIN world_role_agent AS storyteller \
                ON storyteller.world_id = world.id AND storyteller.role = 'storyteller' \
+             JOIN agent_history AS storyteller_chat ON storyteller_chat.agent_id = storyteller.agent_id \
              WHERE world.id = ?",
             world_id,
         )
@@ -268,27 +262,6 @@ impl Store {
             (GenerationStage::Ask, Advance::Questions(questions)) => {
                 ensure!(!questions.is_empty(), "the Questioner asked no questions");
                 let questions = serde_json::to_string(&questions).context("encoding questions")?;
-                // Each round's Storyteller starts from the seed and summary only.
-                // The first round uses the history the agent was created with.
-                if current.questions != "[]" {
-                    let branch_id = sqlx::query!(
-                        "INSERT INTO history_branch (agent_id) \
-                         SELECT agent_id FROM world_role_agent WHERE world_id = ? AND role = 'storyteller'",
-                        world_id,
-                    )
-                    .execute(&mut *transaction)
-                    .await
-                    .context("starting the Storyteller's round")?
-                    .last_insert_rowid();
-                    sqlx::query!(
-                        "UPDATE world_generation SET storyteller_branch_id = ? WHERE world_id = ?",
-                        branch_id,
-                        world_id,
-                    )
-                    .execute(&mut *transaction)
-                    .await
-                    .context("moving the Storyteller to its new round")?;
-                }
                 sqlx::query!(
                     "UPDATE world_generation SET questions = ?, next_question = 0 WHERE world_id = ?",
                     questions,
@@ -474,7 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn each_later_round_starts_the_storyteller_on_a_new_branch_and_progress_is_kept() {
+    async fn every_round_uses_the_same_one_chat_per_role_and_progress_is_kept() {
         let (store, _db, world_id) = new_world("generation-rounds").await;
         let first = store.next_generation(world_id).await.unwrap().unwrap();
 
@@ -494,8 +467,7 @@ mod tests {
         assert_eq!(round_one.spent, 2);
         assert_eq!(
             round_one.storyteller.branch_id(),
-            first.storyteller.branch_id(),
-            "the first round uses the history the agent was created with"
+            first.storyteller.branch_id()
         );
         assert_eq!(
             round_one.storyteller.agent_id(),
@@ -529,9 +501,10 @@ mod tests {
             .await
             .unwrap();
         let round_two = store.next_generation(world_id).await.unwrap().unwrap();
-        assert_ne!(
+        assert_eq!(
             round_two.storyteller.branch_id(),
-            round_one.storyteller.branch_id()
+            round_one.storyteller.branch_id(),
+            "the Storyteller keeps its one chat"
         );
         assert_eq!(
             round_two.summary, "A flooded city.",

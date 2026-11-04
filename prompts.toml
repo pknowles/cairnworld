@@ -385,13 +385,17 @@ role = """\
     vivid ideas, and keep the world small and simple enough to play.\
     """
 
-# The first message of a round. {seed} {summary} {count} {question}
-round_start = """\
+# The Storyteller's view of the world, replaced on every request rather than
+# stored in its chat, so only the latest summary is ever in its context. {seed} {summary}
+world_state = """\
     Seed prompt for the world: {seed}
 
-    Your world summary so far:
-{summary}
+    The current world summary, which already includes your earlier answers:
+{summary}\
+    """
 
+# The first message of a round. {count} {question}
+round_start = """\
     The Questioner has {count} questions, asked one at a time. Answer each in a short \
     paragraph.
 
@@ -401,9 +405,10 @@ round_start = """\
 # Each later question of the round. {number} {question}
 next_question = "Question {number}: {question}"
 
-# After the last question. The reply becomes the world summary.
+# After the last question, asked as a side inference outside the chat. The reply
+# becomes the world summary.
 summary_request = """\
-    Write the world summary now, folding in your answers: the setting, factions, \
+    Write the new world summary now, folding in your answers: the setting, factions, \
     important NPCs and their motives, the locations and the central tension, in about \
     300 words. Rewrite it whole, keeping ideas that still make a cohesive story and \
     dropping those that no longer fit.\
