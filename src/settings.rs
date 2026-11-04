@@ -19,6 +19,8 @@ pub struct Settings {
     pub sampling: SamplingConfig,
     pub game: GameSettings,
     pub web: Option<Web>,
+    #[serde(default)]
+    pub testing: Testing,
 }
 
 /// Rules of play that apply to every world.
@@ -90,6 +92,16 @@ pub struct Web {
     pub google_client_id: String,
     pub google_client_secret: String,
     pub google_redirect_url: String,
+}
+
+/// Aids for testing a deployment by hand. Everything is off unless set.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Testing {
+    /// Shows the world detail page's "Create character" button, which lets one
+    /// account run several players.
+    #[serde(default)]
+    pub create_character_button: bool,
 }
 
 /// A model and everything needed to talk to it. The chat template travels with

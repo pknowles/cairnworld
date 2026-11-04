@@ -85,6 +85,12 @@ presence_departure_seconds = 60
 # google_client_secret = "..."
 # google_redirect_url = "http://localhost:3000/auth/google/callback"
 
+# Aids for testing by hand. Everything here is off unless set; enable in local.toml.
+[testing]
+# Shows "Create character" on the world detail page so one account can run several
+# players.
+create_character_button = false
+
 # Rules of play for every world.
 [game]
 # Every character receives the same detailed narration of an event, for a shared

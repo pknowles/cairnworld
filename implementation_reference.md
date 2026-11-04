@@ -828,7 +828,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   creates, limits, lists, revokes, and accepts invitation links, and lets an
   owner remove an active member while retaining its durable association. It
   renders every retained membership with its characters nested below it; an
-  active member can create another blank Adventurer, and every entry link names
+  active member can create another blank Adventurer when `[testing]
+  create_character_button` is set (off by default; the POST is refused
+  otherwise), and every entry link names
   its exact character. Landing,
   world, invitation, and membership routes all resolve access through `Store`
   rather than trusting a client user or agent id. `POST

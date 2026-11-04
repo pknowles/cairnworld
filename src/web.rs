@@ -93,6 +93,8 @@ struct App {
     store: Store,
     google: Google,
     game: GameLoad,
+    /// `[testing] create_character_button`: whether members may add characters.
+    create_character_button: bool,
 }
 
 /// The web-visible lifetime of the one in-process game model.
@@ -316,7 +318,12 @@ fn router(app: App, sessions: SqliteStore, secure_cookies: bool) -> Router {
 /// Serve the OAuth-only browser entrypoint. The Google exchange is deliberately
 /// performed by the OpenID Connect crate; Cairnworld only persists the verified
 /// email identity it receives and resolves access from that identity.
-pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Result<()> {
+pub async fn serve(
+    store: Store,
+    config: &settings::Web,
+    testing: settings::Testing,
+    game: GameLoad,
+) -> Result<()> {
     let bind: SocketAddr = config
         .bind
         .parse()
@@ -335,6 +342,7 @@ pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Resu
             store,
             google,
             game,
+            create_character_button: testing.create_character_button,
         },
         sessions,
         secure_cookies,
@@ -586,10 +594,11 @@ async fn world_detail(
     } else {
         vec![]
     };
+    let create_character = app.create_character_button;
     Ok(Html(render_page(
         "Cairnworld",
         true,
-        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=viewer.id/> },
+        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=viewer.id create_character/> },
     )))
 }
 
@@ -1009,6 +1018,11 @@ async fn create_player_character(
     Path(world_id): Path<i64>,
 ) -> Result<Redirect, WebError> {
     let user = session_user(&app.store, &session).await?;
+    if !app.create_character_button {
+        return Err(WebError::forbidden(
+            "creating extra characters is not enabled (`[testing] create_character_button`)",
+        ));
+    }
     app.store.create_player_character(user.id, world_id).await?;
     Ok(Redirect::to(&format!("/world/{world_id}")))
 }
@@ -1587,6 +1601,7 @@ fn WorldDetail(
     members: Vec<WorldMember>,
     invitations: Vec<crate::store::Invitation>,
     viewer_id: i64,
+    #[prop(default = false)] create_character: bool,
 ) -> impl IntoView {
     let is_owner = world.owner_id == viewer_id;
     let world_id = world.id;
@@ -1618,7 +1633,7 @@ fn WorldDetail(
                 let is_active = member.access == "active";
                 let remove = is_owner && member.user_id != viewer_id && is_active;
                 let enter = member.user_id == viewer_id && is_active;
-                let create = member.user_id == viewer_id && is_active;
+                let create = create_character && member.user_id == viewer_id && is_active;
                 let player = format!("{} ({})", member.display_name, member.access);
                 let away = enter && member.away;
                 let remove_path = format!("{member_path}/{}", member.user_id);
@@ -2798,6 +2813,10 @@ mod tests {
         (app, store, db)
     }
 
+    async fn test_app_with_game() -> (Router, Store, crate::store::TestDatabase, GameLoad) {
+        test_app_with_options(false).await
+    }
+
     #[tokio::test]
     async fn model_failure_leaves_world_inspection_notifications_available() {
         let (app, store, _db, game) = test_app_with_game().await;
@@ -2876,7 +2895,9 @@ mod tests {
         ));
     }
 
-    async fn test_app_with_game() -> (Router, Store, crate::store::TestDatabase, GameLoad) {
+    async fn test_app_with_options(
+        create_character_button: bool,
+    ) -> (Router, Store, crate::store::TestDatabase, GameLoad) {
         use openidconnect::{
             AuthUrl, EmptyAdditionalProviderMetadata, JsonWebKeySetUrl, ResponseTypes,
             core::{CoreJwsSigningAlgorithm, CoreResponseType, CoreSubjectIdentifierType},
@@ -2910,6 +2931,7 @@ mod tests {
                 store: store.clone(),
                 google,
                 game: game.clone(),
+                create_character_button,
             },
             sessions,
             true,
@@ -3212,6 +3234,7 @@ mod tests {
                     ]
                     invitations=vec![crate::store::Invitation { token: "invite".into(), world_id: 7, max_uses: Some(2), uses: 1 }]
                     viewer_id
+                    create_character=true
                 /> }
             })
         }
@@ -3238,6 +3261,58 @@ mod tests {
         assert!(owner.contains("action=\"/world/7/members/2\""));
         assert!(owner.contains("action=\"/world/7/invitations\""));
         assert!(owner.contains("action=\"/world/7/invitations/invite/revoke\""));
+    }
+
+    #[test]
+    fn world_detail_hides_the_create_character_button_unless_enabled() {
+        let detail = render_page("Cairnworld", false, move || {
+            view! { <WorldDetail
+                world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode: false }
+                members=vec![WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), away: false, characters: vec![] }]
+                invitations=vec![]
+                viewer_id=1
+            /> }
+        });
+        assert!(!detail.contains("Create character"));
+        assert!(!detail.contains("action=\"/world/7/characters\""));
+    }
+
+    #[tokio::test]
+    async fn creating_a_character_needs_the_button_enabled() {
+        for enabled in [false, true] {
+            let (app, store, _db, _game) = test_app_with_options(enabled).await;
+            let owner = store
+                .find_or_create_user("owner@example.test", "Owner")
+                .await
+                .unwrap();
+            let cookie = session_cookie(&store, owner.id).await;
+            assert_eq!(
+                request(&app, "POST", "/worlds", Some(&cookie)).await,
+                StatusCode::SEE_OTHER
+            );
+            let world_id = store.owned_worlds(owner.id).await.unwrap()[0].id;
+            let characters = |store: Store| async move {
+                store.world_members(world_id).await.unwrap()[0]
+                    .characters
+                    .len()
+            };
+            let before = characters(store.clone()).await;
+            let status = request(
+                &app,
+                "POST",
+                &format!("/world/{world_id}/characters"),
+                Some(&cookie),
+            )
+            .await;
+            let after = characters(store.clone()).await;
+            if enabled {
+                assert_eq!(status, StatusCode::SEE_OTHER);
+                assert_eq!(after, before + 1);
+            } else {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert_eq!(after, before);
+            }
+        }
     }
 
     #[test]

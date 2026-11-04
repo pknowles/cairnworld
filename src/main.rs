@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
                     })
                     .await;
             });
-            web::serve(store, web, game).await
+            web::serve(store, web, settings.testing, game).await
         }
     }
 }
