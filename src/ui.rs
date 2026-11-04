@@ -1974,8 +1974,7 @@ fn RawHistoryEntryRow(
                 return view! {
                 <li class=move || format!("rounded border border-dashed border-warning p-2 {}", if history_entry_selected(history_entry_id, selection) { "ring-2 ring-primary" } else { "" })>
                     <div class="flex flex-wrap items-center gap-2">
-                        <span class="badge badge-warning badge-sm">"Side inference"</span>
-                        <span class="text-xs">"Not part of this agent's chat: it is not shown to the agent in later calls."</span>
+                        <span class="badge badge-warning badge-sm" title="Not part of this agent's chat: the agent does not see it in later calls.">"Side inference - not in chat"</span>
                         <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>
                             "View inference"
                         </button>
