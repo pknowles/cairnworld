@@ -1685,15 +1685,22 @@ The developer view will need to be able to display the following.
   complex as it is a higher level concept than the data. I.e. inference view is
   real and tangible but the chat history is more of a timeline view of messages.
   For example, the linear messages for an individual player or NPC agents. The
-  GM agent chat history is more complex as it will form a DAG where histories
-  split and merge. To support this, the GM's chat history view needs to
-  authentically display the DAG, including multiple heads - one per Group of
-  characters and their history of messages. This view should include expandable
-  compaction/chat-summaries inline into the history at the point they were made.
-  It does not include additional agent prompt/context. When opening a message
-  from the current player's chat, it would show the player agent's chat history,
-  including its agentic loop and tool calls etc that would normally be hidden
-  from the player.
+  GM agent chat history is more complex as the relationship between groups, and
+  thus GM chats, forms a DAG where histories split and merge. This view should
+  include expandable compaction/chat-summaries inline into the history at the
+  point they were made. It does not include additional agent prompt/context -
+  that appears in the inference view. When opening a message from the current
+  player's chat, it would show the player agent's chat history, including its
+  agentic loop and tool calls etc that would normally be hidden from the player.
+- To support multiple GMs, we should have a group/GM view rendered as a graph
+  (just like a git graph with branches and merges). Nodes in the graph are
+  groups and GM chats (this is 1:1) and clicking on a node jumps to its chat
+  history view. Scrolling a GM's history view to the beginning (after a merge)
+  or end (before a split) can move to another GM/group but should take the path
+  with the most player characters in the group. If tied, the most characters and
+  if still tied, it doesn't matter. There must be an item in the linear history
+  to deliniate the point of the merge/split, showing the group name and that
+  jumps to the other merged or split group when clicked.
 
 There needs to be a button on chat entries on the left to inspect them, which
 will open and highlight their entry in the turn view on the right. This will be

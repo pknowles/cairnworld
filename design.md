@@ -231,7 +231,7 @@ transaction; no payload is published before that transaction commits.
 | `recorded_content` | `id, body` where body serializes the existing content enum and reasoning once. No uniqueness constraint on body. |
 | `text` | Immutable prompt, tool-schema and formatter artifacts, reused by equality. Ordinary conversation text is in recorded_content, not interned here. |
 | `history_branch` | `id, agent_id, next_position`; positions are allocated by UPDATE/RETURNING in the insertion transaction. |
-| `history_parent` | `branch_id, agent_id, ordinal, parent_branch_id, through_position`; primary key `(branch_id, ordinal)`. Immutable bounded references. Parents belong to the same agent and predate their child, enforced by composite foreign keys to `history_branch(id, agent_id)` and `parent_branch_id < branch_id`. |
+| `history_parent` | Ordered immutable references to source chats through recorded positions; primary key `(branch_id, ordinal)`. A source predates its child. GM chat inheritance connects the agents of related groups in the same world; it does not require one agent to own both chats. Validate authorized GM ancestry and world identity, preserving acyclic relationships and exact cuts. |
 | `agent_history` | `agent_id PRIMARY KEY, branch_id UNIQUE`; the single writable branch of a linear player, NPC, Storyteller or sandbox history. GM heads instead belong to groups. |
 | `history_entry` | `id, branch_id, position, kind`; unique `(branch_id, position)`, kind is message, inference or summary. This is the raw history index, not a duplicate transcript. |
 | `message` | `id` is also its history_entry ID; `role, content, source_inference_id, source_tool_execution_id, trigger_sequence_id`. `content` is a plain `recorded_content` reference - every message uses its whole content, so no typed selection is needed. Only applicable provenance fields are set. |
@@ -477,7 +477,7 @@ the Storyteller, GM, and NPC chats.
   character's history.
 - Every `agent(id, world_id)` is only a chat history. Its gameplay
   purpose is determined by a relationship that owns it: `world_storyteller`,
-  `player_character`, the group's GM history head, or `npc_agent`. A PC belongs to a
+  `player_character`, the group owning its GM agent, or `npc_agent`. A PC belongs to a
   membership through `player_character`; an NPC is played through `npc_agent`.
   Locations contain game state. GM context follows the interacting group,
   including when it moves; location alone does not determine shared history.
@@ -488,42 +488,41 @@ one transaction before exposing them to play.
 
 ### Groups and shared GM history
 
-> **DESIGN MISTAKE, to be fixed by [One GM agent per group](plans/gm-per-group.md).**
-> The declarations ask for one GM per group, each with one chat. The text below
-> instead has a single world GM agent holding many chats (a history branch per
-> group). Do not extend it, copy it for other agents, or treat it as correct.
-
 Authority: GM interaction, Game state / Group, Character actions / Travel,
-and Developer Mode's GM history DAG. `world_gm(world_id PRIMARY KEY, agent_id
-UNIQUE)` owns the world's GM agent. `character_group(character_id PRIMARY KEY,
-group_id, description)` replaces character_location. `character_group` is
-created with every character. In the development setup, a new Adventurer enters
-an existing group at its location; no particular group is required. With the
-Storyteller, completion of character creation and the player's readiness lead to
-the entry placement described under Storyteller world creation below.
-`group(id, world_id, location_id, description, branch_id,
-gm_notes, storyteller_notes, retired_at)` owns one GM history branch. A null
-retired_at denotes an active group with a writable head; a retired group keeps
-its final head for inspection but cannot receive new gameplay entries. Each active
-character has exactly one group. Retired groups keep their historical identity
-but no character membership or writable head.
+and Developer Mode's group/GM graph and history navigation. Each group owns one
+GM agent (`group.gm_agent_id`) with one chat, resolved through the same
+`agent_history` relationship as other agents. The group is the gameplay owner;
+graph nodes visualize groups and their GM chats, not another ownership layer.
+There is no single world GM selecting among several group chats.
 
-`GroupHistory { agent_id, branch_id }` is passed explicitly to context assembly;
-agent ID alone cannot select a GM history. Player/NPC calls resolve agent_history.
-The call-stack prohibition on re-entering an active agent remains unchanged;
-the same GM role cannot recursively invoke itself through a different group.
+A group retains its membership and GM chat as historical facts when retired;
+only an active group's GM takes new turns. Characters leaving an established
+group produce successor groups through split/merge rather than changing that
+group's historical membership in place. Gameplay resolves the character's active
+group; historical inspection can still read predecessor memberships. A blank
+Adventurer awaiting creation/placement has no group yet. Entry placement follows
+the lifecycle described under Storyteller world creation below.
+
+Each chat stores its own entries. Bounded references to source chats provide
+inherited context after split/merge without copying transcripts. A reference may
+cross GM agent identities only for validated group ancestry in the same world;
+arbitrary unrelated-agent or foreign-world history is not accessible. The
+call-stack prohibition on re-entering an active agent still applies. Grouping
+does not grant another action allowance or reset the triggering inference budget.
 
 **Split.** `split_group(group_id, partitions)` accepts a complete, nonempty,
 disjoint partition of its character IDs with descriptions. Rust validates exact
-membership. Each resulting group gets a new branch whose single parent is the
-old head through its settled position. The old group retires. Character and
-branch ownership change in one transaction. IDs of resulting groups are returned.
+membership. Each resulting group gets a new GM agent/chat whose single source is
+the old chat through its settled position. The old group retires. Successor
+memberships, agents/chats and source references commit in one transaction without
+erasing predecessor membership. IDs of resulting groups are returned.
 
 **Merge.** `merge_groups(group_ids, description)` validates distinct nonempty
 groups at one location in the same world. Sort source group IDs ascending for
-parent order. The resulting group gets a new branch with those bounded parents;
-source groups retire. Character membership and the new head commit together.
-The resulting GM context includes both histories. No transcript is copied.
+parent order. The resulting group gets a new GM agent/chat with those bounded
+sources; source groups retire. Successor membership and the new GM/chat commit
+together. Its own chat does not acquire copies of ancestor entries; inference
+assembly includes the relevant source histories once.
 
 **Tool boundary.** Grouping tools produce a typed pending topology change in
 `ToolOutcome`; it is applied at the end of the current model-returned tool batch.
@@ -545,13 +544,31 @@ If execution fails before the boundary, unapplied grouping calls fail and no
 head changes; completed ordinary results still get history references during
 failure finalization. No half-finished assistant/tool exchange is inherited.
 
-The next GM inference in the same invocation resolves its branch from the
-triggering character's current group. For a GM event without a triggering
+Subsequent GM work resolves the GM agent of the triggering character's resulting
+group. A recorded invocation belongs to its actual agent: finish source-agent
+work and use ordinary invocation recording for successor-agent work under the
+same trigger and budget, rather than moving an invocation between agents or
+replaying completed tools. For a GM event without a triggering
 character, split_group requires an explicit `continue_with_character_id` from
 the source group. This binding is recorded on the invocation and visible in its
 context, rather than an implicit choice of the first resulting group. A merge
-has one resulting head. Source-branch compaction settles before taking cuts;
+has one resulting group. Source-chat compaction settles before taking cuts;
 no database transaction spans inference execution.
+
+**Developer navigation.** The group/GM view draws a git-style graph of groups
+and split/merge edges. Selecting a group opens only its GM chat's own entries,
+with ordinary paging, expandable inline compaction summaries and inference links.
+Additional model prompt/context belongs in the inference view. The graph and
+named split/merge boundary entries use the same source references as inference
+assembly, rather than a second graph representation.
+
+Scrolling past the beginning/end can navigate to a predecessor/successor chat.
+Choose among adjacent groups by most player characters, then most characters in
+total; either path is valid after a final tie. These are the groups' retained
+memberships, not changing memberships of a reused group. Boundary entries name
+and link the other related groups, so alternative paths remain available. Loading
+another chat during navigation does not change message ownership or flatten all
+source chats into the selected group's chat.
 
 **Context order.** Like a git history with merges: every branch reachable from
 the head appears once, with the longest prefix any path reaches, in branch

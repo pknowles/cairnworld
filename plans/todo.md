@@ -21,8 +21,8 @@ there yet". Remove and archive only verified completions.
   and bounded tool/context sizes. Incidental detail stays in text; significant
   item creation retains its Storyteller responsibility.
 - [One GM agent per group](gm-per-group.md): fixes a design mistake (one GM
-  agent holding a chat per group); each group gets its own GM agent with one chat.
-  Needs the user's sign-off on the design change first.
+  agent holding a chat per group); each group owns its GM agent/chat, with
+  inherited split/merge context, a group graph and history navigation.
 - [Storyteller world initialization](storyteller-worlds.md): core objects
   (create/edit/delete tools, Questioner review that ends with CoreObjectsCreated),
   then the extended summary and detail objects ending with DetailObjectsCreated.
