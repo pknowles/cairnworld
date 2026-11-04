@@ -565,7 +565,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   described above, `model` naming the default among them, and `limits`,
   including `max_concurrent_inferences`, `max_context_tokens`,
   `max_output_tokens`, `compact_before_next_input_tokens`, and
-  `keep_raw_messages`. The fixed paged KV-cache reservation is
+  `keep_raw_messages`. `[game]` (`GameSettings`) holds `characters_share_narration` and the
+  required `player_response_timeout` (seconds; no code default, so a missing value fails startup).
+  The fixed paged KV-cache reservation is
   `max_context_tokens` per concurrently admitted inference. A completed turn
   queues compaction only when its measured input plus output would make the
   next input reach the lazy threshold; that agent's next inference waits for
@@ -774,14 +776,24 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - Tentative and committed actions, InterventionCheck (`arbitrate` in
   `src/game.rs`). `take` carries `committed` (default false), which the GM reads in
   the recorded request; Rust does not act on it. The GM's `intervention_check`
-  names the presented action and characters in the actor's group. Only NPCs other than the
-  actor are asked; the result says who was not asked (the actor, and players, who cannot
-  be asked until player replies exist: plans/player-replies.md). Each NPC is asked in the GM's call as a child invocation
-  (`Game::ask_npc`, the same decision a response collection asks for, plus an
-  `npc.intervention_request` in its history), answers do_nothing or an action,
-  and the strongest proposals become pending actions of their own
-  (`Store::create_reaction_action`). Those join the turn's `PresentedActions`: the
-  GM approves or rejects each with the ordinary tools, and narration is refused
+  names the presented action and characters in the actor's group. Every character but the
+  actor is asked at once; the result says that the actor was not asked. Each player gets a
+  `pending_reply` and the question in their chat (`Store::ask_player`, `gm.intervention_request`)
+  before any NPC inference; each NPC is asked in the GM's call as a child invocation
+  (`Game::ask_npc`, the same decision a response collection asks for), answers do_nothing or an
+  action, and the strongest proposals become pending actions of their own
+  (`Store::create_reaction_action`, linked by `reacts_to`). With players asked the call returns
+  `ToolOutcome::Waiting`: it ends the GM's turn, calls after it in the response do not run
+  (`Store::close_unrun_tool_calls`), `arbitrate` returns `None` and the actor's call is told
+  the GM is waiting. A player's next input answers (`Game::reply_tools`: `do_nothing` or an
+  action tool, proposed as a reaction); a passed deadline records do-nothing (`WorldEvent::ReplyDeadline`,
+  `Store::next_reply_deadline`, the persisted earliest-deadline wake of `process_world`) and counts a miss
+  per membership (`world_member.missed_replies`, `[game] player_response_timeout`);
+  `AFK_AFTER_MISSES` in a row broadcast `ChatChange::Away`, which ends the connection
+  (`ServerEvent::Away`) and the WorldDetail page says why. The settle that closes the last
+  open reply runs `Game::decide_after_replies`: the question moves to the deciding sequence
+  and the GM's next turn starts from `gm.answers_request` with every reaction presented.
+  The GM approves or rejects each with the ordinary tools, and narration is refused
   until every presented action is decided. Nobody is blocked by proposing, and a
   committed retry is the GM's to approve. Nested work spends the turn's budget.
 - Group-scoped narration. `Store::append_group_narration` selects connected

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_reply SET status = ?, response = ? WHERE world_id = ? AND action_id = ? AND character_id = ? AND status = 'open' AND (? = 0 OR unixepoch(deadline) <= unixepoch('now'))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "ee64f0d0cabf21d94b243074a8726ba91c37d4910ecee4bfbd97a935e1741683"
+}

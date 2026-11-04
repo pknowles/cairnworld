@@ -3,11 +3,13 @@ mod history;
 mod interruption;
 mod npc;
 mod prompt;
+mod reply;
 mod speech;
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
 pub use npc::{Decision, NpcStep, ResponseCollection, with_eagerness};
 pub use prompt::PromptEvidence;
+pub use reply::AFK_AFTER_MISSES;
 pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SpeakAction};
 
 // Developer Mode's inspection view types are shared with the browser; see
@@ -378,6 +380,8 @@ pub struct WorldMember {
     pub user_id: i64,
     pub display_name: String,
     pub access: String,
+    /// Missed too many response deadlines in a row, so was disconnected as away.
+    pub away: bool,
     pub characters: Vec<WorldCharacter>,
 }
 
@@ -393,6 +397,7 @@ struct WorldMemberCharacterRow {
     user_id: i64,
     display_name: String,
     access: String,
+    away: bool,
     character_id: i64,
     character_name: String,
 }
@@ -1531,12 +1536,13 @@ impl Store {
     pub async fn world_members(&self, world_id: i64) -> Result<Vec<WorldMember>> {
         let rows: Vec<WorldMemberCharacterRow> = sqlx::query_as!(
             WorldMemberCharacterRow,
-            "SELECT member.id AS member_id, member.user_id, user.display_name, member.access, character.id AS character_id, character.name AS character_name \
+            "SELECT member.id AS member_id, member.user_id, user.display_name, member.access, member.missed_replies >= ? AS \"away: bool\", character.id AS character_id, character.name AS character_name \
              FROM world_member AS member \
              JOIN user ON user.id = member.user_id \
              JOIN player_character ON player_character.member_id = member.id \
              JOIN character ON character.id = player_character.character_id \
              WHERE member.world_id = ? ORDER BY member.id, character.id",
+            AFK_AFTER_MISSES,
             world_id,
         )
         .fetch_all(&self.pool)
@@ -1551,6 +1557,7 @@ impl Store {
                     user_id: row.user_id,
                     display_name: row.display_name,
                     access: row.access,
+                    away: row.away,
                     characters: vec![],
                 });
             }

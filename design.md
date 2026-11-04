@@ -701,10 +701,10 @@ sequences) so a session is fully replayable as data.
 
 Authority: Scheduling, Agent syntax and tool calls, Character actions' human
 replies. One Tokio task per world processes game events sequentially. An event
-runs until its invocation completes, fails or is left waiting for a player
-reply. Waiting stores the continuation and releases the queue: nothing runs or
-counts down while it waits. A later reply or deadline event continues the same
-recorded continuation. Other legal events can run while a reply is outstanding.
+runs until its invocation completes or fails. A turn that needs a player reply
+ends, with the reply stored as rows and a deadline: nothing runs or counts down
+while it waits. A later reply or deadline event starts a new turn of the asking
+agent with the answers. Other legal events can run while a reply is outstanding.
 Connection presence uses short-lived state locks; membership writes use short
 Store transactions. Both run independently of model work, so a long inference
 cannot postpone a disconnect or ban.
@@ -1829,7 +1829,7 @@ short turns through EndTurn, without resetting its ready times. For travel it go
 a strict majority of the party, and otherwise, including a tie, stays where it is.
 
 A reply that needs a human persists
-`pending_reply(action_id, character_id, deadline, status, response_content_id)`; its
+`pending_reply(action_id, character_id, deadline, status, response)`; its
 deadline and intended character are explicit. Nothing is suspended and nothing
 is resumed mid-response: the asking agent's turn simply ends with a result saying
 who it is waiting for, and the answers later reach it as a new message that starts

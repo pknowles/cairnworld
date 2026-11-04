@@ -91,3 +91,7 @@ presence_departure_seconds = 60
 # experience, unless the GM narrates something privately. When off, players get
 # the accounts the GM wrote for them. The GM is not told about this setting.
 characters_share_narration = true
+# Seconds a player has to answer when the game cannot go on without them, such as
+# being asked whether they intervene. When it passes, do-nothing is applied for
+# them. Three passed in a row without a response and they are treated as away.
+player_response_timeout = 300

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character_id, status, response FROM pending_reply WHERE world_id = ? AND action_id = ? AND status <> 'open' ORDER BY rowid",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "response",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "655ef8e9fc515312fb63f56afceb03baebe7450e46b2ab426d31e435dd3026f4"
+}

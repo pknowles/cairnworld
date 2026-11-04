@@ -1149,10 +1149,24 @@ async fn play(
     member: PlayerAgent,
     after_message_id: Option<i64>,
 ) {
-    if let Err(error) = play_connection(socket, game, stream, member, after_message_id).await {
+    if let Err(error) = play_connection(socket, game, stream, member, after_message_id).await
+        && error.downcast_ref::<AwayDisconnect>().is_none()
+    {
         tracing::error!(error = %format!("{error:#}"), "player chat websocket ended with an error");
     }
 }
+
+/// The player's connection ends because they missed too many response deadlines.
+#[derive(Debug)]
+struct AwayDisconnect;
+
+impl std::fmt::Display for AwayDisconnect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("player disconnected for being away")
+    }
+}
+
+impl std::error::Error for AwayDisconnect {}
 
 async fn play_connection<B: Backend + Send + Sync + 'static>(
     mut socket: WebSocket,
@@ -1351,6 +1365,10 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                 }
             }
             narration = broadcasts.recv() => match narration {
+                Ok(crate::world::ChatChange::Away { character_id }) if character_id == member.character_id => {
+                    send_event(socket, &ServerEvent::Away).await?;
+                    return Err(AwayDisconnect.into());
+                }
                 Ok(change) => {
                     send_chat_failure(socket, game, member, change, cursor).await?;
                     cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
@@ -1423,6 +1441,12 @@ async fn send_ready_broadcasts<B: Backend + Send + Sync + 'static>(
     let mut missed = 0;
     loop {
         match broadcasts.try_recv() {
+            Ok(crate::world::ChatChange::Away { character_id })
+                if character_id == member.character_id =>
+            {
+                send_event(socket, &ServerEvent::Away).await?;
+                return Err(AwayDisconnect.into());
+            }
             Ok(change) => {
                 send_chat_failure(socket, game, member, change, cursor).await?;
             }
@@ -1596,10 +1620,12 @@ fn WorldDetail(
                 let enter = member.user_id == viewer_id && is_active;
                 let create = member.user_id == viewer_id && is_active;
                 let player = format!("{} ({})", member.display_name, member.access);
+                let away = enter && member.away;
                 let remove_path = format!("{member_path}/{}", member.user_id);
                 view! { <li class=WORLD_DETAIL_ROW_CLASSES>
                     <div class="w-full flex flex-wrap items-center justify-between gap-3">
                         <span>{player}</span>
+                        {away.then(|| view! { <span class="alert alert-warning">"You were disconnected for being AFK: you did not respond in time. Enter the world to continue."</span> })}
                         {create.then(|| view! { <form action=format!("{world_path}/characters") method="post"><button class="btn btn-sm" type="submit">"Create character"</button></form> })}
                         {remove.then(|| view! { <form action=remove_path method="post"><button class="btn btn-error btn-sm" type="submit">"Remove"</button></form> })}
                     </div>
@@ -3180,9 +3206,9 @@ mod tests {
                 view! { <WorldDetail
                     world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode: false }
                     members=vec![
-                        WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 8, name: "Rook".into() }, crate::store::WorldCharacter { id: 11, name: "Lark".into() }] },
-                        WorldMember { user_id: 2, display_name: "Invitee".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 9, name: "Moth".into() }] },
-                        WorldMember { user_id: 3, display_name: "Removed".into(), access: "removed".into(), characters: vec![crate::store::WorldCharacter { id: 10, name: "Ash".into() }] },
+                        WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), away: false, characters: vec![crate::store::WorldCharacter { id: 8, name: "Rook".into() }, crate::store::WorldCharacter { id: 11, name: "Lark".into() }] },
+                        WorldMember { user_id: 2, display_name: "Invitee".into(), access: "active".into(), away: false, characters: vec![crate::store::WorldCharacter { id: 9, name: "Moth".into() }] },
+                        WorldMember { user_id: 3, display_name: "Removed".into(), access: "removed".into(), away: false, characters: vec![crate::store::WorldCharacter { id: 10, name: "Ash".into() }] },
                     ]
                     invitations=vec![crate::store::Invitation { token: "invite".into(), world_id: 7, max_uses: Some(2), uses: 1 }]
                     viewer_id

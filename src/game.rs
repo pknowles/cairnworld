@@ -26,8 +26,9 @@ use crate::{
     prompts,
     settings::{GameSettings, Limits},
     store::{
-        ActionOutcome, Decision, GmScene, Hearing, InvalidHearing, MAX_PREFIX_CHARS, Narration,
-        PendingAction, PlayerAgent, PresenceNarration, SpeakAction, Store,
+        AFK_AFTER_MISSES, ActionOutcome, Decision, GmScene, Hearing, InvalidHearing,
+        MAX_PREFIX_CHARS, Narration, NarrationText, PendingAction, PlayerAgent, PresenceNarration,
+        SpeakAction, Store,
     },
     tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
@@ -509,6 +510,17 @@ where
                     }
                 }
             };
+            let reply_next = if draining {
+                None
+            } else {
+                match store.next_reply_deadline(world_id).await {
+                    Ok(next) => next,
+                    Err(error) => {
+                        tracing::error!(world_id, error = %format!("{error:#}"), "reading reply schedule");
+                        break;
+                    }
+                }
+            };
             // NPC replies are finite steps that wait their turn: foreground
             // input and presence handling above take priority, and none start
             // once stopping or in a group where a player has a hand raised.
@@ -533,6 +545,23 @@ where
                         WorldEvent::PresenceDeadline {
                             group_id,
                             generation,
+                        }
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let reply_deadline = async {
+                match reply_next {
+                    Some(due) => {
+                        if due.after_seconds > 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                due.after_seconds as u64,
+                            ))
+                            .await;
+                        }
+                        WorldEvent::ReplyDeadline {
+                            action_id: due.action_id,
+                            character_id: due.character_id,
                         }
                     }
                     None => std::future::pending().await,
@@ -565,6 +594,7 @@ where
                 }
                 _ = state.released.notified(), if !draining => continue,
                 event = deadline, if !draining => event,
+                event = reply_deadline, if !draining => event,
                 event = events.recv() => match event { Some(event) => event, None => break },
                 _ = std::future::ready(()), if npc_step.is_some() => {
                     let Some(game) = game.upgrade() else { break };
@@ -604,6 +634,17 @@ where
                         tracing::error!(world_id, group_id, generation, error = %format!("{error:#}"), "handling presence deadline");
                     }
                 }
+                WorldEvent::ReplyDeadline {
+                    action_id,
+                    character_id,
+                } => {
+                    if let Err(error) = game
+                        .handle_reply_deadline(world_id, action_id, character_id)
+                        .await
+                    {
+                        tracing::error!(world_id, action_id, character_id, error = %format!("{error:#}"), "handling reply deadline");
+                    }
+                }
                 #[cfg(test)]
                 WorldEvent::Settled(reply) => {
                     let _test_finished = reply.send(());
@@ -617,6 +658,144 @@ where
         events.close();
         while events.try_recv().is_ok() {}
         world_id
+    }
+
+    /// A reply was not given in time: do-nothing is applied for the character and
+    /// the miss counted. A player who has missed too many in a row is away, which
+    /// ends their connections.
+    async fn handle_reply_deadline(
+        self: &Arc<Self>,
+        world_id: i64,
+        action_id: i64,
+        character_id: i64,
+    ) -> Result<()> {
+        let Some(missed) = self
+            .store
+            .time_out_reply(world_id, action_id, character_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        if missed >= AFK_AFTER_MISSES {
+            let _no_live_viewers = self
+                .world(world_id)?
+                .broadcasts
+                .send(ChatChange::Away { character_id });
+        }
+        if self.store.has_open_replies(world_id, action_id).await? {
+            return Ok(());
+        }
+        let world = self.world(world_id)?;
+        let sequence = self
+            .store
+            .begin_sequence(world_id, "reply deadline")
+            .await
+            .context("starting reply deadline sequence")?;
+        let budget = Budget::new(self.limits);
+        let call = CallContext::root(Some(sequence.id));
+        let result = self
+            .decide_after_replies(world_id, action_id, sequence.id, &budget, &call)
+            .await;
+        if let Err(finish_error) = self
+            .store
+            .finish_root_turn(
+                sequence.id,
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("{error:#}"))
+                    .as_deref(),
+                budget.spent(),
+            )
+            .await
+        {
+            tracing::error!(
+                sequence_id = sequence.id,
+                error = %format!("{finish_error:#}"),
+                "finishing reply deadline sequence"
+            );
+        }
+        if result.is_err() {
+            let _no_live_viewers = world.broadcasts.send(ChatChange::Failed {
+                sequence_id: sequence.id,
+            });
+        }
+        result
+    }
+
+    /// Once every character asked about an action has answered or timed out, the
+    /// GM decides it with all the answers in front of it, as one turn of
+    /// `sequence_id`. Does nothing while a reply is still open or the action was
+    /// already decided.
+    async fn decide_after_replies(
+        self: &Arc<Self>,
+        world_id: i64,
+        action_id: i64,
+        sequence_id: i64,
+        budget: &Budget,
+        call: &CallContext,
+    ) -> Result<()> {
+        if self.store.has_open_replies(world_id, action_id).await? {
+            return Ok(());
+        }
+        if self
+            .store
+            .pending_action(world_id, action_id)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.store
+            .move_question_to_sequence(world_id, action_id, sequence_id)
+            .await?;
+        let Some(pending) = self.store.pending_action(world_id, action_id).await? else {
+            return Ok(());
+        };
+        let prompts = prompts::current()?;
+        let mut answers = Vec::new();
+        for reply in self.store.replies(world_id, action_id).await? {
+            let name = self.store.character_name(reply.character_id).await?;
+            answers.push(if reply.timed_out {
+                prompts::fill(&prompts.gm.reply_timed_out, &[("name", &name)])?
+            } else {
+                prompts::fill(
+                    &prompts.gm.reply_answered,
+                    &[("name", &name), ("response", &reply.response)],
+                )?
+            });
+        }
+        // A failure fails this sequence, which closes the actions it now owns.
+        let narration = self
+            .arbitrate_request(
+                pending.clone(),
+                budget.clone(),
+                call.clone(),
+                ArbitrationRequest::Answers {
+                    answers: &answers.join(" "),
+                },
+            )
+            .await?;
+        let Some(mut narration) = narration else {
+            return Ok(());
+        };
+        // The actor's own call had already returned, so what it would have
+        // been told of a failure reaches them as part of the narration.
+        if let Some(reason) = self
+            .store
+            .failed_action_reason(pending.requesting_tool_execution_id)
+            .await?
+        {
+            narration.texts.push(NarrationText {
+                text: format!("The action could not be applied: {reason}"),
+                only: Some(vec![pending.character_id]),
+                except: Vec::new(),
+            });
+        }
+        self.store
+            .show_speech_with_result(pending.requesting_tool_execution_id)
+            .await?;
+        self.deliver_narration(world_id, &narration).await
     }
 
     /// React to a character's connect/disconnect: on first arrival into an
@@ -846,7 +1025,15 @@ where
                 .await
                 .context("checking character creation state")?;
             let call = CallContext::root(Some(sequence.id));
-            let tools = if ready {
+            // A character the GM asked whether they intervene answers with this input.
+            let reply_action = if ready {
+                self.store.open_reply_action(member.character_id).await?
+            } else {
+                None
+            };
+            let tools = if let Some(action_id) = reply_action {
+                self.reply_tools(member.clone(), action_id, sequence.id)?
+            } else if ready {
                 self.action_tools(member.clone(), sequence.id, budget.clone(), call.clone())?
             } else {
                 self.creation_tools(member.clone(), sequence.id, budget.clone(), call.clone())?
@@ -876,6 +1063,10 @@ where
             .await
             .context("resolving player agent")?;
             self.warn_unexpected_silent_player_completion(&member, sequence.id, &settled);
+            if let Some(action_id) = reply_action {
+                self.decide_after_replies(member.world_id, action_id, sequence.id, &budget, &call)
+                    .await?;
+            }
             Ok(settled.response)
         }
         .await;
@@ -1195,6 +1386,94 @@ where
         Ok(vec![hit_protection, attributes, ready])
     }
 
+    /// The tools a character the GM asked whether they intervene answers with:
+    /// do nothing, or an action, which is proposed to the GM as a reaction.
+    fn reply_tools(
+        self: &Arc<Self>,
+        member: PlayerAgent,
+        action_id: i64,
+        sequence_id: i64,
+    ) -> Result<Vec<Tool>> {
+        let prompts = prompts::current()?;
+        let game = Arc::clone(self);
+        let waiting_member = member.clone();
+        let do_nothing = Tool::ending(
+            prompts
+                .player
+                .tools
+                .tool("do_nothing", prompts::no_arguments())?,
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let game = Arc::clone(&game);
+                let member = waiting_member.clone();
+                Box::pin(async move {
+                    if let Err(error) = parse_no_arguments(&arguments) {
+                        return Ok(ToolOutcome::rejected(error));
+                    }
+                    game.store
+                        .answer_reply(
+                            member.world_id,
+                            action_id,
+                            member.character_id,
+                            "does nothing",
+                        )
+                        .await?;
+                    Ok(ToolOutcome::Completed(
+                        prompts::current()?.player.reply_sent.clone(),
+                    ))
+                }) as ToolFuture
+            },
+        );
+        let mut tools = vec![do_nothing];
+        for ActionKind {
+            definition,
+            validate,
+        } in action_kinds()?
+        {
+            let game = Arc::clone(self);
+            let member = member.clone();
+            let tool_name = definition.name.clone();
+            tools.push(Tool::ending(definition, move |context| {
+                let arguments = context.arguments.to_string();
+                let tool_execution_id = context.tool_execution_id;
+                let game = Arc::clone(&game);
+                let member = member.clone();
+                let tool_name = tool_name.clone();
+                Box::pin(async move {
+                    if let Err(error) = validate(&arguments) {
+                        return Ok(ToolOutcome::rejected(error));
+                    }
+                    let reaction = game
+                        .store
+                        .create_reaction_action(
+                            member.world_id,
+                            member.character_id,
+                            sequence_id,
+                            tool_execution_id,
+                            (&tool_name, &arguments),
+                            Some(action_id),
+                        )
+                        .await?;
+                    game.store
+                        .answer_reply(
+                            member.world_id,
+                            action_id,
+                            member.character_id,
+                            &format!(
+                                "proposes action {}: a `{tool_name}` request with arguments {arguments}.",
+                                reaction.id
+                            ),
+                        )
+                        .await?;
+                    Ok(ToolOutcome::Completed(
+                        prompts::current()?.player.reply_sent.clone(),
+                    ))
+                }) as ToolFuture
+            }));
+        }
+        Ok(tools)
+    }
+
     fn action_tools(
         self: &Arc<Self>,
         member: PlayerAgent,
@@ -1296,7 +1575,11 @@ where
                     .await
                     .with_context(|| format!("submitting {tool_name} to location GM"))?;
                 let requesting_tool_execution_id = pending.requesting_tool_execution_id;
-                let narration = game.arbitrate(pending, budget, call, None).await?;
+                let Some(narration) = game.arbitrate(pending, budget, call, None).await? else {
+                    return Ok(ToolOutcome::Completed(
+                        prompts::current()?.player.action_waiting.clone(),
+                    ));
+                };
                 // An approved action that could not happen is this call's
                 // result in place of the usual one; the GM's narration is
                 // still delivered and the agent continues.
@@ -1453,14 +1736,28 @@ where
     }
 
     /// `note` adds circumstances the GM should weigh, such as replies composed
-    /// at the same moment.
+    /// at the same moment. `None` when the GM asked players whether they intervene
+    /// and is waiting for them: it decides once they have answered
+    /// (`decide_after_replies`).
     async fn arbitrate(
         self: &Arc<Self>,
         pending: PendingAction,
         budget: Budget,
         call: CallContext,
         note: Option<&str>,
-    ) -> Result<Narration> {
+    ) -> Result<Option<Narration>> {
+        self.arbitrate_request(pending, budget, call, ArbitrationRequest::Action { note })
+            .await
+    }
+
+    async fn arbitrate_request(
+        self: &Arc<Self>,
+        pending: PendingAction,
+        budget: Budget,
+        call: CallContext,
+        request: ArbitrationRequest<'_>,
+    ) -> Result<Option<Narration>> {
+        let sequence_id = pending.sequence_id;
         let group_id = self
             .store
             .character_group_id(pending.character_id)
@@ -1487,8 +1784,19 @@ where
         // not an error - a later rejection reason can never replace an
         // earlier approval's result, or vice versa.
         let prompts = prompts::current()?;
-        let presented: PresentedActions = Arc::new(Mutex::new(vec![pending.clone()]));
-        let question = asked_question(&pending);
+        let mut first = vec![pending.clone()];
+        if matches!(request, ArbitrationRequest::Answers { .. }) {
+            first.extend(
+                self.store
+                    .reactions_to(pending.world_id, pending.id)
+                    .await?,
+            );
+        }
+        let presented: PresentedActions = Arc::new(Mutex::new(first));
+        let question = match request {
+            ArbitrationRequest::Action { .. } => asked_question(&pending),
+            ArbitrationRequest::Answers { .. } => None,
+        };
         let asking = question.is_some();
         let scope = NarrationScope {
             world_id: pending.world_id,
@@ -1699,17 +2007,18 @@ where
                                 notice(&rejection.reason);
                             }
                             Ok(ToolOutcome::Completed(format!(
-                            "Action {action_id} rejected: {}{}",
-                            rejection.reason,
-                            if asking {
-                                String::new()
-                            } else {
-                                format!(
-                                    " {}",
-                                    next_step(&game.store, pending.world_id, &presented).await?
-                                )
-                            }
-                        )))
+                                "Action {action_id} rejected: {}{}",
+                                rejection.reason,
+                                if asking {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        " {}",
+                                        next_step(&game.store, pending.world_id, &presented)
+                                            .await?
+                                    )
+                                }
+                            )))
                         }
                         ActionOutcome::Applied(_) | ActionOutcome::Failed(_) => {
                             Ok(ToolOutcome::Rejected(format!(
@@ -1827,10 +2136,8 @@ where
                                 .to_string(),
                         ));
                     }
-                    // Players are meant to be asked too, through a reply that waits
-                    // for them (design.md, "Player replies"); that does not exist yet.
-                    // Until it does, the GM is told who was not asked and why.
                     let mut asked = Vec::new();
+                    let mut players = Vec::new();
                     let mut not_asked = Vec::new();
                     for character_id in check.character_ids {
                         if !present.contains(&character_id) {
@@ -1838,7 +2145,7 @@ where
                                 "Tool arguments were rejected: character {character_id} is not in this group"
                             )));
                         }
-                        if asked.contains(&character_id) {
+                        if asked.contains(&character_id) || players.contains(&character_id) {
                             continue;
                         }
                         if character_id == pending.character_id {
@@ -1846,10 +2153,7 @@ where
                         } else if npcs.contains(&character_id) {
                             asked.push(character_id);
                         } else {
-                            not_asked.push((
-                                character_id,
-                                "a player character, who cannot be asked yet",
-                            ));
+                            players.push(character_id);
                         }
                     }
                     let mut skipped = Vec::new();
@@ -1864,6 +2168,32 @@ where
                     };
                     let prompts = prompts::current()?;
                     let world = game.world(pending.world_id)?;
+                    // Every player is asked, and their deadlines start, before any
+                    // inference runs, so they think while the NPCs decide.
+                    let question = prompts::fill(
+                        &prompts.gm.intervention_request,
+                        &[
+                            ("actor", &actor),
+                            ("tool", &pending.tool),
+                            ("arguments", &pending.args),
+                        ],
+                    )?;
+                    let mut waiting_for = Vec::new();
+                    for &character_id in &players {
+                        game.store
+                            .ask_player(
+                                pending.world_id,
+                                pending.id,
+                                character_id,
+                                &question,
+                                game.rules.player_response_timeout,
+                            )
+                            .await?;
+                        waiting_for.push(game.store.character_name(character_id).await?);
+                    }
+                    if !players.is_empty() {
+                        let _no_live_viewers = world.broadcasts.send(ChatChange::Entries);
+                    }
                     let mut proposals = Vec::new();
                     for character_id in asked {
                         budget
@@ -1874,17 +2204,7 @@ where
                         game.store
                             .append_instruction(
                                 branch,
-                                &Message::text(
-                                    Role::User,
-                                    prompts::fill(
-                                        &prompts.npc.intervention_request,
-                                        &[
-                                            ("actor", &actor),
-                                            ("tool", &pending.tool),
-                                            ("arguments", &pending.args),
-                                        ],
-                                    )?,
-                                ),
+                                &Message::text(Role::User, question.clone()),
                                 pending.sequence_id,
                             )
                             .await?;
@@ -1955,8 +2275,8 @@ where
                                 character_id,
                                 pending.sequence_id,
                                 execution_id,
-                                &proposal.tool,
-                                &proposal.arguments,
+                                (&proposal.tool, &proposal.arguments),
+                                Some(pending.id),
                             )
                             .await?;
                         reports.push(format!(
@@ -1967,6 +2287,18 @@ where
                             .lock()
                             .expect("presented actions lock poisoned")
                             .push(reaction);
+                    }
+                    if !waiting_for.is_empty() {
+                        // The GM's turn ends here; it decides once they have answered.
+                        let waiting = prompts::fill(
+                            &prompts.gm.waiting_for,
+                            &[("names", &waiting_for.join(", "))],
+                        )?;
+                        return Ok(ToolOutcome::Waiting(
+                            format!("{} {waiting}{skipped}", reports.join(" "))
+                                .trim_start()
+                                .to_string(),
+                        ));
                     }
                     Ok(ToolOutcome::Completed(if reports.is_empty() {
                         format!("Nobody intervenes in action {}.{skipped}", pending.id)
@@ -2011,11 +2343,14 @@ where
                 &prompts.gm.role
             },
         );
-        let note = note.map(|note| format!(" {note}")).unwrap_or_default();
         let request = Message::text(
             Role::User,
-            match &question {
-                Some(question) => prompts::fill(
+            match (&question, request) {
+                (_, ArbitrationRequest::Answers { answers }) => prompts::fill(
+                    &prompts.gm.answers_request,
+                    &[("action_id", &action_id.to_string()), ("answers", answers)],
+                )?,
+                (Some(question), _) => prompts::fill(
                     &prompts.gm.ask_request,
                     &[
                         ("actor", &actor),
@@ -2023,20 +2358,23 @@ where
                         ("question", &serde_json::to_string(question)?),
                     ],
                 )?,
-                None => prompts::fill(
+                (None, ArbitrationRequest::Action { note }) => prompts::fill(
                     &prompts.gm.action_request,
                     &[
                         ("actor", &actor),
                         ("action_id", &action_id.to_string()),
                         ("tool", &pending.tool),
                         ("arguments", &pending.args),
-                        ("note", &note),
+                        (
+                            "note",
+                            &note.map(|note| format!(" {note}")).unwrap_or_default(),
+                        ),
                     ],
                 )?,
             },
         );
         self.store
-            .append_instruction(branch, &request, pending.sequence_id)
+            .append_instruction(branch, &request, sequence_id)
             .await
             .with_context(|| format!("storing arbitration event for action {action_id}"))?;
         let settled = agent::complete_with_call_context(
@@ -2059,12 +2397,20 @@ where
         )
         .await
         .with_context(|| format!("arbitrating action {action_id}"))?;
+        // The check asked players: the GM decides when they have answered.
+        if self
+            .store
+            .has_open_replies(pending.world_id, action_id)
+            .await?
+        {
+            return Ok(None);
+        }
         // A split or merge in this turn may have moved the actor, and the
         // narration describes where they now are.
         let mut narration = narrate.finish(
             (
                 self.store.character_group_id(pending.character_id).await?,
-                pending.sequence_id,
+                sequence_id,
             ),
             settled.inference_id,
             Some(pending.character_id),
@@ -2083,8 +2429,18 @@ where
             Some(audience) => narration.restrict_to(audience),
             None => {}
         }
-        Ok(narration)
+        Ok(Some(narration))
     }
+}
+
+/// What starts the GM's turn on a presented action.
+#[derive(Clone, Copy)]
+enum ArbitrationRequest<'a> {
+    /// The action itself, as its actor submitted it.
+    Action { note: Option<&'a str> },
+    /// The answers of the players it asked whether they intervene, completing a
+    /// turn that waited for them.
+    Answers { answers: &'a str },
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2572,6 +2928,7 @@ mod tests {
                 Limits::default(),
                 GameSettings {
                     characters_share_narration: shares,
+                    ..GameSettings::default()
                 },
             )
             .await;
@@ -4074,8 +4431,8 @@ mod tests {
                         toma_id,
                         sequence.id,
                         requesting,
-                        "attempt",
-                        &arguments,
+                        ("attempt", &arguments),
+                        None,
                     )
                     .await
                     .unwrap()
@@ -4452,7 +4809,8 @@ mod tests {
                 Some("Toma is beside the sack and may object; ask him with intervention_check before you decide."),
             )
             .await
-            .expect("the GM's turn with an intervention check");
+            .expect("the GM's turn with an intervention check")
+            .expect("the GM decided without waiting");
         game.deliver_narration(first.world_id, &narration)
             .await
             .unwrap();
@@ -4496,6 +4854,114 @@ mod tests {
         assert_eq!(undecided, 0, "an action was left undecided");
         assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
+    }
+
+    /// A player the GM asks whether they intervene answers with their own player
+    /// agent, and the GM then decides every presented action. Each case is one
+    /// real GM asking, one real player agent answering what the player types, and
+    /// the GM's second turn; `CAIRNWORLD_REPEATS` repeats each case to measure. How
+    /// often the GM names the player in its check is printed, not asserted: it
+    /// sometimes names an NPC's id instead (plans/agent-tuning.md).
+    async fn real_model_player_answers_an_intervention_question(model: &DeviceModel) {
+        let repeats: usize = std::env::var("CAIRNWORLD_REPEATS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
+        // (what the player types, whether they intervene)
+        let cases = [
+            ("I don't mind. Let him take it.", false),
+            ("No! I won't let him. I grab the sack before he does.", true),
+        ];
+        let mut wrong = Vec::new();
+        let mut not_asked = 0;
+        for (typed, intervenes) in cases {
+            for repeat in 0..repeats {
+                let (backend, _model_path, _sampling, limits) = model.parts();
+                let (game, store, _db, first, second) =
+                    two_player_bread_thief_game_with_limits(backend, limits).await;
+                let bystander = store.player_scene(&second).await.unwrap().character_name;
+                let sequence = store
+                    .begin_sequence(first.world_id, "real GM intervention")
+                    .await
+                    .unwrap();
+                let arguments =
+                    serde_json::json!({"item": "flour sack", "committed": false}).to_string();
+                let requesting = crate::store::record_tool_call_for_test(
+                    &store,
+                    store.agent_branch(first.agent_id).await.unwrap(),
+                    Some(sequence.id),
+                    "take-1",
+                    "take",
+                    &arguments,
+                )
+                .await;
+                let pending = store
+                    .create_pending_action(
+                        &store.player_actor(&first).await.unwrap(),
+                        sequence.id,
+                        requesting,
+                        "take",
+                        &arguments,
+                    )
+                    .await
+                    .unwrap();
+                let waiting = game
+                    .arbitrate(
+                        pending.clone(),
+                        Budget::new(limits),
+                        CallContext::root(Some(sequence.id)),
+                        Some(&format!(
+                            "{bystander} is beside the sack and may object; ask them with intervention_check before you decide."
+                        )),
+                    )
+                    .await
+                    .expect("the GM's turn with an intervention check")
+                    .is_none();
+                store.finish_root_turn(sequence.id, None, 0).await.unwrap();
+                if !waiting {
+                    not_asked += 1;
+                    game.shutdown().await.unwrap();
+                    continue;
+                }
+                game.player_message(second.clone(), typed).await.unwrap();
+                let replies = store.replies(pending.world_id, pending.id).await.unwrap();
+                let answer = replies
+                    .first()
+                    .map(|reply| reply.response.clone())
+                    .unwrap_or_default();
+                let proposed = answer.starts_with("proposes action");
+                if replies.len() != 1
+                    || replies[0].timed_out
+                    || proposed != intervenes
+                    || !(proposed || answer == "does nothing")
+                {
+                    wrong.push(format!("{typed:?} #{repeat}: {replies:?}"));
+                }
+                let undecided: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pending_action")
+                    .fetch_one(&store.pool())
+                    .await
+                    .unwrap();
+                if undecided != 0 {
+                    wrong.push(format!(
+                        "{typed:?} #{repeat}: {undecided} actions undecided"
+                    ));
+                }
+                assert_no_rejected_output(&store).await;
+                game.shutdown().await.unwrap();
+            }
+        }
+        println!("PLAYER REPLY not asked by the GM: {not_asked}; wrong: {wrong:#?}");
+        assert!(
+            wrong.is_empty(),
+            "the player's answer went wrong: {wrong:#?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn a_player_answers_the_gms_intervention_question() {
+        let model = DeviceModel::load().await;
+        real_model_player_answers_an_intervention_question(&model).await;
     }
 
     /// `ask` is an explicit question for the GM. The GM answers a question it may
@@ -4579,7 +5045,8 @@ mod tests {
                     None,
                 )
                 .await
-                .expect("the GM's turn");
+                .expect("the GM's turn")
+                .expect("the GM decided without waiting");
             game.deliver_narration(first.world_id, &narration)
                 .await
                 .unwrap();
@@ -4598,9 +5065,7 @@ mod tests {
                 {
                     decision = decision.or(calls
                         .iter()
-                        .find(|call| {
-                            matches!(call.name.as_str(), "answer" | "reject_action")
-                        })
+                        .find(|call| matches!(call.name.as_str(), "answer" | "reject_action"))
                         .map(|call| call.name.clone()));
                 }
             }
@@ -4736,7 +5201,7 @@ mod tests {
                 .await;
             match result {
                 Ok(narration) => {
-                    game.deliver_narration(first.world_id, &narration)
+                    game.deliver_narration(first.world_id, &narration.expect("no wait"))
                         .await
                         .unwrap();
                 }
@@ -5721,6 +6186,7 @@ mod tests {
             Limits::default(),
             GameSettings {
                 characters_share_narration: false,
+                ..GameSettings::default()
             },
         )
         .await
@@ -6861,7 +7327,6 @@ mod tests {
         scene.responses.lock().unwrap().extend([
             take_flour(false),
             intervention_check(1, &[player]),
-            intervention_check(1, &[scene.second.character_id]),
             intervention_check(9, &[toma]),
             intervention_check(1, &[]),
             intervention_check(1, &[i64::MAX]),
@@ -6881,7 +7346,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             rejected, 3,
-            "another action, nobody and a stranger are refused; the actor and a player are reported"
+            "another action, nobody and a stranger are refused; the actor is reported"
         );
         let results: Vec<String> = scene
             .requests
@@ -6897,13 +7362,212 @@ mod tests {
             ),
             "{results:?}"
         );
-        assert!(
-            results
-                .iter()
-                .any(|result| result.contains("a player character, who cannot be asked yet")),
-            "{results:?}"
-        );
         assert_eq!(decisions_asked(&scene, "Toma").await, 0);
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    fn calls(calls: &[(&str, serde_json::Value)]) -> Response {
+        response(Content::ToolCalls(
+            calls
+                .iter()
+                .map(|(name, arguments)| ToolCall {
+                    id: format!("{name}-call"),
+                    name: (*name).into(),
+                    arguments: arguments.to_string(),
+                })
+                .collect(),
+        ))
+    }
+
+    async fn reply_status(scene: &SpeechScene, character_id: i64) -> Vec<String> {
+        sqlx::query_scalar("SELECT status FROM pending_reply WHERE character_id = ? ORDER BY rowid")
+            .bind(character_id)
+            .fetch_all(&scene.store.pool())
+            .await
+            .unwrap()
+    }
+
+    async fn chat_texts(scene: &SpeechScene, member: &PlayerAgent) -> Vec<String> {
+        scene
+            .store
+            .player_chat(member)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_player_asked_in_an_intervention_check_answers_and_the_gm_decides_once_everyone_has()
+    {
+        let scene = speech_scene().await;
+        let toma = character_id(&scene, "Toma").await;
+        let second = scene.second.character_id;
+        let speaker = scene.names[0].clone();
+        let held_before = items_held(&scene).await;
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            // The second player is asked before Toma decides.
+            calls(&[(
+                "intervention_check",
+                serde_json::json!({"action_id": 1, "character_ids": [second, toma]}),
+            )]),
+            propose("Wait!", &speaker, 2),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack.")
+            .await
+            .unwrap();
+
+        assert_eq!(items_held(&scene).await, held_before, "the GM is waiting");
+        assert!(
+            chat_texts(&scene, &scene.second)
+                .await
+                .iter()
+                .any(|text| text.contains("is about to act: a `take` request")),
+            "the question reaches the asked player's chat"
+        );
+        assert_eq!(reply_status(&scene, second).await, ["open"]);
+        let told: Vec<String> = sqlx::query_scalar(
+            "SELECT json_extract(recorded_content.body, '$.content.value') FROM tool_execution              JOIN recorded_content ON recorded_content.id = tool_execution.result_content_id",
+        )
+        .fetch_all(&scene.store.pool())
+        .await
+        .unwrap();
+        assert!(
+            told.iter()
+                .any(|result| result.contains("The GM asked others whether")),
+            "the acting player's own call is told the GM is waiting: {told:?}"
+        );
+
+        // Two earlier misses: answering resets the count.
+        sqlx::query("UPDATE world_member SET missed_replies = 2 WHERE user_id = ?")
+            .bind(scene.second.user_id)
+            .execute(&scene.store.pool())
+            .await
+            .unwrap();
+        scene.responses.lock().unwrap().extend([
+            do_nothing(),
+            approve(1),
+            approve(2),
+            tool_call("narrate_nothing", serde_json::json!({})),
+            do_nothing(),
+            do_nothing(),
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.second.clone(), "I let it happen.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+
+        assert_eq!(items_held(&scene).await, held_before + 1);
+        assert_eq!(reply_status(&scene, second).await, ["answered"]);
+        let missed: i64 =
+            sqlx::query_scalar("SELECT missed_replies FROM world_member WHERE user_id = ?")
+                .bind(scene.second.user_id)
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(missed, 0);
+        let told_gm = scene.requests.lock().unwrap().iter().any(|request| {
+            matches!(request.messages.last().map(|message| &message.content),
+                Some(MessageContent::Text(text))
+                    if text.contains("Everyone you asked about action 1 has answered.")
+                        && text.contains("does nothing."))
+        });
+        assert!(told_gm, "the GM's next turn carries the answer");
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_player_who_does_not_answer_in_time_does_nothing_and_three_misses_in_a_row_make_them_away()
+     {
+        let scene = speech_scene_with_rules(
+            Limits::default(),
+            GameSettings {
+                player_response_timeout: 0,
+                ..GameSettings::default()
+            },
+        )
+        .await;
+        let second = scene.second.character_id;
+        let mut changes = scene.game.subscribe(&scene.second).await.unwrap();
+        for action_id in 1..=3 {
+            scene.responses.lock().unwrap().extend([
+                tool_call(
+                    "attempt",
+                    serde_json::json!({"kind": "look", "description": "look around"}),
+                ),
+                intervention_check(action_id, &[second]),
+                // The deadline passes at once; the GM then decides.
+                approve(action_id),
+                narrate("You look around."),
+            ]);
+            scene
+                .game
+                .player_message(scene.first.clone(), "Look around.")
+                .await
+                .unwrap();
+            let_presence_handlers_run(&scene.game, &scene.first).await;
+            assert!(scene.responses.lock().unwrap().is_empty());
+        }
+        assert_eq!(
+            reply_status(&scene, second).await,
+            ["timed_out", "timed_out", "timed_out"]
+        );
+        let mut away = false;
+        while let Ok(change) = changes.try_recv() {
+            away |= change
+                == ChatChange::Away {
+                    character_id: second,
+                };
+        }
+        assert!(away, "the third miss in a row ends their connection");
+        let members = scene
+            .store
+            .world_members(scene.first.world_id)
+            .await
+            .unwrap();
+        assert!(
+            members
+                .iter()
+                .any(|member| member.user_id == scene.second.user_id && member.away)
+        );
+        assert!(failed_sequences(&scene).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn calls_after_a_waiting_intervention_check_do_not_run() {
+        let scene = speech_scene().await;
+        let second = scene.second.character_id;
+        let held_before = items_held(&scene).await;
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            calls(&[
+                (
+                    "intervention_check",
+                    serde_json::json!({"action_id": 1, "character_ids": [second]}),
+                ),
+                ("approve_action", serde_json::json!({"action_id": 1})),
+            ]),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack.")
+            .await
+            .unwrap();
+
+        assert_eq!(items_held(&scene).await, held_before);
+        let not_run: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tool_execution WHERE status = 'unexecuted'")
+                .fetch_one(&scene.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(not_run, 1);
         assert!(failed_sequences(&scene).await.is_empty());
     }
 

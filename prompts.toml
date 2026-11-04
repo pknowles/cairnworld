@@ -84,6 +84,28 @@ entrance_request = """\
 # Characters arrived or left. {change} states who.
 presence_request = "{change} Narrate this to the characters present, with a narrate tool."
 
+# Asked of each character an intervention check names, in a player's chat or an NPC's
+# history. {actor} {tool} {arguments}.
+intervention_request = """\
+    {actor} is about to act: a `{tool}` request with arguments {arguments}. Act to \
+    intervene, or do nothing.\
+    """
+
+# The result of an intervention check that waits for players. {names} lists them.
+waiting_for = "Waiting for {names} to answer. You will be told what they do."
+
+# The GM's next request once every player asked has answered or run out of time.
+# {action_id}; {answers} holds one line per player.
+answers_request = """\
+    Everyone you asked about action {action_id} has answered. {answers} Approve or \
+    reject each reaction, then decide action {action_id}; a reaction does not stop it \
+    by itself.\
+    """
+
+# One line of {answers}. {name} {response}.
+reply_answered = "{name} {response}."
+reply_timed_out = "{name} did not answer in time, so does nothing."
+
 [gm.tools.approve_action]
 description = """\
     Approve the presented action by its id after judging its visible arguments.\
@@ -222,6 +244,18 @@ entered = """\
     directly to them.\
     """
 
+# The result of an action the GM is holding until the players it asked have answered.
+action_waiting = """\
+    The GM asked others whether they intervene and decides when they have answered. \
+    The outcome will reach the player as its own entry.\
+    """
+
+# The result of a player agent's answer to an intervention question.
+reply_sent = "Your answer is with the GM, who decides what happens."
+
+[player.tools.do_nothing]
+description = "Do not intervene."
+
 [player.tools.roll_hit_protection]
 description = "Roll the Adventurer's starting 1d6 Hit Protection."
 
@@ -279,12 +313,6 @@ role = """\
 situation = """\
     Your situation:
 {scene}\
-    """
-
-# Asked of an NPC before an action happens. {actor} {tool} {arguments}.
-intervention_request = """\
-    {actor} is about to act: a `{tool}` request with arguments {arguments}. Act to \
-    intervene, or do nothing.\
     """
 
 # The last thing an NPC reads before each decision about what it heard.

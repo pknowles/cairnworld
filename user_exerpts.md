@@ -1003,7 +1003,7 @@ measured problem):
 > sound like a proven risk, but not something to blindly change everywhere
 
 On asking players in an InterventionCheck: "yes, ask players now unless you have a good
-reason not to, i.e. it is blocked by a future item" (plans/player-replies.md).
+reason not to, i.e. it is blocked by a future item" (plans/archive/player-replies.md).
 
 ## 2026-11-03: `ask` misuse is fixed at the source, not by a page of GM rules
 
@@ -1036,4 +1036,4 @@ Chosen (b), after the user's direction:
 > inference. Then we join them all, waiting with a timeout for players that do not respond
 > in time and finally process all responses.
 
-design.md (Player replies and coordinated travel) and plans/player-replies.md updated to match.
+design.md (Player replies and coordinated travel) and plans/archive/player-replies.md updated to match.

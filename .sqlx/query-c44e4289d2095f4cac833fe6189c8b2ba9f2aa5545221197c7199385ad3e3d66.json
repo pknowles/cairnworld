@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action_id FROM pending_reply WHERE character_id = ? AND status = 'open' ORDER BY deadline, action_id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c44e4289d2095f4cac833fe6189c8b2ba9f2aa5545221197c7199385ad3e3d66"
+}

@@ -45,6 +45,11 @@ pub struct Gm {
     pub scene_request: String,
     pub entrance_request: String,
     pub presence_request: String,
+    pub intervention_request: String,
+    pub waiting_for: String,
+    pub answers_request: String,
+    pub reply_answered: String,
+    pub reply_timed_out: String,
     pub tools: Tools,
 }
 
@@ -55,6 +60,8 @@ pub struct Player {
     pub scene: String,
     pub turn_end: String,
     pub entered: String,
+    pub reply_sent: String,
+    pub action_waiting: String,
     pub tools: Tools,
 }
 
@@ -63,7 +70,6 @@ pub struct Player {
 pub struct Npc {
     pub role: String,
     pub situation: String,
-    pub intervention_request: String,
     pub before_deciding: String,
     pub eagerness: String,
     pub tools: Tools,

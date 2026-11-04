@@ -235,12 +235,11 @@ impl NarrationTools {
             let captured = Arc::clone(&captured_for_tool);
             let scope = Arc::clone(&scope);
             Box::pin(async move {
-                let call: Answer = match serde_json::from_str(&arguments)
-                    .context("parsing answer arguments")
-                {
-                    Ok(call) => call,
-                    Err(error) => return Ok(ToolOutcome::rejected(error)),
-                };
+                let call: Answer =
+                    match serde_json::from_str(&arguments).context("parsing answer arguments") {
+                        Ok(call) => call,
+                        Err(error) => return Ok(ToolOutcome::rejected(error)),
+                    };
                 if let Err(error) = nonempty(&call.answer) {
                     return Ok(ToolOutcome::rejected(error));
                 }

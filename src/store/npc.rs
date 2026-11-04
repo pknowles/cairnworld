@@ -868,20 +868,33 @@ impl Store {
         character_id: i64,
         sequence_id: i64,
         requesting_tool_execution_id: i64,
-        tool: &str,
-        arguments: &str,
+        (tool, arguments): (&str, &str),
+        reacts_to: Option<i64>,
     ) -> Result<PendingAction> {
-        self.create_pending_action(
-            &CharacterActor {
+        let pending = self
+            .create_pending_action(
+                &CharacterActor {
+                    world_id,
+                    character_id,
+                },
+                sequence_id,
+                requesting_tool_execution_id,
+                tool,
+                arguments,
+            )
+            .await?;
+        if let Some(action_id) = reacts_to {
+            sqlx::query!(
+                "UPDATE pending_action SET reacts_to = ? WHERE world_id = ? AND id = ?",
+                action_id,
                 world_id,
-                character_id,
-            },
-            sequence_id,
-            requesting_tool_execution_id,
-            tool,
-            arguments,
-        )
-        .await
+                pending.id,
+            )
+            .execute(&self.pool)
+            .await
+            .context("linking a reaction to its action")?;
+        }
+        Ok(pending)
     }
 
     async fn save_discussion_budget(

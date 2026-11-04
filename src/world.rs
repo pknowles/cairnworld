@@ -27,7 +27,13 @@ pub async fn stopped(stopping: &mut watch::Receiver<bool>) {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatChange {
     Entries,
-    Failed { sequence_id: i64 },
+    Failed {
+        sequence_id: i64,
+    },
+    /// This character's player let too many response deadlines pass: end their connections.
+    Away {
+        character_id: i64,
+    },
 }
 
 /// Live state exists independently of model loading. Database operations never
@@ -201,6 +207,11 @@ pub enum WorldEvent {
     PresenceDeadline {
         group_id: i64,
         generation: i64,
+    },
+    /// A character's reply to a question about a pending action is overdue.
+    ReplyDeadline {
+        action_id: i64,
+        character_id: i64,
     },
     #[cfg(test)]
     Settled(oneshot::Sender<()>),

@@ -57,6 +57,9 @@ pub enum ToolOutcome {
         after_result: AfterToolResult,
     },
     Rejected(String),
+    /// The call completed and the answer it asked for will arrive later: it
+    /// ends the turn, and the calls after it in the response do not run.
+    Waiting(String),
     /// A proposed split/merge, not yet applied - see `TopologyChange`.
     PendingTopologyChange(TopologyChange),
 }

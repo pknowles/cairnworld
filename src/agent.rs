@@ -379,6 +379,9 @@ pub async fn complete_with_call_context<B: Backend>(
             // Whether an earlier call in this response was rejected, so the
             // response cannot be the one that ends the turn.
             let mut batch_rejected = false;
+            // A call that ended the turn to wait for an answer: the calls after it
+            // were written before the answer and do not run.
+            let mut waiting = false;
             // Deliveries put messages into histories, possibly the caller's
             // own, so they wait until every call of the batch has its result:
             // a message between a call and a sibling's result would break the
@@ -417,6 +420,10 @@ pub async fn complete_with_call_context<B: Backend>(
                     .with_context(|| format!("executing tool call {}", tool_call.id))?;
                     let (status, result, after_result) = match outcome {
                         tools::ToolOutcome::Completed(content) => ("completed", content, None),
+                        tools::ToolOutcome::Waiting(content) => {
+                            waiting = true;
+                            ("completed", content, None)
+                        }
                         tools::ToolOutcome::CompletedAfter {
                             content,
                             after_result,
@@ -454,8 +461,8 @@ pub async fn complete_with_call_context<B: Backend>(
                             format!("storing result for tool call {}", tool_call.id)
                         })?;
                     on_activity(format!("tool result {}: {result}", tool_call.id));
-                    ended |=
-                        status == "completed" && tools::ends_turn(turn.tools, &tool_call.name);
+                    ended |= waiting
+                        || (status == "completed" && tools::ends_turn(turn.tools, &tool_call.name));
                     batch_rejected |= status == "rejected";
                     if let Some(after_result) = after_result {
                         deliveries.push((tool_call.id.clone(), after_result));
@@ -484,6 +491,19 @@ pub async fn complete_with_call_context<B: Backend>(
                         }
                     }
                     return Err(error);
+                }
+                if waiting {
+                    store
+                        .close_unrun_tool_calls(
+                            completion.inference_id,
+                            &format!(
+                                "`{}` ended your turn to wait for an answer. Call this again afterwards if it is still wanted.",
+                                tool_call.name
+                            ),
+                        )
+                        .await
+                        .context("closing the calls after a waiting call")?;
+                    break;
                 }
             }
             for (call_id, delivery) in deliveries {

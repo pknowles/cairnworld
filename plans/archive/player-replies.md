@@ -1,6 +1,6 @@
 # Player replies: asking players in an InterventionCheck
 
-Pending implementation (mechanism revised 2026-11-04: no continuation, see Mechanism). Taken forward from [Rules and travel](playable-rules.md) step 2
+Completed and verified 2026-11-04 (mechanism revised: no continuation, see Mechanism). Taken forward from [Rules and travel](playable-rules.md) step 2
 and the generic deadline and consecutive-timeout handling in
 [Unified game time](unified-game-time.md), because the GM's `intervention_check` cannot
 ask player characters today, the GM names them anyway (about 45% of takes), and the
@@ -56,7 +56,7 @@ deferred outcome reaches the actor through the same delivery as the immediate on
    `default.toml`, no code default: missing is a startup error) to `GameSettings`. Store a
    per-membership count of consecutive missed deadlines, reset by any response.
 2. **Stored replies and the wake.** Migration for `pending_reply(action_id, character_id,
-   deadline, status, response_content_id)`. Reuse the presence deadline's earliest-deadline wake:
+   deadline, status, response)`. Reuse the presence deadline's earliest-deadline wake:
    the world loop wakes at the earliest open reply deadline, records `do_nothing`, counts the
    miss. On restart overdue replies are answered first. Three misses in a row end the player's
    connection with the WorldDetail message and the usual departure handling.

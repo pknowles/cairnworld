@@ -6,10 +6,6 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Player replies](player-replies.md): ask player characters in the GM's InterventionCheck
-  with a saved reply, the player response deadline, AFK counting and a resumable agent
-  call. Taken forward from Rules and travel step 2 and the generic deadline handling in
-  Unified game time.
 - [Model context size](llm-context-size.md): measure what each agent's context
   is made of (tool definitions are about 59% of a GM request) and find what does
   not earn its place. Problems to investigate only; no remedy is decided.

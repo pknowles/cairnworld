@@ -27,6 +27,9 @@ pub(super) enum CallClosure<'a> {
         failing_execution_id: Option<i64>,
         error: &'a str,
     },
+    /// A call ended the turn without running the calls after it, and `reason`
+    /// is told to the model as their result.
+    NotRun(&'a str),
     /// The process stopped. A call that had begun may have taken effect; one
     /// that had not begun did not.
     Interrupted,
@@ -100,6 +103,7 @@ impl Store {
                 } if failing_execution_id.is_none_or(|id| id == execution_id) => {
                     ("failed", format!("Tool failed: {error}"))
                 }
+                CallClosure::NotRun(reason) => ("unexecuted", format!("Not run: {reason}")),
                 CallClosure::Failed { .. } => (
                     "unexecuted",
                     "Not executed: an earlier call in this batch failed.".to_string(),
@@ -195,8 +199,7 @@ impl Store {
             )
             .await?;
             sqlx::query!(
-                "INSERT INTO action (sequence_id, requesting_tool_execution_id, result_content_id, approved, pending_action_id) \
-                 VALUES (?, ?, ?, FALSE, ?)",
+                "INSERT INTO action (sequence_id, requesting_tool_execution_id, result_content_id, approved, pending_action_id)                  VALUES (?, ?, ?, FALSE, ?)",
                 sequence_id,
                 action.requesting_tool_execution_id,
                 result_content_id,
@@ -249,6 +252,22 @@ impl Store {
             .context("failing an interrupted discussion's collections")?;
         }
         Ok(())
+    }
+
+    /// A call ended the turn, so the calls after it in the same response were
+    /// not run: give each a result saying why.
+    pub async fn close_unrun_tool_calls(&self, inference_id: i64, reason: &str) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("starting unrun tool call closure")?;
+        Self::close_tool_calls(&mut transaction, inference_id, &CallClosure::NotRun(reason))
+            .await?;
+        transaction
+            .commit()
+            .await
+            .context("committing unrun tool call closure")
     }
 
     /// A tool call failed while the server kept running: record the error as

@@ -32,13 +32,15 @@ from the packet, resulting groups read from stored membership, for both a split 
 characters go separate ways and a merge when they cross paths. Measure repeat rate;
 keep in `device_suite` only if reliable.
 
-## The GM names players in an intervention check
+## The GM names the wrong character in an intervention check
 
-`intervention_check` can only ask NPCs; the GM sees one list of characters and names a
-player or the actor in about 45% of takes. The check now reports who it did not ask
-instead of refusing, so this is no longer invalid output, but a player who should be asked
-(user_declarations.md, InterventionCheck) is not. Player replies need a saved reply, a
-deadline and AFK counting; see plans/player-replies.md.
+Players can now be asked (plans/archive/player-replies.md), but the GM must name them. Measured on
+the real model with a note naming the player beside the sack (40 runs, production sampling):
+the GM asked the player in 31, and in 9 named an NPC's id instead (Toma, then approved both
+actions). In the 31 the player agent answered correctly every time (`do_nothing` when the
+player said they did not mind, an action when they objected). Runnable:
+`CAIRNWORLD_REPEATS=20 cargo test a_player_answers_the_gms_intervention_question -- --ignored --nocapture`.
+Cause not yet examined (ids come from the scene packet).
 
 ## The GM approves an ask that is not a question
 
