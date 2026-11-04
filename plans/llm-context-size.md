@@ -81,6 +81,15 @@ the 4,096 limit. The player agent's and NPCs' contexts have not been measured.
   measured.
 - Whether the chat template's standard tool-calling text can be changed, and at
   what risk to tool-call reliability.
+- Whether compaction can reuse the agent's KV cache (user idea, see
+  user_exerpts.md 2026-11-04). The summary request is the agent's own chat with
+  the last messages set aside and a summary request appended. If it kept the
+  agent's normal leading content (role, context, tool definitions, history) and
+  only added the request at the end, a prefix cache could skip re-reading all of
+  it. Today the backend disables prefix caching (`with_prefix_cache_n(None)`) and
+  the summary request omits tools and context. Measure first: how often
+  compaction runs, what the summary request costs in time, and whether turning
+  prefix caching on is safe with the fixed KV capacity and paged attention.
 
 ## Verification
 

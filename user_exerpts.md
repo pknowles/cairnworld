@@ -986,3 +986,18 @@ Implemented in delivery (`Narration::players_share`), not in the GM's tools or t
 
 > I added MoraleCheck and Split/CombineItem. We'll need half flour sack ItemTypes
 > prepared. Damage from attacks should all be handled by the code and NOT the GM.
+
+## 2026-11-04: A summary is the agent itself, and could reuse its KV cache
+
+On whether the compaction summary request is a different model or the agent itself:
+
+> can you confirm the summary request is an execution of the agent itself, not some other
+> LLM? this may even be able to reuse the kv cache since the operation is basically
+> temporarily discarding the last few messages and asking for a summary; then dropping the
+> summary request and splicing in the summary output
+
+Status (assistant's note, not a quote): the summary is the same agent, model and sampling,
+and now starts with the agent's role text. The KV-cache idea is not implemented: the
+backend disables prefix caching (`with_prefix_cache_n(None)`), and the summary request omits
+the tool definitions and dynamic context, so it shares only the role text with the agent's
+normal requests. Reuse would need the summary request to keep the same leading context.

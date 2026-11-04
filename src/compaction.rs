@@ -80,7 +80,7 @@ async fn run_invocation<B: Backend>(
     }
     loop {
         let (segments, branch_id, split, covered) =
-            summary_segments(store, job.branch.branch_id(), keep).await?;
+            summary_segments(store, job.branch.branch_id(), &job.static_segments, keep).await?;
         if split <= covered {
             // Keeping this many raw messages did not fit, so keep half as many,
             // down to none. The message count is a configured preference; the
@@ -162,6 +162,7 @@ async fn run_invocation<B: Backend>(
 async fn summary_segments(
     store: &Store,
     branch_id: i64,
+    leading: &[Segment],
     keep_raw_messages: usize,
 ) -> Result<(Vec<Segment>, i64, i64, i64)> {
     let previous = store.latest_summary_for_branch(branch_id).await?;
@@ -178,7 +179,10 @@ async fn summary_segments(
         .store_prompt_text(&crate::prompts::current()?.compaction.summary_request)
         .await
         .context("storing compaction prompt")?;
-    let mut segments = Vec::new();
+    // The agent writes its own summary: the request is its normal one (role
+    // text, context, tools), with the newest messages left out and the summary
+    // request added at the end. The summary then replaces the covered messages.
+    let mut segments = leading.to_vec();
     if let Some(summary) = previous {
         segments.push(Segment::Summary {
             summary: summary.id,
@@ -384,7 +388,10 @@ mod tests {
         let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_history(&store).await;
         let backend = ScriptedBackend {
-            responses: Mutex::new(VecDeque::from([response_with_usage("reply", 50, 50)])),
+            responses: Mutex::new(VecDeque::from([
+                response_with_usage("reply", 50, 50),
+                response("summary"),
+            ])),
             requests: Mutex::new(Vec::new()),
         };
         complete_turn(
@@ -403,6 +410,24 @@ mod tests {
                 role: Role::System,
                 ..
             }]
+        ));
+
+        // The agent's role text leads its own summary request.
+        run(
+            &reopened,
+            &backend,
+            &job,
+            limits(2),
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .unwrap();
+        let requests = backend.requests.lock().unwrap();
+        let summary_request = requests.last().unwrap();
+        assert!(matches!(
+            &summary_request.messages[0],
+            Message { role: Role::System, content: MessageContent::Text(text), .. }
+                if text.contains("standing instruction")
         ));
     }
 

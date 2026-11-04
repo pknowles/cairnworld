@@ -185,13 +185,19 @@ pub async fn segments(
     Ok(segments)
 }
 
-/// Keep the stored static prompt/tool portion of a normal recipe. Deferred
-/// compaction rebuilds raw history live, but needs this exact static context if
-/// it must measure an exceptional capacity fallback after a restart.
+/// Keep everything before the history in a normal recipe: role text, dynamic
+/// context and tools. Deferred compaction rebuilds raw history live, but
+/// summarizes with this same leading content so the agent writes its own summary,
+/// and measures capacity fallbacks against it after a restart.
 pub fn static_segments(segments: &[Segment]) -> Vec<Segment> {
     segments
         .iter()
-        .filter(|segment| matches!(segment, Segment::Text { .. } | Segment::Tools { .. }))
+        .filter(|segment| {
+            matches!(
+                segment,
+                Segment::Text { .. } | Segment::Context { .. } | Segment::Tools { .. }
+            )
+        })
         .cloned()
         .collect()
 }
