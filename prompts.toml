@@ -373,7 +373,7 @@ meta_questions = [
 description = "Ask the Storyteller thought-provoking questions that add interest and depth to the world."
 
 [questioner.tools.ask_questions.arguments]
-questions = "A list of up to five questions."
+questions = "Up to five questions, each one a single question."
 
 [questioner.tools.world_is_complete]
 description = "Say the world has a solid foundation and is complete enough to begin play."
