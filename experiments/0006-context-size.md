@@ -106,3 +106,17 @@ or reject it with a concise reason") and the request is the fact alone. Interven
 scenario: 0 of 20 runs failed (original text 0 of 32, shortened tool text 7 of 20); device
 suite passed. The instruction to end the turn with a narrate tool is no longer repeated in
 every request; the role and every decision's result still say it.
+
+## Sizes after player replies (characters, `context_size_by_agent_and_part`)
+
+| Request | Tools | System (role + scene) | History | Total |
+|---|---|---|---|---|
+| player agent | 1,985 | 1,731 | 118 | 3,834 |
+| GM, first action | 5,025 | 3,074 | 208 | 8,307 |
+| GM, after four actions | 5,025 | 3,074 | 1,794 | 9,893 |
+| NPC | 2,378 | 2,136 | 503 to 1,314 | 5,017 to 5,828 |
+
+Tool definitions are 60% of the GM request and 52% of the player agent's, and are constant;
+the GM's history adds about 500 characters per action before compaction. The player agent
+and NPC contexts have the same shape as the GM's, with no overhead of their own that the
+GM's does not also have.
