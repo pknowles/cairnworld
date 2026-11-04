@@ -34,13 +34,17 @@ keep in `device_suite` only if reliable.
 
 ## The GM names the wrong character in an intervention check
 
-Players can now be asked (plans/archive/player-replies.md), but the GM must name them. Measured on
-the real model with a note naming the player beside the sack (40 runs, production sampling):
-the GM asked the player in 31, and in 9 named an NPC's id instead (Toma, then approved both
-actions). In the 31 the player agent answered correctly every time (`do_nothing` when the
-player said they did not mind, an action when they objected). Runnable:
-`CAIRNWORLD_REPEATS=20 cargo test a_player_answers_the_gms_intervention_question -- --ignored --nocapture`.
-Cause not yet examined (ids come from the scene packet).
+Players can be asked (plans/archive/player-replies.md), but the GM must name them. The GM's
+input in the test is valid: the scene lists every character with an id (Mara 1, Toma 2, the
+acting player 3, the player to ask 4) and the note names the player to ask. Over 60 GM-only
+samples with production sampling (30 per case) the GM named the right id 54 times, Toma 3 and
+the acting character 3 (the tool refuses that, so nobody is asked). The first note said the
+other player was "beside the sack" while the scene text puts Toma beside the sack; that
+contradiction caused part of it (51 right, 8 Toma, 1 actor), and the note now says the player
+stands next to the acting one. The remaining wrong picks have no known cause. One difference
+worth testing: a player's name carries a random handle ("Adventurer35") unrelated to its id
+(4). Runnable: `CAIRNWORLD_REPEATS=20 cargo test a_player_answers_the_gms_intervention_question
+-- --ignored --nocapture`.
 
 ## The GM approves an ask that is not a question
 

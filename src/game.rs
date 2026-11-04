@@ -4880,6 +4880,7 @@ mod tests {
                 let (game, store, _db, first, second) =
                     two_player_bread_thief_game_with_limits(backend, limits).await;
                 let bystander = store.player_scene(&second).await.unwrap().character_name;
+                let taker = store.player_scene(&first).await.unwrap().character_name;
                 let sequence = store
                     .begin_sequence(first.world_id, "real GM intervention")
                     .await
@@ -4911,7 +4912,7 @@ mod tests {
                         Budget::new(limits),
                         CallContext::root(Some(sequence.id)),
                         Some(&format!(
-                            "{bystander} is beside the sack and may object; ask them with intervention_check before you decide."
+                            "{bystander} stands next to {taker} and may object; ask {bystander} with intervention_check before you decide."
                         )),
                     )
                     .await
