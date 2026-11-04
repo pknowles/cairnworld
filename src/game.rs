@@ -2528,6 +2528,112 @@ mod tests {
         );
     }
 
+    /// Real-model check of what a summary keeps. The history is the Questioner's
+    /// stuck turn from a recorded world generation: its instruction, then
+    /// repeated `ask_questions` calls the game rejected. The summary replaces
+    /// the older part of the turn, so it has to carry the task in progress, not
+    /// treat the rejected drafts as questions already asked.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress() {
+        use crate::llm::{MessageContent, ToolCall};
+        use crate::store::MessageOrigin;
+        let model = DeviceModel::load().await;
+        let (shared, _, sampling, limits) = model.parts();
+        let db = crate::store::TestDatabase::new("compaction-stuck-loop");
+        let store = Store::open(db.path()).await.unwrap();
+        let world = store.create_world("test").await.unwrap();
+        let agent = store.create_agent(world).await.unwrap();
+        let ask = crate::prompts::current()
+            .unwrap()
+            .questioner
+            .ask_request
+            .clone();
+        let say = |role, text: &str| Message::text(role, text);
+        let mut history = vec![
+            say(
+                Role::User,
+                "Seed prompt for the world: A smuggler's port town where something is wrong with \
+                 the tide.\n\nBefore you ask anything, answer each of these briefly:\n- What does \
+                 each involved party want, fear, and refuse to sacrifice?\n- What makes the \
+                 central conflict arise from incompatible goals?",
+            ),
+            say(
+                Role::Assistant,
+                "Each party wants the tide back to normal for a different reason. The smugglers \
+                 fear losing their hidden channels, the harbor guild fears losing its monopoly, \
+                 and the cult wants the tide to stay wrong. The conflict is real because no two \
+                 of them can be satisfied at once.",
+            ),
+            say(Role::User, &ask),
+        ];
+        let questions = r#"{"questions":"[\"What is the specific nature of the 'wrong' tide?\"]\n[\"Who stands to gain or lose the most if the tide returns to normal?\"]"}"#;
+        for attempt in 0..6 {
+            let id = format!("attempt-{attempt}");
+            history.push(Message {
+                role: Role::Assistant,
+                origin: MessageOrigin::Conversation,
+                content: MessageContent::ToolCalls(vec![ToolCall {
+                    id: id.clone(),
+                    name: "ask_questions".into(),
+                    arguments: questions.into(),
+                }]),
+                reasoning: String::new(),
+            });
+            history.push(Message {
+                role: Role::Tool,
+                origin: MessageOrigin::Conversation,
+                content: MessageContent::ToolResult {
+                    tool_call_id: id,
+                    content: "Tool arguments were rejected: parsing ask_questions arguments: \
+                              invalid type: string \"[\\\"What is the specific nature of the \
+                              'wrong' tide?\\\"]\", expected a sequence at line 1 column 96"
+                        .into(),
+                },
+                reasoning: String::new(),
+            });
+        }
+        for message in &history {
+            store.append_message(agent, message).await.unwrap();
+        }
+        let branch = store.agent_branch(agent).await.unwrap();
+        store
+            .enqueue_capacity_compaction(
+                branch,
+                4255,
+                None,
+                crate::store::CompactionPolicy {
+                    sequence_id: None,
+                    compact_before_next_input_tokens: limits.compact_before_next_input_tokens,
+                    sampling: &sampling,
+                    model: "dev-qwen35",
+                    static_segments: &[],
+                    ending_tools: &[],
+                },
+            )
+            .await
+            .unwrap();
+        let job = store.pending_compaction(agent).await.unwrap().unwrap();
+        crate::compaction::run(
+            &store,
+            &shared,
+            &job,
+            Limits {
+                keep_raw_messages: 8,
+                ..limits
+            },
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .unwrap();
+        let summary = store.latest_summary(agent).await.unwrap().unwrap();
+        println!("===== SUMMARY\n{}", summary.content);
+        assert!(
+            summary.content.contains("ask_questions"),
+            "the summary must carry the call the agent still has to make"
+        );
+    }
+
     #[tokio::test]
     async fn the_storyteller_never_sees_a_replaced_summary_and_developer_mode_labels_the_side_inference()
      {

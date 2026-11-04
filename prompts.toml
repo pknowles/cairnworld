@@ -281,8 +281,9 @@ description = "Stay silent for now."
 summary_request = """\
     The conversation above is your own history. Replace it with a summary your \
     next turn will read in its place: keep the facts, decisions, open questions, \
-    and commitments that still matter, and drop small talk and anything your \
-    standing instructions or tools already provide.\
+    and commitments that still matter, such as the task you are in the middle of, \
+    what you tried that did not work, and what to do next. Drop small talk and \
+    anything your standing instructions or tools already provide.\
     """
 
 # ---------------------------------------------------------------------------
