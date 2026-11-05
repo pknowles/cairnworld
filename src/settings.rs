@@ -181,8 +181,8 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_concurrent_inferences: 4,
-            max_inferences_per_chat: 8,
-            max_inferences_total: 64,
+            max_inferences_per_chat: 32,
+            max_inferences_total: 256,
             max_context_tokens: 16_384,
             max_output_tokens: 1_024,
             compact_before_next_input_tokens: 15_360,

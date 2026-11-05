@@ -1164,4 +1164,104 @@ mod id_tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("already leads"));
     }
+
+    #[tokio::test]
+    async fn a_kind_refuses_fields_it_does_not_have_and_creation_needs_the_ones_it_does() {
+        let (store, _db, world) = building_world().await;
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+
+        // A field of another kind is refused, and the kind's fields are listed.
+        let error = store
+            .create_object(
+                world,
+                ObjectKind::Location,
+                &Fields {
+                    group_id: Some(1),
+                    ..location_fields("yard")
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(
+                "A location has the fields name, location_kind, description, not `group_id`"
+            ),
+            "{error:#}"
+        );
+
+        // Creating needs every required field, naming the missing ones.
+        let error = store
+            .create_object(
+                world,
+                ObjectKind::Group,
+                &Fields {
+                    name: Some("family".into()),
+                    ..Fields::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("A group needs location_id, description"),
+            "{error:#}"
+        );
+
+        // An item is somewhere exactly once.
+        let loaf = create(
+            &store,
+            world,
+            ObjectKind::ItemType,
+            Fields {
+                name: Some("loaf".into()),
+                description: Some(String::new()),
+                ..Fields::default()
+            },
+        )
+        .await;
+        let item = |location_id, held_by_id| Fields {
+            name: Some("stale loaf".into()),
+            item_type_id: Some(loaf),
+            description: Some(String::new()),
+            location_id,
+            held_by_id,
+            ..Fields::default()
+        };
+        for fields in [item(None, None), item(Some(hut), Some(1))] {
+            let error = store
+                .create_object(world, ObjectKind::Item, &fields)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("either location_id or held_by_id"),
+                "{error:#}"
+            );
+        }
+
+        // An update is refused the same way, but needs nothing.
+        let error = store
+            .update_object(
+                world,
+                ObjectKind::Location,
+                hut,
+                &Fields {
+                    motive: Some("x".into()),
+                    ..Fields::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not `motive`"), "{error:#}");
+        store
+            .update_object(
+                world,
+                ObjectKind::Location,
+                hut,
+                &Fields {
+                    description: Some("Smaller.".into()),
+                    ..Fields::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
 }

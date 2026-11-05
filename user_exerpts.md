@@ -1047,3 +1047,22 @@ flow.
 On integration order:
 
 > lets finish getting this branch up to scractch and make it possible to generate a small world that's playable. then I'll merge the branches and we can continue to the detailed world
+
+## 2026-11-06: Per-run inference bounds are configuration, and generic names get a prefix
+
+On the limit of 8 inferences per chat turn, which stopped a world build:
+
+> oh - where is this in my user declarations!!??
+>
+> 8 is absurd for world gen. I hope you made it much larger.
+
+The only record is the earlier request for two configurable safety bounds, where hitting
+one is a hard error (see "Safety bounds on the agent loop"); the values 8 and 64 were an
+agent's defaults. They are now 32 per chat and 256 per generation in `default.toml`.
+
+On naming a field that said `kind` in the generic object tools:
+
+> "kind" - it's a terrible name when there is no obvious thing it's a kind of. please make
+> sure all kinds have a prefix if the containing object is not named too
+
+The location's field is `location_kind`; the object's own kind argument is `object`.

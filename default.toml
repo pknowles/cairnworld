@@ -50,11 +50,13 @@ top_k = 20
 # sequences internally; foreground work is admitted before deferred work.
 max_concurrent_inferences = 1
 # Inferences one chat turn may run before its tool loop is abandoned. A turn
-# needs one inference per tool round trip plus a final reply.
-max_inferences_per_chat = 8
-# Inferences one player action may run across every agent it reaches,
-# including recursive agent-to-agent calls.
-max_inferences_total = 64
+# needs one inference per tool round trip plus a final reply. Building a world
+# creates objects that refer to each other, one step per level, so it needs more
+# than a player's turn does. Hitting the bound is a hard error, not a signal.
+max_inferences_per_chat = 32
+# Inferences one player action, or one world's generation, may run across every
+# agent it reaches, including recursive agent-to-agent calls.
+max_inferences_total = 256
 # Fixed total input plus generated-token capacity reserved in the paged KV cache
 # for each admitted inference. This determines the model's fixed VRAM budget.
 max_context_tokens = 16384
