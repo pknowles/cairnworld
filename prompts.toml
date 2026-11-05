@@ -484,12 +484,12 @@ objects_state = """\
     """
 
 [storyteller.tools.create_object]
-description = "Create an object. Fields: location name, kind, description; connection from_id, to_id, travel_time, description; group name, location_id, description; npc name, group_id, description, background, motive, ambition, sheet; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id."
+description = "Create an object. Fields: location name, location_kind, description; connection from_id, to_id, travel_time, description; group name, location_id, description; npc name, group_id, description, background, motive, ambition, sheet; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
 
 [storyteller.tools.create_object.arguments]
 object = "The object's kind."
 name = "Unique name, where it has one."
-kind = "What kind of location it is."
+location_kind = "What kind of place the location is."
 description = "What it is like."
 from_id = "Starting location ID."
 to_id = "Destination location ID."
@@ -511,7 +511,7 @@ description = "Change an object's fields. Omitted fields stay."
 object = "The object's kind."
 id = "Its ID from the object list."
 name = "New unique name."
-kind = "New location kind."
+location_kind = "New kind of place."
 description = "New description."
 from_id = "A connection's ends cannot change."
 to_id = "A connection's ends cannot change."

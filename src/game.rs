@@ -2463,7 +2463,7 @@ mod tests {
             calls(&[
                 (
                     "create_object",
-                    r#"{"object":"location","name":"Belfry","kind":"tower","description":"A tower above the water."}"#,
+                    r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"A tower above the water."}"#,
                 ),
                 (
                     "create_object",
@@ -2475,7 +2475,7 @@ mod tests {
                 ),
                 (
                     "create_object",
-                    r#"{"object":"location","name":"Belfry","kind":"tower","description":"Again."}"#,
+                    r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"Again."}"#,
                 ),
             ]),
             text("The objects exist."),
@@ -2758,7 +2758,7 @@ mod tests {
                     ObjectKind::Location,
                     &Fields {
                         name: Some("Saltgate Quay".into()),
-                        kind: Some("village".into()),
+                        location_kind: Some("village".into()),
                         description: Some("A smuggler town on a still estuary.".into()),
                         ..Fields::default()
                     },

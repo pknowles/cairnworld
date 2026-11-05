@@ -42,7 +42,11 @@ impl ObjectKind {
     /// An item needs exactly one of `location_id` and `held_by_id`.
     pub(super) fn fields(self) -> &'static [(&'static str, bool)] {
         match self {
-            Self::Location => &[("name", true), ("kind", true), ("description", true)],
+            Self::Location => &[
+                ("name", true),
+                ("location_kind", true),
+                ("description", true),
+            ],
             Self::Connection => &[
                 ("from_id", true),
                 ("to_id", true),
@@ -76,7 +80,7 @@ impl ObjectKind {
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 pub struct Fields {
     pub name: Option<String>,
-    pub kind: Option<String>,
+    pub location_kind: Option<String>,
     pub description: Option<String>,
     pub from_id: Option<i64>,
     pub to_id: Option<i64>,
@@ -457,7 +461,7 @@ impl Store {
                 Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
                 let location = Location {
                     name,
-                    kind: need(&fields.kind, "kind")?,
+                    kind: need(&fields.location_kind, "location_kind")?,
                     description: need(&fields.description, "description")?,
                     notes,
                 };
@@ -914,7 +918,7 @@ pub(in crate::store) mod fixtures {
     pub(in crate::store) fn location_fields(name: &str) -> Fields {
         Fields {
             name: Some(name.into()),
-            kind: Some("room".into()),
+            location_kind: Some("room".into()),
             description: Some(format!("The {name}.")),
             ..Fields::default()
         }

@@ -67,7 +67,7 @@ impl Store {
                     "UPDATE location SET name = COALESCE(?, name), kind = COALESCE(?, kind), \
                      description = COALESCE(?, description) WHERE id = ?",
                     fields.name,
-                    fields.kind,
+                    fields.location_kind,
                     fields.description,
                     id,
                 )
