@@ -96,3 +96,11 @@ instructions. Less is more.
 - Is an LLM doing something that is fully deterministic that would be better
   done by the programming language? Inference is expensive and best for fuzzy
   interpretation and tasks.
+- Did you attempt to introduce tool filtering. This is a common pitfall and
+  highly error prone as simply seeing other tool calls often hints at how to
+  behave. LLMs frequently misbehave when the correct tool call is not available
+  and coding agents often struggle to notice.
+- Did you write unnecessarily verbose and long tool descriptions? A useful
+  exercise is to explain what might go wrong if each statement were to be
+  removed, evaluate the importance of it being there. If nothing would be left,
+  rethink your understanding of the intent of the tool call.

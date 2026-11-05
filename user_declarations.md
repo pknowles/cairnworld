@@ -37,17 +37,27 @@ explicit reasoning model where we have fine grain control over how much thinking
 is done before the final output is accepted. Maybe there's already technologies
 that could do this more robustly. I'd be interested to know.
 
-I'd like to break up world generation into three phases:
+I'd like to break up world generation into the following phases of summary
+writing and object creation:
 
 1. World Summary - the top level setting and plot
 2. Core object creation - implementing the world summary
-3. Detail object creation - adding minor encounters, supporting NPCs etc.
+3. Extended world summary - a second document to the world summary that adds
+   detail, side plots, further elements that strongly connect parts of the main
+   world summary, add additional tension, conflict and detail. 
+4. Detail object creation - implementig the extended world summary, adding minor
+   encounters, connecting locations, multiple routes, supporting NPCs etc.
+
+We could actually have a user facing checkbox to create a small world where we
+only do the core objects and not the extended world summary. Only the smaller
+world would be a handy first milestone for development too.
 
 The intent of the questioner is to ask questions that, in order of priority:
 
 1. Enrich the world with interest, depth, internal connections
 2. Establish multiple pathways for player character objectives, conflict with
-   NPCs and setting engagement
+   NPCs and setting engagement, opportunity for players to make meaningful
+   choices
 3. Point out problems, outright contradictions in the ideas, weak coupling in
    the ideas (i.e. elements that have no relation or little connection with
    other elements), encourage dropping and rewriting elements that don't fit, no
@@ -72,10 +82,10 @@ progress of the world generation. The intent is to first build an RPG world,
 setting and initial plot(s) that players would want to play in and then refine
 it by removing crud and adding intriguing detail. The Questioner should switch
 to using more critical review style questions when appropriate. Once the
-questioner deems the world ready it can respond saying the world is solid and
-complete enough to begin play. The Storyteller needs to be able to name the
-world too. The final "world summary" and the world/campaign name is the product
-of the first phase of world generation.
+questioner deems the phase of world generation ready it can make a tool call to
+move on to the next phase. The Storyteller needs to be able to name the world
+too. The final "world summary" and the world/campaign name is the product of the
+first phase of world generation.
 
 The Storyteller is also given the initial world prompt. It is first run with the
 Questioner's questions, asked one at a time. We should experiment with a high
@@ -1341,17 +1351,19 @@ opens the chest, the GM describes the item they found.
 
 During the initial world creation stage, much like character creation, the
 storyteller has access to the following tools. It will be prompted in a loop to
-complete and review phases until it marks it done and calls BeginWorld. The
-storyteller should receive stats after changes to help it know what might be
-missing, for example connection, npc and item counts.
+complete and question/review steps until the Questioner is happy. For object
+creation stages the Storyteller should receive stats after changes to help it
+know what might be missing, for example connection, npc and item counts.
 
 - CreateLocation/Connection/NPC/Group/ItemType/Item - initial attributes and
   details for all fields must be given in the tool call.
 - UpdateLocation/Connection/NPC/Group/ItemType/Item - Just like create, but
   supports replacing individual fields without specifing them all. 
-- DeleteLocation/Connection/NPC/Group/ItemType/Item - flags them as deleted and
+- DeleteLocation/Connection/NPC/ItemType/Item - flags them as deleted and
   filters. We don't want to let agents be actually destructive, ever. Still
-  findable in developer mode, but default filtered out.
+  findable in developer mode, but default filtered out. I'm tempted to leave out
+  DeleteGroup and have groups implicitly delete when the last NPC is moved or
+  deleted.
 - Storyteller notes text editing tools (See "Game state" section)
 
 We may need to create some prefab ItemTypes to make it easier for the
@@ -1371,10 +1383,10 @@ is non-blocking reminder and the storyteller will be explicitly instructed to
 ignore those it ultimately decides do not need to exist. We help it; we do not
 force things.
 
-The Questioner is far simpler and can only ask questions or make a tool call to
-say it is satisfied. It does not get access to any of the storyteller's answers
-or chat history. All it can see is the elements of the world that the
-storyteller creates. It then must reply with one of two structured responses:
+The Questioner can only read/review world objects, ask questions or make a tool
+call to say it is satisfied. It does not get access to any of the storyteller's
+answers or chat history. All it can see is the elements of the world that the
+storyteller creates. It then must use one of the following structured responses:
 
 - AskQuestions - the world generation phase is implicitly incomplete and the
   questioner must indirectly ask a question that invites closing the gap. As
@@ -1382,13 +1394,35 @@ storyteller creates. It then must reply with one of two structured responses:
   question that gets at the core of the remaining issue(s).
 - WorldSummaryComplete - asks the Storyteller for the world title, saves it and
   the summary, them prompts the Storyteller to create all world summary objects.
-  The Questioner then sees the result, all created objects is provided (e.g. in
-  the system prompt) and it can continue questioning.
-- CoreObjectsCreated - prompt the Storyteller to create detail objects. TODO: I
-  think the Storyteller should have to write some detail text with the
-  Questioner before diving into creating the final detail objects.
-- DetailObjectsCreated - ends world creation, marks the world ready and implies
-  play can begin, but does not start play until a player joins.
+  The Questioner then sees the result, all created top level objects (those not
+  accessible indirectly such as an NPC's items - those are part of the NPC and
+  not top level) are listed with a flag for whether the object is Reviewed or
+  not (e.g. shown in the system prompt) and it can continue questioning to
+  review the created objects. I would hope the initial questions could catch
+  missing objects that the Storyteller forgot or even spurious ones it added.
+- ReadObject - shows the full object details, e.g. an NPC and all its items. The
+  intent is to allow the Questioner to review objects one at a time and not get
+  overloaded with context for all objects the Storyteller makes.
+- MarkObjectReviewed - sets a flag with the provided argument (true or false)
+  for the object being reviewed and ready for play. The intent is the Questioner
+  manages its own notes for what still needs reviewing. Everything must be
+  reviewed before completing the world generation phase. If any object is
+  modified by the Storyteller, its Reviewed state is reset to false.
+- CoreObjectsCreated - verifies all objects have been marked reviewed. If this
+  is a simple world without an extended summary and detailed objects, generation
+  ends here. Otherwise, inserts a canned message into the Storyteller chat to
+  say the extended world summary now begins and describes its purpose. The
+  Questioner is given the same and prompted to first ask questions that result
+  in the initial extended world summary being well written and follow up
+  reviewing until complete.
+- ExtendedWorldSummaryComplete - saves the extended world summary document and
+  prompts the Storyteller to create objects for it, much like above. The
+  Questioner then begins reviewing the new objects, comparing against the
+  extended world summary.
+- DetailObjectsCreated - verifies all objects are reviewed, ends world creation,
+  marks the world ready and implies play can begin, but does not start play
+  until a player joins. Like other phases, we insert a message into the
+  Storyteller chat so it knkows this is where the world is marked complete.
 
 Once the game is in progress, the storyteller gains:
 
