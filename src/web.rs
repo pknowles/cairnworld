@@ -2000,8 +2000,6 @@ mod tests {
                         target_group_id: None,
                         split: crate::tools::SplitGroup {
                             character_ids: vec![toma_id],
-                            current_name: "player side".into(),
-                            target_name: "Toma side".into(),
                             continue_with_character_id: Some(installed.member.character_id),
                         },
                     },

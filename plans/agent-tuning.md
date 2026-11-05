@@ -1,6 +1,6 @@
 # Agent tuning: known failures of agent behaviour
 
-Status: nothing started. These are measured failures of the current agents that
+Status: in progress. These are measured failures of the current agents that
 need prompt/context tuning once the features they depend on exist. Follow the
 [AGENTS.md checklist](../AGENTS.md#post-feature-and-pre-commit-checklist) and
 [prompt standards](../prompt_standards.md): read the full model input of a failing
@@ -14,12 +14,29 @@ group id and its characters (id and name) only. No group description or position
 none. Merge when characters of different groups could perceive each other; split when
 characters move away. `split_group` already acts on the GM's own group (it takes no group id).
 
-Done: the packet lists the other groups, and the tools are `split_group` (the characters leaving, names for
-both groups, an optional target group) and `merge_group` (the other group's id and a name), as declared.
-Still to do: real-model checks of valid calls with two groups (ids taken from the packet, resulting groups read
-from stored membership) for a merge when characters cross paths and a split when they part, repeated
-enough to know the rate, including how often the optional target group is filled needlessly. The batched,
-delayed split belongs to plans/unified-game-time.md.
+Done: the packet lists the other groups; the tools are `split_group(character_ids)`,
+`move_to_group(character_ids, group_id)` and `merge_group(group_id)`; groups are named for their
+members; the tools act on the acting character's current group; mistral.rs's Qwen parser needs
+an optional integer's schema type to be plain (`"integer"`, not `["integer","null"]`), which the
+schema normaliser now does. Do not add string-to-integer coercion in the game for it.
+
+Still open (user, 2026-11-05: the GM must regroup characters; the ignored test is
+`the_gm_regroups_characters_as_they_move`, `CAIRNWORLD_REPEATS=N` for seeds). Measured over 2
+seeds with realistic wording (experiments/0009-group-tools.md): a character joining another
+group is merged in with the whole group instead of moved (`merge_group` 2 of 2, no
+`move_to_group`); walking off alone makes no group call (0 of 2, 1 of 3 in an earlier wording);
+walking back to the others works (2 of 2, as a merge). The GM does call `move_to_group` with
+correct arguments when its description is the only one that fits, but often after a wrong
+`split_group` of both players. The batched, delayed split belongs to plans/unified-game-time.md.
+
+## Whole-suite test time
+
+Trims made: character creation ends at the GM opening (the GM-take coverage is in the GM and
+intervention scenarios), committed-take cases share the player-routing scenario, the compaction
+conversation has one plain turn, and tools that other scenarios call are left out of the
+tool-interface scenario unless `CAIRNWORLD_ALL_TOOLS` is set. Not yet timed on an idle GPU:
+the untrimmed suite was about 270 seconds of device scenarios plus 25 seconds of scripted tests, and a
+run on a busy GPU took 467 seconds, so judge it from `nvidia-smi` showing the GPU idle.
 
 ## The GM names the wrong character in an intervention check
 
@@ -79,6 +96,12 @@ lantern". Four questions to the real GM on the merged history: the player asks a
 Mara's whisper (must mention heron) and about Toma's words (must not mention lantern);
 Toma asks about Mara's words (must not mention heron) and about his own (must mention
 lantern).
+
+The check now reads the delivered answer instead of looking only for
+`narrate_*` calls: questions use the private `answer` tool. Its split/merge setup
+also removes obsolete player follow-up responses (actions end the player's turn)
+and shuts down each scripted game before opening the next. Re-measure before
+treating the older failures below as current behaviour.
 
 Measured 2026-10-28, 6 runs, none passed. Causes seen:
 - Toma asked what Mara said outside and the GM narrated "heron" (3 of 6 runs).

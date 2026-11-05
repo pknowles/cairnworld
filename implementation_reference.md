@@ -909,11 +909,18 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   the player agent and the GM are scripted, the NPCs are the real model;
   `RealPlayerOnly` (the "routing" scenario) makes the player agent the real model; both
   use `mechanical_gm` for the GM.
-- `game::tests::real_model_every_tool_can_be_called` (the "every tool" device scenario, also `every_tool_can_be_called`
+- `game::tests::real_model_gm_resolves_a_look_and_a_spoken_line` (the "gm turns" scenario) has the
+  real GM resolve a look and a spoken line. `real_model_gm_regroups_characters` (ignored test
+  `the_gm_regroups_characters_as_they_move`) puts three moves to the GM, each from its own known
+  start, and reads who shares a group afterwards; it is an open requirement (plans/agent-tuning.md).
+  The creation scenario ends at the GM opening; committed-take cases share the player-routing scenario.
+- `game::tests::real_model_every_tool_can_be_called` (the "other tools" device scenario, also `every_tool_can_be_called`
   alone): a scripted game captures one real request per kind of agent (GM, player, asked player,
-  NPC; `one_request_per_kind_of_agent`), then the model is asked to call each of the 15 tools by name
+  NPC; `one_request_per_kind_of_agent`), then the model is asked to call tools by name
   with only that agent's system messages, and a player who says "I don't mind" must do nothing. With
   the fixed seed it is the quick check for a change in how tools reach the model.
+  Tools with their own scenarios are omitted by default; `CAIRNWORLD_ALL_TOOLS`
+  includes every tool.
 - `src/lib.rs` exports Leptos's required islands `hydrate()` entrypoint, which
   initializes the island hydrator before the generated loader invokes each
   island. `npm run test:hydration` builds the frontend and explicitly runs

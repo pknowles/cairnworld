@@ -2035,6 +2035,11 @@ where
         } else {
             reject_tool
         };
+        // A split or merge replaces groups, so a later call in the same turn must act on the
+        // acting character's group as it is by then, not the group the turn began with.
+        let actor_id = pending.character_id;
+        let (split_store, move_store, merge_store) =
+            (self.store.clone(), self.store.clone(), self.store.clone());
         let split_tool = Tool::new(
             prompts.gm.tools.tool(
                 "split_group",
@@ -2043,7 +2048,9 @@ where
             )?,
             move |context| {
                 let arguments = context.arguments.to_string();
+                let store = split_store.clone();
                 Box::pin(async move {
+                    let group_id = store.character_group_id(actor_id).await?;
                     let split: SplitGroup = match serde_json::from_str(&arguments)
                         .context("parsing split_group arguments")
                     {
@@ -2052,11 +2059,37 @@ where
                     };
                     Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Split {
                         group_id,
-                        target_group_id: split.target_group_id,
+                        target_group_id: None,
                         split: tools::SplitGroup {
                             character_ids: split.character_ids,
-                            current_name: split.current_group_name,
-                            target_name: split.target_group_name,
+                            continue_with_character_id: None,
+                        },
+                    }))
+                }) as ToolFuture
+            },
+        );
+        let move_tool = Tool::new(
+            prompts.gm.tools.tool(
+                "move_to_group",
+                serde_json::to_value(schema_for!(MoveToGroup))
+                    .expect("move_to_group schema should serialize"),
+            )?,
+            move |context| {
+                let arguments = context.arguments.to_string();
+                let store = move_store.clone();
+                Box::pin(async move {
+                    let group_id = store.character_group_id(actor_id).await?;
+                    let moving: MoveToGroup = match serde_json::from_str(&arguments)
+                        .context("parsing move_to_group arguments")
+                    {
+                        Ok(moving) => moving,
+                        Err(error) => return Ok(ToolOutcome::rejected(error)),
+                    };
+                    Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Split {
+                        group_id,
+                        target_group_id: Some(moving.group_id),
+                        split: tools::SplitGroup {
+                            character_ids: moving.character_ids,
                             continue_with_character_id: None,
                         },
                     }))
@@ -2071,7 +2104,9 @@ where
             )?,
             move |context| {
                 let arguments = context.arguments.to_string();
+                let store = merge_store.clone();
                 Box::pin(async move {
+                    let group_id = store.character_group_id(actor_id).await?;
                     let merge: MergeGroup = match serde_json::from_str(&arguments)
                         .context("parsing merge_group arguments")
                     {
@@ -2080,7 +2115,6 @@ where
                     };
                     Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Merge {
                         group_ids: vec![group_id, merge.group_id],
-                        name: merge.name,
                     }))
                 }) as ToolFuture
             },
@@ -2310,6 +2344,7 @@ where
                 approve_speech_tool,
                 reject_tool,
                 split_tool,
+                move_tool,
                 merge_tool,
                 intervention_tool,
             ]
@@ -2618,12 +2653,15 @@ struct RejectAction {
 struct SplitGroup {
     // The characters leaving this group.
     character_ids: Vec<i64>,
-    // A short name for the group left behind.
-    current_group_name: String,
-    // A short name for the group the characters end up in.
-    target_group_name: String,
-    // An existing group at this location for them to join.
-    target_group_id: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MoveToGroup {
+    // The characters moving.
+    character_ids: Vec<i64>,
+    // The other group at this location they join.
+    group_id: i64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2631,8 +2669,6 @@ struct SplitGroup {
 struct MergeGroup {
     // The other group at this location to merge into this one.
     group_id: i64,
-    // A short name for the merged group.
-    name: String,
 }
 
 #[cfg(test)]
@@ -3780,8 +3816,7 @@ mod tests {
             .await
             .unwrap();
         let split_args = serde_json::json!({
-            "character_ids": [toma_id], "current_group_name": "with Mara", "target_group_name": "Toma alone",
-        })
+            "character_ids": [toma_id], })
         .to_string();
         let (scripted_backend, recorded_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
@@ -3871,7 +3906,7 @@ mod tests {
             seen_by_with_mara.other_groups,
             [crate::store::OtherGroup {
                 id: toma_group,
-                name: "Toma alone".to_string(),
+                name: "Toma".to_string(),
                 characters: vec![member(toma_id, "Toma")],
             }]
         );
@@ -4014,8 +4049,7 @@ mod tests {
             .unwrap();
 
         let split_args = serde_json::json!({
-            "character_ids": [toma_id], "current_group_name": "with Mara", "target_group_name": "Toma alone",
-        })
+            "character_ids": [toma_id], })
         .to_string();
         let (split_backend, _split_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
@@ -4036,7 +4070,6 @@ mod tests {
                 },
             ])),
             narrate("You step outside with Mara."),
-            response(Content::Text("What do you do next?".into())),
             // Mara, now with the Adventurer, hears the narration.
             do_nothing(),
         ]);
@@ -4057,6 +4090,7 @@ mod tests {
             .await
             .unwrap();
         wait_for_npc_work_of(&split_game, &store, &installed.member).await;
+        split_game.shutdown().await.unwrap();
 
         let adventurer_group = store
             .character_group_id(installed.member.character_id)
@@ -4119,8 +4153,7 @@ mod tests {
             .unwrap();
 
         let merge_args = serde_json::json!({
-            "group_id": toma_group,
-            "name": "reunited",
+            "group_id": toma_group
         })
         .to_string();
         let (merge_backend, merge_requests) = ScriptedBackend::recording([
@@ -4142,7 +4175,6 @@ mod tests {
                 },
             ])),
             narrate("You and Mara rejoin Toma."),
-            response(Content::Text("What do you do next?".into())),
             // Mara and Toma hear the narration.
             do_nothing(),
             do_nothing(),
@@ -4164,6 +4196,7 @@ mod tests {
             .await
             .unwrap();
         wait_for_npc_work_of(&merge_game, &store, &installed.member).await;
+        merge_game.shutdown().await.unwrap();
 
         let merge_result = {
             let requests = merge_requests.lock().unwrap();
@@ -4396,6 +4429,25 @@ mod tests {
             !says("only knows the cellar"),
             "another world's history leaked in"
         );
+        // Each side's history is labelled with its group, by the name the group had.
+        let labels: Vec<&str> = requests[0]
+            .messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                MessageContent::Text(text) if text.starts_with("GM history for group") => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.len() >= 2,
+            "the merged histories are unlabelled: {labels:?}"
+        );
+        assert!(
+            labels.iter().all(|label| !label.contains("retired")),
+            "{labels:?}"
+        );
     }
 
     /// After a split and merge the GM holds both sides' histories, but a character
@@ -4487,7 +4539,7 @@ mod tests {
                 model_path,
                 sampling,
             );
-            real_game
+            let narration = real_game
                 .arbitrate(
                     pending.clone(),
                     Budget::new(limits),
@@ -4495,35 +4547,36 @@ mod tests {
                     None,
                 )
                 .await
-                .expect("a real GM turn must resolve the pending action on the merged branch DAG");
-            let last_inference: i64 = sqlx::query_scalar(
-                "SELECT id FROM inference WHERE sequence_id = ? AND agent_id = ? ORDER BY ordinal DESC LIMIT 1",
-            )
-            .bind(sequence.id)
-            .bind(pending.gm_agent_id)
-            .fetch_one(&store.pool())
-            .await
-            .unwrap();
-            let recorded = store.reconstruct_inference(last_inference).await.unwrap();
-            let crate::inspection::RecordedOutcome::Response(response) = recorded.outcome else {
-                panic!("the GM's last inference did not complete");
+                .expect("a real GM turn must resolve the pending action on the merged branch DAG")
+                .expect("a question is answered without waiting");
+            real_game
+                .deliver_narration(member.world_id, &narration)
+                .await
+                .unwrap();
+            let delivered = if asker == "player" {
+                narrations(&store, &member).await
+            } else {
+                narrated_to_npc(&store, "Toma").await
             };
-            let Content::ToolCalls(calls) = response.content else {
-                panic!("the GM did not close with a narrate call: {response:?}");
-            };
-            // Whichever narrate tool the GM chose, all its text counts.
-            let narration = calls
-                .iter()
-                .filter(|call| call.name.starts_with("narrate_"))
-                .map(|call| call.arguments.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if must.is_some_and(|word| !narration.contains(word))
-                || must_not.is_some_and(|word| narration.contains(word))
+            let answer = delivered
+                .last()
+                .expect("the asker received an answer")
+                .to_lowercase();
+            if must.is_some_and(|word| !answer.contains(word))
+                || must_not.is_some_and(|word| answer.contains(word))
             {
-                wrong.push(format!("{asker} asked {question:?}: {narration}"));
+                let recorded = store
+                    .reconstruct_inference(narration.inference_id)
+                    .await
+                    .unwrap();
+                eprintln!(
+                    "Privacy failure input: {}",
+                    recorded.model_prompt.expect("observed model input")
+                );
+                wrong.push(format!("{asker} asked {question:?}: {answer}"));
             }
             assert_no_rejected_output(&store).await;
+            real_game.shutdown().await.unwrap();
         }
         assert!(wrong.is_empty(), "the GM's answers were wrong: {wrong:#?}");
     }
@@ -4550,10 +4603,10 @@ mod tests {
     /// The GM's run of actions on its own, so a change to its wording can be
     /// repeated against it.
     #[tokio::test]
-    #[ignore = "needs a CUDA GPU"]
-    async fn the_gm_resolves_a_run_of_actions() {
+    #[ignore = "open requirement: the GM must regroup characters as they move (plans/agent-tuning.md); needs a CUDA GPU"]
+    async fn the_gm_regroups_characters_as_they_move() {
         let model = DeviceModel::load().await;
-        real_model_gm_resolves_a_run_of_actions(&model).await;
+        real_model_gm_regroups_characters(&model).await;
     }
 
     /// Every real-model test, run against one model load. The whole suite must
@@ -4633,7 +4686,7 @@ mod tests {
         scenario(
             "creation",
             120,
-            real_model_finishes_creation_and_the_gm_resolves_a_take(&model),
+            real_model_finishes_creation_and_the_gm_opens(&model),
         )
         .await;
         scenario(
@@ -4661,9 +4714,9 @@ mod tests {
         )
         .await;
         scenario(
-            "gm run",
+            "gm turns",
             120,
-            real_model_gm_resolves_a_run_of_actions(&model),
+            real_model_gm_resolves_a_look_and_a_spoken_line(&model),
         )
         .await;
         scenario(
@@ -4679,19 +4732,13 @@ mod tests {
         )
         .await;
         scenario(
-            "committed take",
-            120,
-            real_model_player_marks_only_a_determined_take_committed(&model),
-        )
-        .await;
-        scenario(
             "player speech",
             120,
             real_model_player_agent_says_what_the_player_says_and_stops(&model),
         )
         .await;
         scenario(
-            "every tool",
+            "other tools",
             120,
             real_model_every_tool_can_be_called(&model),
         )
@@ -5140,6 +5187,15 @@ mod tests {
             }
             let answered = decision.as_deref() == Some("answer");
             if answered != should_answer {
+                let recorded = store
+                    .reconstruct_inference(narration.inference_id)
+                    .await
+                    .unwrap();
+                eprintln!(
+                    "Ask failure: {:?}\nInput: {}",
+                    recorded.outcome,
+                    recorded.model_prompt.unwrap()
+                );
                 wrong.push(format!("{asker} asked {question:?}: {decision:?}"));
             }
         }
@@ -5158,143 +5214,255 @@ mod tests {
         real_model_gm_answers_a_question_and_rejects_any_other_ask(&model).await;
     }
 
-    /// The take arguments a real player agent sends for what a player says.
-    async fn take_arguments_for(model: &DeviceModel, text: &str) -> Vec<String> {
-        let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, _second) = two_player_bread_thief_game_with_sampling(
-            backend,
-            limits,
-            GameSettings::default(),
-            model.sampling.clone(),
-        )
-        .await;
-        let _connection = game.connect(&first).await.unwrap();
-        game.player_message(first.clone(), text)
+    /// One action put to the real GM as the product does: recorded, presented, arbitrated and
+    /// its narration delivered. An error is the GM's failure to resolve it.
+    async fn gm_resolves_action<B: Backend + Send + Sync + 'static>(
+        game: &Arc<Game<B>>,
+        store: &Store,
+        actor: &PlayerAgent,
+        limits: Limits,
+        (tool, arguments): (&str, serde_json::Value),
+    ) -> Result<(), String> {
+        let arguments = arguments.to_string();
+        let sequence = store
+            .begin_sequence(actor.world_id, "real GM run")
             .await
-            .expect("the player's turn");
-        let sent: Vec<String> = sqlx::query_scalar(
-            "SELECT json_extract(value, '$.arguments') FROM recorded_content, \
-             json_each(json_extract(recorded_content.body, '$.content.value')) \
-             WHERE json_extract(recorded_content.body, '$.content.type') = 'ToolCalls' \
-               AND json_extract(value, '$.name') = 'take'",
-        )
-        .fetch_all(&store.pool())
-        .await
-        .unwrap();
-        assert_no_rejected_output(&store).await;
-        game.shutdown().await.unwrap();
-        sent
-    }
-
-    /// The player agent marks a take committed only when the player is set on
-    /// it despite objections.
-    async fn real_model_player_marks_only_a_determined_take_committed(model: &DeviceModel) {
-        let determined = take_arguments_for(
-            model,
-            "I take the flour sack, and I'm doing it no matter what anyone says.",
+            .unwrap();
+        let requesting = crate::store::record_tool_call_for_test(
+            store,
+            store.agent_branch(actor.agent_id).await.unwrap(),
+            Some(sequence.id),
+            &format!("{tool}-{}", sequence.id),
+            tool,
+            &arguments,
         )
         .await;
-        assert!(
-            determined
-                .iter()
-                .any(|arguments| arguments.contains("\"committed\":true")),
-            "a determined take was not marked committed: {determined:?}"
-        );
-        let tentative = take_arguments_for(model, "Take the flour sack, if nobody minds.").await;
-        assert!(
-            !tentative.is_empty()
-                && tentative
-                    .iter()
-                    .all(|arguments| !arguments.contains("\"committed\":true")),
-            "a tentative take was marked committed: {tentative:?}"
-        );
-    }
-
-    /// The committed-take check on its own, so it can be repeated.
-    #[tokio::test]
-    #[ignore = "needs a CUDA GPU"]
-    async fn the_player_marks_only_a_determined_take_committed() {
-        let model = DeviceModel::load().await;
-        real_model_player_marks_only_a_determined_take_committed(&model).await;
-    }
-
-    async fn real_model_gm_resolves_a_run_of_actions(model: &DeviceModel) {
-        let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, _second) = two_player_bread_thief_game_with_sampling(
-            backend,
-            limits,
-            GameSettings::default(),
-            model.sampling.clone(),
-        )
-        .await;
-        // The speech comes last: it starts NPC replies, which would otherwise
-        // compete for the model with the actions still to be judged.
-        let lines = [
-            "Look closely at the rear window.",
-            "Look closely at the floor by the fire.",
-            "Toma, where did the bread go?",
-        ];
-        let mut failures = Vec::new();
-        for (index, line) in lines.iter().enumerate() {
-            let sequence = store
-                .begin_sequence(first.world_id, "real GM speech run")
-                .await
-                .unwrap();
-            let (tool, arguments) = if index < 2 {
-                (
-                    "attempt",
-                    serde_json::json!({"kind": "look", "description": line}).to_string(),
-                )
-            } else {
-                (
-                    "speak",
-                    serde_json::json!({"words": line, "to": ["Toma"]}).to_string(),
-                )
-            };
-            let requesting = crate::store::record_tool_call_for_test(
-                &store,
-                store.agent_branch(first.agent_id).await.unwrap(),
-                Some(sequence.id),
-                &format!("{tool}-{index}"),
+        let pending = store
+            .create_pending_action(
+                &store.player_actor(actor).await.unwrap(),
+                sequence.id,
+                requesting,
                 tool,
                 &arguments,
             )
-            .await;
-            let pending = store
-                .create_pending_action(
-                    &store.player_actor(&first).await.unwrap(),
-                    sequence.id,
-                    requesting,
-                    tool,
-                    &arguments,
-                )
+            .await
+            .unwrap();
+        let narration = game
+            .arbitrate(
+                pending,
+                Budget::new(limits),
+                CallContext::root(Some(sequence.id)),
+                None,
+            )
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        game.deliver_narration(
+            actor.world_id,
+            &narration.ok_or("the GM is waiting for an intervention")?,
+        )
+        .await
+        .unwrap();
+        Ok(())
+    }
+
+    /// The two-player game with the players named Rowan and Iris and given fixed sheets, so a
+    /// scenario's input is the same on every run (their names and attributes are otherwise random).
+    async fn named_two_player_game<B: Backend + Send + Sync + 'static>(
+        backend: B,
+        limits: Limits,
+        sampling: Sampling,
+    ) -> (
+        Arc<Game<B>>,
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        PlayerAgent,
+    ) {
+        let (game, store, db, first, second) = two_player_bread_thief_game_with_sampling(
+            backend,
+            limits,
+            GameSettings::default(),
+            sampling,
+        )
+        .await;
+        for (player, name) in [(&first, "Rowan"), (&second, "Iris")] {
+            sqlx::query("UPDATE character SET name = ?, sheet = ? WHERE id = ?")
+                .bind(name)
+                .bind(r#"{"hp":4,"str":10,"dex":10,"wil":10,"ready":true}"#)
+                .bind(player.character_id)
+                .execute(&store.pool())
                 .await
                 .unwrap();
-            let result = game
-                .arbitrate(
-                    pending,
-                    Budget::new(limits),
-                    CallContext::root(Some(sequence.id)),
-                    None,
-                )
-                .await;
-            match result {
-                Ok(narration) => {
-                    game.deliver_narration(first.world_id, &narration.expect("no wait"))
-                        .await
-                        .unwrap();
-                }
-                Err(error) => failures.push(format!("{index}: {error:#}")),
+        }
+        (game, store, db, first, second)
+    }
+
+    /// The real GM resolves a look and a spoken line, each as the product presents them.
+    /// The speech comes last: it starts NPC replies, which would otherwise compete for the
+    /// model with the action still to be judged.
+    async fn real_model_gm_resolves_a_look_and_a_spoken_line(model: &DeviceModel) {
+        let (_, _, _, limits) = model.parts();
+        let (game, store, _db, first, _second) = named_two_player_game(
+            SharedModel(Arc::clone(&model.backend)),
+            limits,
+            model.sampling.clone(),
+        )
+        .await;
+        let mut failures = Vec::new();
+        for (tool, arguments) in [
+            (
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "Look closely at the rear window."}),
+            ),
+            (
+                "speak",
+                serde_json::json!({"words": "Toma, where did the bread go?", "to": ["Toma"]}),
+            ),
+        ] {
+            if let Err(error) =
+                gm_resolves_action(&game, &store, &first, limits, (tool, arguments)).await
+            {
+                failures.push(format!("{tool}: {error}"));
             }
         }
-        println!(
-            "GM RESULT resolved={} failed={}",
-            lines.len() - failures.len(),
-            failures.len()
-        );
         assert!(failures.is_empty(), "{failures:#?}");
         assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
+    }
+
+    /// The real GM keeps the groups right as a character moves. From its own known start each
+    /// time: Rowan joins Toma in the hut while Mara and Iris stay outside (only Rowan changes
+    /// group, into Toma's), walks off alone from everyone (a new group), and walks back to the
+    /// others (everyone together again). Each result is read from who shares a group.
+    /// `CAIRNWORLD_REPEATS` runs the cases again with another seed each time, to measure how
+    /// often each goes wrong.
+    async fn real_model_gm_regroups_characters(model: &DeviceModel) {
+        let repeats: u64 = std::env::var("CAIRNWORLD_REPEATS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
+        let (_, _, _, limits) = model.parts();
+        let mut failures = Vec::new();
+        for repeat in 0..repeats {
+            for case in ["joins Toma", "walks off", "walks back"] {
+                let sampling = Sampling {
+                    seed: model.sampling.seed.map(|seed| seed + repeat),
+                    ..model.sampling.clone()
+                };
+                let (game, store, _db, first, second) = named_two_player_game(
+                    SharedModel(Arc::clone(&model.backend)),
+                    limits,
+                    sampling,
+                )
+                .await;
+                let character = |name: &'static str| {
+                    let pool = store.pool();
+                    async move {
+                        sqlx::query_scalar::<_, i64>("SELECT id FROM character WHERE name = ?")
+                            .bind(name)
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap()
+                    }
+                };
+                let (mara, toma) = (character("Mara").await, character("Toma").await);
+                let (rowan, iris) = (first.character_id, second.character_id);
+                let together = |ids: Vec<i64>| {
+                    let store = store.clone();
+                    async move {
+                        let mut groups = Vec::new();
+                        for id in ids {
+                            groups.push(store.character_group_id(id).await.unwrap());
+                        }
+                        groups.dedup();
+                        groups.len() == 1
+                    }
+                };
+                let mut turns = Vec::new();
+                let start = store.character_group_id(rowan).await.unwrap();
+                let description = match case {
+                    "joins Toma" => {
+                        store
+                            .split_group_for_test(start, None, vec![toma])
+                            .await
+                            .unwrap();
+                        "I climb through the rear window into the hut to join Toma."
+                    }
+                    "walks off" => {
+                        "I walk off down the path to the stream, out of sight and hearing of everyone."
+                    }
+                    _ => {
+                        store
+                            .split_group_for_test(start, None, vec![rowan])
+                            .await
+                            .unwrap();
+                        "I walk back to the hut and stand with the others."
+                    }
+                };
+                turns.push(
+                    gm_resolves_action(
+                        &game,
+                        &store,
+                        &first,
+                        limits,
+                        (
+                            "attempt",
+                            serde_json::json!({"kind": "open", "description": description}),
+                        ),
+                    )
+                    .await,
+                );
+                let right = match case {
+                    "joins Toma" => {
+                        together(vec![rowan, toma]).await
+                            && !together(vec![rowan, iris]).await
+                            && together(vec![iris, mara]).await
+                    }
+                    "walks off" => {
+                        !together(vec![rowan, iris]).await
+                            && !together(vec![rowan, mara]).await
+                            && !together(vec![rowan, toma]).await
+                            && together(vec![iris, mara, toma]).await
+                    }
+                    _ => together(vec![rowan, iris, mara, toma]).await,
+                };
+                let calls: Vec<String> = sqlx::query_scalar(
+                    "SELECT json_extract(value, '$.name') || ' ' || json_extract(value, '$.arguments') \
+                     FROM recorded_content, json_each(json_extract(recorded_content.body, '$.content.value')) \
+                     WHERE json_extract(recorded_content.body, '$.content.type') = 'ToolCalls' \
+                     ORDER BY recorded_content.id",
+                )
+                .fetch_all(&store.pool())
+                .await
+                .unwrap();
+                let calls: Vec<&String> = calls
+                    .iter()
+                    .filter(|call| {
+                        ["split_group", "merge_group", "move_to_group"]
+                            .iter()
+                            .any(|name| call.starts_with(name))
+                    })
+                    .collect();
+                println!(
+                    "GM GROUPS #{repeat} {case}: {} | group calls: {calls:?}",
+                    if right { "ok" } else { "WRONG" },
+                );
+                for result in turns {
+                    if let Err(error) = result {
+                        failures.push(format!("#{repeat} {case}: {error}"));
+                    }
+                }
+                if !right {
+                    failures.push(format!("#{repeat} {case}: the groups are wrong afterwards"));
+                }
+                if let Some(problem) = rejected_output(&store).await {
+                    failures.push(format!("#{repeat} {case}: {problem}"));
+                }
+                game.shutdown().await.unwrap();
+            }
+        }
+        println!("GM GROUPS runs={repeats} failures={}", failures.len());
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[tokio::test]
@@ -5338,9 +5506,7 @@ mod tests {
         // Omits Mara and Toma entirely - not a complete partition of the
         // group's current membership.
         let incomplete_split = serde_json::json!({
-            "character_ids": [],
-            "current_group_name": "stay",
-            "target_group_name": "go",
+        "character_ids": [],
         })
         .to_string();
         let (backend, recorded_requests) = ScriptedBackend::recording([
@@ -5467,12 +5633,10 @@ mod tests {
         // source (design.md: "A stale second topology proposal gets a
         // rejected result").
         let first_split = serde_json::json!({
-            "character_ids": [toma_id], "current_group_name": "with Mara", "target_group_name": "Toma alone",
-        })
+            "character_ids": [toma_id], })
         .to_string();
         let second_split = serde_json::json!({
-            "character_ids": [mara_id, toma_id], "current_group_name": "alone", "target_group_name": "the other two",
-        })
+            "character_ids": [mara_id, toma_id], })
         .to_string();
         let (backend, recorded_requests) = ScriptedBackend::recording([
             response(Content::ToolCalls(vec![ToolCall {
@@ -8825,8 +8989,7 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "character_ids": [scene.second.character_id, toma], "current_group_name": "outside", "target_group_name": "inside",
-                    })
+                        "character_ids": [scene.second.character_id, toma], })
                     .to_string(),
                 },
             ])),
@@ -9330,8 +9493,7 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "character_ids": [scene.second.character_id, toma], "current_group_name": "outside", "target_group_name": "inside",
-                    })
+                        "character_ids": [scene.second.character_id, toma], })
                     .to_string(),
                 },
             ])),
@@ -9473,14 +9635,16 @@ mod tests {
         };
         // The second player parts from everyone else.
         scene.responses.lock().unwrap().extend([
-            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             response(Content::ToolCalls(vec![
                 call("approve_action", serde_json::json!({"action_id": 1})),
                 call(
                     "split_group",
                     serde_json::json!({
-                        "character_ids": [scene.second.character_id], "current_group_name": "hut", "target_group_name": "yard",
-                    }),
+                        "character_ids": [scene.second.character_id], }),
                 ),
             ])),
             narrate("The group parts."),
@@ -9531,10 +9695,7 @@ mod tests {
             ),
             response(Content::ToolCalls(vec![
                 call("approve_action", serde_json::json!({"action_id": 4})),
-                call(
-                    "merge_group",
-                    serde_json::json!({"group_id": groups[0], "name": "everyone"}),
-                ),
+                call("merge_group", serde_json::json!({"group_id": groups[0]})),
             ])),
             narrate("They come together."),
             // Mara and Toma hear the narration.
@@ -9655,8 +9816,7 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "character_ids": [scene.second.character_id, toma], "current_group_name": "outside", "target_group_name": "inside",
-                    })
+                        "character_ids": [scene.second.character_id, toma], })
                     .to_string(),
                 },
             ])),
@@ -10373,8 +10533,7 @@ mod tests {
                     id: "split-1".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "character_ids": [toma], "current_group_name": "players", "target_group_name": "Toma",
-                    })
+                        "character_ids": [toma], })
                     .to_string(),
                 },
             ])),
@@ -10432,8 +10591,7 @@ mod tests {
                     id: "merge-1".into(),
                     name: "merge_group".into(),
                     arguments: serde_json::json!({
-                        "group_id": alone, "name": "reunited"
-                    })
+                        "group_id": alone})
                     .to_string(),
                 },
             ])),
@@ -10998,7 +11156,11 @@ mod tests {
     async fn returning_before_the_deadline_cancels_the_departure() {
         let (backend, recorded_requests) = ScriptedBackend::recording([
             narrate("Someone arrives."),
+            do_nothing(),
+            do_nothing(),
             narrate("Someone else arrives."),
+            do_nothing(),
+            do_nothing(),
         ]);
         let (game, store, _db, first, second) =
             two_player_bread_thief_game_with_deadline(backend, 60).await;
@@ -11006,9 +11168,11 @@ mod tests {
         let group_id = store.character_group_id(first.character_id).await.unwrap();
         let first_connection = game.connect(&first).await.unwrap();
         deliver_presence_deadline(&game, &store, &first).await;
+        wait_for_npc_work_of(&game, &store, &first).await;
         let _second_connection = game.connect(&second).await.unwrap();
         let_presence_handlers_run(&game, &first).await;
-        assert_eq!(recorded_requests.lock().unwrap().len(), 2);
+        wait_for_npc_work_of(&game, &store, &first).await;
+        assert_eq!(gm_requests(&recorded_requests), 2);
 
         game.disconnect(&first, first_connection).await.unwrap();
         let_presence_handlers_run(&game, &first).await;
@@ -11016,7 +11180,7 @@ mod tests {
         let _first_connection_again = game.connect(&first).await.unwrap();
         deliver_presence_deadline(&game, &store, &first).await;
         assert_eq!(
-            recorded_requests.lock().unwrap().len(),
+            gm_requests(&recorded_requests),
             2,
             "returning before the deadline must cancel the departure without ever narrating it"
         );
@@ -11154,22 +11318,18 @@ mod tests {
                 0 => (
                     "split_group",
                     serde_json::json!({
-                        "character_ids": characters,
-                        "current_group_name": "Changed",
-                        "target_group_name": "Moved",
+                    "character_ids": characters,
                     }),
                 ),
                 1 => (
                     "merge_group",
-                    serde_json::json!({"group_id": foreign_groups[0], "name": "Changed"}),
+                    serde_json::json!({"group_id": foreign_groups[0]}),
                 ),
                 _ => (
-                    "split_group",
+                    "move_to_group",
                     serde_json::json!({
-                        "character_ids": [member.character_id],
-                        "current_group_name": "Changed",
-                        "target_group_name": "Moved",
-                        "target_group_id": foreign_groups[0],
+                    "character_ids": [member.character_id],
+                    "group_id": foreign_groups[0],
                     }),
                 ),
             };
@@ -11296,8 +11456,7 @@ mod tests {
         let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
         let group_id = store.character_group_id(first.character_id).await.unwrap();
         let split = serde_json::json!({
-            "character_ids": [second.character_id], "current_group_name": "first group", "target_group_name": "second group",
-        })
+            "character_ids": [second.character_id], })
         .to_string();
         script.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
@@ -11562,18 +11721,39 @@ mod tests {
         ]
     }
 
-    /// Every tool, asked for by name in the context of the agent that has it,
-    /// is called, and a player asked whether they intervene who says they do
-    /// not mind does nothing, using the model's production sampling. It is only
-    /// repeatable once sampling takes a fixed seed (plans/llm-context-size.md).
+    /// Tools the other real-model scenarios call themselves: the GM turns and the intervention
+    /// check (every GM turn ends with a narrate tool), the player routing and the regrouping check.
+    const TOOLS_WITH_THEIR_OWN_SCENARIOS: [&str; 12] = [
+        "approve_action",
+        "intervention_check",
+        "narrate_group",
+        "narrate_actor_and_others",
+        "narrate_characters",
+        "narrate_nothing",
+        "split_group",
+        "move_to_group",
+        "merge_group",
+        "speak",
+        "attempt",
+        "take",
+    ];
+
+    /// The tools no other scenario calls are each asked for by name in the context of the
+    /// agent that has them (all of them with `CAIRNWORLD_ALL_TOOLS`, for a change to how
+    /// tools reach the model), and a player asked whether they intervene who says they do
+    /// not mind does nothing. The model's production sampling with a fixed seed.
     async fn real_model_every_tool_can_be_called(model: &DeviceModel) {
         let kinds = one_request_per_kind_of_agent().await;
         let mut wrong = Vec::new();
         let mut tried = std::collections::BTreeSet::new();
+        let every_tool = std::env::var_os("CAIRNWORLD_ALL_TOOLS").is_some();
         for (kind, base) in &kinds {
             for tool in &base.tools {
-                // The same tool in another agent's context is covered by that agent's scenarios.
-                if !tried.insert(tool.name.clone()) {
+                // The same tool in another agent's context is covered by that agent's scenarios,
+                // and a tool with a scenario of its own is called there.
+                if !tried.insert(tool.name.clone())
+                    || (!every_tool && TOOLS_WITH_THEIR_OWN_SCENARIOS.contains(&tool.name.as_str()))
+                {
                     continue;
                 }
                 let mut request = base.clone();
@@ -11640,7 +11820,7 @@ mod tests {
             .collect();
         assert_eq!(
             counts,
-            [("GM", 10), ("player", 4), ("asked player", 4), ("NPC", 4)]
+            [("GM", 11), ("player", 4), ("asked player", 4), ("NPC", 4)]
         );
     }
 
@@ -11742,10 +11922,9 @@ mod tests {
         game.shutdown().await.unwrap();
     }
 
-    /// Character creation finishing and one action after it, each asked once: the
-    /// model must call ready_to_begin when the rolls are done, and a take must
-    /// reach the GM, be approved and move the item.
-    async fn real_model_finishes_creation_and_the_gm_resolves_a_take(model: &DeviceModel) {
+    /// Character creation finishes through ready_to_begin and the GM's opening
+    /// reaches the player. Action routing and transfers have their own scenarios.
+    async fn real_model_finishes_creation_and_the_gm_opens(model: &DeviceModel) {
         let (backend, model_path, configured, limits) = model.parts();
         // Greedy: this asserts the model follows specific instructions, so it
         // must not depend on a sampling draw.
@@ -11791,27 +11970,6 @@ mod tests {
             "the GM opening narration must become player-visible"
         );
 
-        game.player_message(member.clone(), "I pick up the flour sack.")
-            .await
-            .expect("the take turn");
-        // The flour sack is Toma's, so a GM may fairly refuse the take. What the
-        // real model must do is resolve the action with a tool, and Rust moves
-        // the item exactly when the GM approved (the transfer itself is covered
-        // by the scripted take test).
-        let approved: bool =
-            sqlx::query_scalar("SELECT approved FROM action ORDER BY id DESC LIMIT 1")
-                .fetch_one(&store.pool())
-                .await
-                .expect("the GM never resolved the take");
-        let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_character")
-            .fetch_one(&store.pool())
-            .await
-            .unwrap();
-        assert_eq!(
-            held,
-            i64::from(approved),
-            "the item did not follow the GM's decision"
-        );
         assert_no_rejected_output(&store).await;
         game.shutdown().await.unwrap();
     }
@@ -12128,11 +12286,6 @@ mod tests {
         let (_, _model_path, _sampling, limits) = model.parts();
         let requests = [
             (
-                "Look at the rear window.",
-                "attempt",
-                Some(("kind", "look")),
-            ),
-            (
                 "Search the floor by the fire carefully for any clues.",
                 "attempt",
                 Some(("kind", "investigate")),
@@ -12143,13 +12296,22 @@ mod tests {
                 "attempt",
                 Some(("kind", "ask")),
             ),
-            ("Say hello to everyone.", "speak", None),
             (
                 "Quietly tell Toma only that I will help him.",
                 "speak",
                 Some(("private", "true")),
             ),
             ("Pick up the flour sack.", "take", None),
+            (
+                "I take the flour sack, and I'm doing it no matter what anyone says.",
+                "take",
+                Some(("committed", "true")),
+            ),
+            (
+                "Take the flour sack, if nobody minds.",
+                "take",
+                Some(("committed", "false")),
+            ),
         ];
         let mut wrong = Vec::new();
         for (line, tool, expected) in requests {
@@ -12176,8 +12338,10 @@ mod tests {
                     serde_json::from_str(&call.arguments).unwrap_or_default();
                 call.name == tool
                     && expected.is_none_or(|(key, value)| {
+                        // An argument left out counts as false, as the tool treats it.
                         let shown = match arguments[key].as_str() {
                             Some(text) => text.to_string(),
+                            None if arguments[key].is_null() => "false".to_string(),
                             None => arguments[key].to_string(),
                         };
                         shown == value
@@ -12336,24 +12500,37 @@ mod tests {
         let (game, store, _db, member) =
             opening_game_with_limits(backend, model_path, sampling, limits).await;
 
-        // An early character goal, then enough turns to force a compaction.
+        // An early character goal.
         game.player_message(
             member.clone(),
             "My character's missing sister is named Maribel. Finding her is my reason for adventuring.",
         )
             .await
             .expect("first player message");
-        // Plain chat that needs no scene tool, so the model answers directly
-        // instead of paying for a GM narration each turn.
-        for prompt in [
-            "In two sentences, tell me what a lighthouse keeper does.",
-            "In two sentences, tell me how a bell is cast.",
-        ] {
-            game.player_message(member.clone(), prompt)
-                .await
-                .expect("later player message");
-        }
+        // One plain turn, so there is older history than the two messages compaction keeps raw.
+        // Its context clears the trigger, a compaction is queued, and the recall question that
+        // follows waits for it.
+        game.player_message(
+            member.clone(),
+            "In one sentence, tell me what a lighthouse keeper does.",
+        )
+        .await
+        .expect("later player message");
 
+        // The fact is recalled after compaction, and what the model was shown
+        // for that question held it only in the summary.
+        let question = "What is my missing sister's name? Reply with the name only.";
+        let recall = game
+            .player_message(member.clone(), question)
+            .await
+            .expect("the recall turn");
+        let Content::Text(answer) = recall.content else {
+            panic!("the player agent did not answer in words: {recall:?}");
+        };
+        assert!(
+            answer.to_uppercase().contains("MARIBEL"),
+            "the fact was lost after compaction: {answer}"
+        );
         let branch_id = store
             .agent_branch(member.agent_id)
             .await
@@ -12376,20 +12553,6 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // The fact is recalled after compaction, and what the model was shown
-        // for that question held it only in the summary.
-        let question = "What is my missing sister's name? Reply with the name only.";
-        let recall = game
-            .player_message(member.clone(), question)
-            .await
-            .expect("the recall turn");
-        let Content::Text(answer) = recall.content else {
-            panic!("the player agent did not answer in words: {recall:?}");
-        };
-        assert!(
-            answer.to_uppercase().contains("MARIBEL"),
-            "the fact was lost after compaction: {answer}"
-        );
         // Copy the request out and release the capture lock: the model's
         // prompt observer takes it for any inference still running.
         let shown = {

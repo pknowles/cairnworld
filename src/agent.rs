@@ -1640,8 +1640,6 @@ mod tests {
                         target_group_id: None,
                         split: tools::SplitGroup {
                             character_ids: vec![toma_id],
-                            current_name: "player side".into(),
-                            target_name: "Toma side".into(),
                             continue_with_character_id: Some(installed.member.character_id),
                         },
                     },
@@ -1745,7 +1743,6 @@ mod tests {
             1,
             tools::TopologyChange::Merge {
                 group_ids: vec![over_group_id, under_group_id],
-                name: "merged".into(),
             },
         )];
         let changes = store

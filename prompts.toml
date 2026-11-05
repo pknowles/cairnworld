@@ -15,8 +15,11 @@
 [gm]
 role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
-    packet. Judge each presented action from the scene: approve it if it can happen, \
-    or reject it with a concise reason. Your narration reaches the characters only \
+    packet. Group membership changes through tools: split_group when characters \
+    separate from the rest, move_to_group when some join another group, merge_group \
+    when whole groups meet. Narration alone leaves membership unchanged. Judge each \
+    presented action from the scene: approve it if it can happen, or reject it with a \
+    concise reason. Your narration reaches the characters only \
     through a narrate tool, which ends your turn: make it your last call. Spoken words \
     reach their hearers exactly as said, so narrate only what else happens, or call \
     narrate_nothing. Characters speak for themselves: narrate what is seen and done, \
@@ -38,7 +41,7 @@ ask_request = "{actor} asks you (action {action_id}): {question}"
 
 # Ends the result of resolving an action, which is the last thing the GM reads
 # before narrating it.
-narrate_next = "End your turn with a narrate tool."
+narrate_next = "Apply the action's group changes with split_group, move_to_group or merge_group. End your turn with a narrate tool."
 
 # Ends the result of resolving an action while others presented this turn are
 # still undecided, in place of narrate_next. {actions} names them.
@@ -46,7 +49,7 @@ decide_next = "Still to decide: {actions}."
 
 # Added to the result of approving an action that is not speech: its outcome is
 # whatever the GM narrates, since nobody has been told it yet.
-outcome_untold = "The characters have not been told the outcome: narrate it."
+outcome_untold = "The characters have not been told the outcome."
 
 # Added to the result of approving speech, before narrate_next.
 speech_conveyed = "Their words are already conveyed to them, so there is nothing to narrate."
@@ -183,16 +186,24 @@ character_ids = "The characters to ask. Not the character taking the action."
 
 [gm.tools.split_group]
 description = """\
-    Move characters out of this group when they go their own way, out of reach of the \
-    rest. They form a new group, or join an existing one at this location if you name \
-    it. Applies after every other call in this turn's batch has run.\
+    Form a new group from the listed characters when they separate from the rest of \
+    this group. The others stay together. Applies after every other call in this \
+    turn's batch has run.\
     """
 
 [gm.tools.split_group.arguments]
 character_ids = "The characters leaving this group."
-current_group_name = "A short name for the group left behind."
-target_group_name = "A short name for the group the characters end up in."
-target_group_id = "An existing group at this location for them to join."
+
+[gm.tools.move_to_group]
+description = """\
+    Move the listed characters into another group at this location when they join \
+    its characters. The others stay together. Applies after every other call in \
+    this turn's batch has run.\
+    """
+
+[gm.tools.move_to_group.arguments]
+character_ids = "The characters moving."
+group_id = "The other group they join."
 
 [gm.tools.merge_group]
 description = """\
@@ -203,7 +214,6 @@ description = """\
 
 [gm.tools.merge_group.arguments]
 group_id = "The other group to merge into this one."
-name = "A short name for the merged group."
 
 # ---------------------------------------------------------------------------
 # The player's own agent, which turns what a human types into actions.

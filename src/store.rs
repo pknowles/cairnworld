@@ -2222,10 +2222,9 @@ impl Store {
                         split,
                     }
                 }
-                tools::TopologyChange::Merge { name, .. } => tools::TopologyChange::Merge {
-                    group_ids: groups,
-                    name,
-                },
+                tools::TopologyChange::Merge { .. } => {
+                    tools::TopologyChange::Merge { group_ids: groups }
+                }
             });
             resolved.push((call_id, execution_id, scoped));
         }
@@ -2280,8 +2279,8 @@ impl Store {
                     )
                     .await?
                 }
-                Ok(tools::TopologyChange::Merge { group_ids, name }) => {
-                    Self::apply_merge(&mut transaction, group_ids, name, presence_seconds).await?
+                Ok(tools::TopologyChange::Merge { group_ids }) => {
+                    Self::apply_merge(&mut transaction, group_ids, presence_seconds).await?
                 }
                 Err(rejection) => Err(rejection),
             };
@@ -2370,6 +2369,43 @@ impl Store {
         Ok((group_id, branch_id))
     }
 
+    /// A split applied in its own committed transaction, as the GM's tool batch does, for
+    /// tests that need a world with more than one group. Returns the tool's result text.
+    #[cfg(test)]
+    pub(crate) async fn split_group_for_test(
+        &self,
+        group: i64,
+        target: Option<i64>,
+        character_ids: Vec<i64>,
+    ) -> Result<String, String> {
+        let source = WorldGroup {
+            id: group,
+            branch: self.group_branch(group).await.unwrap(),
+        };
+        let target = match target {
+            Some(id) => Some(WorldGroup {
+                id,
+                branch: self.group_branch(id).await.unwrap(),
+            }),
+            None => None,
+        };
+        let mut transaction = self.pool.begin().await.unwrap();
+        let result = Self::apply_split(
+            &mut transaction,
+            source,
+            target,
+            tools::SplitGroup {
+                character_ids,
+                continue_with_character_id: None,
+            },
+            60,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        result
+    }
+
     /// `split_group`: the named characters leave the GM's group for a new group,
     /// or for the target group (which is merged with them). Groups are fungible
     /// (design.md's "Split"), so the group they leave and the group they reach
@@ -2442,15 +2478,23 @@ impl Store {
             }
             sources.push(target.id);
         }
-        let mut names = vec![split.target_name.as_str()];
-        if !remaining.is_empty() {
-            names.push(split.current_name.as_str());
+        // A group is named for the characters in it. Every change of membership makes new
+        // groups, so the name is always accurate, and no two active groups can share one.
+        let stay_name = Self::member_names(transaction, &remaining).await?;
+        let mut together = leaving.clone();
+        if let Some(target) = &target {
+            let target_id = target.id;
+            together.extend(
+                sqlx::query_scalar!(
+                    "SELECT character_id FROM character_group WHERE group_id = ?",
+                    target_id,
+                )
+                .fetch_all(&mut **transaction)
+                .await
+                .context("loading the target group's members")?,
+            );
         }
-        if let Some(rejection) =
-            Self::reject_group_names(transaction, world_id, &names, &sources).await?
-        {
-            return Ok(Err(rejection));
-        }
+        let leave_name = Self::member_names(transaction, &together).await?;
         let through_position: i64 = sqlx::query_scalar!(
             "SELECT next_position - 1 FROM history_branch WHERE id = ?",
             branch_id,
@@ -2488,7 +2532,7 @@ impl Store {
                 world_id,
                 world_gm_agent_id,
                 location_id,
-                &split.current_name,
+                &stay_name,
                 &[(branch_id, through_position)],
             )
             .await?;
@@ -2502,7 +2546,7 @@ impl Store {
             world_id,
             world_gm_agent_id,
             location_id,
-            &split.target_name,
+            &leave_name,
             &leaving_parents,
         )
         .await?;
@@ -2562,38 +2606,20 @@ impl Store {
         Ok(())
     }
 
-    /// Why `names` cannot be given to new groups: empty, repeated, or in use by
-    /// an active group other than the `sources` about to retire.
-    async fn reject_group_names(
+    /// The names of these characters, in id order, as a group's name.
+    async fn member_names(
         transaction: &mut Transaction<'_, Sqlite>,
-        world_id: i64,
-        names: &[&str],
-        sources: &[i64],
-    ) -> Result<Option<String>> {
-        let sources = serde_json::to_string(sources)?;
-        for (index, name) in names.iter().enumerate() {
-            if name.trim().is_empty() || names[..index].contains(name) {
-                return Ok(Some(format!(
-                    "Tool arguments were rejected: group names must be nonempty and different, not \"{name}\""
-                )));
-            }
-            let taken: i64 = sqlx::query_scalar!(
-                "SELECT COUNT(*) FROM \"group\" WHERE world_id = ? AND name = ? AND retired_at IS NULL \
-                 AND id NOT IN (SELECT value FROM json_each(?))",
-                world_id,
-                name,
-                sources,
-            )
-            .fetch_one(&mut **transaction)
-            .await
-            .context("checking group names")?;
-            if taken > 0 {
-                return Ok(Some(format!(
-                    "Tool arguments were rejected: a group named \"{name}\" already exists; choose another name"
-                )));
-            }
-        }
-        Ok(None)
+        character_ids: &[i64],
+    ) -> Result<String> {
+        let ids = serde_json::to_string(character_ids)?;
+        let names: Vec<String> = sqlx::query_scalar!(
+            "SELECT name FROM character WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id",
+            ids,
+        )
+        .fetch_all(&mut **transaction)
+        .await
+        .context("naming a group for its members")?;
+        Ok(names.join(", "))
     }
 
     /// `merge_groups`: union distinct, active, co-located groups in one world
@@ -2603,7 +2629,6 @@ impl Store {
     async fn apply_merge(
         transaction: &mut Transaction<'_, Sqlite>,
         mut groups: Vec<WorldGroup>,
-        name: String,
         presence_seconds: u64,
     ) -> Result<Result<String, String>> {
         groups.sort_unstable_by_key(|group| group.id);
@@ -2650,16 +2675,15 @@ impl Store {
         }
         let location_id = location_id.expect("at least two group ids were validated above");
         let source_ids: Vec<i64> = groups.iter().map(|group| group.id).collect();
-        if let Some(rejection) = Self::reject_group_names(
-            transaction,
-            authority.world_id(),
-            &[name.as_str()],
-            &source_ids,
+        let members_json = serde_json::to_string(&source_ids)?;
+        let members: Vec<i64> = sqlx::query_scalar!(
+            "SELECT character_id FROM character_group WHERE group_id IN (SELECT value FROM json_each(?))",
+            members_json,
         )
-        .await?
-        {
-            return Ok(Err(rejection));
-        }
+        .fetch_all(&mut **transaction)
+        .await
+        .context("loading the merged groups' members")?;
+        let name = Self::member_names(transaction, &members).await?;
         for group_id in &source_ids {
             Self::retire_group(transaction, *group_id).await?;
         }
@@ -5074,6 +5098,9 @@ impl Store {
         let mut tools = Vec::new();
         for segment in segments {
             match segment {
+                Segment::Provenance { provenance } => {
+                    messages.push(Message::text(Role::User, self.text(*provenance).await?));
+                }
                 Segment::Text { text, role } => {
                     messages.push(Message::text(role.clone(), self.text(*text).await?));
                 }
@@ -7456,44 +7483,6 @@ mod tests {
         );
     }
 
-    /// Applies one split in its own committed transaction, as the GM's tool batch does.
-    async fn split_for_test(
-        store: &Store,
-        group: i64,
-        target: Option<i64>,
-        character_ids: Vec<i64>,
-        names: (&str, &str),
-    ) -> Result<String, String> {
-        let group_of = |id: i64| async move {
-            WorldGroup {
-                id,
-                branch: store.group_branch(id).await.unwrap(),
-            }
-        };
-        let target = match target {
-            Some(id) => Some(group_of(id).await),
-            None => None,
-        };
-        let source = group_of(group).await;
-        let mut transaction = store.pool.begin().await.unwrap();
-        let result = Store::apply_split(
-            &mut transaction,
-            source,
-            target,
-            tools::SplitGroup {
-                character_ids,
-                current_name: names.0.into(),
-                target_name: names.1.into(),
-                continue_with_character_id: None,
-            },
-            60,
-        )
-        .await
-        .unwrap();
-        transaction.commit().await.unwrap();
-        result
-    }
-
     async fn active_groups(store: &Store) -> Vec<(String, Vec<String>)> {
         let groups: Vec<(i64, String)> =
             sqlx::query_as("SELECT id, name FROM \"group\" WHERE retired_at IS NULL ORDER BY id")
@@ -7515,7 +7504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn characters_split_off_to_a_new_group_or_an_existing_one_and_names_are_reused() {
+    async fn characters_split_off_to_a_new_group_or_an_existing_one() {
         let db = database();
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -7540,55 +7529,50 @@ mod tests {
         };
         let (mara, toma) = (character("Mara").await, character("Toma").await);
         let adventurer = installed.member.character_id;
+        let adventurer_name = character_name(&store, adventurer).await;
         let start = store.character_group_id(adventurer).await.unwrap();
 
-        // Toma leaves; the group left behind keeps the name it had.
-        split_for_test(
-            &store,
-            start,
-            None,
-            vec![toma],
-            ("charcoal hut", "Toma alone"),
-        )
-        .await
-        .unwrap();
-        let adventurer_name = |groups: &[(String, Vec<String>)]| {
-            groups
-                .iter()
-                .find(|(_, members)| members.iter().any(|name| name.starts_with("Adventurer")))
-                .map(|(name, members)| (name.clone(), members.len()))
-        };
-        let groups = active_groups(&store).await;
-        assert_eq!(groups.len(), 2, "{groups:?}");
-        assert_eq!(
-            adventurer_name(&groups),
-            Some(("charcoal hut".to_string(), 2))
-        );
-        assert!(groups.contains(&("Toma alone".to_string(), vec!["Toma".to_string()])));
+        // Toma leaves. Each group is named for the characters in it.
+        store
+            .split_group_for_test(start, None, vec![toma])
+            .await
+            .unwrap();
+        let mut groups = active_groups(&store).await;
+        groups.sort();
+        let mut expected = vec![
+            (
+                format!("Mara, {adventurer_name}"),
+                vec!["Mara".to_string(), adventurer_name.clone()],
+            ),
+            ("Toma".to_string(), vec!["Toma".to_string()]),
+        ];
+        for (_, members) in &mut expected {
+            members.sort();
+        }
+        expected.sort();
+        assert_eq!(groups, expected);
 
         // Mara leaves the Adventurer to join Toma's group: one new group holds both.
         let adventurers_group = store.character_group_id(adventurer).await.unwrap();
         let tomas_group = store.character_group_id(toma).await.unwrap();
-        split_for_test(
-            &store,
-            adventurers_group,
-            Some(tomas_group),
-            vec![mara],
-            ("Adventurer alone", "Together"),
-        )
-        .await
-        .unwrap();
+        store
+            .split_group_for_test(adventurers_group, Some(tomas_group), vec![mara])
+            .await
+            .unwrap();
         let groups = active_groups(&store).await;
         assert_eq!(groups.len(), 2, "{groups:?}");
-        assert!(groups.contains(&(
-            "Together".to_string(),
-            vec!["Mara".to_string(), "Toma".to_string()]
-        )));
-        assert_eq!(
-            adventurer_name(&groups),
-            Some(("Adventurer alone".to_string(), 1))
+        assert!(
+            groups.contains(&(
+                "Mara, Toma".to_string(),
+                vec!["Mara".to_string(), "Toma".to_string()]
+            )),
+            "{groups:?}"
         );
-        // Together's history holds both sources, and both retired.
+        assert!(
+            groups.contains(&(adventurer_name.clone(), vec![adventurer_name.clone()])),
+            "{groups:?}"
+        );
+        // Together's history holds both sources.
         let together = store.character_group_id(toma).await.unwrap();
         let parents: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM history_parent WHERE branch_id = (SELECT branch_id FROM \"group\" WHERE id = ?)",
@@ -7599,46 +7583,45 @@ mod tests {
         .unwrap();
         assert_eq!(parents, 2);
 
-        // A name an active group uses, an empty name, and bad character lists are refused,
-        // and nothing changes.
-        let together = store.character_group_id(toma).await.unwrap();
-        for (leaving, names, wanted) in [
-            (vec![mara], ("a", "Adventurer alone"), "already exists"),
-            (vec![mara], ("", "b"), "nonempty"),
-            (vec![mara], ("same", "same"), "different"),
-            (vec![], ("c", "d"), "nonempty list"),
-            (vec![adventurer], ("e", "f"), "distinct characters in group"),
-            (vec![mara, mara], ("g", "h"), "distinct characters"),
+        // Bad character lists and targets are refused, and nothing changes.
+        for (leaving, target, wanted) in [
+            (vec![], None, "nonempty list"),
+            (vec![adventurer], None, "distinct characters in group"),
+            (vec![mara, mara], None, "distinct characters"),
+            (vec![mara], Some(together), "another group at this location"),
         ] {
             let before = active_groups(&store).await;
-            let refused = split_for_test(&store, together, None, leaving, names)
+            let refused = store
+                .split_group_for_test(together, target, leaving)
                 .await
                 .unwrap_err();
-            assert!(refused.contains(wanted), "{names:?}: {refused}");
+            assert!(refused.contains(wanted), "{wanted}: {refused}");
             assert_eq!(
                 active_groups(&store).await,
                 before,
-                "{names:?} changed groups"
+                "{wanted} changed groups"
             );
         }
 
-        // Everyone leaves: the one new group holds them, and the group they left is gone.
-        let together = store.character_group_id(toma).await.unwrap();
-        split_for_test(
-            &store,
-            together,
-            None,
-            vec![mara, toma],
-            ("stay", "Both gone"),
-        )
-        .await
-        .unwrap();
+        // Everyone leaves: the one new group holds them, and no group is left behind.
+        store
+            .split_group_for_test(together, None, vec![mara, toma])
+            .await
+            .unwrap();
         let groups = active_groups(&store).await;
+        assert_eq!(groups.len(), 2, "{groups:?}");
         assert!(groups.contains(&(
-            "Both gone".to_string(),
+            "Mara, Toma".to_string(),
             vec!["Mara".to_string(), "Toma".to_string()]
         )));
-        assert!(!groups.iter().any(|(name, _)| name == "stay"), "{groups:?}");
+    }
+
+    async fn character_name(store: &Store, id: i64) -> String {
+        sqlx::query_scalar("SELECT name FROM character WHERE id = ?")
+            .bind(id)
+            .fetch_one(&store.pool())
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -7670,8 +7653,6 @@ mod tests {
             None,
             tools::SplitGroup {
                 character_ids: vec![companion.character_id],
-                current_name: "first".into(),
-                target_name: "second".into(),
                 continue_with_character_id: None,
             },
             60,
@@ -10046,8 +10027,6 @@ mod tests {
                         target_group_id: None,
                         split: tools::SplitGroup {
                             character_ids: vec![toma_id],
-                            current_name: "player side".into(),
-                            target_name: "Toma side".into(),
                             continue_with_character_id: Some(installed.member.character_id),
                         },
                     },

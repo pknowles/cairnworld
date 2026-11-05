@@ -279,7 +279,28 @@ impl Store {
     pub async fn history_live_segments(&self, branch: AgentBranch) -> Result<Vec<Segment>> {
         let mut segments = Vec::new();
         let cut = self.current_cut(branch.branch_id).await?;
-        for (branch_id, cut) in self.reach(branch, cut).await? {
+        let reached = self.reach(branch, cut).await?;
+        let branched = reached.len() > 1;
+        for (branch_id, cut) in reached {
+            if branched {
+                let name: String =
+                    sqlx::query_scalar("SELECT name FROM \"group\" WHERE branch_id = ?")
+                        .bind(branch_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .with_context(|| {
+                            format!("loading group provenance for branch {branch_id}")
+                        })?;
+                // A retired group's name carries a "(retired N)" suffix to free the name; the
+                // model is shown the name the group had.
+                let name = name.split(" (retired ").next().unwrap_or(&name);
+                let text = self
+                    .store_prompt_text(&format!(
+                        "GM history for group {name:?} (branch {branch_id}):"
+                    ))
+                    .await?;
+                segments.push(Segment::Provenance { provenance: text });
+            }
             let summary: Option<(i64, String)> = sqlx::query!(
                 "SELECT summary.id, summary.covered_ranges \
                  FROM history_entry \

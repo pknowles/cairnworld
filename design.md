@@ -508,24 +508,33 @@ agent ID alone cannot select a GM history. Player/NPC calls resolve agent_histor
 The call-stack prohibition on re-entering an active agent remains unchanged;
 the same GM role cannot recursively invoke itself through a different group.
 
-**Split.** `split_group(character_ids, current_group_name, target_group_name,
-target_group_id?)` moves the named characters out of the GM's own group. Rust validates
-that they are distinct members of that group. They go to a new group named
-`target_group_name`, or, when `target_group_id` names another group at the same location,
-into that group. Groups are fungible, so each result is a new group: the characters' group
-has a branch whose parents are the settled positions of the group they left and of the
-target, in ascending group order, and the characters still in the group left behind get a new
-group named `current_group_name` whose single parent is the old head. The source groups
-retire. If everyone leaves there is no group left behind. Character and branch ownership
-change in one transaction, and the ids of the resulting groups are returned. A retired group
-gives up its name (`name (retired id)`), so a name can be reused; an active group's name
-cannot, and a name that is empty, repeated, or in use is rejected with the reason.
+**Split.** `split_group(character_ids)` forms a new group from the named characters of
+the GM's own group, and `move_to_group(character_ids, group_id)` moves them into another group
+at the same location. Rust validates that they are distinct members of the GM's group. They are
+two tools because the meaning differs: an optional destination on one tool was left out, or the
+tool was avoided, when the GM meant to join a group (experiments/0009-group-tools.md). Groups are
+fungible, so each result is a new group: the characters' group has a branch whose parents are the
+settled positions of the group they left and, for a move, of the destination, in ascending group
+order, and the characters left behind get a new group whose single parent is the old head. The
+source groups retire. If everyone leaves there is no group left behind. Character and branch
+ownership change in one transaction, and the ids of the resulting groups are returned.
 
-**Merge.** `merge_group(group_id, name)` merges the named group into the GM's own
-group. Rust validates two distinct active groups at one location in the same world. Sort
-source group IDs ascending for parent order. The resulting group gets a new branch with those bounded parents;
+A group is named for the characters in it, in id order ("Mara, Toma"). Every change of
+membership makes new groups, so the name is always accurate and no two active groups share one.
+The GM supplies no names: when it had to, it reused or collided with existing names and repeated
+the rejected call. A retired group gives up its name (`name (retired id)`), so a name can be reused.
+This differs from user_declarations.md (SplitGroup and MergeGroup take names for the groups); it
+awaits the user's decision.
+
+The tools act on the acting character's group as it is when each call is made, since an earlier
+call in the same turn may have replaced the group the turn began with.
+
+**Merge.** `merge_group(group_id)` merges the named group into the GM's own group. Rust
+validates two distinct active groups at one location in the same world. Sort source group IDs
+ascending for parent order. The resulting group gets a new branch with those bounded parents;
 source groups retire. Character membership and the new head commit together.
-The resulting GM context includes both histories. No transcript is copied.
+The resulting GM context includes both histories, each labelled with its group's name. No
+transcript is copied.
 
 **Awareness of other groups.** A GM sees the other active groups at its location: each
 group's id and name and its characters (id, name and each character's own position text), and

@@ -226,6 +226,10 @@ pub struct Usage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Segment {
+    /// Frozen group provenance for a historical branch, presented as a user turn.
+    Provenance {
+        provenance: i64,
+    },
     Text {
         text: i64,
         role: Role,
