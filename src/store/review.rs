@@ -11,6 +11,7 @@ use super::{Store, authoring::ObjectKind};
 #[derive(Debug, PartialEq)]
 pub struct ReviewEntry {
     pub kind: String,
+    pub id: i64,
     pub name: String,
     pub reviewed: bool,
 }
@@ -33,30 +34,30 @@ impl Store {
     ) -> Result<Vec<ReviewEntry>> {
         sqlx::query_as!(
             ReviewEntry,
-            "SELECT 'location' AS \"kind!: String\", name AS \"name!: String\", \
+            "SELECT 'location' AS \"kind!: String\", id AS \"id!: i64\", name AS \"name!: String\", \
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'location' AND object_id = location.id) AS \"reviewed!: bool\" \
                FROM location WHERE world_id = ?1 AND deleted = 0 \
              UNION ALL \
-             SELECT 'connection', origin.name || ' -> ' || target.name, \
+             SELECT 'connection', connection.id, origin.name || ' -> ' || target.name, \
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'connection' AND object_id = connection.id) \
                FROM connection \
                JOIN location AS origin ON origin.id = connection.from_location_id \
                JOIN location AS target ON target.id = connection.to_location_id \
               WHERE connection.world_id = ?1 AND connection.deleted = 0 \
              UNION ALL \
-             SELECT 'group', name, \
+             SELECT 'group', id, name, \
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'group' AND object_id = \"group\".id) \
                FROM \"group\" WHERE world_id = ?1 AND deleted = 0 \
              UNION ALL \
-             SELECT 'npc', name, \
+             SELECT 'npc', id, name, \
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'npc' AND object_id = character.id) \
                FROM character WHERE world_id = ?1 AND role = 'npc' AND deleted = 0 \
              UNION ALL \
-             SELECT 'item_type', name, \
+             SELECT 'item_type', id, name, \
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'item_type' AND object_id = item_type.id) \
                FROM item_type WHERE world_id = ?1 AND deleted = 0 \
              UNION ALL \
-             SELECT 'item', name, \
+             SELECT 'item', id, name, \
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'item' AND object_id = item.id) \
                FROM item JOIN item_location ON item_location.item_id = item.id WHERE world_id = ?1 AND item.deleted = 0",
             world_id,
@@ -86,7 +87,7 @@ impl Store {
         &self,
         world_id: i64,
         kind: ObjectKind,
-        name: &str,
+        id: i64,
         reviewed: bool,
     ) -> Result<()> {
         let mut transaction = self
@@ -95,7 +96,7 @@ impl Store {
             .await
             .with_context(|| format!("reviewing an object of world {world_id}"))?;
         Self::ensure_stage(&mut transaction, world_id, "review").await?;
-        let id = Self::named_id(&mut transaction, world_id, kind, name).await?;
+        Self::ensure_exists(&mut transaction, world_id, kind, id).await?;
         let kind = kind.as_str();
         if reviewed {
             sqlx::query!(
@@ -123,13 +124,13 @@ impl Store {
     }
 
     /// Everything the Questioner may read about one object, as JSON text.
-    pub async fn read_object(&self, world_id: i64, kind: ObjectKind, name: &str) -> Result<String> {
+    pub async fn read_object(&self, world_id: i64, kind: ObjectKind, id: i64) -> Result<String> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .with_context(|| format!("reading an object of world {world_id}"))?;
-        let id = Self::named_id(&mut transaction, world_id, kind, name).await?;
+        Self::ensure_exists(&mut transaction, world_id, kind, id).await?;
         let mut object = match kind {
             ObjectKind::Location => {
                 let row = sqlx::query!(

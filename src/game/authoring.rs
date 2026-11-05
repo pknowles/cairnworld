@@ -1,7 +1,9 @@
 //! The tools of world creation's object phase (design.md's Storyteller world
-//! creation): the Storyteller creates objects, and the Questioner reads them,
-//! marks them reviewed and says when they are whole. Every tool is built for
-//! one world, so a call can only touch that world.
+//! creation): the Storyteller creates, changes and deletes objects, and the
+//! Questioner reads them, marks them reviewed and says when they are whole.
+//! Three tools with an `object` kind stand in for the declared per-kind
+//! Create/Update/Delete tools, so the model is shown each field once. Every tool
+//! is built for one world, so a call can only touch that world.
 
 use std::sync::Arc;
 
@@ -12,63 +14,87 @@ use serde::{Deserialize, de::DeserializeOwned};
 use crate::{
     inspection::DevEvent,
     prompts,
-    scenario::{Connection, Group, ItemType, Location, Npc},
-    store::{
-        Change, ConnectionDelete, ConnectionUpdate, Delete, GroupUpdate, ItemTypeUpdate,
-        ItemUpdate, LocationDelete, LocationUpdate, NameOnly, NewItem, NewObject, NpcDelete,
-        NpcUpdate, ObjectKind, Rejected, Store, Update,
-    },
+    store::{Change, DeleteOptions, Fields, ObjectKind, Rejected, Store},
     tools::{Tool, ToolOutcome},
     world::World,
 };
 
+#[derive(Deserialize, JsonSchema)]
+struct CreateObject {
+    object: ObjectKind,
+    #[serde(flatten)]
+    fields: Fields,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct UpdateObject {
+    object: ObjectKind,
+    id: i64,
+    #[serde(flatten)]
+    fields: Fields,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DeleteObject {
+    object: ObjectKind,
+    id: i64,
+    #[serde(flatten)]
+    options: DeleteOptions,
+}
+
 /// The tools for the Storyteller to create, change and delete the world's
-/// objects. A rejected call (a name already used, a reference to nothing, a
-/// delete something depends on) is an ordinary tool result.
+/// objects. A rejected call (a name already used, an ID of nothing, a delete
+/// something depends on) is an ordinary tool result.
 pub(super) fn storyteller_tools(store: &Store, world: &Arc<World>) -> Result<Vec<Tool>> {
-    let s = (store, world);
+    let world = (store, world);
+    let with = |extra: &[&str], names: Vec<String>| -> Vec<String> {
+        extra
+            .iter()
+            .map(ToString::to_string)
+            .chain(names)
+            .collect()
+    };
     Ok(vec![
-        changer::<Location>(s, "create_location", |o| {
-            Change::Create(NewObject::Location(o))
-        })?,
-        changer::<Connection>(s, "create_connection", |o| {
-            Change::Create(NewObject::Connection(o))
-        })?,
-        changer::<Group>(s, "create_group", |o| Change::Create(NewObject::Group(o)))?,
-        changer::<Npc>(s, "create_npc", |o| Change::Create(NewObject::Npc(o)))?,
-        changer::<ItemType>(s, "create_item_type", |o| {
-            Change::Create(NewObject::ItemType(o))
-        })?,
-        changer::<NewItem>(s, "create_item", |o| Change::Create(NewObject::Item(o)))?,
-        changer::<LocationUpdate>(s, "update_location", |o| {
-            Change::Update(Update::Location(o))
-        })?,
-        changer::<ConnectionUpdate>(s, "update_connection", |o| {
-            Change::Update(Update::Connection(o))
-        })?,
-        changer::<GroupUpdate>(s, "update_group", |o| Change::Update(Update::Group(o)))?,
-        changer::<NpcUpdate>(s, "update_npc", |o| Change::Update(Update::Npc(o)))?,
-        changer::<ItemTypeUpdate>(s, "update_item_type", |o| {
-            Change::Update(Update::ItemType(o))
-        })?,
-        changer::<ItemUpdate>(s, "update_item", |o| Change::Update(Update::Item(o)))?,
-        changer::<LocationDelete>(s, "delete_location", |o| {
-            Change::Delete(Delete::Location(o))
-        })?,
-        changer::<ConnectionDelete>(s, "delete_connection", |o| {
-            Change::Delete(Delete::Connection(o))
-        })?,
-        changer::<NpcDelete>(s, "delete_npc", |o| Change::Delete(Delete::Npc(o)))?,
-        changer::<NameOnly>(s, "delete_item_type", |o| {
-            Change::Delete(Delete::ItemType(o))
-        })?,
-        changer::<NameOnly>(s, "delete_item", |o| Change::Delete(Delete::Item(o)))?,
+        changer::<CreateObject>(
+            world,
+            "create_object",
+            "Created",
+            with(&["object"], Fields::names()),
+            |call| Change::Create {
+                kind: call.object,
+                fields: &call.fields,
+            },
+        )?,
+        changer::<UpdateObject>(
+            world,
+            "update_object",
+            "Changed",
+            with(&["object", "id"], Fields::names()),
+            |call| Change::Update {
+                kind: call.object,
+                id: call.id,
+                fields: &call.fields,
+            },
+        )?,
+        changer::<DeleteObject>(
+            world,
+            "delete_object",
+            "Deleted",
+            with(&["object", "id"], DeleteOptions::names()),
+            |call| Change::Delete {
+                kind: call.object,
+                id: call.id,
+                options: &call.options,
+            },
+        )?,
     ])
 }
 
 fn changer<T>(
     (store, world): (&Store, &Arc<World>),
     name: &'static str,
+    done: &'static str,
+    allowed: Vec<String>,
     wrap: for<'a> fn(&'a T) -> Change<'a>,
 ) -> Result<Tool>
 where
@@ -85,20 +111,23 @@ where
         let arguments = context.arguments.to_string();
         let store = store.clone();
         let world = Arc::clone(&world);
+        let allowed = allowed.clone();
         Box::pin(async move {
-            let object: T = match parse(&arguments) {
-                Ok(object) => object,
+            let call: T = match parse(&arguments, &allowed) {
+                Ok(call) => call,
                 Err(error) => return Ok(ToolOutcome::rejected(error)),
             };
-            match store.change_object(world.id, wrap(&object)).await {
-                Ok(counts) => {
+            match store.change_object(world.id, wrap(&call)).await {
+                Ok(changed) => {
                     world.publish(DevEvent::Changed {
                         sequence_id: None,
                         inference_id: None,
                     });
                     Ok(ToolOutcome::Completed(format!(
-                        "Done. The world now has {}.",
-                        serde_json::to_string(&counts)?
+                        "{done} {} {}. The world now has {}.",
+                        changed.kind,
+                        changed.id,
+                        serde_json::to_string(&changed.counts)?
                     )))
                 }
                 Err(error) => rejection_or_failure(error),
@@ -123,10 +152,15 @@ fn drop_null_types(schema: &mut serde_json::Value) {
     }
 }
 
-/// Read a call's arguments. The notes are not the Storyteller's to write here.
-fn parse<T: DeserializeOwned>(arguments: &str) -> Result<T> {
+/// Read a call's arguments, refusing any the tool does not take (serde would
+/// otherwise drop them silently).
+fn parse<T: DeserializeOwned>(arguments: &str, allowed: &[String]) -> Result<T> {
     let value: serde_json::Value = serde_json::from_str(arguments)?;
-    anyhow::ensure!(value.get("notes").is_none(), "notes cannot be set here");
+    if let Some(map) = value.as_object()
+        && let Some(unknown) = map.keys().find(|key| !allowed.contains(key))
+    {
+        anyhow::bail!("`{unknown}` is not an argument of this tool");
+    }
     Ok(serde_json::from_value(value)?)
 }
 
@@ -135,21 +169,24 @@ fn parse<T: DeserializeOwned>(arguments: &str) -> Result<T> {
 /// summary phase.
 pub(super) fn review_tools(store: &Store, world_id: i64) -> Result<Vec<Tool>> {
     let tools = &prompts::current()?.questioner.tools;
+    let allowed = ["object", "id", "reviewed"].map(String::from).to_vec();
     let read_store = store.clone();
+    let read_allowed = allowed.clone();
     let read = Tool::new(
         tools.tool(
             "read_object",
-            serde_json::to_value(schema_for!(ObjectName)).expect("schema should serialize"),
+            serde_json::to_value(schema_for!(ObjectId)).expect("schema should serialize"),
         )?,
         move |context| {
             let arguments = context.arguments.to_string();
             let store = read_store.clone();
+            let allowed = read_allowed.clone();
             Box::pin(async move {
-                let object: ObjectName = match parse(&arguments) {
+                let object: ObjectId = match parse(&arguments, &allowed) {
                     Ok(object) => object,
                     Err(error) => return Ok(ToolOutcome::rejected(error)),
                 };
-                match store.read_object(world_id, object.kind, &object.name).await {
+                match store.read_object(world_id, object.object, object.id).await {
                     Ok(text) => Ok(ToolOutcome::Completed(text)),
                     Err(error) => rejection_or_failure(error),
                 }
@@ -165,19 +202,20 @@ pub(super) fn review_tools(store: &Store, world_id: i64) -> Result<Vec<Tool>> {
         move |context| {
             let arguments = context.arguments.to_string();
             let store = mark_store.clone();
+            let allowed = allowed.clone();
             Box::pin(async move {
-                let mark: MarkReviewed = match parse(&arguments) {
+                let mark: MarkReviewed = match parse(&arguments, &allowed) {
                     Ok(mark) => mark,
                     Err(error) => return Ok(ToolOutcome::rejected(error)),
                 };
                 match store
-                    .set_reviewed(world_id, mark.kind, &mark.name, mark.reviewed)
+                    .set_reviewed(world_id, mark.object, mark.id, mark.reviewed)
                     .await
                 {
                     Ok(()) => Ok(ToolOutcome::Completed(format!(
                         "{:?} {} is now marked {}.",
-                        mark.kind,
-                        mark.name,
+                        mark.object,
+                        mark.id,
                         if mark.reviewed {
                             "reviewed"
                         } else {
@@ -211,17 +249,15 @@ pub(super) fn review_tools(store: &Store, world_id: i64) -> Result<Vec<Tool>> {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ObjectName {
-    kind: ObjectKind,
-    name: String,
+struct ObjectId {
+    object: ObjectKind,
+    id: i64,
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct MarkReviewed {
-    kind: ObjectKind,
-    name: String,
+    object: ObjectKind,
+    id: i64,
     reviewed: bool,
 }
 

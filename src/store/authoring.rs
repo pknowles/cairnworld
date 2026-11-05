@@ -1,7 +1,8 @@
 //! Creating a world's objects, for scenario installation and for the
 //! Storyteller's authoring tools alike: one insert per kind of object, so both
-//! build identical records. The Storyteller refers to objects by name, as a
-//! scenario does, so authoring keeps the names of one kind distinct.
+//! build identical records. The Storyteller refers to objects by the IDs the
+//! tools return; names stay distinct within a kind so people and the other
+//! agents can still refer to them.
 
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
@@ -36,17 +37,116 @@ impl ObjectKind {
             Self::Item => "item",
         }
     }
+
+    /// The fields an object of this kind has, and whether creating one needs it.
+    /// An item needs exactly one of `location_id` and `held_by_id`.
+    pub(super) fn fields(self) -> &'static [(&'static str, bool)] {
+        match self {
+            Self::Location => &[("name", true), ("kind", true), ("description", true)],
+            Self::Connection => &[
+                ("from_id", true),
+                ("to_id", true),
+                ("travel_time", true),
+                ("description", true),
+            ],
+            Self::Group => &[("name", true), ("location_id", true), ("description", true)],
+            Self::Npc => &[
+                ("name", true),
+                ("group_id", true),
+                ("description", true),
+                ("background", true),
+                ("motive", true),
+                ("ambition", false),
+                ("sheet", false),
+            ],
+            Self::ItemType => &[("name", true), ("description", true), ("stats", false)],
+            Self::Item => &[
+                ("name", true),
+                ("item_type_id", true),
+                ("description", true),
+                ("location_id", false),
+                ("held_by_id", false),
+            ],
+        }
+    }
 }
 
-// An item to create, held by an NPC or lying at a location.
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NewItem {
-    pub name: String,
-    pub item_type: String,
-    pub description: String,
-    pub location: Option<String>,
-    pub held_by: Option<String>,
+// The fields of any object; which of them an object has depends on its kind.
+// Objects are referred to by the IDs the tools return.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
+pub struct Fields {
+    pub name: Option<String>,
+    pub kind: Option<String>,
+    pub description: Option<String>,
+    pub from_id: Option<i64>,
+    pub to_id: Option<i64>,
+    pub travel_time: Option<i64>,
+    pub location_id: Option<i64>,
+    pub group_id: Option<i64>,
+    pub item_type_id: Option<i64>,
+    pub held_by_id: Option<i64>,
+    pub background: Option<String>,
+    pub motive: Option<String>,
+    pub ambition: Option<String>,
+    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>")]
+    pub sheet: Option<serde_json::Value>,
+    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>")]
+    pub stats: Option<serde_json::Value>,
+}
+
+impl Fields {
+    /// The names of the fields that have a value.
+    fn given(&self) -> Vec<String> {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::Object(map)) => map
+                .into_iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(name, _)| name)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Refuse a field the kind does not have and, when creating, a missing one.
+    pub(super) fn check(&self, kind: ObjectKind, creating: bool) -> Result<()> {
+        let given = self.given();
+        let has: Vec<&str> = kind.fields().iter().map(|(name, _)| *name).collect();
+        if let Some(extra) = given.iter().find(|field| !has.contains(&field.as_str())) {
+            return reject(format!(
+                "A {} has the fields {}, not `{extra}`.",
+                kind.as_str(),
+                has.join(", ")
+            ));
+        }
+        if creating {
+            let missing: Vec<&str> = kind
+                .fields()
+                .iter()
+                .filter(|(name, needed)| *needed && !given.iter().any(|field| field == name))
+                .map(|(name, _)| *name)
+                .collect();
+            if !missing.is_empty() {
+                return reject(format!("A {} needs {}.", kind.as_str(), missing.join(", ")));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What to do about what depends on an object being deleted.
+#[derive(Clone, Debug, Default)]
+pub struct DeleteOptions {
+    pub delete_groups: bool,
+    pub item_location_id: Option<i64>,
+    pub item_description: Option<String>,
+    pub delete_items: bool,
+}
+
+/// The object a change created or acted on, and what the world holds after it.
+#[derive(Debug, Serialize)]
+pub struct Changed {
+    pub id: i64,
+    pub counts: Counts,
 }
 
 /// Where an item is: exactly one of these.
@@ -70,18 +170,16 @@ impl std::fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-pub(super) fn reject<T>(message: String) -> Result<T> {
-    Err(Rejected(message).into())
+/// A field `Fields::check` has already required.
+fn need<T: Clone>(field: &Option<T>, name: &str) -> Result<T> {
+    match field {
+        Some(value) => Ok(value.clone()),
+        None => reject(format!("`{name}` is needed.")),
+    }
 }
 
-/// An object for the Storyteller to add to the world being built.
-pub enum NewObject<'a> {
-    Location(&'a Location),
-    Connection(&'a Connection),
-    Group(&'a Group),
-    Npc(&'a Npc),
-    ItemType(&'a ItemType),
-    Item(&'a NewItem),
+pub(super) fn reject<T>(message: String) -> Result<T> {
+    Err(Rejected(message).into())
 }
 
 /// How much of each kind the world holds, returned after every change so the
@@ -126,10 +224,10 @@ impl Store {
         from_location_id: i64,
         to_location_id: i64,
         connection: &Connection,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let gm_notes = Json(&connection.notes.gm);
         let storyteller_notes = Json(&connection.notes.storyteller);
-        sqlx::query!(
+        Ok(sqlx::query!(
             "INSERT INTO connection (world_id, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
             world_id,
@@ -142,8 +240,8 @@ impl Store {
         )
         .execute(&mut **transaction)
         .await
-        .context("creating connection")?;
-        Ok(())
+        .context("creating connection")?
+        .last_insert_rowid())
     }
 
     /// The world's GM agent, created with its first group.
@@ -240,7 +338,7 @@ impl Store {
         name: &str,
         description: &str,
         notes: &Notes,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let gm_notes = Json(&notes.gm);
         let storyteller_notes = Json(&notes.storyteller);
         let item_id = sqlx::query!(
@@ -260,7 +358,7 @@ impl Store {
         Self::move_item(transaction, item_id, holder)
             .await
             .with_context(|| format!("placing item {name}"))?;
-        Ok(())
+        Ok(item_id)
     }
 
     pub(super) async fn insert_npc(
@@ -268,7 +366,7 @@ impl Store {
         world_id: i64,
         group_id: i64,
         npc: &Npc,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let character_id = Self::insert_character(
             transaction,
             world_id,
@@ -306,134 +404,167 @@ impl Store {
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("linking NPC agent for {}", npc.name))?;
-        Ok(())
+        Ok(character_id)
     }
 
-    /// Add one object to a world whose Storyteller is building it, and report
-    /// what the world now holds. The references are resolved by name inside
-    /// the world; a missing one or a name already taken changes nothing.
-    pub async fn create_object(&self, world_id: i64, object: NewObject<'_>) -> Result<Counts> {
+    /// Add one object to a world whose Storyteller is building it. The fields
+    /// are checked against the kind, every reference must be an object of the
+    /// world, and a name already taken changes nothing.
+    pub async fn create_object(
+        &self,
+        world_id: i64,
+        kind: ObjectKind,
+        fields: &Fields,
+    ) -> Result<Changed> {
+        fields.check(kind, true)?;
         let mut transaction = self
             .pool
             .begin()
             .await
             .with_context(|| format!("creating an object in world {world_id}"))?;
         Self::ensure_stage(&mut transaction, world_id, "build").await?;
-        match object {
-            NewObject::Location(location) => {
-                Self::ensure_unused(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    &location.name,
-                )
-                .await?;
-                Self::insert_location(&mut transaction, world_id, location).await?;
+        let notes = Notes::default();
+        let id = match kind {
+            ObjectKind::Location => {
+                let name = need(&fields.name, "name")?;
+                Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
+                let location = Location {
+                    name,
+                    kind: need(&fields.kind, "kind")?,
+                    description: need(&fields.description, "description")?,
+                    notes,
+                };
+                Self::insert_location(&mut transaction, world_id, &location).await?
             }
-            NewObject::Connection(connection) => {
-                if connection.travel_time < 0 {
+            ObjectKind::Connection => {
+                let from = need(&fields.from_id, "from_id")?;
+                let to = need(&fields.to_id, "to_id")?;
+                let travel_time = need(&fields.travel_time, "travel_time")?;
+                if travel_time < 0 {
                     return reject("A connection's travel time cannot be negative.".into());
                 }
-                if connection.from == connection.to {
+                if from == to {
                     return reject("A connection cannot join a location to itself.".into());
                 }
-                // A connection is named by its ends, and is reviewed by that name.
-                Self::ensure_unused(
-                    &mut transaction,
+                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, from).await?;
+                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, to).await?;
+                if let Some(existing) = sqlx::query_scalar!(
+                    "SELECT id FROM connection WHERE world_id = ? AND from_location_id = ? \
+                     AND to_location_id = ? AND deleted = 0",
                     world_id,
-                    ObjectKind::Connection,
-                    &format!("{} -> {}", connection.from, connection.to),
+                    from,
+                    to,
                 )
-                .await?;
-                let from = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    &connection.from,
-                )
-                .await?;
-                let to = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    &connection.to,
-                )
-                .await?;
-                Self::insert_connection(&mut transaction, world_id, from, to, connection).await?;
+                .fetch_optional(&mut *transaction)
+                .await
+                .context("looking for an existing connection")?
+                {
+                    return reject(format!(
+                        "Connection {existing} already leads from location {from} to location {to}."
+                    ));
+                }
+                // The ends are given as IDs, so the names in the record stay empty.
+                let connection = Connection {
+                    from: String::new(),
+                    to: String::new(),
+                    travel_time,
+                    description: need(&fields.description, "description")?,
+                    notes,
+                };
+                Self::insert_connection(&mut transaction, world_id, from, to, &connection).await?
             }
-            NewObject::Group(group) => {
-                Self::ensure_unused(&mut transaction, world_id, ObjectKind::Group, &group.name)
+            ObjectKind::Group => {
+                let name = need(&fields.name, "name")?;
+                Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
+                let location_id = need(&fields.location_id, "location_id")?;
+                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, location_id)
                     .await?;
-                let location = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    &group.location,
-                )
-                .await?;
-                Self::insert_group(&mut transaction, world_id, location, group).await?;
+                let group = Group {
+                    name,
+                    location: String::new(),
+                    description: need(&fields.description, "description")?,
+                    notes,
+                };
+                Self::insert_group(&mut transaction, world_id, location_id, &group).await?
             }
-            NewObject::Npc(npc) => {
-                Self::ensure_unused(&mut transaction, world_id, ObjectKind::Npc, &npc.name).await?;
-                let group =
-                    Self::named_id(&mut transaction, world_id, ObjectKind::Group, &npc.group)
+            ObjectKind::Npc => {
+                let name = need(&fields.name, "name")?;
+                Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
+                let group_id = need(&fields.group_id, "group_id")?;
+                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Group, group_id)
+                    .await?;
+                let npc = Npc {
+                    name,
+                    group: String::new(),
+                    description: need(&fields.description, "description")?,
+                    background: need(&fields.background, "background")?,
+                    motive: need(&fields.motive, "motive")?,
+                    ambition: fields.ambition.clone().unwrap_or_default(),
+                    sheet: fields.sheet.clone().unwrap_or_else(|| serde_json::json!({})),
+                    notes,
+                };
+                Self::insert_npc(&mut transaction, world_id, group_id, &npc).await?
+            }
+            ObjectKind::ItemType => {
+                let name = need(&fields.name, "name")?;
+                Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
+                let item_type = ItemType {
+                    name,
+                    description: need(&fields.description, "description")?,
+                    stats: fields.stats.clone().unwrap_or_else(|| serde_json::json!({})),
+                    notes,
+                };
+                Self::insert_item_type(&mut transaction, world_id, &item_type).await?
+            }
+            ObjectKind::Item => {
+                let name = need(&fields.name, "name")?;
+                Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
+                let item_type_id = need(&fields.item_type_id, "item_type_id")?;
+                Self::ensure_exists(&mut transaction, world_id, ObjectKind::ItemType, item_type_id)
+                    .await?;
+                let holder = match (fields.location_id, fields.held_by_id) {
+                    (Some(location), None) => {
+                        Self::ensure_exists(
+                            &mut transaction,
+                            world_id,
+                            ObjectKind::Location,
+                            location,
+                        )
                         .await?;
-                Self::insert_npc(&mut transaction, world_id, group, npc).await?;
-            }
-            NewObject::ItemType(item_type) => {
-                Self::ensure_unused(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::ItemType,
-                    &item_type.name,
-                )
-                .await?;
-                Self::insert_item_type(&mut transaction, world_id, item_type).await?;
-            }
-            NewObject::Item(item) => {
-                Self::ensure_unused(&mut transaction, world_id, ObjectKind::Item, &item.name)
-                    .await?;
-                let item_type = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::ItemType,
-                    &item.item_type,
-                )
-                .await?;
-                let holder = match (&item.location, &item.held_by) {
-                    (Some(location), None) => Holder::Location(
-                        Self::named_id(&mut transaction, world_id, ObjectKind::Location, location)
-                            .await?,
-                    ),
+                        Holder::Location(location)
+                    }
                     (None, Some(npc)) => {
-                        let npc = Self::named_id(&mut transaction, world_id, ObjectKind::Npc, npc)
+                        Self::ensure_exists(&mut transaction, world_id, ObjectKind::Npc, npc)
                             .await?;
                         // What an NPC carries is part of the NPC.
                         Self::clear_review(&mut transaction, ObjectKind::Npc, npc).await?;
                         Holder::Character(npc)
                     }
                     _ => {
-                        return reject("Give either a location or an NPC to hold the item.".into());
+                        return reject(
+                            "Give either location_id or held_by_id to say where the item is."
+                                .into(),
+                        );
                     }
                 };
                 Self::insert_item(
                     &mut transaction,
                     world_id,
-                    item_type,
+                    item_type_id,
                     holder,
-                    &item.name,
-                    &item.description,
-                    &Notes::default(),
+                    &name,
+                    &need(&fields.description, "description")?,
+                    &notes,
                 )
-                .await?;
+                .await?
             }
-        }
+        };
         let counts = Self::counts(&mut transaction, world_id).await?;
         transaction
             .commit()
             .await
             .with_context(|| format!("committing an object of world {world_id}"))?;
-        Ok(counts)
+        Ok(Changed { id, counts })
     }
 
     /// The object of `kind` called `name` in the world, if there is one.
@@ -475,21 +606,8 @@ impl Store {
                 .fetch_optional(&mut **transaction)
                 .await
             }
-            ObjectKind::Connection => {
-                let Some((from, to)) = name.split_once(" -> ") else {
-                    return Ok(None);
-                };
-                sqlx::query_scalar!(
-                    "SELECT connection.id FROM connection                      JOIN location AS origin ON origin.id = connection.from_location_id                      JOIN location AS target ON target.id = connection.to_location_id                      WHERE connection.world_id = ? AND origin.name = ? AND target.name = ? \
-                       AND (connection.deleted = 0 OR ?)",
-                    world_id,
-                    from,
-                    to,
-                    include_deleted,
-                )
-                .fetch_optional(&mut **transaction)
-                .await
-            }
+            // A connection has no name; it is told apart by the locations it joins.
+            ObjectKind::Connection => Ok(None),
             ObjectKind::Npc => {
                 sqlx::query_scalar!(
                     "SELECT id FROM character WHERE world_id = ? AND role = 'npc' AND name = ? AND (deleted = 0 OR ?)",
@@ -514,16 +632,75 @@ impl Store {
         .with_context(|| format!("looking up {} {name}", kind.as_str()))
     }
 
-    pub(super) async fn named_id(
+    /// Refuse an ID that is not an object of the kind in this world.
+    pub(super) async fn ensure_exists(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
         kind: ObjectKind,
-        name: &str,
-    ) -> Result<i64> {
-        match Self::find_by_name(transaction, world_id, kind, name, false).await? {
-            Some(id) => Ok(id),
+        id: i64,
+    ) -> Result<()> {
+        let found = match kind {
+            ObjectKind::Location => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM location WHERE id = ? AND world_id = ? AND deleted = 0",
+                    id,
+                    world_id,
+                )
+                .fetch_optional(&mut **transaction)
+                .await
+            }
+            ObjectKind::Connection => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM connection WHERE id = ? AND world_id = ? AND deleted = 0",
+                    id,
+                    world_id,
+                )
+                .fetch_optional(&mut **transaction)
+                .await
+            }
+            ObjectKind::Group => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM \"group\" WHERE id = ? AND world_id = ? AND deleted = 0",
+                    id,
+                    world_id,
+                )
+                .fetch_optional(&mut **transaction)
+                .await
+            }
+            ObjectKind::Npc => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM character WHERE id = ? AND world_id = ? AND role = 'npc' \
+                     AND deleted = 0",
+                    id,
+                    world_id,
+                )
+                .fetch_optional(&mut **transaction)
+                .await
+            }
+            ObjectKind::ItemType => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM item_type WHERE id = ? AND world_id = ? AND deleted = 0",
+                    id,
+                    world_id,
+                )
+                .fetch_optional(&mut **transaction)
+                .await
+            }
+            ObjectKind::Item => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM item WHERE id = ? AND world_id = ? AND deleted = 0",
+                    id,
+                    world_id,
+                )
+                .fetch_optional(&mut **transaction)
+                .await
+            }
+        }
+        .with_context(|| format!("looking up {} {id}", kind.as_str()))?;
+        match found {
+            Some(_) => Ok(()),
             None => reject(format!(
-                "There is no {} called `{name}` in the world.",
+                "There is no {} with id {id} in the world.",
                 kind.as_str()
             )),
         }

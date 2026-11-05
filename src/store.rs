@@ -9,11 +9,8 @@ mod prompt;
 mod review;
 mod speech;
 use authoring::Holder;
-pub use authoring::{NewItem, NewObject, ObjectKind, Rejected};
-pub use editing::{
-    Change, ConnectionDelete, ConnectionUpdate, Delete, GroupUpdate, ItemTypeUpdate, ItemUpdate,
-    LocationDelete, LocationUpdate, NameOnly, NpcDelete, NpcUpdate, Update,
-};
+pub use authoring::{Changed, DeleteOptions, Fields, ObjectKind, Rejected};
+pub use editing::Change;
 pub use generation::{Advance, Generation, GenerationStage};
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};

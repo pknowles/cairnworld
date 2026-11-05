@@ -1,248 +1,132 @@
 //! Changing the objects of a world being built: replacing fields, and
 //! deleting by flag. A delete only flags an object; nothing is removed.
+//! Objects are addressed by the IDs the tools return.
 
 use anyhow::{Context, Result};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use sqlx::{Sqlite, Transaction};
 
 use super::{
     Store,
-    authoring::{Counts, Holder, NewObject, ObjectKind, reject},
+    authoring::{Changed, DeleteOptions, Fields, Holder, ObjectKind, reject},
 };
 
 /// One change to the world being built.
 pub enum Change<'a> {
-    Create(NewObject<'a>),
-    Update(Update<'a>),
-    Delete(Delete<'a>),
-}
-
-// The fields of an existing object to replace; a field left out keeps its
-// value. `name` finds the object, `new_name` renames it.
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LocationUpdate {
-    pub name: String,
-    pub new_name: Option<String>,
-    pub kind: Option<String>,
-    pub description: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ConnectionUpdate {
-    pub from: String,
-    pub to: String,
-    pub travel_time: Option<i64>,
-    pub description: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GroupUpdate {
-    pub name: String,
-    pub new_name: Option<String>,
-    pub location: Option<String>,
-    pub description: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NpcUpdate {
-    pub name: String,
-    pub new_name: Option<String>,
-    pub group: Option<String>,
-    pub description: Option<String>,
-    pub background: Option<String>,
-    pub motive: Option<String>,
-    pub ambition: Option<String>,
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>")]
-    pub sheet: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ItemTypeUpdate {
-    pub name: String,
-    pub new_name: Option<String>,
-    pub description: Option<String>,
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>")]
-    pub stats: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ItemUpdate {
-    pub name: String,
-    pub new_name: Option<String>,
-    pub item_type: Option<String>,
-    pub location: Option<String>,
-    pub held_by: Option<String>,
-    pub description: Option<String>,
-}
-
-pub enum Update<'a> {
-    Location(&'a LocationUpdate),
-    Connection(&'a ConnectionUpdate),
-    Group(&'a GroupUpdate),
-    Npc(&'a NpcUpdate),
-    ItemType(&'a ItemTypeUpdate),
-    Item(&'a ItemUpdate),
-}
-
-// What to delete and, where something depends on it, what to do about that.
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LocationDelete {
-    pub name: String,
-    #[serde(default)]
-    pub delete_groups: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ConnectionDelete {
-    pub from: String,
-    pub to: String,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NpcDelete {
-    pub name: String,
-    pub item_location: Option<String>,
-    pub item_description: Option<String>,
-    #[serde(default)]
-    pub delete_items: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NameOnly {
-    pub name: String,
-}
-
-pub enum Delete<'a> {
-    Location(&'a LocationDelete),
-    Connection(&'a ConnectionDelete),
-    Npc(&'a NpcDelete),
-    ItemType(&'a NameOnly),
-    Item(&'a NameOnly),
+    Create {
+        kind: ObjectKind,
+        fields: &'a Fields,
+    },
+    Update {
+        kind: ObjectKind,
+        id: i64,
+        fields: &'a Fields,
+    },
+    Delete {
+        kind: ObjectKind,
+        id: i64,
+        options: &'a DeleteOptions,
+    },
 }
 
 impl Store {
-    pub async fn change_object(&self, world_id: i64, change: Change<'_>) -> Result<Counts> {
+    pub async fn change_object(&self, world_id: i64, change: Change<'_>) -> Result<Changed> {
         match change {
-            Change::Create(object) => self.create_object(world_id, object).await,
-            Change::Update(update) => self.update_object(world_id, update).await,
-            Change::Delete(delete) => self.delete_object(world_id, delete).await,
+            Change::Create { kind, fields } => self.create_object(world_id, kind, fields).await,
+            Change::Update { kind, id, fields } => {
+                self.update_object(world_id, kind, id, fields).await
+            }
+            Change::Delete { kind, id, options } => {
+                self.delete_object(world_id, kind, id, options).await
+            }
         }
     }
 
-    /// Replace some fields of an existing object. Fields left out keep their
-    /// value, and the Questioner's review no longer holds for the object.
-    pub async fn update_object(&self, world_id: i64, update: Update<'_>) -> Result<Counts> {
+    /// Replace the given fields of an object; the others keep their value, and
+    /// the Questioner's review no longer holds for the object.
+    pub async fn update_object(
+        &self,
+        world_id: i64,
+        kind: ObjectKind,
+        id: i64,
+        fields: &Fields,
+    ) -> Result<Changed> {
+        fields.check(kind, false)?;
         let mut transaction = self
             .pool
             .begin()
             .await
             .with_context(|| format!("updating an object in world {world_id}"))?;
         Self::ensure_stage(&mut transaction, world_id, "build").await?;
-        match update {
-            Update::Location(update) => {
-                let id = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    &update.name,
-                )
-                .await?;
-                Self::ensure_renamed(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    &update.name,
-                    &update.new_name,
-                )
-                .await?;
+        Self::ensure_exists(&mut transaction, world_id, kind, id).await?;
+        if let Some(name) = &fields.name {
+            Self::ensure_name_free(&mut transaction, world_id, kind, name, id).await?;
+        }
+        match kind {
+            ObjectKind::Location => {
                 sqlx::query!(
                     "UPDATE location SET name = COALESCE(?, name), kind = COALESCE(?, kind), \
                      description = COALESCE(?, description) WHERE id = ?",
-                    update.new_name,
-                    update.kind,
-                    update.description,
+                    fields.name,
+                    fields.kind,
+                    fields.description,
                     id,
                 )
                 .execute(&mut *transaction)
                 .await
                 .context("updating a location")?;
-                Self::clear_review(&mut transaction, ObjectKind::Location, id).await?;
             }
-            Update::Connection(update) => {
-                let name = format!("{} -> {}", update.from, update.to);
-                let id = Self::named_id(&mut transaction, world_id, ObjectKind::Connection, &name)
-                    .await?;
-                if update.travel_time.is_some_and(|time| time < 0) {
+            ObjectKind::Connection => {
+                if fields.from_id.is_some() || fields.to_id.is_some() {
+                    return reject(
+                        "A connection's ends cannot change; delete it and create another.".into(),
+                    );
+                }
+                if fields.travel_time.is_some_and(|time| time < 0) {
                     return reject("A connection's travel time cannot be negative.".into());
                 }
                 sqlx::query!(
                     "UPDATE connection SET travel_time = COALESCE(?, travel_time), \
                      description = COALESCE(?, description) WHERE id = ?",
-                    update.travel_time,
-                    update.description,
+                    fields.travel_time,
+                    fields.description,
                     id,
                 )
                 .execute(&mut *transaction)
                 .await
                 .context("updating a connection")?;
-                Self::clear_review(&mut transaction, ObjectKind::Connection, id).await?;
             }
-            Update::Group(update) => {
-                let id =
-                    Self::named_id(&mut transaction, world_id, ObjectKind::Group, &update.name)
+            ObjectKind::Group => {
+                if let Some(location) = fields.location_id {
+                    Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, location)
                         .await?;
-                Self::ensure_renamed(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Group,
-                    &update.name,
-                    &update.new_name,
-                )
-                .await?;
-                let location = match &update.location {
-                    Some(name) => Some(
-                        Self::named_id(&mut transaction, world_id, ObjectKind::Location, name)
-                            .await?,
-                    ),
-                    None => None,
-                };
+                }
                 sqlx::query!(
                     "UPDATE \"group\" SET name = COALESCE(?, name), \
                      location_id = COALESCE(?, location_id), \
                      description = COALESCE(?, description) WHERE id = ?",
-                    update.new_name,
-                    location,
-                    update.description,
+                    fields.name,
+                    fields.location_id,
+                    fields.description,
                     id,
                 )
                 .execute(&mut *transaction)
                 .await
                 .context("updating a group")?;
-                Self::clear_review(&mut transaction, ObjectKind::Group, id).await?;
             }
-            Update::Npc(update) => {
-                let id = Self::named_id(&mut transaction, world_id, ObjectKind::Npc, &update.name)
-                    .await?;
-                Self::ensure_renamed(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Npc,
-                    &update.name,
-                    &update.new_name,
-                )
-                .await?;
-                let sheet = update
+            ObjectKind::Npc => {
+                if let Some(group) = fields.group_id {
+                    Self::ensure_exists(&mut transaction, world_id, ObjectKind::Group, group)
+                        .await?;
+                    sqlx::query!(
+                        "UPDATE character_group SET group_id = ? WHERE character_id = ?",
+                        group,
+                        id,
+                    )
+                    .execute(&mut *transaction)
+                    .await
+                    .context("moving an NPC to another group")?;
+                }
+                let sheet = fields
                     .sheet
                     .as_ref()
                     .map(serde_json::to_string)
@@ -253,49 +137,20 @@ impl Store {
                      description = COALESCE(?, description), background = COALESCE(?, background), \
                      motive = COALESCE(?, motive), ambition = COALESCE(?, ambition), \
                      sheet = COALESCE(?, sheet) WHERE id = ?",
-                    update.new_name,
-                    update.description,
-                    update.background,
-                    update.motive,
-                    update.ambition,
+                    fields.name,
+                    fields.description,
+                    fields.background,
+                    fields.motive,
+                    fields.ambition,
                     sheet,
                     id,
                 )
                 .execute(&mut *transaction)
                 .await
                 .context("updating an NPC")?;
-                if let Some(group) = &update.group {
-                    let group =
-                        Self::named_id(&mut transaction, world_id, ObjectKind::Group, group)
-                            .await?;
-                    sqlx::query!(
-                        "UPDATE character_group SET group_id = ? WHERE character_id = ?",
-                        group,
-                        id,
-                    )
-                    .execute(&mut *transaction)
-                    .await
-                    .context("moving an NPC to another group")?;
-                }
-                Self::clear_review(&mut transaction, ObjectKind::Npc, id).await?;
             }
-            Update::ItemType(update) => {
-                let id = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::ItemType,
-                    &update.name,
-                )
-                .await?;
-                Self::ensure_renamed(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::ItemType,
-                    &update.name,
-                    &update.new_name,
-                )
-                .await?;
-                let stats = update
+            ObjectKind::ItemType => {
+                let stats = fields
                     .stats
                     .as_ref()
                     .map(serde_json::to_string)
@@ -304,40 +159,27 @@ impl Store {
                 sqlx::query!(
                     "UPDATE item_type SET name = COALESCE(?, name), \
                      description = COALESCE(?, description), stats = COALESCE(?, stats) WHERE id = ?",
-                    update.new_name,
-                    update.description,
+                    fields.name,
+                    fields.description,
                     stats,
                     id,
                 )
                 .execute(&mut *transaction)
                 .await
                 .context("updating an item type")?;
-                Self::clear_review(&mut transaction, ObjectKind::ItemType, id).await?;
             }
-            Update::Item(update) => {
-                let id = Self::named_id(&mut transaction, world_id, ObjectKind::Item, &update.name)
-                    .await?;
-                Self::ensure_renamed(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Item,
-                    &update.name,
-                    &update.new_name,
-                )
-                .await?;
-                let item_type = match &update.item_type {
-                    Some(name) => Some(
-                        Self::named_id(&mut transaction, world_id, ObjectKind::ItemType, name)
-                            .await?,
-                    ),
-                    None => None,
-                };
+            ObjectKind::Item => {
+                if let Some(item_type) = fields.item_type_id {
+                    Self::ensure_exists(&mut transaction, world_id, ObjectKind::ItemType, item_type)
+                        .await?;
+                }
                 sqlx::query!(
-                    "UPDATE item SET name = COALESCE(?, name), item_type_id = COALESCE(?, item_type_id), \
+                    "UPDATE item SET name = COALESCE(?, name), \
+                     item_type_id = COALESCE(?, item_type_id), \
                      description = COALESCE(?, description) WHERE id = ?",
-                    update.new_name,
-                    item_type,
-                    update.description,
+                    fields.name,
+                    fields.item_type_id,
+                    fields.description,
                     id,
                 )
                 .execute(&mut *transaction)
@@ -345,61 +187,63 @@ impl Store {
                 .context("updating an item")?;
                 // Whoever held the item, and whoever holds it now, changed with it.
                 Self::clear_holder_review(&mut transaction, id).await?;
-                Self::clear_review(&mut transaction, ObjectKind::Item, id).await?;
-                match (&update.location, &update.held_by) {
-                    (None, None) => {}
+                let holder = match (fields.location_id, fields.held_by_id) {
+                    (None, None) => None,
+                    (Some(location), None) => {
+                        Self::ensure_exists(
+                            &mut transaction,
+                            world_id,
+                            ObjectKind::Location,
+                            location,
+                        )
+                        .await?;
+                        Some(Holder::Location(location))
+                    }
+                    (None, Some(npc)) => {
+                        Self::ensure_exists(&mut transaction, world_id, ObjectKind::Npc, npc)
+                            .await?;
+                        Some(Holder::Character(npc))
+                    }
                     (Some(_), Some(_)) => {
-                        return reject("Give either a location or an NPC to hold the item.".into());
+                        return reject(
+                            "Give either location_id or held_by_id to say where the item is."
+                                .into(),
+                        );
                     }
-                    (location, held_by) => {
-                        let holder = match (location, held_by) {
-                            (Some(location), _) => Holder::Location(
-                                Self::named_id(
-                                    &mut transaction,
-                                    world_id,
-                                    ObjectKind::Location,
-                                    location,
-                                )
-                                .await?,
-                            ),
-                            (_, Some(npc)) => Holder::Character(
-                                Self::named_id(&mut transaction, world_id, ObjectKind::Npc, npc)
-                                    .await?,
-                            ),
-                            (None, None) => unreachable!("handled above"),
-                        };
-                        Self::move_item(&mut transaction, id, holder).await?;
-                        Self::clear_holder_review(&mut transaction, id).await?;
-                    }
+                };
+                if let Some(holder) = holder {
+                    Self::move_item(&mut transaction, id, holder).await?;
+                    Self::clear_holder_review(&mut transaction, id).await?;
                 }
             }
         }
+        Self::clear_review(&mut transaction, kind, id).await?;
         let counts = Self::counts(&mut transaction, world_id).await?;
         transaction
             .commit()
             .await
             .with_context(|| format!("committing an update in world {world_id}"))?;
-        Ok(counts)
+        Ok(Changed { id, counts })
     }
 
     /// Flag an object as deleted. What depends on it either blocks the delete or
-    /// is dealt with as the call says; nothing is removed.
-    pub async fn delete_object(&self, world_id: i64, delete: Delete<'_>) -> Result<Counts> {
+    /// is dealt with as the options say; nothing is removed.
+    pub async fn delete_object(
+        &self,
+        world_id: i64,
+        kind: ObjectKind,
+        id: i64,
+        options: &DeleteOptions,
+    ) -> Result<Changed> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .with_context(|| format!("deleting an object in world {world_id}"))?;
         Self::ensure_stage(&mut transaction, world_id, "build").await?;
-        match delete {
-            Delete::Location(delete) => {
-                let id = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    &delete.name,
-                )
-                .await?;
+        Self::ensure_exists(&mut transaction, world_id, kind, id).await?;
+        match kind {
+            ObjectKind::Location => {
                 let lying_here = sqlx::query_scalar!(
                     "SELECT item.name FROM item_location JOIN item ON item.id = item_location.item_id \
                      WHERE item_location.location_id = ? AND item.deleted = 0",
@@ -410,8 +254,7 @@ impl Store {
                 .context("finding the items at a location")?;
                 if !lying_here.is_empty() {
                     return reject(format!(
-                        "These items lie at {}: {}. Move or delete them first.",
-                        delete.name,
+                        "These items lie at location {id}: {}. Move or delete them first.",
                         lying_here.join(", ")
                     ));
                 }
@@ -422,13 +265,12 @@ impl Store {
                 .fetch_all(&mut *transaction)
                 .await
                 .context("finding the groups at a location")?;
-                if !groups.is_empty() && !delete.delete_groups {
+                if !groups.is_empty() && !options.delete_groups {
                     return reject(format!(
-                        "These groups are at {}: {}. Move them, or set delete_groups to delete them too.",
-                        delete.name,
+                        "These groups are at location {id}: {}. Move them, or set delete_groups to delete them too.",
                         groups
                             .iter()
-                            .map(|group| group.name.as_str())
+                            .map(|group| format!("{} ({})", group.name, group.id))
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
@@ -436,8 +278,8 @@ impl Store {
                 for group in &groups {
                     if Self::active_members(&mut transaction, group.id).await? > 0 {
                         return reject(format!(
-                            "Group {} still has characters. Move or delete them first.",
-                            group.name
+                            "Group {} ({}) still has characters. Move or delete them first.",
+                            group.name, group.id
                         ));
                     }
                     Self::flag_deleted(&mut transaction, ObjectKind::Group, group.id).await?;
@@ -456,15 +298,19 @@ impl Store {
                 }
                 Self::flag_deleted(&mut transaction, ObjectKind::Location, id).await?;
             }
-            Delete::Connection(delete) => {
-                let name = format!("{} -> {}", delete.from, delete.to);
-                let id = Self::named_id(&mut transaction, world_id, ObjectKind::Connection, &name)
-                    .await?;
-                Self::flag_deleted(&mut transaction, ObjectKind::Connection, id).await?;
+            ObjectKind::Connection | ObjectKind::Item => {
+                if kind == ObjectKind::Item {
+                    Self::clear_holder_review(&mut transaction, id).await?;
+                }
+                Self::flag_deleted(&mut transaction, kind, id).await?;
             }
-            Delete::Npc(delete) => {
-                let id = Self::named_id(&mut transaction, world_id, ObjectKind::Npc, &delete.name)
-                    .await?;
+            ObjectKind::Group => {
+                return reject(
+                    "A group is deleted along with its last character; delete or move them."
+                        .into(),
+                );
+            }
+            ObjectKind::Npc => {
                 let carried = sqlx::query!(
                     "SELECT item.id, item.name FROM item_character \
                      JOIN item ON item.id = item_character.item_id \
@@ -475,23 +321,24 @@ impl Store {
                 .await
                 .context("finding what an NPC carries")?;
                 if !carried.is_empty() {
-                    match (&delete.item_location, delete.delete_items) {
+                    match (options.item_location_id, options.delete_items) {
                         (Some(_), true) => {
-                            return reject("Give item_location or delete_items, not both.".into());
+                            return reject(
+                                "Give item_location_id or delete_items, not both.".into(),
+                            );
                         }
                         (None, false) => {
                             return reject(format!(
-                                "{} carries {}. Give item_location to leave them somewhere, or set delete_items.",
-                                delete.name,
+                                "NPC {id} carries {}. Give item_location_id to leave them somewhere, or set delete_items.",
                                 carried
                                     .iter()
-                                    .map(|item| item.name.as_str())
+                                    .map(|item| format!("{} ({})", item.name, item.id))
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             ));
                         }
                         (Some(location), false) => {
-                            let location = Self::named_id(
+                            Self::ensure_exists(
                                 &mut transaction,
                                 world_id,
                                 ObjectKind::Location,
@@ -499,13 +346,9 @@ impl Store {
                             )
                             .await?;
                             for item in &carried {
-                                Self::move_item(
-                                    &mut transaction,
-                                    item.id,
-                                    Holder::Location(location),
-                                )
-                                .await?;
-                                if let Some(description) = &delete.item_description {
+                                Self::move_item(&mut transaction, item.id, Holder::Location(location))
+                                    .await?;
+                                if let Some(description) = &options.item_description {
                                     sqlx::query!(
                                         "UPDATE item SET description = ? WHERE id = ?",
                                         description,
@@ -540,16 +383,9 @@ impl Store {
                     Self::flag_deleted(&mut transaction, ObjectKind::Group, group).await?;
                 }
             }
-            Delete::ItemType(delete) => {
-                let id = Self::named_id(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::ItemType,
-                    &delete.name,
-                )
-                .await?;
-                let using = sqlx::query_scalar!(
-                    "SELECT name FROM item WHERE item_type_id = ? AND deleted = 0",
+            ObjectKind::ItemType => {
+                let using = sqlx::query!(
+                    "SELECT id, name FROM item WHERE item_type_id = ? AND deleted = 0",
                     id,
                 )
                 .fetch_all(&mut *transaction)
@@ -557,18 +393,15 @@ impl Store {
                 .context("finding the items of an item type")?;
                 if !using.is_empty() {
                     return reject(format!(
-                        "These items are of type {}: {}. Delete them first.",
-                        delete.name,
-                        using.join(", ")
+                        "These items are of item type {id}: {}. Delete them first.",
+                        using
+                            .iter()
+                            .map(|item| format!("{} ({})", item.name, item.id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
                 Self::flag_deleted(&mut transaction, ObjectKind::ItemType, id).await?;
-            }
-            Delete::Item(delete) => {
-                let id = Self::named_id(&mut transaction, world_id, ObjectKind::Item, &delete.name)
-                    .await?;
-                Self::clear_holder_review(&mut transaction, id).await?;
-                Self::flag_deleted(&mut transaction, ObjectKind::Item, id).await?;
             }
         }
         let counts = Self::counts(&mut transaction, world_id).await?;
@@ -576,21 +409,22 @@ impl Store {
             .commit()
             .await
             .with_context(|| format!("committing a delete in world {world_id}"))?;
-        Ok(counts)
+        Ok(Changed { id, counts })
     }
 
-    /// Reject a new name another object of the kind already has.
-    async fn ensure_renamed(
+    /// Refuse a name another object of the kind already has.
+    async fn ensure_name_free(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
         kind: ObjectKind,
         name: &str,
-        new_name: &Option<String>,
+        own_id: i64,
     ) -> Result<()> {
-        match new_name {
-            Some(new_name) if new_name != name => {
-                Self::ensure_unused(transaction, world_id, kind, new_name).await
-            }
+        match Self::find_by_name(transaction, world_id, kind, name, true).await? {
+            Some(other) if other != own_id => reject(format!(
+                "The world already has a {} called `{name}`.",
+                kind.as_str()
+            )),
             _ => Ok(()),
         }
     }
