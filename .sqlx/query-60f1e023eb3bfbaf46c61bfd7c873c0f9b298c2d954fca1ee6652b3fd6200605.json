@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM object_reviewed WHERE kind = ? AND object_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "60f1e023eb3bfbaf46c61bfd7c873c0f9b298c2d954fca1ee6652b3fd6200605"
+}

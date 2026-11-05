@@ -12,10 +12,10 @@ CREATE TABLE world_role_agent (
 -- selects the next finite step: the Questioner answers the meta-questions
 -- (meta), asks questions or declares the world complete (ask), the Storyteller
 -- answers one question (answer), replies with the summary (summarize) and, once
--- the Questioner is satisfied, the name (name); concept_done waits for the
--- authoring tools. A failed step's error stays on its sequence.
+-- the Questioner is satisfied, the name (name); the Storyteller then creates objects with the authoring
+-- tools (build) and the Questioner reviews them (review). A failed step's error stays on its sequence.
 ALTER TABLE world ADD COLUMN generation_stage TEXT NOT NULL DEFAULT 'complete'
-    CHECK (generation_stage IN ('meta', 'ask', 'answer', 'summarize', 'name', 'concept_done', 'failed', 'complete'));
+    CHECK (generation_stage IN ('meta', 'ask', 'answer', 'summarize', 'name', 'build', 'review', 'failed', 'complete'));
 
 -- What the Questioner/Storyteller loop is working on. Each step's outputs commit
 -- with the next stage, so a restart resumes at the stored one.

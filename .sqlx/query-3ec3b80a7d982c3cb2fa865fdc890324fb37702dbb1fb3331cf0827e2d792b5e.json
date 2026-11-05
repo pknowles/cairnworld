@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT generation_stage FROM world WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation_stage",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3ec3b80a7d982c3cb2fa865fdc890324fb37702dbb1fb3331cf0827e2d792b5e"
+}

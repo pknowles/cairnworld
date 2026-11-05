@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM location WHERE world_id = ? AND name = ? AND (deleted = 0 OR ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e05f8b2db2401545c2c19c1da9d44745e4f576eee86d0bdb545509a242bae000"
+}

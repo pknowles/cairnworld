@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM character WHERE world_id = ? AND role = 'npc' AND name = ? AND (deleted = 0 OR ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "781c2d3de0204360a2cebbfcb57d0e4d6da7393babe308a7ca2b467bf7191cbf"
+}

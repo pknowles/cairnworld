@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM item_type WHERE world_id = ? AND name = ? AND (deleted = 0 OR ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1b66bf1917322fa31f4224627f0e118e9b6efbb5a14cd507e1c4846bd23599ef"
+}

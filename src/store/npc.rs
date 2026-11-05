@@ -429,7 +429,7 @@ impl Store {
         .with_context(|| format!("loading NPC {character_id}'s surroundings"))?;
         let present = sqlx::query_as!(
             PersonRow,
-            "SELECT character.name, character.description FROM character_group              JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? AND character.id <> ? ORDER BY character.id",
+            "SELECT character.name, character.description FROM character_group              JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? AND character.id <> ? AND character.deleted = 0 ORDER BY character.id",
             you.group_id,
             character_id,
         )

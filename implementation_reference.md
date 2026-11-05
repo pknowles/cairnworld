@@ -666,7 +666,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   The world worker takes one step per stage after NPC steps (`Store::next_generation`,
   `Game::run_generation_step`, restoring `spent` into the shared `Budget`): the
   Questioner answers `questioner.example_questions` and `meta_questions` once (its
-  history keeps them), then each round asks (`ask_questions` or `world_is_complete`)
+  history keeps them), then each round asks (`ask_questions` or `world_summary_complete`)
   with the seed and current summary as per-request context, not stored history; the
   Storyteller answers each question as text in its one chat (migration 0017; both
   roles have exactly one chat), seeing the seed and the one current summary as
@@ -674,14 +674,30 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   the request and reply never enter its chat, so it never sees a replaced summary;
   Developer Mode lists it in its history as a labelled "Side inference"
   (`RawHistoryEntry::Inference.aside`). The reply becomes `storyteller_summary`, and after
-  `world_is_complete` its reply becomes the name. `Store::advance_generation` is the
+  `world_summary_complete` its reply becomes the name. `Store::advance_generation` is the
   one transition table; a failing step fails the world with the error on its
   sequence. `Game::admit`/`queue_player_message` refuse input until `world_is_ready`;
   players can open the play page, whose chat says the world is being created until
   it is ready (`play_connected`). The world page shows the status,
   failure and expandable seed, and with Developer Mode on hosts the Inspect panel
   (`WorldInspector` island; `ui.rs`'s `Inspector` is shared with `PlayerChat`).
-  Not built yet: authoring tools and the Questioner's later phases, so a world stops at `concept_done`.
+  After the name the Storyteller builds (`build`) with `create_/update_/delete_` tools for locations,
+  connections, groups, NPCs, item types and items (`game/authoring.rs`; objects are referred to by name,
+  and an item lies at a location or is held by an NPC). `Store::change_object` (`store/authoring.rs`
+  creates, sharing its per-object inserts with `install_scenario`; `store/editing.rs` updates and deletes;
+  a delete only sets `deleted`, and the gameplay queries that enumerate characters, items, locations and
+  connections skip deleted ones; Developer Mode lists them labelled) returns the object counts, and the
+  Questioner reviews (`review`, `store/review.rs`): `read_object`, `mark_object_reviewed`, `ask_questions`
+  (back to `build`) or `core_objects_created`. Reviewed flags are `object_reviewed` rows, cleared when an
+  object or what it holds changes. `Store::core_object_problems` is the one readiness check, run by the
+  tool and again by `advance_generation`, which then marks the world `complete` and places waiting
+  Adventurers in its first group (interim, until entry placement). Rule refusals are `Rejected` errors,
+  shown to the agent as tool results. Names the summary marks as `[[Name]]` and no object has yet are
+  A chat summary reaches the model as the first user-role message after the system message, so a
+  compacted request always has the user turn chat templates require.
+  added to the build request. The first round of Storyteller answers uses
+  `first_round_temperature`; each world samples `sample_size` example and meta-questions. Not built yet:
+  the extended summary and detail phases.
 - NPC speech responses (design.md: Character perceptions and NPC responses; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
   (`commit_speech`) opens an `npc_response_collection` whose candidates are the NPCs who heard

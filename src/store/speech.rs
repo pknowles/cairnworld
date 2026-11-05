@@ -139,7 +139,7 @@ impl Store {
              LEFT JOIN world_member ON world_member.id = player_character.member_id \
              LEFT JOIN npc_agent ON npc_agent.character_id = character.id \
              JOIN agent_history ON agent_history.agent_id = COALESCE(player_character.agent_id, npc_agent.agent_id) \
-             WHERE character_group.group_id = ? \
+             WHERE character_group.group_id = ? AND character.deleted = 0 \
                AND (npc_agent.agent_id IS NOT NULL OR world_member.access = 'active') \
              ORDER BY character.id",
             group_id,

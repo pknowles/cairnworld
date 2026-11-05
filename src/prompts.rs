@@ -48,6 +48,10 @@ pub struct Questioner {
     pub world_state: String,
     pub ask_request: String,
     pub ask_reminder: String,
+    pub review_request: String,
+    pub review_state: String,
+    pub review_reminder: String,
+    pub sample_size: usize,
     pub example_questions: Vec<String>,
     pub meta_questions: Vec<String>,
     pub tools: Tools,
@@ -56,12 +60,17 @@ pub struct Questioner {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Storyteller {
+    pub first_round_temperature: f32,
     pub role: String,
     pub world_state: String,
     pub round_start: String,
     pub next_question: String,
     pub summary_request: String,
     pub name_request: String,
+    pub uncreated_mentions: String,
+    pub build_request: String,
+    pub fix_request: String,
+    pub tools: Tools,
 }
 
 #[derive(Debug, Deserialize)]

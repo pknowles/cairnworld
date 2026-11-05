@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+mod authoring;
 mod generation;
 mod narration;
 mod npc;
@@ -2417,7 +2418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_world_is_generated_from_a_seed_and_refuses_play_until_ready() {
+    async fn a_world_is_generated_from_a_seed_into_reviewed_objects_and_then_opens_play() {
         let db = crate::store::TestDatabase::new("generation-test");
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -2436,6 +2437,18 @@ mod tests {
             }]))
         };
         let text = |text: &str| response(Content::Text(text.into()));
+        let calls = |calls: &[(&str, &str)]| {
+            response(Content::ToolCalls(
+                calls
+                    .iter()
+                    .map(|(name, arguments)| ToolCall {
+                        id: (*name).into(),
+                        name: (*name).into(),
+                        arguments: (*arguments).into(),
+                    })
+                    .collect(),
+            ))
+        };
         let (scripted, requests) = ScriptedBackend::recording([
             text("Meta answers."),
             call(
@@ -2444,9 +2457,44 @@ mod tests {
             ),
             text("The tide-wardens rule."),
             text("The drowned bell."),
-            text("Summary: a city ruled by tide-wardens."),
-            call("world_is_complete", "{}"),
+            text("Summary: a city ruled by tide-wardens. [[Ysolde]] guards the [[Drowned Bell]]."),
+            call("world_summary_complete", "{}"),
             text("  The Drowned Bell \n"),
+            calls(&[
+                (
+                    "create_location",
+                    r#"{"name":"Belfry","kind":"tower","description":"A tower above the water."}"#,
+                ),
+                (
+                    "create_group",
+                    r#"{"name":"Wardens","location":"Belfry","description":"The tide-wardens."}"#,
+                ),
+                (
+                    "create_npc",
+                    r#"{"name":"Ysolde","group":"Wardens","description":"A stern warden.","background":"Lost her brother to the tide.","motive":"Keep the bell silent."}"#,
+                ),
+                (
+                    "create_location",
+                    r#"{"name":"Belfry","kind":"tower","description":"Again."}"#,
+                ),
+            ]),
+            text("The objects exist."),
+            calls(&[
+                ("read_object", r#"{"kind":"npc","name":"Ysolde"}"#),
+                (
+                    "mark_object_reviewed",
+                    r#"{"kind":"location","name":"Belfry","reviewed":true}"#,
+                ),
+                (
+                    "mark_object_reviewed",
+                    r#"{"kind":"group","name":"Wardens","reviewed":true}"#,
+                ),
+                (
+                    "mark_object_reviewed",
+                    r#"{"kind":"npc","name":"Ysolde","reviewed":true}"#,
+                ),
+                ("core_objects_created", "{}"),
+            ]),
         ]);
         let backend = InferenceScheduler::new(scripted, Limits::default()).unwrap();
         // Listen before the worker starts so no step goes unseen.
@@ -2455,7 +2503,7 @@ mod tests {
             .unwrap()
             .events
             .subscribe();
-        let game = Game::new(
+        let _game = Game::new(
             store.clone(),
             worlds,
             backend.foreground(),
@@ -2467,24 +2515,13 @@ mod tests {
             },
         );
 
-        // Seven steps: meta, ask, two answers, summary, ask, name.
-        let mut finished = 0;
-        while finished < 7 {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+        // Nine steps (meta, ask, two answers, summary, ask, name, build, review)
+        // run until the world is ready; a failed world never becomes ready.
+        while !store.world_is_ready(member.world_id).await.unwrap() {
+            tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
                 .await
                 .expect("a generation step did not finish")
                 .unwrap();
-            // Each step ends with a change that names no inference; the
-            // inferences announce their own.
-            if matches!(
-                event,
-                crate::inspection::DevEvent::Changed {
-                    inference_id: None,
-                    ..
-                }
-            ) {
-                finished += 1;
-            }
         }
 
         assert!(
@@ -2493,19 +2530,45 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none(),
-            "no step is left once the concept is done"
+            "no step is left once the core objects are created"
         );
         let world = store.world(member.world_id).await.unwrap().unwrap();
         assert_eq!(world.name, "The Drowned Bell");
-        assert!(!world.ready, "the concept alone does not open play");
+        assert!(world.ready, "reviewed core objects open play");
         assert!(world.failure.is_none());
+        let objects = store.review_list(member.world_id).await.unwrap();
+        assert_eq!(objects.len(), 3);
+        assert!(objects.iter().all(|object| object.reviewed));
+        store.character_group_id(member.character_id).await.unwrap();
 
         let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
-        assert_eq!(shown.len(), 7);
-        assert!(shown[0].contains("A drowned city") && shown[0].contains("real personality"));
-        assert!(shown[1].contains("ask_questions") && shown[1].contains("world_is_complete"));
+        assert_eq!(shown.len(), 10);
+        assert!(shown[0].contains("A drowned city"));
+        let prompts = crate::prompts::current().unwrap();
+        let sampled = |questions: &[String]| {
+            questions
+                .iter()
+                .filter(|question| shown[0].contains(question.as_str()))
+                .count()
+        };
+        assert_eq!(
+            sampled(&prompts.questioner.meta_questions),
+            prompts.questioner.sample_size
+        );
+        assert_eq!(
+            sampled(&prompts.questioner.example_questions),
+            prompts.questioner.sample_size
+        );
+        assert!(shown[1].contains("ask_questions") && shown[1].contains("world_summary_complete"));
         // The Storyteller never sees the Questioner's meta-questions.
-        assert!(shown[2].contains("Who rules?") && !shown[2].contains("real personality"));
+        assert!(shown[2].contains("Who rules?"));
+        assert!(
+            prompts
+                .questioner
+                .meta_questions
+                .iter()
+                .all(|question| !shown[2].contains(question.as_str()))
+        );
         assert!(shown[3].contains("What is feared?"));
         // Only the summary reaches the Questioner, not the Storyteller's answers.
         assert!(shown[5].contains("Summary: a city ruled by tide-wardens."));
@@ -2513,7 +2576,71 @@ mod tests {
             !shown[5].contains("The tide-wardens rule.") && !shown[5].contains("The drowned bell.")
         );
 
-        // A player can open the world but nothing reaches it until it is ready.
+        // Only the Storyteller's first round of answers runs at its own temperature.
+        let temperatures: Vec<f32> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.sampling.temperature)
+            .collect();
+        let hot = prompts.storyteller.first_round_temperature;
+        assert_eq!(temperatures[..4], [0.0, 0.0, hot, hot]);
+        assert!(
+            temperatures[4..]
+                .iter()
+                .all(|temperature| *temperature == 0.0)
+        );
+
+        // The Storyteller builds with creation tools and sees the one summary.
+        assert!(
+            shown[7].contains("no object has them yet: Ysolde, Drowned Bell"),
+            "{}",
+            shown[7]
+        );
+        assert!(
+            shown[7].contains("Create the world's objects"),
+            "{}",
+            shown[7]
+        );
+        assert!(
+            shown[7].contains("create_npc") && shown[7].contains("a city ruled by tide-wardens")
+        );
+        // A refused call reaches the Storyteller as a tool result it can act on.
+        assert!(
+            shown[8].contains("already has a location called `Belfry`"),
+            "{}",
+            shown[8]
+        );
+        // The Questioner reviews the objects, not the Storyteller's answers.
+        assert!(shown[9].contains("- [ ] npc Ysolde") && shown[9].contains("read_object"));
+        assert!(!shown[9].contains("The tide-wardens rule."));
+    }
+
+    #[tokio::test]
+    async fn a_player_can_open_a_world_being_created_but_nothing_reaches_it() {
+        let db = crate::store::TestDatabase::new("generation-refusal");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("maker@example.test", "Maker")
+            .await
+            .unwrap();
+        let member = store
+            .create_world_to_generate(&owner, "A drowned city")
+            .await
+            .unwrap();
+        // No model response is scripted, so the first step fails the world.
+        let (scripted, requests) = ScriptedBackend::recording([]);
+        let backend = InferenceScheduler::new(scripted, Limits::default()).unwrap();
+        let worlds = World::load(&store).await.unwrap();
+        let game = Game::new(
+            store.clone(),
+            worlds,
+            backend.foreground(),
+            Limits::default(),
+            "scripted".into(),
+            Sampling::default(),
+        );
+
         let entered = game.enter(member.clone()).await.unwrap_err();
         assert!(format!("{entered:#}").contains("still being created"));
         let spoke = game
@@ -2521,11 +2648,183 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{spoke:#}").contains("still being created"));
-        assert_eq!(
-            requests.lock().unwrap().len(),
-            7,
-            "refused input ran no inference"
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| { !shown(request).contains("hello") }),
+            "refused input reached no model"
         );
+    }
+
+    /// The object phases on the real model: from a finished summary the
+    /// Storyteller builds the objects with its tools and the Questioner
+    /// reviews them. Prints what was made and both chats. Not part of the
+    /// device suite: a run takes several minutes.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU; takes several minutes"]
+    async fn the_real_model_builds_and_reviews_core_objects_from_a_summary() {
+        real_core_object_phases(false).await;
+    }
+
+    /// The Questioner's review on the real model: part of the world is already
+    /// built and the rest is missing, so the review has to notice that and ask
+    /// the Storyteller to add it before it can complete the phase.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU; takes several minutes"]
+    async fn the_real_model_questioner_catches_what_the_storyteller_left_out() {
+        real_core_object_phases(true).await;
+    }
+
+    /// With `leave_gaps` the Storyteller's building is replaced by a partial
+    /// world, so the first thing that happens is the Questioner's review.
+    async fn real_core_object_phases(leave_gaps: bool) {
+        use crate::scenario::{Group, Location, Notes, Npc};
+        use crate::store::{Advance, NewObject};
+        const SUMMARY: &str = "Saltgate is a smuggler town on an estuary whose tide has stopped             coming in. The Harbor Guild, led by Warden [[Ysolde Varn]], blames the smugglers and             wants the channel dredged. The smugglers, led by [[Captain Brannoch]], hide their             cargo in the [[Bell Cellar]] below [[Saltgate Quay]], where a drowned bell rings             against the tide; Brannoch wants the tide to stay wrong because it hides his boats.             Ysolde's brother drowned near the bell and she will not let the cellar stay hidden.             Players arrive at the quay with a [[Guild writ]] from a distant client who wants the             bell silenced, and must choose between the Guild, the smugglers and their own aims.";
+        let model = DeviceModel::load_with_default_limits().await;
+        let (shared, name, sampling, limits) = model.parts();
+        let db = crate::store::TestDatabase::new("real-generation");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("maker@example.test", "Maker")
+            .await
+            .unwrap();
+        let member = store
+            .create_world_to_generate(
+                &owner,
+                "A smuggler's port town where something is wrong with the tide.",
+            )
+            .await
+            .unwrap();
+        // The summary phase is done; start where the objects are built.
+        for advance in [
+            Advance::MetaQuestionsAnswered,
+            Advance::Questions(vec!["Who rules the town?".into()]),
+            Advance::QuestionAnswered,
+            Advance::Summary(SUMMARY.into()),
+            Advance::WorldSummaryComplete,
+            Advance::Name("Saltgate".into()),
+        ] {
+            store
+                .advance_generation(member.world_id, advance, 0)
+                .await
+                .unwrap();
+        }
+        if leave_gaps {
+            let quay = Location {
+                name: "Saltgate Quay".into(),
+                kind: "village".into(),
+                description: "A smuggler town on a still estuary.".into(),
+                notes: Notes::default(),
+            };
+            let guild = Group {
+                name: "The Harbor Guild".into(),
+                location: "Saltgate Quay".into(),
+                description: "Officials who want the channel dredged.".into(),
+                notes: Notes::default(),
+            };
+            let ysolde = Npc {
+                name: "Ysolde Varn".into(),
+                group: "The Harbor Guild".into(),
+                description: "A stern Guild warden.".into(),
+                background: "Her brother drowned near the bell.".into(),
+                motive: "Dredge the channel.".into(),
+                ambition: String::new(),
+                sheet: serde_json::json!({}),
+                notes: Notes::default(),
+            };
+            store
+                .create_object(member.world_id, NewObject::Location(&quay))
+                .await
+                .unwrap();
+            store
+                .create_object(member.world_id, NewObject::Group(&guild))
+                .await
+                .unwrap();
+            store
+                .create_object(member.world_id, NewObject::Npc(&ysolde))
+                .await
+                .unwrap();
+            store
+                .advance_generation(member.world_id, Advance::Built, 0)
+                .await
+                .unwrap();
+        }
+        let backend = InferenceScheduler::new(shared, limits).unwrap();
+        let worlds = World::load(&store).await.unwrap();
+        let mut events = World::get(&worlds, member.world_id)
+            .unwrap()
+            .events
+            .subscribe();
+        let _game = Game::new(
+            store.clone(),
+            worlds,
+            backend.foreground(),
+            limits,
+            name,
+            sampling,
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1500), async {
+            loop {
+                let world = store.world(member.world_id).await.unwrap().unwrap();
+                if world.ready || world.failure.is_some() {
+                    break;
+                }
+                let _ = events.recv().await;
+            }
+        })
+        .await
+        .expect("the world was neither ready nor failed in time");
+
+        let world = store.world(member.world_id).await.unwrap().unwrap();
+        println!(
+            "WORLD {} ready={} failure={:?}",
+            world.name, world.ready, world.failure
+        );
+        for entry in store.review_list(member.world_id).await.unwrap() {
+            println!(
+                "OBJECT [{}] {} {}",
+                if entry.reviewed { "x" } else { " " },
+                entry.kind,
+                entry.name
+            );
+        }
+        for role in ["questioner", "storyteller"] {
+            let agent = store.role_agent(member.world_id, role).await.unwrap();
+            let branch = store.agent_branch(agent).await.unwrap();
+            let segments = store.history_live_segments(branch).await.unwrap();
+            let request = store
+                .request_for_segments(agent, &segments, Sampling::default())
+                .await
+                .unwrap();
+            println!(
+                "CHAT {role}
+{}",
+                shown(&request)
+            );
+        }
+        assert!(world.failure.is_none(), "{:?}", world.failure);
+        assert!(world.ready);
+        if leave_gaps {
+            let agent = store
+                .role_agent(member.world_id, "storyteller")
+                .await
+                .unwrap();
+            let branch = store.agent_branch(agent).await.unwrap();
+            let segments = store.history_live_segments(branch).await.unwrap();
+            let chat = shown(
+                &store
+                    .request_for_segments(agent, &segments, Sampling::default())
+                    .await
+                    .unwrap(),
+            );
+            assert!(
+                chat.contains("The Questioner reviewed the world and asks"),
+                "the review should have sent the Storyteller back to add what was missing"
+            );
+        }
     }
 
     /// Real-model check of what a summary keeps. The history is the Questioner's
@@ -2667,7 +2966,7 @@ mod tests {
             call("ask_questions", r#"{"questions":["Q two?"]}"#),
             text("Answer two."),
             text("SUMMARY-TWO"),
-            call("world_is_complete", "{}"),
+            call("world_summary_complete", "{}"),
             text("The Drowned Bell"),
         ]);
         let backend = InferenceScheduler::new(scripted, Limits::default()).unwrap();
@@ -3136,12 +3435,30 @@ mod tests {
 
     impl DeviceModel {
         pub(crate) async fn load() -> Self {
+            Self::load_with(
+                Settings::for_device_test("dev-qwen35").expect("default.toml should load"),
+            )
+            .await
+        }
+
+        /// The model under the product's own limits instead of the small-card
+        /// ones, for work whose requests do not fit a 4096-token context.
+        async fn load_with_default_limits() -> Self {
+            Self::load_with(
+                Settings::for_test(
+                    "model = \"dev-qwen35\"
+",
+                )
+                .expect("default.toml should load"),
+            )
+            .await
+        }
+
+        async fn load_with(settings: Settings) -> Self {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter("cairnworld=info")
                 .with_test_writer()
                 .try_init();
-            let settings =
-                Settings::for_device_test("dev-qwen35").expect("default.toml should load");
             let model = settings
                 .model(None)
                 .expect("default.toml should configure the device-test model");

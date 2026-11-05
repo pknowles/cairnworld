@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT item.name, item.description FROM item_character JOIN item ON item.id = item_character.item_id WHERE item_character.character_id = ? AND item.deleted = 0 ORDER BY item.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a84fb61319516069e7cb86629234cdc5741727286ae6f83e5699f4c702f530c6"
+}

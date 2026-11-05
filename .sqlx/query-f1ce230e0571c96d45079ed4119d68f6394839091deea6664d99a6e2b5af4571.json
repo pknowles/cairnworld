@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.name, character.description, character.background, character.motive, character.ambition, character.sheet, \"group\".name AS \"group_name?\" FROM character LEFT JOIN character_group ON character_group.character_id = character.id LEFT JOIN \"group\" ON \"group\".id = character_group.group_id WHERE character.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "background",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "motive",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "ambition",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "sheet",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "group_name?",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "f1ce230e0571c96d45079ed4119d68f6394839091deea6664d99a6e2b5af4571"
+}

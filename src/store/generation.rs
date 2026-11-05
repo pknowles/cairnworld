@@ -24,8 +24,10 @@ pub enum GenerationStage {
     Summarize,
     /// The Storyteller replies with the world name.
     Name,
-    /// The concept is finished and waits for the authoring tools.
-    ConceptDone,
+    /// The Storyteller creates objects with the authoring tools.
+    Build,
+    /// The Questioner reviews the objects.
+    Review,
     Failed,
     /// Ready to play, however the world was filled in.
     Complete,
@@ -39,7 +41,8 @@ impl GenerationStage {
             Self::Answer => "answer",
             Self::Summarize => "summarize",
             Self::Name => "name",
-            Self::ConceptDone => "concept_done",
+            Self::Build => "build",
+            Self::Review => "review",
             Self::Failed => "failed",
             Self::Complete => "complete",
         }
@@ -52,7 +55,8 @@ impl GenerationStage {
             "answer" => Self::Answer,
             "summarize" => Self::Summarize,
             "name" => Self::Name,
-            "concept_done" => Self::ConceptDone,
+            "build" => Self::Build,
+            "review" => Self::Review,
             "failed" => Self::Failed,
             "complete" => Self::Complete,
             other => bail!("unknown generation stage `{other}`"),
@@ -66,10 +70,14 @@ pub enum Advance {
     /// The Questioner's questions for the Storyteller to answer.
     Questions(Vec<String>),
     /// The Questioner is satisfied.
-    WorldIsComplete,
+    WorldSummaryComplete,
     QuestionAnswered,
     Summary(String),
     Name(String),
+    /// The Storyteller finished a round of creating objects.
+    Built,
+    /// Every core object is reviewed and the world is whole.
+    CoreObjectsCreated,
 }
 
 /// Everything one generation step needs, read at once.
@@ -119,7 +127,10 @@ impl Store {
         let joined = Self::join_world_unplaced(&mut transaction, owner, world_id).await?;
         Self::create_role_agent(&mut transaction, world_id, "questioner").await?;
         Self::create_role_agent(&mut transaction, world_id, "storyteller").await?;
-        sqlx::query!("INSERT INTO world_generation (world_id) VALUES (?)", world_id)
+        sqlx::query!(
+            "INSERT INTO world_generation (world_id) VALUES (?)",
+            world_id
+        )
         .execute(&mut *transaction)
         .await
         .with_context(|| format!("recording generation progress for world {world_id}"))?;
@@ -158,6 +169,19 @@ impl Store {
         .await
         .with_context(|| format!("linking the {role} agent for world {world_id}"))?;
         Ok(())
+    }
+
+    /// The agent for one of a world's generation roles.
+    #[cfg(test)]
+    pub async fn role_agent(&self, world_id: i64, role: &str) -> Result<i64> {
+        sqlx::query_scalar!(
+            "SELECT agent_id FROM world_role_agent WHERE world_id = ? AND role = ?",
+            world_id,
+            role,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("finding the {role} of world {world_id}"))
     }
 
     /// Whether the world is ready to play, however it was filled in.
@@ -208,6 +232,8 @@ impl Store {
                 | GenerationStage::Answer
                 | GenerationStage::Summarize
                 | GenerationStage::Name
+                | GenerationStage::Build
+                | GenerationStage::Review
         ) {
             return Ok(None);
         }
@@ -259,7 +285,10 @@ impl Store {
         let stage = GenerationStage::parse(&current.generation_stage)?;
         let next = match (stage, advance) {
             (GenerationStage::Meta, Advance::MetaQuestionsAnswered) => GenerationStage::Ask,
-            (GenerationStage::Ask, Advance::Questions(questions)) => {
+            (
+                stage @ (GenerationStage::Ask | GenerationStage::Review),
+                Advance::Questions(questions),
+            ) => {
                 ensure!(!questions.is_empty(), "the Questioner asked no questions");
                 let questions = serde_json::to_string(&questions).context("encoding questions")?;
                 sqlx::query!(
@@ -270,9 +299,23 @@ impl Store {
                 .execute(&mut *transaction)
                 .await
                 .context("recording the round's questions")?;
-                GenerationStage::Answer
+                if stage == GenerationStage::Review {
+                    GenerationStage::Build
+                } else {
+                    GenerationStage::Answer
+                }
             }
-            (GenerationStage::Ask, Advance::WorldIsComplete) => GenerationStage::Name,
+            (GenerationStage::Ask, Advance::WorldSummaryComplete) => {
+                // The last round's questions are answered; building starts fresh.
+                sqlx::query!(
+                    "UPDATE world_generation SET questions = '[]', next_question = 0 WHERE world_id = ?",
+                    world_id,
+                )
+                .execute(&mut *transaction)
+                .await
+                .context("clearing the answered questions")?;
+                GenerationStage::Name
+            }
             (GenerationStage::Answer, Advance::QuestionAnswered) => {
                 let answered = current.next_question + 1;
                 let asked: Vec<String> = serde_json::from_str(&current.questions)
@@ -313,7 +356,29 @@ impl Store {
                     .execute(&mut *transaction)
                     .await
                     .context("storing the world name")?;
-                GenerationStage::ConceptDone
+                GenerationStage::Build
+            }
+            (GenerationStage::Build, Advance::Built) => {
+                sqlx::query!(
+                    "UPDATE world_generation SET questions = '[]', next_question = 0 WHERE world_id = ?",
+                    world_id,
+                )
+                .execute(&mut *transaction)
+                .await
+                .context("clearing the answered questions")?;
+                GenerationStage::Review
+            }
+            (GenerationStage::Review, Advance::CoreObjectsCreated) => {
+                let problems = Self::core_problems(&mut transaction, world_id).await?;
+                ensure!(
+                    problems.is_empty(),
+                    "the world is not whole: {}",
+                    problems.join(" ")
+                );
+                // Until entry placement exists, whoever waits for the world
+                // starts in its first group.
+                Self::place_waiting_adventurers(&mut transaction, world_id).await?;
+                GenerationStage::Complete
             }
             (stage, _) => bail!(
                 "that generation step does not apply to world {world_id} at stage `{}`",
@@ -540,7 +605,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .advance_generation(world_id, Advance::WorldIsComplete, 5)
+            .advance_generation(world_id, Advance::WorldSummaryComplete, 5)
             .await
             .unwrap();
         assert!(
@@ -553,7 +618,7 @@ mod tests {
             .advance_generation(world_id, Advance::Name(" Saltmarsh \n".into()), 6)
             .await
             .unwrap();
-        assert!(store.next_generation(world_id).await.unwrap().is_none());
+        assert_eq!(stage(&store, world_id).await, GenerationStage::Build);
         assert_eq!(
             store.world(world_id).await.unwrap().unwrap().name,
             "Saltmarsh"

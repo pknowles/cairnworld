@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT from_location_id, to_location_id FROM connection WHERE world_id = ? AND deleted = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "from_location_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "to_location_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8ecdc1181b45f06797caaf91b15e2d75706eaff0a5337595aa462fb1734a83c9"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE item SET name = COALESCE(?, name), item_type_id = COALESCE(?, item_type_id), description = COALESCE(?, description) WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "d40051091ab2ba7601d0926bda846045f827132e73c489deafb1e50cf904829c"
+}

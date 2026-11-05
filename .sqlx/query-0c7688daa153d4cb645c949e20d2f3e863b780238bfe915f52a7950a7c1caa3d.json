@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE character SET name = COALESCE(?, name), description = COALESCE(?, description), background = COALESCE(?, background), motive = COALESCE(?, motive), ambition = COALESCE(?, ambition), sheet = COALESCE(?, sheet) WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "0c7688daa153d4cb645c949e20d2f3e863b780238bfe915f52a7950a7c1caa3d"
+}

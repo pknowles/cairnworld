@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name AS \"name!: String\" FROM location WHERE world_id = ?1 AND deleted = 0 UNION SELECT name FROM \"group\" WHERE world_id = ?1 AND deleted = 0 UNION SELECT name FROM character WHERE world_id = ?1 AND role = 'npc' AND deleted = 0 UNION SELECT name FROM item_type WHERE world_id = ?1 AND deleted = 0 UNION SELECT name FROM item WHERE world_id = ?1 AND deleted = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6b6d9e6163b25aad89d5afc31a7439b6c182089b09bae659e54988388e4befa3"
+}

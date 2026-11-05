@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT item.name, item.description, item_type.name AS item_type, location.name AS \"location?\", holder.name AS \"held_by?\" FROM item JOIN item_type ON item_type.id = item.item_type_id LEFT JOIN item_location ON item_location.item_id = item.id LEFT JOIN location ON location.id = item_location.location_id LEFT JOIN item_character ON item_character.item_id = item.id LEFT JOIN character AS holder ON holder.id = item_character.character_id WHERE item.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "item_type",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "location?",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "held_by?",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "adb0637e9b7142fd52155198039dcfbeae2c651a2ad16365700d923b5c29649d"
+}

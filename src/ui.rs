@@ -860,7 +860,8 @@ fn inspect_pane(
             // history for any committed world change rather than leaving it
             // stale until the developer reopens it.
             InspectData::AgentHistory { .. } => true,
-            InspectData::Agents(_) | InspectData::Objects(_) => false,
+            InspectData::Objects(_) => true,
+            InspectData::Agents(_) => false,
         }
     }
 
@@ -2552,7 +2553,9 @@ fn chat_status_line(
 
 fn chat_activity_text(activity: ChatActivity) -> &'static str {
     match activity {
-        ChatActivity::WorldBeingCreated => "This world is still being created. You can start once it is ready.",
+        ChatActivity::WorldBeingCreated => {
+            "This world is still being created. You can start once it is ready."
+        }
         ChatActivity::PreparingOpening => "The game is preparing its first response…",
         ChatActivity::Responding => "The game is responding…",
     }

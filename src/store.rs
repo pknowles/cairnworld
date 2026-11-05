@@ -1,10 +1,19 @@
+mod authoring;
 mod content;
+mod editing;
 mod generation;
 mod history;
 mod interruption;
 mod npc;
 mod prompt;
+mod review;
 mod speech;
+use authoring::Holder;
+pub use authoring::{NewItem, NewObject, ObjectKind, Rejected};
+pub use editing::{
+    Change, ConnectionDelete, ConnectionUpdate, Delete, GroupUpdate, ItemTypeUpdate, ItemUpdate,
+    LocationDelete, LocationUpdate, NameOnly, NpcDelete, NpcUpdate, Update,
+};
 pub use generation::{Advance, Generation, GenerationStage};
 use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
@@ -929,7 +938,7 @@ pub struct PendingCompaction {
     pub next_input_tokens: usize,
     pub sampling: Sampling,
     pub model: String,
-    /// Static prompt and tool segments from the normal request that queued
+    /// Role text, context and tool segments from the normal request that queued
     /// this job. Raw history is always rebuilt from its current stored form.
     pub static_segments: Vec<Segment>,
 }
@@ -1640,106 +1649,34 @@ impl Store {
 
         let mut locations = HashMap::new();
         for location in &scenario.locations {
-            let gm_notes = Json(&location.notes.gm);
-            let storyteller_notes = Json(&location.notes.storyteller);
-            let location_id = sqlx::query!(
-                "INSERT INTO location (world_id, name, kind, description, gm_notes, storyteller_notes) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
-                world_id,
-                location.name,
-                location.kind,
-                location.description,
-                gm_notes,
-                storyteller_notes,
-            )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("creating location {}", location.name))?
-            .last_insert_rowid();
+            let location_id = Self::insert_location(&mut transaction, world_id, location).await?;
             locations.insert(location.name.as_str(), location_id);
         }
-
         for connection in &scenario.connections {
-            let gm_notes = Json(&connection.notes.gm);
-            let storyteller_notes = Json(&connection.notes.storyteller);
-            sqlx::query!(
-                "INSERT INTO connection (world_id, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            Self::insert_connection(
+                &mut transaction,
                 world_id,
                 locations[connection.from.as_str()],
                 locations[connection.to.as_str()],
-                connection.travel_time,
-                connection.description,
-                gm_notes,
-                storyteller_notes,
+                connection,
             )
-            .execute(&mut *transaction)
-            .await
-            .context("creating scenario connection")?;
+            .await?;
         }
-
-        let world_gm_agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id,)
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("creating world GM for world {world_id}"))?
-            .last_insert_rowid();
-        sqlx::query!(
-            "INSERT INTO world_gm (world_id, agent_id) VALUES (?, ?)",
-            world_id,
-            world_gm_agent_id,
-        )
-        .execute(&mut *transaction)
-        .await
-        .with_context(|| format!("linking world GM for world {world_id}"))?;
-
         let mut groups = HashMap::new();
         for group in &scenario.groups {
-            let branch_id = sqlx::query!(
-                "INSERT INTO history_branch (agent_id) VALUES (?)",
-                world_gm_agent_id,
-            )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("creating history branch for group {}", group.name))?
-            .last_insert_rowid();
-            let gm_notes = Json(&group.notes.gm);
-            let storyteller_notes = Json(&group.notes.storyteller);
-            let group_id = sqlx::query!(
-                "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id, gm_notes, storyteller_notes, scene_narrated) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            let group_id = Self::insert_group(
+                &mut transaction,
                 world_id,
-                group.name,
                 locations[group.location.as_str()],
-                group.description,
-                branch_id,
-                gm_notes,
-                storyteller_notes,
+                group,
             )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("creating group {}", group.name))?
-            .last_insert_rowid();
+            .await?;
             groups.insert(group.name.as_str(), group_id);
         }
-
         let mut item_types = HashMap::new();
         for item_type in &scenario.item_types {
-            let stats = Json(&item_type.stats);
-            let gm_notes = Json(&item_type.notes.gm);
-            let storyteller_notes = Json(&item_type.notes.storyteller);
-            let item_type_id = sqlx::query!(
-                "INSERT INTO item_type (world_id, name, description, stats, gm_notes, storyteller_notes) VALUES (?, ?, ?, ?, ?, ?)",
-                world_id,
-                item_type.name,
-                item_type.description,
-                stats,
-                gm_notes,
-                storyteller_notes,
-            )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("creating item type {}", item_type.name))?
-            .last_insert_rowid();
+            let item_type_id =
+                Self::insert_item_type(&mut transaction, world_id, item_type).await?;
             item_types.insert(item_type.name.as_str(), item_type_id);
         }
         for spell_type in &scenario.spell_types {
@@ -1760,70 +1697,19 @@ impl Store {
             .with_context(|| format!("creating spell type {}", spell_type.name))?;
         }
         for item in &scenario.items {
-            let gm_notes = Json(&item.notes.gm);
-            let storyteller_notes = Json(&item.notes.storyteller);
-            let item_id = sqlx::query!(
-                "INSERT INTO item (world_id, item_type_id, name, description, gm_notes, storyteller_notes) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
-                world_id,
-                item_types[item.item_type.as_str()],
-                item.name,
-                item.description,
-                gm_notes,
-                storyteller_notes,
-            )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("creating item {}", item.name))?
-            .last_insert_rowid();
-            sqlx::query!(
-                "INSERT INTO item_location (item_id, location_id) VALUES (?, ?)",
-                item_id,
-                locations[item.location.as_str()],
-            )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("placing item {}", item.name))?;
-        }
-
-        for npc in &scenario.npcs {
-            let character_id = Self::insert_character(
+            Self::insert_item(
                 &mut transaction,
                 world_id,
-                CharacterSeed {
-                    role: "npc",
-                    name: &npc.name,
-                    description: &npc.description,
-                    background: &npc.background,
-                    motive: &npc.motive,
-                    ambition: &npc.ambition,
-                    sheet: &npc.sheet,
-                    notes: &npc.notes,
-                },
+                item_types[item.item_type.as_str()],
+                Holder::Location(locations[item.location.as_str()]),
+                &item.name,
+                &item.description,
+                &item.notes,
             )
             .await?;
-            sqlx::query!(
-                "INSERT INTO character_group (character_id, group_id, description) VALUES (?, ?, '')",
-                character_id,
-                groups[npc.group.as_str()],
-            )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("placing NPC {}", npc.name))?;
-            let agent_id = sqlx::query!("INSERT INTO agent (world_id) VALUES (?)", world_id,)
-                .execute(&mut *transaction)
-                .await
-                .with_context(|| format!("creating NPC agent for {}", npc.name))?
-                .last_insert_rowid();
-            Self::create_agent_history(&mut transaction, agent_id).await?;
-            sqlx::query!(
-                "INSERT INTO npc_agent (character_id, agent_id) VALUES (?, ?)",
-                character_id,
-                agent_id,
-            )
-            .execute(&mut *transaction)
-            .await
-            .with_context(|| format!("linking NPC agent for {}", npc.name))?;
+        }
+        for npc in &scenario.npcs {
+            Self::insert_npc(&mut transaction, world_id, groups[npc.group.as_str()], npc).await?;
         }
 
         sqlx::query!(
@@ -2688,7 +2574,7 @@ impl Store {
              FROM character_group \
              JOIN character ON character.id = character_group.character_id \
              LEFT JOIN character_presence ON character_presence.character_id = character_group.character_id \
-             WHERE character_group.group_id = ? ORDER BY character.id",
+             WHERE character_group.group_id = ? AND character.deleted = 0 ORDER BY character.id",
             group_id,
         )
         .fetch_all(&self.pool)
@@ -3336,7 +3222,7 @@ impl Store {
         sqlx::query_scalar!(
             "SELECT character.id FROM character_group \
              JOIN character ON character.id = character_group.character_id \
-             WHERE character_group.group_id = ? AND character.role = 'npc' \
+             WHERE character_group.group_id = ? AND character.role = 'npc' AND character.deleted = 0 \
              ORDER BY character.id",
             group_id,
         )
@@ -3411,7 +3297,7 @@ impl Store {
             SceneItem,
             "SELECT item.name, item.description FROM item_location \
              JOIN item ON item.id = item_location.item_id \
-             WHERE item_location.location_id = ? ORDER BY item.id",
+             WHERE item_location.location_id = ? AND item.deleted = 0 ORDER BY item.id",
             location_id,
         )
         .fetch_all(pool)
@@ -3424,7 +3310,7 @@ impl Store {
             SceneItem,
             "SELECT item.name, item.description FROM item_character \
              JOIN item ON item.id = item_character.item_id \
-             WHERE item_character.character_id = ? ORDER BY item.id",
+             WHERE item_character.character_id = ? AND item.deleted = 0 ORDER BY item.id",
             character_id,
         )
         .fetch_all(pool)
@@ -3438,7 +3324,7 @@ impl Store {
             "SELECT character.name, character.description FROM character_group \
              JOIN \"group\" ON \"group\".id = character_group.group_id \
              JOIN character ON character.id = character_group.character_id \
-             WHERE \"group\".location_id = ? AND character.role = 'npc' ORDER BY character.id",
+             WHERE \"group\".location_id = ? AND character.role = 'npc' AND character.deleted = 0 ORDER BY character.id",
             location_id,
         )
         .fetch_all(pool)
@@ -3452,7 +3338,7 @@ impl Store {
     ) -> Result<Vec<GmSceneCharacter>> {
         let rows: Vec<GmSceneCharacterRow> = sqlx::query_as!(
             GmSceneCharacterRow,
-            "SELECT character.id, character.name, character.description, character.sheet, character.gm_notes              FROM character_group JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? ORDER BY character.id",
+            "SELECT character.id, character.name, character.description, character.sheet, character.gm_notes              FROM character_group JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? AND character.deleted = 0 ORDER BY character.id",
             group_id,
         )
         .fetch_all(pool)
@@ -3996,7 +3882,7 @@ impl Store {
                      JOIN character_group ON character_group.character_id = ? \
                      JOIN \"group\" ON \"group\".id = character_group.group_id \
                         AND \"group\".location_id = item_location.location_id \
-                     WHERE item.world_id = ? AND item.name = ?",
+                     WHERE item.world_id = ? AND item.name = ? AND item.deleted = 0",
                     action.character_id,
                     action.world_id,
                     arguments.item,
@@ -4048,7 +3934,7 @@ impl Store {
     pub async fn export_scenario(&self, world_id: i64) -> Result<Scenario> {
         let held_items: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM item_character \
-             JOIN item ON item.id = item_character.item_id WHERE item.world_id = ?",
+             JOIN item ON item.id = item_character.item_id WHERE item.world_id = ? AND item.deleted = 0",
             world_id,
         )
         .fetch_one(&self.pool)
@@ -4065,7 +3951,7 @@ impl Store {
             .with_context(|| format!("world {world_id} does not exist"))?;
         let notes = decode_notes(&world.gm_notes, &world.storyteller_notes)?;
         let locations = sqlx::query!(
-            "SELECT name, kind, description, gm_notes, storyteller_notes FROM location WHERE world_id = ? ORDER BY id",
+            "SELECT name, kind, description, gm_notes, storyteller_notes FROM location WHERE world_id = ? AND deleted = 0 ORDER BY id",
             world_id,
         ).fetch_all(&self.pool).await.context("loading scenario locations")?.into_iter()
             .map(|row| Ok(Location {
@@ -4095,7 +3981,7 @@ impl Store {
         let connections = sqlx::query!(
             "SELECT from_location.name AS from_name, to_location.name AS to_name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
              FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id \
-             JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? ORDER BY connection.id",
+             JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? AND connection.deleted = 0 ORDER BY connection.id",
             world_id,
         ).fetch_all(&self.pool).await.context("loading scenario connections")?.into_iter()
             .map(|row| Ok(ScenarioConnection {
@@ -4104,7 +3990,7 @@ impl Store {
             })).collect::<Result<_>>()?;
         let groups = sqlx::query!(
             "SELECT \"group\".name, location.name AS location_name, \"group\".description, \"group\".gm_notes, \"group\".storyteller_notes \
-             FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".world_id = ? ORDER BY \"group\".id",
+             FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".world_id = ? AND \"group\".deleted = 0 ORDER BY \"group\".id",
             world_id,
         ).fetch_all(&self.pool).await.context("loading scenario groups")?.into_iter()
             .map(|row| Ok(ScenarioGroup {
@@ -4114,7 +4000,7 @@ impl Store {
         let npcs = sqlx::query!(
             "SELECT character.name, \"group\".name AS group_name, character.description, character.background, character.motive, character.ambition, character.sheet, character.gm_notes, character.storyteller_notes \
              FROM character JOIN character_group ON character_group.character_id = character.id \
-             JOIN \"group\" ON \"group\".id = character_group.group_id WHERE character.world_id = ? AND character.role = 'npc' ORDER BY character.id",
+             JOIN \"group\" ON \"group\".id = character_group.group_id WHERE character.world_id = ? AND character.role = 'npc' AND character.deleted = 0 ORDER BY character.id",
             world_id,
         ).fetch_all(&self.pool).await.context("loading scenario NPCs")?.into_iter()
             .map(|row| Ok(Npc {
@@ -4128,7 +4014,7 @@ impl Store {
         let items = sqlx::query!(
             "SELECT item.name, item_type.name AS item_type, location.name AS location_name, item.description, item.gm_notes, item.storyteller_notes \
              FROM item JOIN item_type ON item_type.id = item.item_type_id JOIN item_location ON item_location.item_id = item.id \
-             JOIN location ON location.id = item_location.location_id WHERE item.world_id = ? ORDER BY item.id",
+             JOIN location ON location.id = item_location.location_id WHERE item.world_id = ? AND item.deleted = 0 ORDER BY item.id",
             world_id,
         ).fetch_all(&self.pool).await.context("loading scenario items")?.into_iter()
             .map(|row| Ok(Item {
@@ -4989,23 +4875,18 @@ impl Store {
                         summary.id,
                         summary.agent_id
                     );
-                    // The summary is prior conversation carried in the leading
-                    // system message as a marked block, not a second system
-                    // turn: strict chat templates reject a system message
-                    // anywhere but first. When a recipe has a role prompt it
-                    // hosts the block; otherwise the summary is that message.
-                    let block = format!("Conversation summary so far:\n{}", summary.content);
-                    match messages.first_mut() {
-                        Some(Message {
-                            role: Role::System,
-                            content: MessageContent::Text(system),
-                            ..
-                        }) => {
-                            system.push_str("\n\n");
-                            system.push_str(&block);
-                        }
-                        _ => messages.insert(0, Message::text(Role::System, block)),
-                    }
+                    // The summary stands in for the oldest messages, which began
+                    // with the task, so it is a user turn: whatever messages are
+                    // kept after it, the conversation still has the user turn
+                    // that chat templates require.
+                    messages.push(Message::text(
+                        Role::User,
+                        format!(
+                            "Conversation summary so far:
+{}",
+                            summary.content
+                        ),
+                    ));
                 }
                 Segment::Messages { messages: range } => {
                     // Ownership of every range's branch was already checked
@@ -5085,7 +4966,7 @@ impl Store {
             }
         }
         // A well-formed conversation for any chat model: at most one system
-        // message and only in first place, and a real user turn to answer.
+        // message, and only in first place.
         // Strict templates (Qwen3.5) reject anything else outright; lenient
         // ones hide the malformed input.
         let system_positions = messages
@@ -5097,14 +4978,6 @@ impl Store {
         ensure!(
             system_positions.is_empty() || system_positions == [0],
             "assembled request for agent {agent_id} has system messages at {system_positions:?}, not only first"
-        );
-        // Narration and speech reach the model as user input, so either gives
-        // an agent that has only heard something a turn to answer.
-        ensure!(
-            messages
-                .iter()
-                .any(|message| matches!(message.role, Role::User | Role::Narration | Role::Speech)),
-            "assembled request for agent {agent_id} has no user turn for the model to answer"
         );
         Ok(Request {
             messages,
@@ -6172,12 +6045,12 @@ impl Store {
         let rows = sqlx::query_as!(
             ObjectIndexRow,
             "WITH object_index AS ( \
-                SELECT 'character' AS object_type, id, name, description, gm_notes, storyteller_notes FROM character WHERE world_id = ? \
-                UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name, connection.description, connection.gm_notes, connection.storyteller_notes FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? \
-                UNION ALL SELECT 'group', id, name, description, gm_notes, storyteller_notes FROM \"group\" WHERE world_id = ? \
-                UNION ALL SELECT 'item', id, name, description, gm_notes, storyteller_notes FROM item WHERE world_id = ? \
-                UNION ALL SELECT 'item_type', id, name, description, gm_notes, storyteller_notes FROM item_type WHERE world_id = ? \
-                UNION ALL SELECT 'location', id, name, description, gm_notes, storyteller_notes FROM location WHERE world_id = ? \
+                SELECT 'character' AS object_type, id, name || IIF(deleted, ' (deleted)', '') AS name, description, gm_notes, storyteller_notes FROM character WHERE world_id = ? \
+                UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name || IIF(connection.deleted, ' (deleted)', ''), connection.description, connection.gm_notes, connection.storyteller_notes FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? \
+                UNION ALL SELECT 'group', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM \"group\" WHERE world_id = ? \
+                UNION ALL SELECT 'item', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM item WHERE world_id = ? \
+                UNION ALL SELECT 'item_type', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM item_type WHERE world_id = ? \
+                UNION ALL SELECT 'location', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM location WHERE world_id = ? \
              ) SELECT object_type, id, name, description, gm_notes, storyteller_notes FROM object_index \
              WHERE (? IS NULL OR object_type = ?) \
                AND (? IS NULL OR id = ?) \
@@ -9029,14 +8902,16 @@ mod tests {
             )
             .await
             .unwrap();
-        // The summary is folded into the single leading system message, not a
-        // second system turn, so strict chat templates accept it.
+        // The summary is a user turn after the one system message, so the
+        // conversation has a user turn even when only the agent's own messages
+        // were kept after it.
         assert!(matches!(assembled.messages.as_slice(), [
             Message { role: Role::System, content: MessageContent::Text(system), .. },
+            Message { role: Role::User, content: MessageContent::Text(summary), .. },
             Message { role: Role::Assistant, .. },
             Message { role: Role::User, .. },
-        ] if system.starts_with("You are a careful guide.")
-            && system.contains("The floorboards hide a locked chest.")));
+        ] if system == "You are a careful guide."
+            && summary.contains("The floorboards hide a locked chest.")));
     }
 
     #[tokio::test]
@@ -9846,7 +9721,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_summary_without_a_role_prompt_becomes_the_leading_system_message() {
+    async fn a_summary_without_a_role_prompt_is_the_leading_user_turn() {
         let (store, _db, agent, segments, request) = store_with_history().await;
         complete_summary(&store, agent, &segments, &request, "Earlier events.", 0)
             .await
@@ -9870,14 +9745,16 @@ mod tests {
             )
             .await
             .unwrap();
-        // One system message, first, carrying the marked summary.
+        // The marked summary is the first message, a user turn, and nothing
+        // in the request is a system message.
         assert!(matches!(
             &request.messages[0],
-            Message { role: Role::System, content: MessageContent::Text(text), .. }
+            Message { role: Role::User, content: MessageContent::Text(text), .. }
                 if text.contains("Earlier events.")
         ));
         assert!(
-            request.messages[1..]
+            request
+                .messages
                 .iter()
                 .all(|message| message.role != Role::System)
         );
@@ -10050,21 +9927,7 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("not only first"));
 
-        // A request with no user turn is rejected.
-        let assistant_only = Segment::Messages {
-            messages: PositionRange {
-                branch_id,
-                first_position: 1,
-                last_position: 1,
-            },
-        };
-        let error = store
-            .request_for_segments(agent, &[system.clone(), assistant_only], sampling.clone())
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("no user turn"));
-
-        // A leading system message plus a user turn is accepted.
+        // A leading system message plus history is accepted.
         store
             .request_for_segments(agent, &[system, history], sampling)
             .await

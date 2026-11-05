@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE character_group SET group_id = ? WHERE character_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c7a938a2e9123dc71c04db158465bc469e6d23fcd0bf34bd78aeef249747a401"
+}

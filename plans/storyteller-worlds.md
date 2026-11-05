@@ -64,8 +64,9 @@ after their rules dependencies. Campaign completion remains a separate plan.
    views of both agents, their inferences, the summary and progress. These are the
    "develop and review" checkpoint's loop, progress, failure and visibility
    bullets. The loop needs no authoring tools.
-2. **Core objects (phases 1 and 2).** After [GM editing and lookup](gm-editing.md)
-   is merged: the Storyteller's Create/Update/Delete tools and lookup, the
+2. **Core objects (phases 1 and 2).** Built before [GM editing and lookup](gm-editing.md)
+   merged, so the tools replace whole fields by name; moving to its shared editing
+   and lookup is part of merging the two: the Storyteller's Create/Update/Delete tools and lookup, the
    Questioner's ReadObject, MarkObjectReviewed and CoreObjectsCreated, mention
    reminders and focused location/NPC development, with created objects appearing
    live in Developer Mode. A world can be run with only its core objects, so until
@@ -97,7 +98,7 @@ the last implemented phase makes a generated world ready.
 - Every world has `generation_stage`, whatever filled it in: `complete` means
   ready to play (a scenario import is `complete` at once, and DetailObjectsCreated
   will set it). Otherwise it selects the next finite step, as `next_npc_step` does: `meta`,
-  `ask`, `answer`, `summarize`, `name`, `concept_done`, `failed`. A failed step's
+  `ask`, `answer`, `summarize`, `name`, `build`, `review`, `failed`. A failed step's
   error stays on its sequence; the stage only marks the world failed.
 - `world_generation(world_id, questions, next_question, spent)` is the loop's
   working data; `spent` is restored into the shared `Budget` each step, as NPC
@@ -118,8 +119,7 @@ the last implemented phase makes a generated world ready.
   `answer`: the Storyteller answers one question as plain text. `summarize`: its
   text reply is stored as the world summary, then `ask` runs again. After
   `world_summary_complete`, `name`: its text reply is stored as the world name, then
-  `concept_done` waits for step 2, whose first action is the Storyteller creating
-  the summary's core objects. An empty summary or name reply fails its step
+  `build` follows, in which the Storyteller creates the summary's core objects. An empty summary or name reply fails its step
   visibly; it is not replaced or retried. The Storyteller has no tools here; the only
   tools are the Questioner's two, and step 2's editing tools let the Storyteller
   revise the summary and name afterwards.

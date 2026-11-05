@@ -1,6 +1,7 @@
 use std::{fs, path::Path as FilePath};
 
 use anyhow::{Context, Result, ensure};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -43,17 +44,18 @@ pub struct Scenario {
     pub items: Vec<Item>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Location {
     pub name: String,
     pub kind: String,
     pub description: String,
     #[serde(default)]
+    #[schemars(skip)]
     pub notes: Notes,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
     pub from: String,
@@ -61,20 +63,22 @@ pub struct Connection {
     pub travel_time: i64,
     pub description: String,
     #[serde(default)]
+    #[schemars(skip)]
     pub notes: Notes,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
     pub name: String,
     pub location: String,
     pub description: String,
     #[serde(default)]
+    #[schemars(skip)]
     pub notes: Notes,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Npc {
     pub name: String,
@@ -87,19 +91,23 @@ pub struct Npc {
     #[serde(default)]
     pub ambition: String,
     #[serde(default = "empty_object")]
+    #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub sheet: Value,
     #[serde(default)]
+    #[schemars(skip)]
     pub notes: Notes,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemType {
     pub name: String,
     pub description: String,
     #[serde(default = "empty_object")]
+    #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub stats: Value,
     #[serde(default)]
+    #[schemars(skip)]
     pub notes: Notes,
 }
 

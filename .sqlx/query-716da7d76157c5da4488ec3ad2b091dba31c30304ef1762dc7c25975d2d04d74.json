@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT connection.id FROM connection                      JOIN location AS origin ON origin.id = connection.from_location_id                      JOIN location AS target ON target.id = connection.to_location_id                      WHERE connection.world_id = ? AND origin.name = ? AND target.name = ? AND (connection.deleted = 0 OR ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "716da7d76157c5da4488ec3ad2b091dba31c30304ef1762dc7c25975d2d04d74"
+}

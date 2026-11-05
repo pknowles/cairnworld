@@ -181,7 +181,7 @@ async fn summary_segments(
         .context("storing compaction prompt")?;
     // The agent writes its own summary: the request is its normal one (role
     // text, context, tools), with the newest messages left out and the summary
-    // request added at the end. The summary then replaces the covered messages.
+    // request added at the end. Its history mentions its tools, so it keeps them.
     let mut segments = leading.to_vec();
     if let Some(summary) = previous {
         segments.push(Segment::Summary {
@@ -651,13 +651,13 @@ mod tests {
             )
             .await
             .unwrap();
-        // The summary replaces the history it covers, carried in the leading
-        // system message; the retained tail follows unchanged.
+        // The summary replaces the history it covers, as the leading user turn;
+        // the retained tail follows unchanged.
         assert!(
             matches!(&request.messages[0].content, MessageContent::Text(text)
                 if text.contains("lasting fact and decision"))
         );
-        assert_eq!(request.messages[0].role, Role::System);
+        assert_eq!(request.messages[0].role, Role::User);
         assert!(
             matches!(&request.messages[1].content, MessageContent::Text(text) if text == "newest question")
         );

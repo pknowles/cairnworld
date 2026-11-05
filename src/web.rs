@@ -1849,6 +1849,10 @@ mod tests {
 
         struct ScriptedBackend {
             responses: Arc<Mutex<VecDeque<Response>>>,
+            /// The answer to the compaction summary request, given to that
+            /// request whenever it arrives rather than in turn, since which of
+            /// two waiting requests reaches the backend first is a race.
+            summary: Mutex<Option<Response>>,
             requests: Arc<Mutex<Vec<crate::llm::Request>>>,
         }
 
@@ -1860,6 +1864,7 @@ mod tests {
                 (
                     Self {
                         responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+                        summary: Mutex::new(None),
                         requests: Arc::clone(&requests),
                     },
                     requests,
@@ -1873,7 +1878,14 @@ mod tests {
                 request: crate::llm::Request,
                 _on_token: impl FnMut(&str) + Send,
             ) -> Result<Response> {
+                let asks_for_a_summary = request.messages.last().is_some_and(|message| {
+                    matches!(&message.content, crate::llm::MessageContent::Text(text)
+                        if *text == crate::prompts::current().unwrap().compaction.summary_request)
+                });
                 self.requests.lock().unwrap().push(request);
+                if asks_for_a_summary && let Some(summary) = self.summary.lock().unwrap().take() {
+                    return Ok(summary);
+                }
                 self.responses
                     .lock()
                     .unwrap()
@@ -2058,10 +2070,13 @@ mod tests {
             keep_raw_messages: 1,
             ..Default::default()
         };
-        let responses: Vec<Response> =
+        let mut responses: Vec<Response> =
             serde_json::from_str(include_str!("../testdata/real_model_creation_round.json"))
                 .unwrap();
+        // The third recorded response answered the compaction summary request.
+        let summary = responses.remove(2);
         let (backend, captured_requests) = ScriptedBackend::new(responses);
+        *backend.summary.lock().unwrap() = Some(summary);
         let chat_responses = Arc::clone(&backend.responses);
         let scheduler = crate::inference::InferenceScheduler::new(backend, browser_limits).unwrap();
         let game = Game::new(

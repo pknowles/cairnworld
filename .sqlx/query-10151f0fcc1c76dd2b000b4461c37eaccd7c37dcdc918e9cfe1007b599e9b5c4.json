@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT target.name || ' (' || connection.travel_time || ')' AS \"leads_to!: String\" FROM connection JOIN location AS target ON target.id = connection.to_location_id WHERE connection.from_location_id = ? AND connection.deleted = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "leads_to!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "10151f0fcc1c76dd2b000b4461c37eaccd7c37dcdc918e9cfe1007b599e9b5c4"
+}

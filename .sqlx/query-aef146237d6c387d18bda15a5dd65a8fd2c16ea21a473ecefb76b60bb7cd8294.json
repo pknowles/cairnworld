@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT origin.name AS origin, target.name AS target, connection.travel_time, connection.description FROM connection JOIN location AS origin ON origin.id = connection.from_location_id JOIN location AS target ON target.id = connection.to_location_id WHERE connection.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "origin",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "target",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "travel_time",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "aef146237d6c387d18bda15a5dd65a8fd2c16ea21a473ecefb76b60bb7cd8294"
+}

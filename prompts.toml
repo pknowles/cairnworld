@@ -320,16 +320,23 @@ no_summary = "Nothing yet."
 role = """\
     You are the Questioner for a text RPG world that the Storyteller is creating for \
     a small group of players. The game uses the Cairn rules, run by AI game masters. \
-    Ask thought-provoking questions that make the world more interesting and give it \
-    depth, while building a solid foundation in phases: first the overall setting, \
-    factions, the most important NPCs and their motives; then important locations and \
-    where those NPCs start; then smaller locations and supporting NPCs. The world is \
-    complete, and ready to begin play, once its summary has all of that. Detail can \
-    come later.\
+    Ask questions that, in order of priority:
+    1. enrich the world with interest, depth and internal connections;
+    2. establish several pathways for player characters to pursue objectives, clash \
+    with NPCs and engage the setting, with meaningful choices for the players;
+    3. point out contradictions and weakly connected elements, and encourage dropping \
+    or rewriting what does not fit a cohesive story;
+    4. resolve ambiguity and add detail, once the foundation of the setting is solid.
+    As the world matures, ask more critical review questions. The world is complete \
+    once its summary has the setting, factions, the most important NPCs and their \
+    motives, and where they start.\
     """
 
-# Edit these lists freely: they prime the Questioner before it asks.
-# {examples} and {questions} are these, one per line.
+# Edit these lists freely: they prime the Questioner before it asks. Each world
+# samples this many of each list at random, which varies the worlds.
+# {examples} and {questions} are the samples, one per line.
+sample_size = 3
+
 meta_request = """\
     Seed prompt for the world: {seed}
 
@@ -349,10 +356,25 @@ world_state = """\
 {summary}\
     """
 
-ask_request = "Ask the Storyteller up to five thought-provoking questions, or call world_is_complete if the foundation is complete."
+ask_request = "Ask the Storyteller up to five thought-provoking questions, or call world_summary_complete if the foundation is complete."
+
+# Review of the objects the Storyteller created. {seed} {summary} {objects}
+review_state = """\
+    Seed prompt for the world: {seed}
+
+    The world summary:
+{summary}
+    The objects the Storyteller created, each marked [x] once you reviewed it and \
+    it has not changed since:
+{objects}\
+    """
+
+review_request = "Review the objects the Storyteller created against the summary. Read the ones you have not reviewed and mark each once it is ready for play. If something is missing or wrong, call ask_questions with questions that lead the Storyteller to fix it. Call core_objects_created once every object is reviewed and nothing is missing."
+
+review_reminder = "End your turn by calling ask_questions or core_objects_created."
 
 # Appended when the Questioner replies in text instead of calling a tool.
-ask_reminder = "End your turn by calling ask_questions or world_is_complete."
+ask_reminder = "End your turn by calling ask_questions or world_summary_complete."
 
 example_questions = [
     "What is the story really about beyond seemingly simple material acts?",
@@ -376,10 +398,31 @@ description = "Ask the Storyteller thought-provoking questions that add interest
 [questioner.tools.ask_questions.arguments]
 questions = "Up to five questions, each one a single question."
 
-[questioner.tools.world_is_complete]
-description = "Say the world has a solid foundation and is complete enough to begin play."
+[questioner.tools.world_summary_complete]
+description = "Say the world summary has a solid foundation. The Storyteller then names the world and creates its objects."
+
+[questioner.tools.read_object]
+description = "Read everything about one object the Storyteller created."
+
+[questioner.tools.read_object.arguments]
+kind = "What sort of object it is."
+name = "The object's name. A connection is named `from -> to`."
+
+[questioner.tools.mark_object_reviewed]
+description = "Record that you reviewed an object and it is ready for play, or that it is not."
+
+[questioner.tools.mark_object_reviewed.arguments]
+kind = "What sort of object it is."
+name = "The object's name. A connection is named `from -> to`."
+reviewed = "True once the object is ready for play, false to mark it unreviewed again."
+
+[questioner.tools.core_objects_created]
+description = "Say the objects are complete and every one is reviewed. This ends world creation."
 
 [storyteller]
+# The temperature for answering the first round of questions, which widens the
+# variety of worlds. Later requests use the model's own.
+first_round_temperature = 1.2
 role = """\
     You are the Storyteller creating the world for a text RPG that a small group of \
     players will explore, using the Cairn rules. Answer the Questioner with specific, \
@@ -412,8 +455,171 @@ summary_request = """\
     Write the new world summary now, folding in your answers: the setting, factions, \
     important NPCs and their motives, the locations and the central tension, in about \
     300 words. Rewrite it whole, keeping ideas that still make a cohesive story and \
-    dropping those that no longer fit.\
+    dropping those that no longer fit. Put the names of characters, important items \
+    and locations in double square brackets, like [[Name]].\
     """
 
 # The Questioner is satisfied. The reply becomes the world name.
 name_request = "Reply with only a short name for this world."
+
+# Added to a build request when the summary marks names that have no object yet. {names}
+uncreated_mentions = "The summary marks these names but no object has them yet: {names}. Create the ones that need an object and ignore the rest."
+
+build_request = "The world summary is complete. Create the world's objects from it with the tools: its locations, the connections between them, the groups of people and the NPCs in them, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
+
+# {questions}
+fix_request = """\
+    The Questioner reviewed the world and asks:
+{questions}
+    Use the tools to add what is missing. Reply with a short note when you are done.\
+    """
+
+[storyteller.tools.create_location]
+description = "Create a location."
+
+[storyteller.tools.create_location.arguments]
+name = "Unique name."
+kind = "Such as village, forest or cellar."
+description = "What it is like."
+
+[storyteller.tools.create_connection]
+description = "Create a route between two locations."
+
+[storyteller.tools.create_connection.arguments]
+from = "Name of the starting location."
+to = "Name of the destination location."
+travel_time = "Minutes."
+description = "What the route is like."
+
+[storyteller.tools.create_group]
+description = "Create a group of characters at a location."
+
+[storyteller.tools.create_group.arguments]
+name = "Unique name."
+location = "Name of its location."
+description = "Who they are and what they are doing."
+
+[storyteller.tools.create_npc]
+description = "Create an NPC in a group."
+
+[storyteller.tools.create_npc.arguments]
+name = "Unique name."
+group = "Name of its group."
+description = "What anyone can see."
+background = "What only they know."
+motive = "What they want now."
+ambition = "What they want in the long run."
+sheet = "Stats: hp, str, dex, wil, armor and weapon (name, damage)."
+
+[storyteller.tools.create_item_type]
+description = "Create an item type."
+
+[storyteller.tools.create_item_type.arguments]
+name = "Unique name."
+description = "What it is."
+stats = "Rules numbers, if any."
+
+[storyteller.tools.create_item]
+description = "Create an item, lying at a location or held by an NPC."
+
+[storyteller.tools.create_item.arguments]
+name = "Unique name."
+item_type = "Name of its item type."
+location = "Name of the location where it lies. Omit if held."
+held_by = "Name of the NPC holding it. Omit if it lies somewhere."
+description = "What it is like."
+
+[storyteller.tools.update_location]
+description = "Change fields of a location. Omitted fields stay."
+
+[storyteller.tools.update_location.arguments]
+name = "Name of the location."
+new_name = "Unique new name."
+kind = "Such as village, forest or cellar."
+description = "What it is like."
+
+[storyteller.tools.update_connection]
+description = "Change fields of a route. Omitted fields stay."
+
+[storyteller.tools.update_connection.arguments]
+from = "Name of the starting location."
+to = "Name of the destination location."
+travel_time = "Minutes."
+description = "What the route is like."
+
+[storyteller.tools.update_group]
+description = "Change fields of a group. Omitted fields stay."
+
+[storyteller.tools.update_group.arguments]
+name = "Name of the group."
+new_name = "Unique new name."
+location = "Name of its new location."
+description = "Who they are and what they are doing."
+
+[storyteller.tools.update_npc]
+description = "Change fields of an NPC. Omitted fields stay."
+
+[storyteller.tools.update_npc.arguments]
+name = "Name of the NPC."
+new_name = "Unique new name."
+group = "Name of its new group."
+description = "What anyone can see."
+background = "What only they know."
+motive = "What they want now."
+ambition = "What they want in the long run."
+sheet = "Stats: hp, str, dex, wil, armor and weapon (name, damage)."
+
+[storyteller.tools.update_item_type]
+description = "Change fields of an item type. Omitted fields stay."
+
+[storyteller.tools.update_item_type.arguments]
+name = "Name of the item type."
+new_name = "Unique new name."
+description = "What it is."
+stats = "Rules numbers, if any."
+
+[storyteller.tools.update_item]
+description = "Change fields of an item. Omitted fields stay."
+
+[storyteller.tools.update_item.arguments]
+name = "Name of the item."
+new_name = "Unique new name."
+item_type = "Name of its new item type."
+location = "Name of the location where it now lies."
+held_by = "Name of the NPC now holding it."
+description = "What it is like."
+
+[storyteller.tools.delete_location]
+description = "Delete a location and its routes. Items must be moved first."
+
+[storyteller.tools.delete_location.arguments]
+name = "Name of the location."
+delete_groups = "Also delete its empty groups. Otherwise groups there block the delete."
+
+[storyteller.tools.delete_connection]
+description = "Delete a route."
+
+[storyteller.tools.delete_connection.arguments]
+from = "Name of the starting location."
+to = "Name of the destination location."
+
+[storyteller.tools.delete_npc]
+description = "Delete an NPC. Its group goes with its last member. Items it carries must be left somewhere or deleted."
+
+[storyteller.tools.delete_npc.arguments]
+name = "Name of the NPC."
+item_location = "Name of the location to leave its items at."
+item_description = "New description for each item left there."
+delete_items = "Delete its items too."
+
+[storyteller.tools.delete_item_type]
+description = "Delete an item type that no item has."
+
+[storyteller.tools.delete_item_type.arguments]
+name = "Name of the item type."
+
+[storyteller.tools.delete_item]
+description = "Delete an item."
+
+[storyteller.tools.delete_item.arguments]
+name = "Name of the item."

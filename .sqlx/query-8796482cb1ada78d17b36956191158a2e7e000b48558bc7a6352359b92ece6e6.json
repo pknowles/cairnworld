@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE location SET name = COALESCE(?, name), kind = COALESCE(?, kind), description = COALESCE(?, description) WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "8796482cb1ada78d17b36956191158a2e7e000b48558bc7a6352359b92ece6e6"
+}

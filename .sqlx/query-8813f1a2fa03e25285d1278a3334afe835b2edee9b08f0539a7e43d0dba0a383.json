@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character.name, character.description FROM character_group JOIN \"group\" ON \"group\".id = character_group.group_id JOIN character ON character.id = character_group.character_id WHERE \"group\".location_id = ? AND character.role = 'npc' AND character.deleted = 0 ORDER BY character.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8813f1a2fa03e25285d1278a3334afe835b2edee9b08f0539a7e43d0dba0a383"
+}

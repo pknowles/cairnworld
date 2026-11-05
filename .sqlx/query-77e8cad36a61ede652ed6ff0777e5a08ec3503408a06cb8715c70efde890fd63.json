@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT agent_id FROM world_role_agent WHERE world_id = ? AND role = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "77e8cad36a61ede652ed6ff0777e5a08ec3503408a06cb8715c70efde890fd63"
+}

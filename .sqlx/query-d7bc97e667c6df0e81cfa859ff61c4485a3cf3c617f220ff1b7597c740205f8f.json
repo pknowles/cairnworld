@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO object_reviewed (kind, object_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d7bc97e667c6df0e81cfa859ff61c4485a3cf3c617f220ff1b7597c740205f8f"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT character_id FROM item_character WHERE item_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "character_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "806533f7ea9d28ff43a1881eaee2a464f12a1a3a2d6e48ab2bc2b836e8d35484"
+}

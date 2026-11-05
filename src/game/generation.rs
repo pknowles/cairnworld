@@ -12,11 +12,11 @@ use anyhow::{Context, Result, bail, ensure};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 
-use super::{Budget, CallContext, Game};
+use super::{Budget, CallContext, Game, authoring};
 use crate::{
     agent::{self, Settled},
     inspection::DevEvent,
-    llm::{Backend, Content, Message, Role},
+    llm::{Backend, Content, Message, Role, Sampling},
     prompts,
     store::{Advance, AgentBranch, Generation, GenerationStage},
     tools::{Tool, ToolOutcome},
@@ -37,10 +37,10 @@ fn parse_questions(arguments: &str) -> Result<Vec<String>> {
     Ok(asked.questions)
 }
 
-/// The Questioner ends its turn with exactly one of these.
-fn questioner_tools() -> Result<Vec<Tool>> {
+/// Asking the Storyteller questions ends the Questioner's turn.
+fn ask_questions_tool() -> Result<Tool> {
     let prompts = prompts::current()?;
-    let ask = Tool::terminal(
+    Ok(Tool::terminal(
         prompts.questioner.tools.tool(
             "ask_questions",
             serde_json::to_value(schema_for!(AskQuestions))
@@ -55,15 +55,46 @@ fn questioner_tools() -> Result<Vec<Tool>> {
                 })
             })
         },
-    );
+    ))
+}
+
+/// While the summary develops, the Questioner ends its turn with exactly one of these.
+fn questioner_tools() -> Result<Vec<Tool>> {
+    let prompts = prompts::current()?;
+    let ask = ask_questions_tool()?;
     let complete = Tool::terminal(
         prompts
             .questioner
             .tools
-            .tool("world_is_complete", prompts::no_arguments())?,
+            .tool("world_summary_complete", prompts::no_arguments())?,
         |_| Box::pin(async { Ok(ToolOutcome::Completed("World recorded as complete.".into())) }),
     );
     Ok(vec![ask, complete])
+}
+
+/// `count` of the items, picked at random, as one bullet per line.
+fn sampled_bullets(items: &[String], count: usize) -> String {
+    use rand::seq::IndexedRandom;
+    let picked: Vec<String> = items
+        .choose_multiple(&mut rand::rng(), count)
+        .cloned()
+        .collect();
+    bullets(&picked)
+}
+
+/// The names the text marks with double square brackets, once each, in order.
+fn marked_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for part in text.split("[[").skip(1) {
+        let Some((name, _)) = part.split_once("]]") else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() && !names.iter().any(|seen| seen.eq_ignore_ascii_case(name)) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// A list from `prompts.toml` as one bullet per line.
@@ -81,7 +112,7 @@ fn reply_text(settled: &Settled) -> Result<&str> {
 
 /// Where one generation step runs: its world, its sequence and its budget.
 struct StepScope<'a> {
-    world: &'a World,
+    world: &'a Arc<World>,
     sequence_id: i64,
     budget: &'a Budget,
 }
@@ -98,6 +129,8 @@ struct Request<'a> {
     context: Vec<String>,
     tools: Vec<Tool>,
     terminal_reminder: Option<&'a str>,
+    /// Replaces the model's own temperature for this request.
+    temperature: Option<f32>,
 }
 
 impl<'a> Request<'a> {
@@ -110,6 +143,7 @@ impl<'a> Request<'a> {
             context: vec![],
             tools: vec![],
             terminal_reminder: None,
+            temperature: None,
         }
     }
 
@@ -198,8 +232,14 @@ where
                     &questioner.meta_request,
                     &[
                         ("seed", seed),
-                        ("examples", &bullets(&questioner.example_questions)),
-                        ("questions", &bullets(&questioner.meta_questions)),
+                        (
+                            "examples",
+                            &sampled_bullets(&questioner.example_questions, questioner.sample_size),
+                        ),
+                        (
+                            "questions",
+                            &sampled_bullets(&questioner.meta_questions, questioner.sample_size),
+                        ),
                     ],
                 )?;
                 self.generation_turn(
@@ -224,6 +264,7 @@ where
                             context: vec![world_state],
                             tools: questioner_tools()?,
                             terminal_reminder: Some(&questioner.ask_reminder),
+                            temperature: None,
                         },
                     )
                     .await?;
@@ -233,7 +274,7 @@ where
                 let call = calls.last().context("the Questioner made no tool call")?;
                 match call.name.as_str() {
                     "ask_questions" => Ok(Advance::Questions(parse_questions(&call.arguments)?)),
-                    "world_is_complete" => Ok(Advance::WorldIsComplete),
+                    "world_summary_complete" => Ok(Advance::WorldSummaryComplete),
                     other => bail!("the Questioner ended its turn with `{other}`"),
                 }
             }
@@ -256,8 +297,13 @@ where
                         &[("number", &number.to_string()), ("question", question)],
                     )?
                 };
-                self.generation_turn(scope, storyteller_request(text)?)
-                    .await?;
+                // Only the first round, before any summary exists, runs hot.
+                let first_round = generation.summary.trim().is_empty();
+                let request = Request {
+                    temperature: first_round.then_some(storyteller.first_round_temperature),
+                    ..storyteller_request(text)?
+                };
+                self.generation_turn(scope, request).await?;
                 Ok(Advance::QuestionAnswered)
             }
             GenerationStage::Summarize => {
@@ -281,9 +327,80 @@ where
                     .await?;
                 Ok(Advance::Name(reply_text(&settled)?.to_string()))
             }
-            stage @ (GenerationStage::ConceptDone
-            | GenerationStage::Failed
-            | GenerationStage::Complete) => {
+            GenerationStage::Build => {
+                // First the summary's objects, then whatever the Questioner's
+                // questions of the last review found missing.
+                let mut text = if generation.questions.is_empty() {
+                    storyteller.build_request.clone()
+                } else {
+                    prompts::fill(
+                        &storyteller.fix_request,
+                        &[("questions", &bullets(&generation.questions))],
+                    )?
+                };
+                // A reminder, not a requirement: the Storyteller decides which
+                // marked names need an object.
+                let created = self.store.object_names(scope.world.id).await?;
+                let uncreated: Vec<String> = marked_names(&generation.summary)
+                    .into_iter()
+                    .filter(|name| !created.iter().any(|made| made.eq_ignore_ascii_case(name)))
+                    .collect();
+                if !uncreated.is_empty() {
+                    text.push_str("\n\n");
+                    text.push_str(&prompts::fill(
+                        &storyteller.uncreated_mentions,
+                        &[("names", &uncreated.join(", "))],
+                    )?);
+                }
+                let request = Request {
+                    tools: authoring::storyteller_tools(&self.store, scope.world)?,
+                    ..storyteller_request(text)?
+                };
+                self.generation_turn(scope, request).await?;
+                Ok(Advance::Built)
+            }
+            GenerationStage::Review => {
+                let objects: String = self
+                    .store
+                    .review_list(scope.world.id)
+                    .await?
+                    .iter()
+                    .map(|entry| {
+                        let mark = if entry.reviewed { "x" } else { " " };
+                        format!("- [{mark}] {} {}\n", entry.kind, entry.name)
+                    })
+                    .collect();
+                let world_state = prompts::fill(
+                    &questioner.review_state,
+                    &[("seed", seed), ("summary", summary), ("objects", &objects)],
+                )?;
+                let mut tools = vec![ask_questions_tool()?];
+                tools.extend(authoring::review_tools(&self.store, scope.world.id)?);
+                let settled = self
+                    .generation_turn(
+                        scope,
+                        Request {
+                            branch: generation.questioner,
+                            role: &questioner.role,
+                            text: questioner.review_request.clone(),
+                            context: vec![world_state],
+                            tools,
+                            terminal_reminder: Some(&questioner.review_reminder),
+                            temperature: None,
+                        },
+                    )
+                    .await?;
+                let Content::ToolCalls(calls) = &settled.response.content else {
+                    bail!("the Questioner ended its review without calling a tool");
+                };
+                let call = calls.last().context("the Questioner made no tool call")?;
+                match call.name.as_str() {
+                    "ask_questions" => Ok(Advance::Questions(parse_questions(&call.arguments)?)),
+                    "core_objects_created" => Ok(Advance::CoreObjectsCreated),
+                    other => bail!("the Questioner ended its review with `{other}`"),
+                }
+            }
+            stage @ (GenerationStage::Failed | GenerationStage::Complete) => {
                 bail!(
                     "world {} has no generation step at {stage:?}",
                     scope.world.id
@@ -355,8 +472,25 @@ where
             dynamic_context: context,
             tools: &request.tools,
             terminal_reminder: request.terminal_reminder,
-            sampling: self.sampling.clone(),
+            sampling: Sampling {
+                temperature: request.temperature.unwrap_or(self.sampling.temperature),
+                ..self.sampling.clone()
+            },
             model: &self.model,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::marked_names;
+
+    #[test]
+    fn only_names_in_double_brackets_are_marked_once_each() {
+        assert_eq!(
+            marked_names("[[Ysolde]] met [[the Bell]], then [[ysolde]] and [[ ]] left [[Open"),
+            ["Ysolde", "the Bell"]
+        );
+        assert!(marked_names("Ysolde, [one] and 'the Bell'").is_empty());
     }
 }
