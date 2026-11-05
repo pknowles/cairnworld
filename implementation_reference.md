@@ -681,27 +681,33 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   it is ready (`play_connected`). The world page shows the status,
   failure and expandable seed, and with Developer Mode on hosts the Inspect panel
   (`WorldInspector` island; `ui.rs`'s `Inspector` is shared with `PlayerChat`).
-  After the name the Storyteller builds (`build`) with `create_/update_/delete_` tools for locations,
-  connections, groups, NPCs, item types and items (`game/authoring.rs`; objects are referred to by name,
-  and an item lies at a location or is held by an NPC). `Store::change_object` (`store/authoring.rs`
-  creates, sharing its per-object inserts with `install_scenario`; `store/editing.rs` updates and deletes;
-  a delete only sets `deleted`, and the gameplay queries that enumerate characters, items, locations and
-  connections skip deleted ones; Developer Mode lists them labelled) returns the object counts, and the
-  Questioner reviews (`review`, `store/review.rs`): `read_object`, `mark_object_reviewed`, `ask_questions`
-  (back to `build`) or `core_objects_created`. Reviewed flags are `object_reviewed` rows, cleared when an
-  object or what it holds changes. `Store::core_object_problems` is the one readiness check, run by the
-  tool and again by `advance_generation`, which then marks the world `complete` and places waiting
-  Adventurers in its first group (interim, until entry placement). Rule refusals are `Rejected` errors,
-  shown to the agent as tool results. Names the summary marks as `[[Name]]` and no object has yet are
+  After the name the Storyteller builds (`build`) with three tools that take an `object` kind and the IDs
+  the tools return: `create_object`, `update_object`, `delete_object` (`game/authoring.rs`; their schema is
+  `Fields`, and `ObjectKind::fields` is the one list of what each kind has, which the tool refuses to go
+  beyond). An item lies at a location or is held by an NPC. `Store::change_object` creates
+  (`store/authoring.rs`, sharing its per-object inserts with `install_scenario`), updates and deletes
+  (`store/editing.rs`); a delete only sets `deleted`, and the gameplay queries that enumerate characters,
+  items, locations and connections skip deleted ones; Developer Mode lists them labelled. Each result
+  carries the object counts. The Questioner reviews (`review`, `store/review.rs`): `read_object`,
+  `mark_object_reviewed`, `ask_questions` (back to `build`) or `core_objects_created`. Reviewed flags are
+  `object_reviewed` rows, cleared when an object or what it holds changes. `Store::core_object_problems`
+  is the one readiness check, run by the tool and again by `advance_generation`, which then marks the
+  world `complete` and places waiting Adventurers in its first group (interim, until entry placement).
+  Rule refusals are `Rejected` errors, shown to the agent as tool results. Every build request shows the
+  Storyteller the objects that exist; the Questioner's review request lists the summary's `[[Name]]`
+  marks that no object has (found by code, as is the same reminder given to the Storyteller). The first
+  round of Storyteller answers uses `first_round_temperature`; each world samples `sample_size` example
+  and meta-questions.
+
   A chat summary reaches the model as the first user-role message after the system message, so a
-  compacted request always has the user turn chat templates require.
-  The summary request is the agent's role text, the history to replace and the summary prompt: its
-  tools stay out because a model given them answers by calling one. `a_world_is_generated_from_a_seed_by_the_real_model`
-  (ignored, GPU) runs the whole flow from a seed to a ready world; `a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress`
+  compacted request always has the user turn chat templates require. The summary request is the agent's
+  role text, the history to replace and the summary prompt (under 150 words, leaving out the world state
+  that is shown again with each request): its tools stay out because a model given them answers by
+  calling one. The Storyteller's three tools are 3.8 thousand characters, guarded by a test. Real-model
+  tests (ignored, GPU, device-test settings: 4096-token context): `a_world_is_generated_from_a_seed_by_the_real_model`
+  runs the whole flow from a seed to a ready world; `a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress`
   and `the_real_model_questioner_catches_what_the_storyteller_left_out` cover the summary and the review.
-  added to the build request. The first round of Storyteller answers uses
-  `first_round_temperature`; each world samples `sample_size` example and meta-questions. Not built yet:
-  the extended summary and detail phases.
+  Not built yet: the extended summary and detail phases.
 - NPC speech responses (design.md: Character perceptions and NPC responses; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech
   (`commit_speech`) opens an `npc_response_collection` whose candidates are the NPCs who heard

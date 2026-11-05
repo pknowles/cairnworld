@@ -160,7 +160,9 @@ chat and are compacted like any chat's.
   stage before starting inference. Keep only the progress needed to select the
   next stage/object and reference committed outputs; use ordinary recordings for
   inference inputs/results, not another transcript or per-tool replay journal.
-- Provide Create and Update variants for Location, Connection, NPC, Group,
+- (Built as three tools with an `object` kind, `create_object`, `update_object` and
+  `delete_object`, addressed by ID: the user's 2026-11-05 decision, so the tools fit a 4096-token
+  context.) Provide Create and Update variants for Location, Connection, NPC, Group,
   ItemType and Item, and Delete variants for all but Group (a Group goes when its
   last NPC does; this departs from the declarations' DeleteGroup and awaits the
   user's decision). Create requires all initial fields; Update names the

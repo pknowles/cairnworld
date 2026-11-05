@@ -468,7 +468,7 @@ name_request = "Reply with only a short name for this world."
 # Added to a build request when the summary marks names that have no object yet. {names}
 uncreated_mentions = "The summary marks these names but no object has them yet: {names}. Create the ones that need an object and ignore the rest."
 
-build_request = "The world summary is complete. Create the world's objects from it: locations, their connections, groups and NPCs, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
+build_request = "The world summary is complete. Create the world's objects from it, for a small first world of about three locations, two groups and three NPCs: locations, their connections, groups and NPCs, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
 
 # {questions}
 fix_request = """\
