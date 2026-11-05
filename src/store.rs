@@ -262,11 +262,19 @@ impl TopologyChanges {
     pub fn merge_branches(&self) -> impl Iterator<Item = AgentBranch> + '_ {
         self.changes
             .iter()
-            .flat_map(|(_, _, change)| match change {
-                Ok(tools::TopologyChange::Merge { group_ids, .. }) => group_ids.as_slice(),
-                _ => &[],
+            .flat_map(|(_, _, change)| -> Vec<AgentBranch> {
+                match change {
+                    Ok(tools::TopologyChange::Merge { group_ids, .. }) => {
+                        group_ids.iter().map(|group| group.branch).collect()
+                    }
+                    Ok(tools::TopologyChange::Split {
+                        group_id,
+                        target_group_id: Some(target),
+                        ..
+                    }) => vec![group_id.branch, target.branch],
+                    _ => Vec::new(),
+                }
             })
-            .map(|group| group.branch)
     }
 }
 
@@ -2222,9 +2230,10 @@ impl Store {
                         split,
                     }
                 }
-                tools::TopologyChange::Merge { .. } => {
-                    tools::TopologyChange::Merge { group_ids: groups }
-                }
+                tools::TopologyChange::Merge { name, .. } => tools::TopologyChange::Merge {
+                    group_ids: groups,
+                    name,
+                },
             });
             resolved.push((call_id, execution_id, scoped));
         }
@@ -2279,8 +2288,8 @@ impl Store {
                     )
                     .await?
                 }
-                Ok(tools::TopologyChange::Merge { group_ids }) => {
-                    Self::apply_merge(&mut transaction, group_ids, presence_seconds).await?
+                Ok(tools::TopologyChange::Merge { group_ids, name }) => {
+                    Self::apply_merge(&mut transaction, group_ids, name, presence_seconds).await?
                 }
                 Err(rejection) => Err(rejection),
             };
@@ -2377,6 +2386,7 @@ impl Store {
         group: i64,
         target: Option<i64>,
         character_ids: Vec<i64>,
+        names: (&str, &str),
     ) -> Result<String, String> {
         let source = WorldGroup {
             id: group,
@@ -2396,6 +2406,8 @@ impl Store {
             target,
             tools::SplitGroup {
                 character_ids,
+                current_name: names.0.into(),
+                target_name: names.1.into(),
                 continue_with_character_id: None,
             },
             60,
@@ -2478,23 +2490,13 @@ impl Store {
             }
             sources.push(target.id);
         }
-        // A group is named for the characters in it. Every change of membership makes new
-        // groups, so the name is always accurate, and no two active groups can share one.
-        let stay_name = Self::member_names(transaction, &remaining).await?;
-        let mut together = leaving.clone();
-        if let Some(target) = &target {
-            let target_id = target.id;
-            together.extend(
-                sqlx::query_scalar!(
-                    "SELECT character_id FROM character_group WHERE group_id = ?",
-                    target_id,
-                )
-                .fetch_all(&mut **transaction)
-                .await
-                .context("loading the target group's members")?,
-            );
+        if split.target_name.trim().is_empty()
+            || (!remaining.is_empty() && split.current_name.trim().is_empty())
+        {
+            return Ok(Err(
+                "Tool arguments were rejected: group names must not be empty".to_string(),
+            ));
         }
-        let leave_name = Self::member_names(transaction, &together).await?;
         let through_position: i64 = sqlx::query_scalar!(
             "SELECT next_position - 1 FROM history_branch WHERE id = ?",
             branch_id,
@@ -2527,6 +2529,8 @@ impl Store {
         let world_gm_agent_id = group.branch.agent_id();
         let mut result_group_ids = Vec::new();
         if !remaining.is_empty() {
+            let stay_name =
+                Self::unique_group_name(transaction, world_id, &split.current_name).await?;
             let (stay_group_id, _) = Self::spawn_group_branch(
                 transaction,
                 world_id,
@@ -2541,6 +2545,7 @@ impl Store {
             }
             result_group_ids.push(stay_group_id);
         }
+        let leave_name = Self::unique_group_name(transaction, world_id, &split.target_name).await?;
         let (leave_group_id, _) = Self::spawn_group_branch(
             transaction,
             world_id,
@@ -2606,20 +2611,30 @@ impl Store {
         Ok(())
     }
 
-    /// The names of these characters, in id order, as a group's name.
-    async fn member_names(
+    /// `name`, or the first of "name 2", "name 3", ... no active group in the world has. A name
+    /// the model chose never fails a call because another group was already called that.
+    async fn unique_group_name(
         transaction: &mut Transaction<'_, Sqlite>,
-        character_ids: &[i64],
+        world_id: i64,
+        name: &str,
     ) -> Result<String> {
-        let ids = serde_json::to_string(character_ids)?;
-        let names: Vec<String> = sqlx::query_scalar!(
-            "SELECT name FROM character WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id",
-            ids,
-        )
-        .fetch_all(&mut **transaction)
-        .await
-        .context("naming a group for its members")?;
-        Ok(names.join(", "))
+        let mut candidate = name.trim().to_string();
+        let mut number = 1;
+        loop {
+            let taken: i64 = sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM \"group\" WHERE world_id = ? AND name = ? AND retired_at IS NULL",
+                world_id,
+                candidate,
+            )
+            .fetch_one(&mut **transaction)
+            .await
+            .context("checking a group name")?;
+            if taken == 0 {
+                return Ok(candidate);
+            }
+            number += 1;
+            candidate = format!("{} {number}", name.trim());
+        }
     }
 
     /// `merge_groups`: union distinct, active, co-located groups in one world
@@ -2629,6 +2644,7 @@ impl Store {
     async fn apply_merge(
         transaction: &mut Transaction<'_, Sqlite>,
         mut groups: Vec<WorldGroup>,
+        name: String,
         presence_seconds: u64,
     ) -> Result<Result<String, String>> {
         groups.sort_unstable_by_key(|group| group.id);
@@ -2675,18 +2691,15 @@ impl Store {
         }
         let location_id = location_id.expect("at least two group ids were validated above");
         let source_ids: Vec<i64> = groups.iter().map(|group| group.id).collect();
-        let members_json = serde_json::to_string(&source_ids)?;
-        let members: Vec<i64> = sqlx::query_scalar!(
-            "SELECT character_id FROM character_group WHERE group_id IN (SELECT value FROM json_each(?))",
-            members_json,
-        )
-        .fetch_all(&mut **transaction)
-        .await
-        .context("loading the merged groups' members")?;
-        let name = Self::member_names(transaction, &members).await?;
+        if name.trim().is_empty() {
+            return Ok(Err(
+                "Tool arguments were rejected: the group name must not be empty".to_string(),
+            ));
+        }
         for group_id in &source_ids {
             Self::retire_group(transaction, *group_id).await?;
         }
+        let name = Self::unique_group_name(transaction, authority.world_id(), &name).await?;
         let (new_group_id, _new_branch_id) = Self::spawn_group_branch(
             transaction,
             authority.world_id(),
@@ -7531,48 +7544,53 @@ mod tests {
         let adventurer = installed.member.character_id;
         let adventurer_name = character_name(&store, adventurer).await;
         let start = store.character_group_id(adventurer).await.unwrap();
+        let members = |names: &[&str]| {
+            let mut names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+            names.sort();
+            names
+        };
 
-        // Toma leaves. Each group is named for the characters in it.
+        // Toma leaves, and each group has the name the GM gave it.
         store
-            .split_group_for_test(start, None, vec![toma])
+            .split_group_for_test(
+                start,
+                None,
+                vec![toma],
+                ("outside the hut", "Toma by the fire"),
+            )
             .await
             .unwrap();
-        let mut groups = active_groups(&store).await;
-        groups.sort();
-        let mut expected = vec![
-            (
-                format!("Mara, {adventurer_name}"),
-                vec!["Mara".to_string(), adventurer_name.clone()],
-            ),
-            ("Toma".to_string(), vec!["Toma".to_string()]),
-        ];
-        for (_, members) in &mut expected {
-            members.sort();
-        }
-        expected.sort();
-        assert_eq!(groups, expected);
+        let groups = active_groups(&store).await;
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert!(groups.contains(&(
+            "outside the hut".to_string(),
+            members(&["Mara", adventurer_name.as_str()])
+        )));
+        assert!(groups.contains(&("Toma by the fire".to_string(), members(&["Toma"]))));
 
         // Mara leaves the Adventurer to join Toma's group: one new group holds both.
         let adventurers_group = store.character_group_id(adventurer).await.unwrap();
         let tomas_group = store.character_group_id(toma).await.unwrap();
         store
-            .split_group_for_test(adventurers_group, Some(tomas_group), vec![mara])
+            .split_group_for_test(
+                adventurers_group,
+                Some(tomas_group),
+                vec![mara],
+                ("the Adventurer alone", "Mara and Toma at the fire"),
+            )
             .await
             .unwrap();
         let groups = active_groups(&store).await;
         assert_eq!(groups.len(), 2, "{groups:?}");
-        assert!(
-            groups.contains(&(
-                "Mara, Toma".to_string(),
-                vec!["Mara".to_string(), "Toma".to_string()]
-            )),
-            "{groups:?}"
-        );
-        assert!(
-            groups.contains(&(adventurer_name.clone(), vec![adventurer_name.clone()])),
-            "{groups:?}"
-        );
-        // Together's history holds both sources.
+        assert!(groups.contains(&(
+            "Mara and Toma at the fire".to_string(),
+            members(&["Mara", "Toma"])
+        )));
+        assert!(groups.contains(&(
+            "the Adventurer alone".to_string(),
+            members(&[adventurer_name.as_str()])
+        )));
+        // The new group's history holds both sources.
         let together = store.character_group_id(toma).await.unwrap();
         let parents: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM history_parent WHERE branch_id = (SELECT branch_id FROM \"group\" WHERE id = ?)",
@@ -7583,16 +7601,28 @@ mod tests {
         .unwrap();
         assert_eq!(parents, 2);
 
-        // Bad character lists and targets are refused, and nothing changes.
-        for (leaving, target, wanted) in [
-            (vec![], None, "nonempty list"),
-            (vec![adventurer], None, "distinct characters in group"),
-            (vec![mara, mara], None, "distinct characters"),
-            (vec![mara], Some(together), "another group at this location"),
+        // Bad character lists, empty names and a target that is not another group are
+        // refused, and nothing changes.
+        for (leaving, target, names, wanted) in [
+            (vec![], None, ("a", "b"), "nonempty list"),
+            (
+                vec![adventurer],
+                None,
+                ("a", "b"),
+                "distinct characters in group",
+            ),
+            (vec![mara, mara], None, ("a", "b"), "distinct characters"),
+            (
+                vec![mara],
+                Some(together),
+                ("a", "b"),
+                "another group at this location",
+            ),
+            (vec![mara], None, ("a", " "), "must not be empty"),
         ] {
             let before = active_groups(&store).await;
             let refused = store
-                .split_group_for_test(together, target, leaving)
+                .split_group_for_test(together, target, leaving, names)
                 .await
                 .unwrap_err();
             assert!(refused.contains(wanted), "{wanted}: {refused}");
@@ -7603,17 +7633,44 @@ mod tests {
             );
         }
 
-        // Everyone leaves: the one new group holds them, and no group is left behind.
+        // A name another active group has is made unique, not refused; a retired group's is free.
         store
-            .split_group_for_test(together, None, vec![mara, toma])
+            .split_group_for_test(
+                together,
+                None,
+                vec![mara],
+                ("the Adventurer alone", "the Adventurer alone"),
+            )
+            .await
+            .unwrap();
+        let mut names: Vec<String> = active_groups(&store)
+            .await
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "the Adventurer alone",
+                "the Adventurer alone 2",
+                "the Adventurer alone 3"
+            ],
+            "{names:?}"
+        );
+
+        // Everyone leaves: the one new group holds them, and no group is left behind.
+        let marras = store.character_group_id(mara).await.unwrap();
+        store
+            .split_group_for_test(marras, None, vec![mara], ("unused", "Mara on her own"))
             .await
             .unwrap();
         let groups = active_groups(&store).await;
-        assert_eq!(groups.len(), 2, "{groups:?}");
-        assert!(groups.contains(&(
-            "Mara, Toma".to_string(),
-            vec!["Mara".to_string(), "Toma".to_string()]
-        )));
+        assert!(groups.contains(&("Mara on her own".to_string(), members(&["Mara"]))));
+        assert!(
+            !groups.iter().any(|(name, _)| name == "unused"),
+            "{groups:?}"
+        );
     }
 
     async fn character_name(store: &Store, id: i64) -> String {
@@ -7653,6 +7710,8 @@ mod tests {
             None,
             tools::SplitGroup {
                 character_ids: vec![companion.character_id],
+                current_name: "first".into(),
+                target_name: "second".into(),
                 continue_with_character_id: None,
             },
             60,
@@ -10027,6 +10086,8 @@ mod tests {
                         target_group_id: None,
                         split: tools::SplitGroup {
                             character_ids: vec![toma_id],
+                            current_name: "player side".into(),
+                            target_name: "Toma side".into(),
                             continue_with_character_id: Some(installed.member.character_id),
                         },
                     },

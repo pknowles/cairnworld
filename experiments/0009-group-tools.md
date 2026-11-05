@@ -31,10 +31,14 @@ the players; Mara is an NPC outside, Toma an NPC in the hut.
 | Separate `move_to_group`, names as arguments | 0/3: `split_group` named after Toma's group | 0/3 | 2/3 |
 | Names derived, current-group fix | 0/3: a wrong `split_group` of both players, then moves | 1/3 | 3/3 |
 | Same, with the action worded as a player would write it | 0/2: `merge_group` of everyone | 0/2 | 2/2 |
+| `merge_group` removed (a move of every character is a merge), names derived | 2/2: `move_to_group` of Rowan | 0/2 | 1/2 |
+| Final: `merge_group` removed, the GM names the groups (made unique when they clash) | 3/3: `move_to_group` of Rowan, correct group | 2/3 | 1/3 |
 
-The GM calls `move_to_group` with correct arguments in some runs, but not as its first choice. It
-picks `merge_group` for "join" and makes no call for "walks off". Not solved.
+With `merge_group` gone and the GM naming the groups, joining another group is right 3 of 3 times, each
+a `move_to_group` of the one character to the right group. Walking off is right 2 of 3 (once no call), and
+walking back 1 of 3 (once no call, once a `split_group` instead of a move). What remains is the GM making no
+group call, or choosing the wrong one, when a character leaves or returns; the joins are solved. The names it
+writes are descriptive but not always accurate ("outside: Rowan and the Adventurer").
 
-Untried: dropping `merge_group` (a merge is moving every character of one group into the other, so
-`move_to_group` covers it); a split-and-join stated as one tool; the GM's reasoning is not
-visible, so what it weighs between tools is a guess.
+Why `merge_group` went: with it beside `move_to_group` the GM took "join" to mean merging, which pulls the
+other characters along; it names who moves when only a move is offered.

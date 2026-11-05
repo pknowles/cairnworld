@@ -37,12 +37,16 @@ pub enum TopologyChange<G = i64> {
     },
     Merge {
         group_ids: Vec<G>,
+        name: String,
     },
 }
 
-/// The characters leaving the GM's group.
+/// The characters leaving the GM's group, and the names of the group they leave and the group
+/// they go to.
 pub struct SplitGroup {
     pub character_ids: Vec<i64>,
+    pub current_name: String,
+    pub target_name: String,
     pub continue_with_character_id: Option<i64>,
 }
 

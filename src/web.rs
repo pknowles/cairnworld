@@ -2000,6 +2000,8 @@ mod tests {
                         target_group_id: None,
                         split: crate::tools::SplitGroup {
                             character_ids: vec![toma_id],
+                            current_name: "player side".into(),
+                            target_name: "Toma side".into(),
                             continue_with_character_id: Some(installed.member.character_id),
                         },
                     },
@@ -2172,7 +2174,8 @@ mod tests {
                         .await
                         .unwrap();
                     hearing_npcs.extend(store.group_npc_ids(other).await.unwrap());
-                    calls.push(ToolCall {id: "merge-chat".into(), name: "merge_groups".into(), arguments: serde_json::json!({"group_ids": [group, other], "name": "chat reunited", "description": "together"}).to_string()});
+                    let members = store.group_character_ids(group).await.unwrap();
+                    calls.push(ToolCall {id: "merge-chat".into(), name: "move_to_group".into(), arguments: serde_json::json!({"character_ids": members, "group_id": other, "current_group_name": "chat", "joined_group_name": "chat reunited"}).to_string()});
                 }
                 let narration = [
                     "Passive split narration.",

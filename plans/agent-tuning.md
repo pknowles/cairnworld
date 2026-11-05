@@ -14,20 +14,18 @@ group id and its characters (id and name) only. No group description or position
 none. Merge when characters of different groups could perceive each other; split when
 characters move away. `split_group` already acts on the GM's own group (it takes no group id).
 
-Done: the packet lists the other groups; the tools are `split_group(character_ids)`,
-`move_to_group(character_ids, group_id)` and `merge_group(group_id)`; groups are named for their
-members; the tools act on the acting character's current group; mistral.rs's Qwen parser needs
-an optional integer's schema type to be plain (`"integer"`, not `["integer","null"]`), which the
-schema normaliser now does. Do not add string-to-integer coercion in the game for it.
+Done: the packet lists the other groups; the tools are `split_group` (a new group),
+`move_to_group` (into an existing group; every character of the group moving is a merge) with the GM
+naming the groups, made unique when they clash; the tools act on the acting character's current
+group; mistral.rs's Qwen parser needs an optional integer's schema type to be plain (`"integer"`,
+not `["integer","null"]`), which the schema normaliser now does. Do not add string-to-integer
+coercion in the game for it.
 
 Still open (user, 2026-11-05: the GM must regroup characters; the ignored test is
-`the_gm_regroups_characters_as_they_move`, `CAIRNWORLD_REPEATS=N` for seeds). Measured over 2
-seeds with realistic wording (experiments/0009-group-tools.md): a character joining another
-group is merged in with the whole group instead of moved (`merge_group` 2 of 2, no
-`move_to_group`); walking off alone makes no group call (0 of 2, 1 of 3 in an earlier wording);
-walking back to the others works (2 of 2, as a merge). The GM does call `move_to_group` with
-correct arguments when its description is the only one that fits, but often after a wrong
-`split_group` of both players. The batched, delayed split belongs to plans/unified-game-time.md.
+`the_gm_regroups_characters_as_they_move`, `CAIRNWORLD_REPEATS=N` for seeds). Results are in
+experiments/0009-group-tools.md. Joining another group now works with `merge_group` removed; the GM
+often makes no group call at all when a character walks off, or back to the others.
+The batched, delayed split belongs to plans/unified-game-time.md.
 
 ## Whole-suite test time
 

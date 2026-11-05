@@ -508,33 +508,31 @@ agent ID alone cannot select a GM history. Player/NPC calls resolve agent_histor
 The call-stack prohibition on re-entering an active agent remains unchanged;
 the same GM role cannot recursively invoke itself through a different group.
 
-**Split.** `split_group(character_ids)` forms a new group from the named characters of
-the GM's own group, and `move_to_group(character_ids, group_id)` moves them into another group
-at the same location. Rust validates that they are distinct members of the GM's group. They are
-two tools because the meaning differs: an optional destination on one tool was left out, or the
-tool was avoided, when the GM meant to join a group (experiments/0009-group-tools.md). Groups are
-fungible, so each result is a new group: the characters' group has a branch whose parents are the
-settled positions of the group they left and, for a move, of the destination, in ascending group
-order, and the characters left behind get a new group whose single parent is the old head. The
-source groups retire. If everyone leaves there is no group left behind. Character and branch
-ownership change in one transaction, and the ids of the resulting groups are returned.
+**Split and move.** `split_group(character_ids, current_group_name, new_group_name)` forms a new
+group from the named characters of the GM's own group, and `move_to_group(character_ids, group_id,
+current_group_name, joined_group_name)` moves them into another group at the same location. Rust
+validates that they are distinct members of the GM's group. They are two tools because the meaning
+differs: with an optional destination on one tool the GM left it out or avoided the tool when it
+meant to join a group (experiments/0009-group-tools.md). Groups are fungible, so each result is a
+new group: the characters' group has a branch whose parents are the settled positions of the group
+they left and, for a move, of the destination, in ascending group order, and the characters left
+behind get a new group whose single parent is the old head. The source groups retire. Character and
+branch ownership change in one transaction, and the ids of the resulting groups are returned.
 
-A group is named for the characters in it, in id order ("Mara, Toma"). Every change of
-membership makes new groups, so the name is always accurate and no two active groups share one.
-The GM supplies no names: when it had to, it reused or collided with existing names and repeated
-the rejected call. A retired group gives up its name (`name (retired id)`), so a name can be reused.
-This differs from user_declarations.md (SplitGroup and MergeGroup take names for the groups); it
-awaits the user's decision.
+**Merge.** There is no separate merge tool. When `move_to_group` names every character of the GM's
+group, the two groups become one: a merge of both histories into a new group, each source
+compacted first as a merge prepares (`TopologyChanges::merge_branches`) and its history labelled
+with the group's name. With a merge tool beside `move_to_group` the GM chose to merge the whole
+group when one character joined another, 2 of 2 times, and with it withheld it moved only that
+character, 2 of 2.
+
+**Names.** The GM names each group in a short phrase of who and where ("Toma by the fire in the
+hut"). A name another active group has is made unique by adding a number; a call never fails over a
+name, since a rejected name made the GM repeat the same failing call. A retired group gives up its
+name (`name (retired id)`), so a name can be reused. A name must not be empty.
 
 The tools act on the acting character's group as it is when each call is made, since an earlier
 call in the same turn may have replaced the group the turn began with.
-
-**Merge.** `merge_group(group_id)` merges the named group into the GM's own group. Rust
-validates two distinct active groups at one location in the same world. Sort source group IDs
-ascending for parent order. The resulting group gets a new branch with those bounded parents;
-source groups retire. Character membership and the new head commit together.
-The resulting GM context includes both histories, each labelled with its group's name. No
-transcript is copied.
 
 **Awareness of other groups.** A GM sees the other active groups at its location: each
 group's id and name and its characters (id, name and each character's own position text), and

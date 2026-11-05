@@ -16,8 +16,8 @@
 role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
     packet. Group membership changes through tools: split_group when characters \
-    separate from the rest, move_to_group when some join another group, merge_group \
-    when whole groups meet. Narration alone leaves membership unchanged. Judge each \
+    separate from the rest, move_to_group when some join another group. \
+    Narration alone leaves membership unchanged. Judge each \
     presented action from the scene: approve it if it can happen, or reject it with a \
     concise reason. Your narration reaches the characters only \
     through a narrate tool, which ends your turn: make it your last call. Spoken words \
@@ -41,7 +41,7 @@ ask_request = "{actor} asks you (action {action_id}): {question}"
 
 # Ends the result of resolving an action, which is the last thing the GM reads
 # before narrating it.
-narrate_next = "Apply the action's group changes with split_group, move_to_group or merge_group. End your turn with a narrate tool."
+narrate_next = "Apply the action's group changes with split_group or move_to_group. End your turn with a narrate tool."
 
 # Ends the result of resolving an action while others presented this turn are
 # still undecided, in place of narrate_next. {actions} names them.
@@ -193,27 +193,22 @@ description = """\
 
 [gm.tools.split_group.arguments]
 character_ids = "The characters leaving this group."
+current_group_name = "A short phrase for the group left behind: who is in it and where."
+new_group_name = "A short phrase for the new group: who is in it and where."
 
 [gm.tools.move_to_group]
 description = """\
     Move the listed characters into another group at this location when they join \
-    its characters. The others stay together. Applies after every other call in \
-    this turn's batch has run.\
+    its characters. The others stay together; if every character of this group \
+    moves, the two groups become one. Applies after every other call in this \
+    turn's batch has run.\
     """
 
 [gm.tools.move_to_group.arguments]
 character_ids = "The characters moving."
 group_id = "The other group they join."
-
-[gm.tools.merge_group]
-description = """\
-    Merge another group at this location into this one when their characters could \
-    perceive each other. Applies after every other call in this turn's batch has run; \
-    result is deferred and confirmed in the reply.\
-    """
-
-[gm.tools.merge_group.arguments]
-group_id = "The other group to merge into this one."
+current_group_name = "A short phrase for the group left behind: who is in it and where."
+joined_group_name = "A short phrase for the group they join, with them in it: who is in it and where."
 
 # ---------------------------------------------------------------------------
 # The player's own agent, which turns what a human types into actions.
