@@ -111,6 +111,22 @@ set +a
 The server serves the generated package at `/pkg` and the
 checked-in landing artwork at `/media`.
 
+To watch a world being generated at the small-card setting (4096-token context),
+start the server on a fresh database with the limits the device tests use. Create
+the world from the seed form on the home page, turn on Developer Mode on its page
+and open Inspect: the Questioner and Storyteller agents, their chats and the
+objects as they are created are all there.
+
+```sh
+npm run build:frontend
+set -a; . secrets/dev.env; set +a
+export HF_HOME="$PWD/models/huggingface"
+export CAIRNWORLD__LIMITS__MAX_CONTEXT_TOKENS=4096 \
+       CAIRNWORLD__LIMITS__COMPACT_BEFORE_NEXT_INPUT_TOKENS=2048 \
+       CAIRNWORLD__LIMITS__KEEP_RAW_MESSAGES=8
+cargo run -- serve --database target/dev/world-gen.sqlite --model dev-qwen35
+```
+
 `npm run test:hydration` builds the frontend and runs Rust's browser-test fixture
 server with Playwright driving installed Chrome (`CHROME` can select its
 executable). It needs permission to listen on loopback. Test databases and browser
