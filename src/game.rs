@@ -12269,10 +12269,11 @@ mod tests {
     async fn real_model_compacts_a_long_chat_and_keeps_an_early_fact(model: &DeviceModel) {
         let (backend, model_path, sampling, base_limits) = model.parts();
         let observed_prompts = model.observed();
-        // A threshold the second turn's context clears, retaining enough tail
+        // A threshold the first turn's context clears (it totalled 626 tokens, more than 100 above this, so the
+        // length of the model's replies cannot decide whether a compaction runs), retaining enough tail
         // that the summary has real history to work from.
         let limits = Limits {
-            compact_before_next_input_tokens: 700,
+            compact_before_next_input_tokens: 500,
             keep_raw_messages: 2,
             ..base_limits
         };
