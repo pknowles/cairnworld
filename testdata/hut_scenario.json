@@ -16,7 +16,6 @@
     {
       "name": "charcoal hut",
       "location": "charcoal hut",
-      "description": "Everyone present at the charcoal hut: the Adventurer, Mara and Toma.",
       "notes": {
         "gm": {
           "grouping": "This is one group, not several factions; Mara and Toma are both reachable in the same GM turn."

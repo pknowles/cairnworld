@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT \"group\".name, location.name AS location_name, \"group\".description, \"group\".gm_notes, \"group\".storyteller_notes FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".world_id = ? ORDER BY \"group\".id",
+  "query": "SELECT \"group\".name, location.name AS location_name, \"group\".gm_notes, \"group\".storyteller_notes FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".world_id = ? ORDER BY \"group\".id",
   "describe": {
     "columns": [
       {
@@ -14,18 +14,13 @@
         "type_info": "Text"
       },
       {
-        "name": "description",
+        "name": "gm_notes",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "gm_notes",
-        "ordinal": 3,
-        "type_info": "Text"
-      },
-      {
         "name": "storyteller_notes",
-        "ordinal": 4,
+        "ordinal": 3,
         "type_info": "Text"
       }
     ],
@@ -36,9 +31,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "5cea5afa1a2af3d47d69e601d3a3a6376178cf10ad1adcf82202a047ecc7b11d"
+  "hash": "612fdf7ebcf28d7b2d19ca2f22f7eb0aa4182d004f4f9c4a4bd09ddbc6e0aea0"
 }

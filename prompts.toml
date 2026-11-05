@@ -193,7 +193,6 @@ character_ids = """\
     character must appear in exactly one partition.\
     """
 name = "A short name for the resulting group."
-description = "What distinguishes this resulting group's situation."
 
 [gm.tools.merge_groups]
 description = """\
@@ -205,7 +204,6 @@ description = """\
 [gm.tools.merge_groups.arguments]
 group_ids = "At least two distinct group IDs at the same location to merge."
 name = "A short name for the resulting merged group."
-description = "What distinguishes the merged group's situation."
 
 # ---------------------------------------------------------------------------
 # The player's own agent, which turns what a human types into actions.

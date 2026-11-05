@@ -1645,12 +1645,10 @@ mod tests {
                             tools::GroupPartition {
                                 character_ids: vec![installed.member.character_id, mara_id],
                                 name: "player side".into(),
-                                description: "outside".into(),
                             },
                             tools::GroupPartition {
                                 character_ids: vec![toma_id],
                                 name: "Toma side".into(),
-                                description: "inside".into(),
                             },
                         ],
                         continue_with_character_id: Some(installed.member.character_id),
@@ -1756,7 +1754,6 @@ mod tests {
             tools::TopologyChange::Merge {
                 group_ids: vec![over_group_id, under_group_id],
                 name: "merged".into(),
-                description: "reunited".into(),
             },
         )];
         let changes = store

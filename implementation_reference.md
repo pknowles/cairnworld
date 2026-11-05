@@ -251,11 +251,12 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   separate GM and Storyteller JSON notes. Blank player characters are named
   `AdventurerN` from their globally unique `charN` suffix. `world_gm(world_id,
   agent_id)` is one GM agent per world; `"group"(id, world_id, name,
-  location_id, description, branch_id, gm_notes, storyteller_notes,
+  location_id, branch_id, gm_notes, storyteller_notes,
   retired_at)` owns one GM history branch each, and `character_group`
   replaces the removed `character_location` - every active character has
-  exactly one group. A group's fresh scene packet has one `characters` list: every character
-  in it, however controlled, with the same fields (sheet, GM notes and what it
+  exactly one group. A group has a name, a location and members and no description (migration 0017). A
+  group's fresh scene packet has one `characters` list: every character
+  in it, however controlled, with the same fields (position text, sheet, GM notes and what it
   carries, from the one `Store::character_items` that also fills a player's and
   an NPC's own scene); and its role prompt tells the
   world_gm to narrate to the characters as a group; an arbitration request
@@ -777,7 +778,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   before the action is approved or rejected. A valid call is captured in
   `NarrationTools` and delivered after the player agent settles as `NarrationText`
   entries (`only` / `except` recipients); `Narration::restrict_to` keeps speech
-  privacy. The GM scene packet carries character ids and leaves out empty fields (`prompts::drop_blanks`). The global
+  privacy. The GM scene packet carries character ids and leaves out empty fields (`prompts::drop_blanks`), and
+  `other_groups`: each other active group at the location as id, name and its characters (id, name,
+  position text) so the GM can merge. The global
   `[game] characters_share_narration` rule (`GameSettings`, on by default) is never told to
   the GM: `Narration::players_share` makes `append_group_narration_in` show every perceiving
   player character the first account a player received; `narrate_characters` is exempt.

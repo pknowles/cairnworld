@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT \"group\".id AS group_id, location.id AS location_id, location.name AS location_name, location.description AS location_description, location.gm_notes, \"group\".description AS group_description, \"group\".gm_notes AS group_gm_notes FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".branch_id = ? AND \"group\".world_id = ?",
+  "query": "SELECT \"group\".id AS group_id, location.id AS location_id, location.name AS location_name, location.description AS location_description, location.gm_notes, \"group\".gm_notes AS group_gm_notes FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".branch_id = ? AND \"group\".world_id = ?",
   "describe": {
     "columns": [
       {
@@ -29,13 +29,8 @@
         "type_info": "Text"
       },
       {
-        "name": "group_description",
-        "ordinal": 5,
-        "type_info": "Text"
-      },
-      {
         "name": "group_gm_notes",
-        "ordinal": 6,
+        "ordinal": 5,
         "type_info": "Text"
       }
     ],
@@ -48,9 +43,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "855bcea463e3df5421622027e53fdcb71f96eca986e23b5f21fba560ceaadccb"
+  "hash": "9450885917f1a016cedac5b676d694adf6e70eaa5ad3d20d78f933715cf20aa5"
 }

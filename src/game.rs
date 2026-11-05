@@ -2064,7 +2064,6 @@ where
                             .map(|partition| GroupPartition {
                                 character_ids: partition.character_ids,
                                 name: partition.name,
-                                description: partition.description,
                             })
                             .collect(),
                         continue_with_character_id: None,
@@ -2090,7 +2089,6 @@ where
                     Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Merge {
                         group_ids: merge.group_ids,
                         name: merge.name,
-                        description: merge.description,
                     }))
                 }) as ToolFuture
             },
@@ -2631,8 +2629,6 @@ struct SplitGroupPartition {
     character_ids: Vec<i64>,
     // A short name for the resulting group.
     name: String,
-    // What distinguishes this resulting group's situation.
-    description: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2650,8 +2646,6 @@ struct MergeGroups {
     group_ids: Vec<i64>,
     // A short name for the resulting merged group.
     name: String,
-    // What distinguishes the merged group's situation.
-    description: String,
 }
 
 #[cfg(test)]
@@ -3800,8 +3794,8 @@ mod tests {
             .unwrap();
         let split_args = serde_json::json!({
             "partitions": [
-                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara", "description": "outside the hut"},
-                {"character_ids": [toma_id], "name": "Toma alone", "description": "inside the hut"},
+                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara"},
+                {"character_ids": [toma_id], "name": "Toma alone"},
             ],
         })
         .to_string();
@@ -3866,6 +3860,53 @@ mod tests {
             split_result.contains("split into groups"),
             "split_group must report success: {split_result}"
         );
+
+        // Each group's GM sees the other group's characters, and only them.
+        let adventurer_group = store
+            .character_group_id(installed.member.character_id)
+            .await
+            .unwrap();
+        let toma_group = store.character_group_id(toma_id).await.unwrap();
+        let member = |id: i64, name: &str| crate::store::GroupMember {
+            id,
+            name: name.to_string(),
+            position: String::new(),
+        };
+        let seen_by_with_mara = store
+            .gm_scene(
+                installed.world_id,
+                store
+                    .group_gm_history(adventurer_group)
+                    .await
+                    .unwrap()
+                    .branch_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            seen_by_with_mara.other_groups,
+            [crate::store::OtherGroup {
+                id: toma_group,
+                name: "Toma alone".to_string(),
+                characters: vec![member(toma_id, "Toma")],
+            }]
+        );
+        let seen_by_toma = store
+            .gm_scene(
+                installed.world_id,
+                store.group_gm_history(toma_group).await.unwrap().branch_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            seen_by_toma
+                .other_groups
+                .iter()
+                .map(|group| group.id)
+                .collect::<Vec<_>>(),
+            [adventurer_group]
+        );
+        assert_eq!(seen_by_toma.other_groups[0].characters.len(), 2);
 
         let adventurer_group = store
             .character_group_id(installed.member.character_id)
@@ -3990,8 +4031,8 @@ mod tests {
 
         let split_args = serde_json::json!({
             "partitions": [
-                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara", "description": "outside"},
-                {"character_ids": [toma_id], "name": "Toma alone", "description": "inside"},
+                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara"},
+                {"character_ids": [toma_id], "name": "Toma alone"},
             ],
         })
         .to_string();
@@ -4099,7 +4140,6 @@ mod tests {
         let merge_args = serde_json::json!({
             "group_ids": [adventurer_group, toma_group],
             "name": "reunited",
-            "description": "back together at the hut",
         })
         .to_string();
         let (merge_backend, merge_requests) = ScriptedBackend::recording([
@@ -5293,7 +5333,7 @@ mod tests {
         // group's current membership.
         let incomplete_split = serde_json::json!({
             "partitions": [
-                {"character_ids": [installed.member.character_id], "name": "alone", "description": "outside"},
+                {"character_ids": [installed.member.character_id], "name": "alone"},
             ],
         })
         .to_string();
@@ -5422,15 +5462,15 @@ mod tests {
         // rejected result").
         let first_split = serde_json::json!({
             "partitions": [
-                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara", "description": "outside"},
-                {"character_ids": [toma_id], "name": "Toma alone", "description": "inside"},
+                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara"},
+                {"character_ids": [toma_id], "name": "Toma alone"},
             ],
         })
         .to_string();
         let second_split = serde_json::json!({
             "partitions": [
-                {"character_ids": [installed.member.character_id], "name": "alone", "description": "elsewhere"},
-                {"character_ids": [mara_id, toma_id], "name": "the other two", "description": "elsewhere"},
+                {"character_ids": [installed.member.character_id], "name": "alone"},
+                {"character_ids": [mara_id, toma_id], "name": "the other two"},
             ],
         })
         .to_string();
@@ -8771,7 +8811,10 @@ mod tests {
         );
         // The group splits: first with Mara outside, second with Toma inside.
         scene.responses.lock().unwrap().extend([
-            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "approve".into(),
@@ -8783,8 +8826,8 @@ mod tests {
                     name: "split_group".into(),
                     arguments: serde_json::json!({
                         "partitions": [
-                            {"character_ids": [scene.first.character_id, mara], "name": "outside", "description": "with Mara"},
-                            {"character_ids": [scene.second.character_id, toma], "name": "inside", "description": "with Toma"},
+                            {"character_ids": [scene.first.character_id, mara], "name": "outside"},
+                            {"character_ids": [scene.second.character_id, toma], "name": "inside"},
                         ],
                     })
                     .to_string(),
@@ -9276,7 +9319,10 @@ mod tests {
             approve(2),
             narrate("Mara speaks."),
             // While Toma's chosen reply waits, the other player splits the group.
-            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "approve".into(),
@@ -9288,8 +9334,8 @@ mod tests {
                     name: "split_group".into(),
                     arguments: serde_json::json!({
                         "partitions": [
-                            {"character_ids": [scene.first.character_id, mara], "name": "outside", "description": "with Mara"},
-                            {"character_ids": [scene.second.character_id, toma], "name": "inside", "description": "with Toma"},
+                            {"character_ids": [scene.first.character_id, mara], "name": "outside"},
+                            {"character_ids": [scene.second.character_id, toma], "name": "inside"},
                         ],
                     })
                     .to_string(),
@@ -9451,8 +9497,8 @@ mod tests {
                     "split_group",
                     serde_json::json!({
                         "partitions": [
-                            {"character_ids": [scene.first.character_id, mara, toma], "name": "hut", "description": "inside"},
-                            {"character_ids": [scene.second.character_id], "name": "yard", "description": "outside"},
+                            {"character_ids": [scene.first.character_id, mara, toma], "name": "hut"},
+                            {"character_ids": [scene.second.character_id], "name": "yard"},
                         ],
                     }),
                 ),
@@ -9499,12 +9545,15 @@ mod tests {
             propose("It is in the hut.", &speaker, 2),
             approve(3),
             narrate("Mara speaks."),
-            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the yard"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the yard"}),
+            ),
             response(Content::ToolCalls(vec![
                 call("approve_action", serde_json::json!({"action_id": 4})),
                 call(
                     "merge_groups",
-                    serde_json::json!({"group_ids": groups, "name": "everyone", "description": "together"}),
+                    serde_json::json!({"group_ids": groups, "name": "everyone"}),
                 ),
             ])),
             narrate("They come together."),
@@ -9612,7 +9661,10 @@ mod tests {
         let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
         // Split first: the first player stays with Mara, the second with Toma.
         scene.responses.lock().unwrap().extend([
-            tool_call("attempt", serde_json::json!({"kind": "look", "description": "the room"})),
+            tool_call(
+                "attempt",
+                serde_json::json!({"kind": "look", "description": "the room"}),
+            ),
             response(Content::ToolCalls(vec![
                 ToolCall {
                     id: "approve".into(),
@@ -9624,8 +9676,8 @@ mod tests {
                     name: "split_group".into(),
                     arguments: serde_json::json!({
                         "partitions": [
-                            {"character_ids": [scene.first.character_id, mara], "name": "outside", "description": "with Mara"},
-                            {"character_ids": [scene.second.character_id, toma], "name": "inside", "description": "with Toma"},
+                            {"character_ids": [scene.first.character_id, mara], "name": "outside"},
+                            {"character_ids": [scene.second.character_id, toma], "name": "inside"},
                         ],
                     })
                     .to_string(),
@@ -9685,7 +9737,9 @@ mod tests {
         };
         let (game, store, _db, first, _second) =
             two_player_bread_thief_game_with_limits(backend, limits).await;
-        fixed_context.max_chars.store(5400, Ordering::SeqCst);
+        // Sized so the third action overflows with the GM packet as it is; change the packet and this
+        // moves with it (5400 before the group description was dropped).
+        fixed_context.max_chars.store(5310, Ordering::SeqCst);
 
         let narration =
             "The words hang in the smoky air of the hut while everyone waits. ".repeat(8);
@@ -10351,8 +10405,8 @@ mod tests {
                     name: "split_group".into(),
                     arguments: serde_json::json!({
                         "partitions": [
-                            {"character_ids":members, "name":"players", "description":"outside"},
-                            {"character_ids":[toma], "name":"Toma", "description":"inside"}
+                            {"character_ids":members, "name":"players"},
+                            {"character_ids":[toma], "name":"Toma"}
                         ]
                     })
                     .to_string(),
@@ -10412,7 +10466,7 @@ mod tests {
                     id: "merge-1".into(),
                     name: "merge_groups".into(),
                     arguments: serde_json::json!({
-                        "group_ids":[players,alone], "name":"reunited", "description":"together"
+                        "group_ids":[players,alone], "name":"reunited"
                     })
                     .to_string(),
                 },
@@ -11112,7 +11166,7 @@ mod tests {
                 0 => (
                     "split_group",
                     serde_json::json!({
-                        "partitions": [{"character_ids": characters, "name": "Changed", "description": "Changed"}],
+                        "partitions": [{"character_ids": characters, "name": "Changed"}],
                     }),
                 ),
                 _ => (
@@ -11123,7 +11177,7 @@ mod tests {
                             2 => vec![local_group, foreign_groups[0]],
                             _ => vec![foreign_groups[0], local_group],
                         },
-                        "name": "Changed", "description": "Changed",
+                        "name": "Changed",
                     }),
                 ),
             };
@@ -11259,10 +11313,11 @@ mod tests {
             .collect();
         let split = serde_json::json!({
             "partitions": [
-                {"character_ids": companions, "name": "first group", "description": "outside"},
-                {"character_ids": [second.character_id], "name": "second group", "description": "inside"}
+                {"character_ids": companions, "name": "first group"},
+                {"character_ids": [second.character_id], "name": "second group"}
             ]
-        }).to_string();
+        })
+        .to_string();
         script.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),

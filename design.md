@@ -496,7 +496,7 @@ created with every character. In the development setup, a new Adventurer enters
 an existing group at its location; no particular group is required. With the
 Storyteller, completion of character creation and the player's readiness lead to
 the entry placement described under Storyteller world creation below.
-`group(id, world_id, location_id, description, branch_id,
+`group(id, world_id, location_id, name, branch_id,
 gm_notes, storyteller_notes, retired_at)` owns one GM history branch. A null
 retired_at denotes an active group with a writable head; a retired group keeps
 its final head for inspection but cannot receive new gameplay entries. Each active
@@ -508,22 +508,22 @@ agent ID alone cannot select a GM history. Player/NPC calls resolve agent_histor
 The call-stack prohibition on re-entering an active agent remains unchanged;
 the same GM role cannot recursively invoke itself through a different group.
 
-**Split.** `split_group(group_id, partitions)` accepts a complete, nonempty,
-disjoint partition of its character IDs with descriptions. Rust validates exact
+**Split.** `split_group(partitions)` accepts a complete, nonempty,
+disjoint partition of the GM's own group's character IDs with a name for each. Rust validates exact
 membership. Each resulting group gets a new branch whose single parent is the
 old head through its settled position. The old group retires. Character and
 branch ownership change in one transaction. IDs of resulting groups are returned.
 
-**Merge.** `merge_groups(group_ids, description)` validates distinct nonempty
+**Merge.** `merge_groups(group_ids, name)` validates distinct nonempty
 groups at one location in the same world. Sort source group IDs ascending for
 parent order. The resulting group gets a new branch with those bounded parents;
 source groups retire. Character membership and the new head commit together.
 The resulting GM context includes both histories. No transcript is copied.
 
 **Awareness of other groups.** A GM sees the other active groups at its location: each
-group's id and its characters (id and name), and nothing else of them. Groups have no position
-within a location, so there is no group position or description to show; the location is the
-same for every group there. A merge is due when characters of different groups could perceive
+group's id and name and its characters (id, name and each character's own position text), and
+nothing else of them. A group has a name and a location and no description or position of its
+own; where a character is within the location is that character's position text. A merge is due when characters of different groups could perceive
 each other; a split is due when characters move away from a group. Other groups' NPCs and
 players are shown alike.
 
@@ -532,7 +532,10 @@ following one player is one split. The first split of a group schedules a pendin
 split call returns before it resolves; it resolves once every player's game time passes the
 first mover's move time plus a combat turn, and the GM sees the pending split meanwhile.
 `split_group` may name an existing or pending group to move a character into, so a character can
-leave one group and join another in one call.
+leave one group and join another in one call. user_declarations.md (SplitGroup, MergeGroup) defines
+the target shapes: split takes the characters leaving, new names for the current and target group
+and an optional target group; merge takes the other group's id and a new name. The current tools
+still take a complete partition and a list of group ids.
 
 **Tool boundary.** Grouping tools produce a typed pending topology change in
 `ToolOutcome`; it is applied at the end of the current model-returned tool batch.
