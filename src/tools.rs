@@ -31,8 +31,9 @@ pub type AfterToolResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub enum TopologyChange<G = i64> {
     Split {
         group_id: G,
-        partitions: Vec<GroupPartition>,
-        continue_with_character_id: Option<i64>,
+        /// An existing group at the same location for the characters to join.
+        target_group_id: Option<G>,
+        split: SplitGroup,
     },
     Merge {
         group_ids: Vec<G>,
@@ -40,9 +41,13 @@ pub enum TopologyChange<G = i64> {
     },
 }
 
-pub struct GroupPartition {
+/// The characters leaving the GM's group, and the names of the group they leave
+/// and the group they go to.
+pub struct SplitGroup {
     pub character_ids: Vec<i64>,
-    pub name: String,
+    pub current_name: String,
+    pub target_name: String,
+    pub continue_with_character_id: Option<i64>,
 }
 
 /// The model receives a rejected call as an ordinary tool result and can

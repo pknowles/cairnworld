@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM \"group\" WHERE world_id = ? AND name = ? AND retired_at IS NULL AND id NOT IN (SELECT value FROM json_each(?))",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5e91cde3b27879cec9d3ee8aaff8efd2657ea56fbbd4c95f79fcc19da2728f0b"
+}

@@ -14,17 +14,20 @@ group id and its characters (id and name) only. No group description or position
 none. Merge when characters of different groups could perceive each other; split when
 characters move away. `split_group` already acts on the GM's own group (it takes no group id).
 
-Still to do: the packet change, then real-model checks of valid calls (ids taken from the
-packet, resulting groups read from stored membership) for a merge when characters cross paths
-and a split when they part, repeated enough to know the rate. The batched, delayed split and a
-split that moves a character into another group belong to plans/unified-game-time.md.
+Done: the packet lists the other groups, and the tools are `split_group` (the characters leaving, names for
+both groups, an optional target group) and `merge_group` (the other group's id and a name), as declared.
+Still to do: real-model checks of valid calls with two groups (ids taken from the packet, resulting groups read
+from stored membership) for a merge when characters cross paths and a split when they part, repeated
+enough to know the rate, including how often the optional target group is filled needlessly. The batched,
+delayed split belongs to plans/unified-game-time.md.
 
 ## The GM names the wrong character in an intervention check
 
 Players can be asked (plans/archive/player-replies.md), but the GM must name them. The GM's
 input in the test is valid: the scene lists every character with an id (Mara 1, Toma 2, the
 acting player 3, the player to ask 4) and the note names the player to ask. Over 60 GM-only
-samples with production sampling (30 per case) the GM named the right id 54 times, Toma 3 and
+samples (30 per case; the game in that test used greedy sampling, not production sampling, until
+2026-11-05, and varied only by random character names) the GM named the right id 54 times, Toma 3 and
 the acting character 3 (the tool refuses that, so nobody is asked). The first note said the
 other player was "beside the sack" while the scene text puts Toma beside the sack; that
 contradiction caused part of it (51 right, 8 Toma, 1 actor), and the note now says the player

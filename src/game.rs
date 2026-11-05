@@ -30,7 +30,7 @@ use crate::{
         MAX_PREFIX_CHARS, Narration, NarrationText, PendingAction, PlayerAgent, PresenceNarration,
         SpeakAction, Store,
     },
-    tools::{GroupPartition, Tool, ToolFuture, ToolOutcome, TopologyChange},
+    tools::{self, Tool, ToolFuture, ToolOutcome, TopologyChange},
     world::{self, ChatChange, OpeningState, World, WorldEvent, Worlds},
 };
 
@@ -2050,44 +2050,36 @@ where
                         Ok(split) => split,
                         Err(error) => return Ok(ToolOutcome::rejected(error)),
                     };
-                    if split.partitions.is_empty() {
-                        return Ok(ToolOutcome::Rejected(
-                            "Tool arguments were rejected: split_group requires at least one partition"
-                                .to_string(),
-                        ));
-                    }
                     Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Split {
                         group_id,
-                        partitions: split
-                            .partitions
-                            .into_iter()
-                            .map(|partition| GroupPartition {
-                                character_ids: partition.character_ids,
-                                name: partition.name,
-                            })
-                            .collect(),
-                        continue_with_character_id: None,
+                        target_group_id: split.target_group_id,
+                        split: tools::SplitGroup {
+                            character_ids: split.character_ids,
+                            current_name: split.current_group_name,
+                            target_name: split.target_group_name,
+                            continue_with_character_id: None,
+                        },
                     }))
                 }) as ToolFuture
             },
         );
         let merge_tool = Tool::new(
             prompts.gm.tools.tool(
-                "merge_groups",
-                serde_json::to_value(schema_for!(MergeGroups))
-                    .expect("merge_groups schema should serialize"),
+                "merge_group",
+                serde_json::to_value(schema_for!(MergeGroup))
+                    .expect("merge_group schema should serialize"),
             )?,
             move |context| {
                 let arguments = context.arguments.to_string();
                 Box::pin(async move {
-                    let merge: MergeGroups = match serde_json::from_str(&arguments)
-                        .context("parsing merge_groups arguments")
+                    let merge: MergeGroup = match serde_json::from_str(&arguments)
+                        .context("parsing merge_group arguments")
                     {
                         Ok(merge) => merge,
                         Err(error) => return Ok(ToolOutcome::rejected(error)),
                     };
                     Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Merge {
-                        group_ids: merge.group_ids,
+                        group_ids: vec![group_id, merge.group_id],
                         name: merge.name,
                     }))
                 }) as ToolFuture
@@ -2623,28 +2615,23 @@ struct RejectAction {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SplitGroupPartition {
-    // The character IDs going to this resulting group. Every currently
-    // present character must appear in exactly one partition.
-    character_ids: Vec<i64>,
-    // A short name for the resulting group.
-    name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct SplitGroup {
-    // A complete, nonempty, disjoint partition of the group's current
-    // characters: every character present in exactly one partition.
-    partitions: Vec<SplitGroupPartition>,
+    // The characters leaving this group.
+    character_ids: Vec<i64>,
+    // A short name for the group left behind.
+    current_group_name: String,
+    // A short name for the group the characters end up in.
+    target_group_name: String,
+    // An existing group at this location for them to join.
+    target_group_id: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct MergeGroups {
-    // At least two distinct group IDs at the same location to merge.
-    group_ids: Vec<i64>,
-    // A short name for the resulting merged group.
+struct MergeGroup {
+    // The other group at this location to merge into this one.
+    group_id: i64,
+    // A short name for the merged group.
     name: String,
 }
 
@@ -3793,10 +3780,7 @@ mod tests {
             .await
             .unwrap();
         let split_args = serde_json::json!({
-            "partitions": [
-                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara"},
-                {"character_ids": [toma_id], "name": "Toma alone"},
-            ],
+            "character_ids": [toma_id], "current_group_name": "with Mara", "target_group_name": "Toma alone",
         })
         .to_string();
         let (scripted_backend, recorded_requests) = ScriptedBackend::recording([
@@ -3857,7 +3841,7 @@ mod tests {
                 .expect("the GM's own next turn must see split-1's tool result")
         };
         assert!(
-            split_result.contains("split into groups"),
+            split_result.contains("split: the characters are now in group"),
             "split_group must report success: {split_result}"
         );
 
@@ -4030,10 +4014,7 @@ mod tests {
             .unwrap();
 
         let split_args = serde_json::json!({
-            "partitions": [
-                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara"},
-                {"character_ids": [toma_id], "name": "Toma alone"},
-            ],
+            "character_ids": [toma_id], "current_group_name": "with Mara", "target_group_name": "Toma alone",
         })
         .to_string();
         let (split_backend, _split_requests) = ScriptedBackend::recording([
@@ -4138,7 +4119,7 @@ mod tests {
             .unwrap();
 
         let merge_args = serde_json::json!({
-            "group_ids": [adventurer_group, toma_group],
+            "group_id": toma_group,
             "name": "reunited",
         })
         .to_string();
@@ -4156,7 +4137,7 @@ mod tests {
                 },
                 ToolCall {
                     id: "merge-1".into(),
-                    name: "merge_groups".into(),
+                    name: "merge_group".into(),
                     arguments: merge_args,
                 },
             ])),
@@ -4845,8 +4826,13 @@ mod tests {
     /// reaction the character proposes, and still end its turn by narrating.
     async fn real_model_gm_asks_a_character_before_deciding_a_take(model: &DeviceModel) {
         let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, _second) =
-            two_player_bread_thief_game_with_limits(backend, limits).await;
+        let (game, store, _db, first, _second) = two_player_bread_thief_game_with_sampling(
+            backend,
+            limits,
+            GameSettings::default(),
+            model.sampling.clone(),
+        )
+        .await;
         let sequence = store
             .begin_sequence(first.world_id, "real GM intervention")
             .await
@@ -4947,8 +4933,13 @@ mod tests {
         for (typed, intervenes) in cases {
             for repeat in 0..repeats {
                 let (backend, _model_path, _sampling, limits) = model.parts();
-                let (game, store, _db, first, second) =
-                    two_player_bread_thief_game_with_limits(backend, limits).await;
+                let (game, store, _db, first, second) = two_player_bread_thief_game_with_sampling(
+                    backend,
+                    limits,
+                    GameSettings::default(),
+                    model.sampling.clone(),
+                )
+                .await;
                 let bystander = store.player_scene(&second).await.unwrap().character_name;
                 let taker = store.player_scene(&first).await.unwrap().character_name;
                 let sequence = store
@@ -5043,8 +5034,13 @@ mod tests {
     /// showed the GM narrating an NPC's speech out of an `ask`.
     async fn real_model_gm_answers_a_question_and_rejects_any_other_ask(model: &DeviceModel) {
         let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, _second) =
-            two_player_bread_thief_game_with_limits(backend, limits).await;
+        let (game, store, _db, first, _second) = two_player_bread_thief_game_with_sampling(
+            backend,
+            limits,
+            GameSettings::default(),
+            model.sampling.clone(),
+        )
+        .await;
         // (who asks, what they send as an ask, whether it is a question to answer)
         let asks: [(&str, &str, bool); 6] = [
             ("player", "What is the hut built from?", true),
@@ -5165,8 +5161,13 @@ mod tests {
     /// The take arguments a real player agent sends for what a player says.
     async fn take_arguments_for(model: &DeviceModel, text: &str) -> Vec<String> {
         let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, _second) =
-            two_player_bread_thief_game_with_limits(backend, limits).await;
+        let (game, store, _db, first, _second) = two_player_bread_thief_game_with_sampling(
+            backend,
+            limits,
+            GameSettings::default(),
+            model.sampling.clone(),
+        )
+        .await;
         let _connection = game.connect(&first).await.unwrap();
         game.player_message(first.clone(), text)
             .await
@@ -5219,8 +5220,13 @@ mod tests {
 
     async fn real_model_gm_resolves_a_run_of_actions(model: &DeviceModel) {
         let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, _second) =
-            two_player_bread_thief_game_with_limits(backend, limits).await;
+        let (game, store, _db, first, _second) = two_player_bread_thief_game_with_sampling(
+            backend,
+            limits,
+            GameSettings::default(),
+            model.sampling.clone(),
+        )
+        .await;
         // The speech comes last: it starts NPC replies, which would otherwise
         // compete for the model with the actions still to be judged.
         let lines = [
@@ -5292,7 +5298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_incomplete_split_partition_is_rejected_and_changes_nothing() {
+    async fn an_invalid_split_is_rejected_and_changes_nothing() {
         let db = crate::store::TestDatabase::new("game-test");
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -5332,9 +5338,9 @@ mod tests {
         // Omits Mara and Toma entirely - not a complete partition of the
         // group's current membership.
         let incomplete_split = serde_json::json!({
-            "partitions": [
-                {"character_ids": [installed.member.character_id], "name": "alone"},
-            ],
+            "character_ids": [],
+            "current_group_name": "stay",
+            "target_group_name": "go",
         })
         .to_string();
         let (backend, recorded_requests) = ScriptedBackend::recording([
@@ -5461,17 +5467,11 @@ mod tests {
         // source (design.md: "A stale second topology proposal gets a
         // rejected result").
         let first_split = serde_json::json!({
-            "partitions": [
-                {"character_ids": [installed.member.character_id, mara_id], "name": "with Mara"},
-                {"character_ids": [toma_id], "name": "Toma alone"},
-            ],
+            "character_ids": [toma_id], "current_group_name": "with Mara", "target_group_name": "Toma alone",
         })
         .to_string();
         let second_split = serde_json::json!({
-            "partitions": [
-                {"character_ids": [installed.member.character_id], "name": "alone"},
-                {"character_ids": [mara_id, toma_id], "name": "the other two"},
-            ],
+            "character_ids": [mara_id, toma_id], "current_group_name": "alone", "target_group_name": "the other two",
         })
         .to_string();
         let (backend, recorded_requests) = ScriptedBackend::recording([
@@ -5539,7 +5539,7 @@ mod tests {
             )
         };
         assert!(
-            first_result.contains("split into groups"),
+            first_result.contains("split: the characters are now in group"),
             "the first proposal against the still-active source must succeed: {first_result}"
         );
         assert!(
@@ -8803,7 +8803,7 @@ mod tests {
                     .unwrap()
             }
         };
-        let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
+        let toma = id_of("Toma").await;
         let outside_speaker = scene.names[0].clone();
         let (reached, release) = (
             Arc::new(tokio::sync::Notify::new()),
@@ -8825,10 +8825,7 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "partitions": [
-                            {"character_ids": [scene.first.character_id, mara], "name": "outside"},
-                            {"character_ids": [scene.second.character_id, toma], "name": "inside"},
-                        ],
+                        "character_ids": [scene.second.character_id, toma], "current_group_name": "outside", "target_group_name": "inside",
                     })
                     .to_string(),
                 },
@@ -9307,7 +9304,7 @@ mod tests {
                     .unwrap()
             }
         };
-        let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
+        let toma = id_of("Toma").await;
         scene
             .responses
             .lock()
@@ -9333,10 +9330,7 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "partitions": [
-                            {"character_ids": [scene.first.character_id, mara], "name": "outside"},
-                            {"character_ids": [scene.second.character_id, toma], "name": "inside"},
-                        ],
+                        "character_ids": [scene.second.character_id, toma], "current_group_name": "outside", "target_group_name": "inside",
                     })
                     .to_string(),
                 },
@@ -9472,17 +9466,6 @@ mod tests {
     async fn merging_groups_drops_replies_chosen_for_the_group_that_no_longer_exists() {
         let scene = speech_scene().await;
         let speaker = scene.names[0].clone();
-        let id_of = |name: &'static str| {
-            let pool = scene.store.pool();
-            async move {
-                sqlx::query_scalar::<_, i64>("SELECT id FROM character WHERE name = ?")
-                    .bind(name)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap()
-            }
-        };
-        let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
         let call = |name: &str, arguments: serde_json::Value| ToolCall {
             id: name.into(),
             name: name.into(),
@@ -9496,10 +9479,7 @@ mod tests {
                 call(
                     "split_group",
                     serde_json::json!({
-                        "partitions": [
-                            {"character_ids": [scene.first.character_id, mara, toma], "name": "hut"},
-                            {"character_ids": [scene.second.character_id], "name": "yard"},
-                        ],
+                        "character_ids": [scene.second.character_id], "current_group_name": "hut", "target_group_name": "yard",
                     }),
                 ),
             ])),
@@ -9552,8 +9532,8 @@ mod tests {
             response(Content::ToolCalls(vec![
                 call("approve_action", serde_json::json!({"action_id": 4})),
                 call(
-                    "merge_groups",
-                    serde_json::json!({"group_ids": groups, "name": "everyone"}),
+                    "merge_group",
+                    serde_json::json!({"group_id": groups[0], "name": "everyone"}),
                 ),
             ])),
             narrate("They come together."),
@@ -9658,7 +9638,7 @@ mod tests {
                     .unwrap()
             }
         };
-        let (mara, toma) = (id_of("Mara").await, id_of("Toma").await);
+        let toma = id_of("Toma").await;
         // Split first: the first player stays with Mara, the second with Toma.
         scene.responses.lock().unwrap().extend([
             tool_call(
@@ -9675,10 +9655,7 @@ mod tests {
                     id: "split".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "partitions": [
-                            {"character_ids": [scene.first.character_id, mara], "name": "outside"},
-                            {"character_ids": [scene.second.character_id, toma], "name": "inside"},
-                        ],
+                        "character_ids": [scene.second.character_id, toma], "current_group_name": "outside", "target_group_name": "inside",
                     })
                     .to_string(),
                 },
@@ -10380,14 +10357,6 @@ mod tests {
             .fetch_one(&store.pool())
             .await
             .unwrap();
-        let members: Vec<i64> = sqlx::query_scalar(
-            "SELECT character_id FROM character_group WHERE group_id = ? AND character_id != ?",
-        )
-        .bind(original)
-        .bind(toma)
-        .fetch_all(&store.pool())
-        .await
-        .unwrap();
         responses.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-1".into(),
@@ -10404,10 +10373,7 @@ mod tests {
                     id: "split-1".into(),
                     name: "split_group".into(),
                     arguments: serde_json::json!({
-                        "partitions": [
-                            {"character_ids":members, "name":"players"},
-                            {"character_ids":[toma], "name":"Toma"}
-                        ]
+                        "character_ids": [toma], "current_group_name": "players", "target_group_name": "Toma",
                     })
                     .to_string(),
                 },
@@ -10464,9 +10430,9 @@ mod tests {
                 },
                 ToolCall {
                     id: "merge-1".into(),
-                    name: "merge_groups".into(),
+                    name: "merge_group".into(),
                     arguments: serde_json::json!({
-                        "group_ids":[players,alone], "name":"reunited"
+                        "group_id": alone, "name": "reunited"
                     })
                     .to_string(),
                 },
@@ -10637,6 +10603,31 @@ mod tests {
     where
         B: Backend + Send + Sync + 'static,
     {
+        let greedy = Sampling {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        two_player_bread_thief_game_with_sampling(backend, limits, rules, greedy).await
+    }
+
+    /// The two-player game with the given sampling. Real-model scenarios pass the
+    /// device model's, so the agents are sampled as in production; scripted ones
+    /// use `two_player_bread_thief_game_with_rules`, which is greedy.
+    async fn two_player_bread_thief_game_with_sampling<B>(
+        backend: B,
+        limits: Limits,
+        rules: GameSettings,
+        sampling: Sampling,
+    ) -> (
+        Arc<Game<B>>,
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        PlayerAgent,
+    )
+    where
+        B: Backend + Send + Sync + 'static,
+    {
         let db = crate::store::TestDatabase::new("presence-test");
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -10682,10 +10673,7 @@ mod tests {
             scheduler.foreground(),
             limits,
             "scripted".into(),
-            Sampling {
-                temperature: 0.0,
-                ..Default::default()
-            },
+            sampling,
             rules,
         );
         (game, store, db, installed.member, companion)
@@ -11110,7 +11098,7 @@ mod tests {
 
     #[tokio::test]
     async fn group_tools_reject_foreign_worlds_before_compaction_or_mutation() {
-        for case in 0..4 {
+        for case in 0..3 {
             let (backend, requests) = ScriptedBackend::recording([]);
             let responses = Arc::clone(&backend.responses);
             let (game, store, _db, member, _) = two_player_bread_thief_game(backend).await;
@@ -11166,18 +11154,22 @@ mod tests {
                 0 => (
                     "split_group",
                     serde_json::json!({
-                        "partitions": [{"character_ids": characters, "name": "Changed"}],
+                        "character_ids": characters,
+                        "current_group_name": "Changed",
+                        "target_group_name": "Moved",
                     }),
                 ),
+                1 => (
+                    "merge_group",
+                    serde_json::json!({"group_id": foreign_groups[0], "name": "Changed"}),
+                ),
                 _ => (
-                    "merge_groups",
+                    "split_group",
                     serde_json::json!({
-                        "group_ids": match case {
-                            1 => foreign_groups.clone(),
-                            2 => vec![local_group, foreign_groups[0]],
-                            _ => vec![foreign_groups[0], local_group],
-                        },
-                        "name": "Changed",
+                        "character_ids": [member.character_id],
+                        "current_group_name": "Changed",
+                        "target_group_name": "Moved",
+                        "target_group_id": foreign_groups[0],
                     }),
                 ),
             };
@@ -11303,19 +11295,8 @@ mod tests {
         let script = Arc::clone(&backend.responses);
         let (game, store, _db, first, second) = two_player_bread_thief_game(backend).await;
         let group_id = store.character_group_id(first.character_id).await.unwrap();
-        let companions: Vec<i64> = store
-            .party_presence(first.character_id)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|member| member.character_id)
-            .filter(|id| *id != second.character_id)
-            .collect();
         let split = serde_json::json!({
-            "partitions": [
-                {"character_ids": companions, "name": "first group"},
-                {"character_ids": [second.character_id], "name": "second group"}
-            ]
+            "character_ids": [second.character_id], "current_group_name": "first group", "target_group_name": "second group",
         })
         .to_string();
         script.lock().unwrap().extend([
@@ -11605,7 +11586,7 @@ mod tests {
                 request.messages.push(Message::text(
                     Role::User,
                     format!(
-                        "Call the `{}` tool now ({}). Groups 1 and 2 are at this location.",
+                        "Call the `{}` tool now ({}). Action 1 is presented, and groups 1 and 2 are at this location.",
                         tool.name, tool.description
                     ),
                 ));
@@ -11910,8 +11891,13 @@ mod tests {
                 serde_json::json!({"words": "Toma, where did the bread go?", "to": ["Toma"]}),
             )])),
         };
-        let (game, store, _db, first, second) =
-            two_player_bread_thief_game_with_limits(hybrid, limits).await;
+        let (game, store, _db, first, second) = two_player_bread_thief_game_with_sampling(
+            hybrid,
+            limits,
+            GameSettings::default(),
+            model.sampling.clone(),
+        )
+        .await;
         let _first_connection = game.connect(&first).await.unwrap();
         let _second_connection = game.connect(&second).await.unwrap();
 
@@ -12172,8 +12158,13 @@ mod tests {
                 real: Arc::clone(&model.backend),
                 chosen: Arc::clone(&chosen),
             };
-            let (game, _store, _db, first, second) =
-                two_player_bread_thief_game_with_limits(backend, limits).await;
+            let (game, _store, _db, first, second) = two_player_bread_thief_game_with_sampling(
+                backend,
+                limits,
+                GameSettings::default(),
+                model.sampling.clone(),
+            )
+            .await;
             let _first_connection = game.connect(&first).await.unwrap();
             let _second_connection = game.connect(&second).await.unwrap();
             game.player_message(first.clone(), line)
@@ -12237,8 +12228,13 @@ mod tests {
                 real: Arc::clone(&model.backend),
                 chosen: Arc::clone(&chosen),
             };
-            let (game, _store, _db, first, second) =
-                two_player_bread_thief_game_with_limits(backend, limits).await;
+            let (game, _store, _db, first, second) = two_player_bread_thief_game_with_sampling(
+                backend,
+                limits,
+                GameSettings::default(),
+                model.sampling.clone(),
+            )
+            .await;
             let _first_connection = game.connect(&first).await.unwrap();
             let _second_connection = game.connect(&second).await.unwrap();
             let last = game
@@ -12286,8 +12282,13 @@ mod tests {
     /// attribution, storage and privacy are checked by the scripted tests.
     async fn real_model_listener_understands_what_another_player_said(model: &DeviceModel) {
         let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, second) =
-            two_player_bread_thief_game_with_limits(backend, limits).await;
+        let (game, store, _db, first, second) = two_player_bread_thief_game_with_sampling(
+            backend,
+            limits,
+            GameSettings::default(),
+            model.sampling.clone(),
+        )
+        .await;
         let _first_connection = game.connect(&first).await.unwrap();
         let _second_connection = game.connect(&second).await.unwrap();
 

@@ -298,9 +298,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   while a summary's activation is a distinct entry from the message range it
   covers (`summary.covered_ranges`, JSON `[{branch_id, first_position,
   last_position}, ...]`). `history_parent(branch_id, agent_id, ordinal, parent_branch_id,
-  through_position)` is the bounded-parent list `split_group`/`merge_groups`
-  (D4, `Store::spawn_group_branch`) populate: a split's resulting branches
-  each get one parent (the source), a merge's resulting branch gets one
+  through_position)` is the bounded-parent list `split_group`/`merge_group`
+  (D4, `Store::spawn_group_branch`) populate: the group left behind by a split gets one parent
+  (the source), the characters' group gets the source and, with a target group, the target as well; a
+  merge's resulting branch gets one
   parent per source group. Composite foreign keys to
   `history_branch(id, agent_id)` make both branches share one agent (and so
   one world), and `CHECK (parent_branch_id < branch_id)` makes cycles

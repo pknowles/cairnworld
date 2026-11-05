@@ -1592,10 +1592,6 @@ mod tests {
             .fetch_one(&store.pool())
             .await
             .unwrap();
-        let mara_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Mara'")
-            .fetch_one(&store.pool())
-            .await
-            .unwrap();
 
         // Split the player off from Toma so each side gets its own branch:
         // the player's side is seeded with raw messages (over threshold),
@@ -1641,17 +1637,13 @@ mod tests {
                     executions[0],
                     tools::TopologyChange::Split {
                         group_id: original_group_id,
-                        partitions: vec![
-                            tools::GroupPartition {
-                                character_ids: vec![installed.member.character_id, mara_id],
-                                name: "player side".into(),
-                            },
-                            tools::GroupPartition {
-                                character_ids: vec![toma_id],
-                                name: "Toma side".into(),
-                            },
-                        ],
-                        continue_with_character_id: Some(installed.member.character_id),
+                        target_group_id: None,
+                        split: tools::SplitGroup {
+                            character_ids: vec![toma_id],
+                            current_name: "player side".into(),
+                            target_name: "Toma side".into(),
+                            continue_with_character_id: Some(installed.member.character_id),
+                        },
                     },
                 )],
             )

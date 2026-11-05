@@ -508,15 +508,22 @@ agent ID alone cannot select a GM history. Player/NPC calls resolve agent_histor
 The call-stack prohibition on re-entering an active agent remains unchanged;
 the same GM role cannot recursively invoke itself through a different group.
 
-**Split.** `split_group(partitions)` accepts a complete, nonempty,
-disjoint partition of the GM's own group's character IDs with a name for each. Rust validates exact
-membership. Each resulting group gets a new branch whose single parent is the
-old head through its settled position. The old group retires. Character and
-branch ownership change in one transaction. IDs of resulting groups are returned.
+**Split.** `split_group(character_ids, current_group_name, target_group_name,
+target_group_id?)` moves the named characters out of the GM's own group. Rust validates
+that they are distinct members of that group. They go to a new group named
+`target_group_name`, or, when `target_group_id` names another group at the same location,
+into that group. Groups are fungible, so each result is a new group: the characters' group
+has a branch whose parents are the settled positions of the group they left and of the
+target, in ascending group order, and the characters still in the group left behind get a new
+group named `current_group_name` whose single parent is the old head. The source groups
+retire. If everyone leaves there is no group left behind. Character and branch ownership
+change in one transaction, and the ids of the resulting groups are returned. A retired group
+gives up its name (`name (retired id)`), so a name can be reused; an active group's name
+cannot, and a name that is empty, repeated, or in use is rejected with the reason.
 
-**Merge.** `merge_groups(group_ids, name)` validates distinct nonempty
-groups at one location in the same world. Sort source group IDs ascending for
-parent order. The resulting group gets a new branch with those bounded parents;
+**Merge.** `merge_group(group_id, name)` merges the named group into the GM's own
+group. Rust validates two distinct active groups at one location in the same world. Sort
+source group IDs ascending for parent order. The resulting group gets a new branch with those bounded parents;
 source groups retire. Character membership and the new head commit together.
 The resulting GM context includes both histories. No transcript is copied.
 
@@ -531,11 +538,8 @@ TODO (needs unified game time, plans/unified-game-time.md): batch splits so that
 following one player is one split. The first split of a group schedules a pending split that the
 split call returns before it resolves; it resolves once every player's game time passes the
 first mover's move time plus a combat turn, and the GM sees the pending split meanwhile.
-`split_group` may name an existing or pending group to move a character into, so a character can
-leave one group and join another in one call. user_declarations.md (SplitGroup, MergeGroup) defines
-the target shapes: split takes the characters leaving, new names for the current and target group
-and an optional target group; merge takes the other group's id and a new name. The current tools
-still take a complete partition and a list of group ids.
+A split may also name a pending group as its target, so a character leaves one group and
+joins another in one call. Until then a split resolves at once.
 
 **Tool boundary.** Grouping tools produce a typed pending topology change in
 `ToolOutcome`; it is applied at the end of the current model-returned tool batch.

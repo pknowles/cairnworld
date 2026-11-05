@@ -182,28 +182,28 @@ action_id = "The visible action id they may intervene in."
 character_ids = "The characters to ask. Not the character taking the action."
 
 [gm.tools.split_group]
-description = "Split this group when characters go their own ways."
+description = """\
+    Move characters out of this group when they go their own way, out of reach of the \
+    rest. They form a new group, or join an existing one at this location if you name \
+    it. Applies after every other call in this turn's batch has run.\
+    """
 
 [gm.tools.split_group.arguments]
-partitions = "Every character in the group, in exactly one partition."
+character_ids = "The characters leaving this group."
+current_group_name = "A short name for the group left behind."
+target_group_name = "A short name for the group the characters end up in."
+target_group_id = "An existing group at this location for them to join."
 
-[gm.tools.split_group.nested.partitions]
-character_ids = """\
-    The character IDs going to this resulting group. Every currently present \
-    character must appear in exactly one partition.\
-    """
-name = "A short name for the resulting group."
-
-[gm.tools.merge_groups]
+[gm.tools.merge_group]
 description = """\
-    Merge separate groups at one location back into a single group when characters \
-    reunite. Applies after every other call in this turn's batch has run; result \
-    is deferred and confirmed in the reply.\
+    Merge another group at this location into this one when their characters could \
+    perceive each other. Applies after every other call in this turn's batch has run; \
+    result is deferred and confirmed in the reply.\
     """
 
-[gm.tools.merge_groups.arguments]
-group_ids = "At least two distinct group IDs at the same location to merge."
-name = "A short name for the resulting merged group."
+[gm.tools.merge_group.arguments]
+group_id = "The other group to merge into this one."
+name = "A short name for the merged group."
 
 # ---------------------------------------------------------------------------
 # The player's own agent, which turns what a human types into actions.

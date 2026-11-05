@@ -1936,11 +1936,10 @@ mod tests {
             .create_invitation(owner.id, world_id, None)
             .await
             .unwrap();
-        let viewer_character_id = store
+        store
             .accept_invitation(&viewer, &invitation.token)
             .await
-            .unwrap()
-            .character_id;
+            .unwrap();
 
         // A real split, so check_developer_mode.cjs can exercise the GM's
         // branch-graph DAG view (D6), not just the trivial one-branch case
@@ -1998,21 +1997,13 @@ mod tests {
                     split_executions[0],
                     crate::tools::TopologyChange::Split {
                         group_id: original_group_id,
-                        partitions: vec![
-                            crate::tools::GroupPartition {
-                                character_ids: vec![
-                                    installed.member.character_id,
-                                    mara_id,
-                                    viewer_character_id,
-                                ],
-                                name: "player side".into(),
-                            },
-                            crate::tools::GroupPartition {
-                                character_ids: vec![toma_id],
-                                name: "Toma side".into(),
-                            },
-                        ],
-                        continue_with_character_id: Some(installed.member.character_id),
+                        target_group_id: None,
+                        split: crate::tools::SplitGroup {
+                            character_ids: vec![toma_id],
+                            current_name: "player side".into(),
+                            target_name: "Toma side".into(),
+                            continue_with_character_id: Some(installed.member.character_id),
+                        },
                     },
                 )],
             )
