@@ -41,7 +41,6 @@ pub async fn complete_recorded<B: Backend>(
     completion: RecordedCompletion<'_>,
     mut on_token: impl FnMut(&str) + Send,
 ) -> Result<Completion> {
-    let mut last_fixed_kv_rejection = None;
     loop {
         let segments = segments(
             store,
@@ -89,13 +88,9 @@ pub async fn complete_recorded<B: Backend>(
                 let ContextCapacityExceeded::FixedKv {
                     requested_tokens, ..
                 } = capacity;
-                if let Some(previous) = last_fixed_kv_rejection {
-                    ensure!(
-                        *requested_tokens < previous,
-                        "compaction did not reduce the fixed-KV request: was {previous} tokens and is {requested_tokens} tokens"
-                    );
-                }
-                last_fixed_kv_rejection = Some(*requested_tokens);
+                // A rejection after an earlier recovery means the messages it
+                // kept were too big, so the next one keeps fewer (halving, down
+                // to none); once nothing is left to summarize it fails.
                 let static_segments = static_segments(&segments);
                 store
                     .enqueue_capacity_compaction(
@@ -694,7 +689,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capacity_recovery_does_not_retry_an_unchanged_fixed_kv_request() {
+    async fn capacity_recovery_halves_the_kept_messages_on_each_failure_and_stops_when_none_are_left()
+     {
         let db = crate::store::TestDatabase::new("context-test");
         let store = Store::open(db.path()).await.expect("store should open");
         let agent = test_agent(&store).await;
@@ -723,6 +719,21 @@ mod tests {
                             output_tokens: 1,
                         },
                     }),
+                    // Still too big: the next recovery keeps fewer messages.
+                    Err(ContextCapacityExceeded::FixedKv {
+                        requested_tokens: 101,
+                        max_context_tokens: 100,
+                    }
+                    .into()),
+                    Ok(Response {
+                        content: Content::Text("A second summary.".into()),
+                        reasoning: String::new(),
+                        usage: Usage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                        },
+                    }),
+                    // Still too big with nothing left to summarize.
                     Err(ContextCapacityExceeded::FixedKv {
                         requested_tokens: 101,
                         max_context_tokens: 100,
@@ -766,13 +777,12 @@ mod tests {
             |_| {},
         )
         .await
-        .expect_err("unchanged fixed-KV rejection must fail instead of looping");
+        .expect_err("a rejection with nothing left to summarize must fail instead of looping");
         assert!(
-            error
-                .to_string()
-                .contains("compaction did not reduce the fixed-KV request"),
+            format!("{error:#}").contains("no older history to summarize"),
             "unexpected error: {error:#}"
         );
-        assert!(store.pending_compaction(agent).await.unwrap().is_none());
+        // As for any recovery that cannot succeed, the obligation stays pending.
+        assert!(store.pending_compaction(agent).await.unwrap().is_some());
     }
 }

@@ -77,6 +77,28 @@ async fn run_invocation<B: Backend>(
         )
         .context("raw message count exceeds usize")?;
         keep = keep.min(raw);
+        // A request that still did not fit after an earlier recovery means the
+        // messages that one kept were too big: keep half as many (the
+        // declared halving on failure).
+        if let Some(previous) = store
+            .latest_summary_for_branch(job.branch.branch_id())
+            .await?
+            && previous.reason == "capacity_recovery"
+        {
+            let halved = usize::try_from(previous.retained_messages / 2)
+                .context("retained message count exceeds usize")?;
+            if halved < keep {
+                tracing::warn!(
+                    agent_id = job.branch.agent_id(),
+                    branch_id = job.branch.branch_id(),
+                    requested_tokens = job.next_input_tokens,
+                    was = keep,
+                    now = halved,
+                    "the request still overflowed after compaction; keeping fewer raw messages"
+                );
+                keep = halved;
+            }
+        }
     }
     loop {
         let (segments, branch_id, split, covered) =
@@ -562,7 +584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_messages_that_alone_overflow_are_halved_until_the_request_fits() {
+    async fn a_request_that_still_overflows_after_recovery_keeps_half_as_many_raw_messages() {
         let db = database();
         let store = Store::open(db.path()).await.unwrap();
         let agent = agent_with_four_messages(&store).await;
