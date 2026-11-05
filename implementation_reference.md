@@ -93,7 +93,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   Sampling starts from `SamplingParams::neutral()`, not the crate's default
   `deterministic()` (which forces greedy `top_k = 1` independent of
   temperature), then applies the request's `temperature` and any of `top_p`,
-  `top_k`, `min_p`, `presence_penalty` that are set. Truncation matters: a
+  `top_k`, `min_p`, `presence_penalty` that are set, and `seed` (tests only; it needs the
+  fork's request-seed commit). Truncation matters: a
   small model sampled from its full distribution at a normal temperature
   produces incoherent text and, with tools present, spurious tool calls. It
   maps native structured tool calls and reasoning deltas to the shared types,
@@ -130,6 +131,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   template that silently drops tool definitions, so its tool surface is unusable
   without it. `[models.hermes]` supplies it automatically. It renders a stored
   tool call's object `arguments` with `| tojson`, matching the other templates.
+- `templates/experimental/qwen35-text-tools.jinja` - EXPERIMENTAL, off by default: tools as plain-text
+  signatures (-31% of the GM's tool tokens) but the player agent chose worse. Chosen like the lean one.
 - `templates/experimental/qwen35-lean-tools.jinja` - EXPERIMENTAL, off by default. Qwen3.5's own
   template, copied whole (the setting takes a whole file), with only the tool loop changed: each
   tool is one JSON object of name, description, parameters and required (plus `$defs`), without
@@ -893,7 +896,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   up. Never mind without a hand does nothing. The player-chat socket reads
   `interrupt` / `never_mind` while a turn runs and reports `control { hand_raised }`; the
   page swaps Interrupt for Never mind only while the hand is up.
-- `game::tests::device_suite` (ignored) loads the CUDA model once (`DeviceModel`,
+- `game::tests::device_suite` (ignored) loads the CUDA model once (`DeviceModel`, with a fixed
+  sampler seed `DEVICE_TEST_SEED`, so a scenario repeats exactly at production sampling;
   shared by each scenario's `Game` through `SharedModel`) and runs the real-model
   scenarios from `mistralrs_backend::tests` and `game::tests` in turn, each with
   its own time limit and printed elapsed time, to keep the full test suite inside
@@ -901,6 +905,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   the player agent and the GM are scripted, the NPCs are the real model;
   `RealPlayerOnly` (the "routing" scenario) makes the player agent the real model; both
   use `mechanical_gm` for the GM.
+- `game::tests::real_model_every_tool_can_be_called` (the "every tool" device scenario, also `every_tool_can_be_called`
+  alone): a scripted game captures one real request per kind of agent (GM, player, asked player,
+  NPC; `one_request_per_kind_of_agent`), then the model is asked to call each of the 15 tools by name
+  with only that agent's system messages, and a player who says "I don't mind" must do nothing. With
+  the fixed seed it is the quick check for a change in how tools reach the model.
 - `src/lib.rs` exports Leptos's required islands `hydrate()` entrypoint, which
   initializes the island hydrator before the generated loader invokes each
   island. `npm run test:hydration` builds the frontend and explicitly runs

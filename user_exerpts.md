@@ -1037,3 +1037,25 @@ Chosen (b), after the user's direction:
 > in time and finally process all responses.
 
 design.md (Player replies and coordinated travel) and plans/archive/player-replies.md updated to match.
+
+## 2026-11-05: Sampling, test seeds and chat templates
+
+Production sampling temperature went from 0.7 to 0.5 (Qwen's model card gives 0.7 for ordinary
+chat and nothing for tool calling; nearly every agent here picks a tool):
+
+> lets tighten the temperature a bit in production to something practical for our use case
+
+Tests must repeat exactly, with the production temperature (not greedy):
+
+> lets make sure we are using a fixed seed for tests!!
+> patch the fork in a standalone patch. sounds straightforward
+
+Chat templates: a changed rendering of the tools needs a copy of Qwen's template, which the user
+allows only as separate, optional, removable files:
+
+> same as the lean json, we should keep it separate and optional
+> lets drop the template changes for now - keep the optional/experimental code and the numbers
+> you found so far - measured wins and costs/issues
+> my hunch is we should stick to what the model was trained with for now and worry about it later
+> after we have implemented the rest of the project
+

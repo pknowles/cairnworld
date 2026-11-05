@@ -161,3 +161,10 @@ tokens) is not reached under it, so that scenario needs 500 with the lean templa
 `do_nothing` are not called by any passing real-model scenario, so their rendering is checked
 only by reading it.
 
+The plain-text form is kept as `templates/experimental/qwen35-text-tools.jinja` (the description-on-
+the-signature-line layout). Qwen's template lists tools as JSON and the call format it asks for is
+`<tool_call><function=...>`, so JSON definitions are almost certainly what it was trained on; a form
+closer to JSON is the next thing to try. The offline token counts above were rendered in Python;
+the real requests shrank by more (the GM's first request 2,368 to 2,083 tokens with the lean
+template, against 169 predicted), so quote the real figures. Next steps are in plans/llm-context-size.md.
+

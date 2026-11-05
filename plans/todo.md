@@ -6,9 +6,6 @@ checklist for each complete slice. In particular, checks like "Check the order
 of implementation works and that the plan doesn't require features that aren't
 there yet". Remove and archive only verified completions.
 
-- [Model context size](llm-context-size.md): measure what each agent's context
-  is made of (tool definitions are about 59% of a GM request) and find what does
-  not earn its place. Problems to investigate only; no remedy is decided.
 - [Code quality checks](code-quality-checks.md): measure and enforce module
   boundaries, function complexity and duplication; correct the reported problems. DO NOT SKIP THIS - secodnd attempt after the first was "verified complete" spuriously.
 - [Unified game time](unified-game-time.md): resolve the explicit timing design
@@ -45,6 +42,9 @@ there yet". Remove and archive only verified completions.
   depend on exist.
 - [Campaign completion](campaign-completion.md): event-driven ending,
   talk-only epilogue choices, final account and closed play.
+- [Model context size](llm-context-size.md): parked by the user until the rest is built. Tool
+  definitions are about 59% of a GM request; two optional chat templates are measured, and the
+  text form needs its regression understood before use.
 
 Pending user choices are concrete proposals in
 [design.md / Product decisions](../design.md#product-decisions). They block only

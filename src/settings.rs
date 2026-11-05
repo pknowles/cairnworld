@@ -79,6 +79,7 @@ impl SamplingConfig {
             min_p: self.min_p,
             presence_penalty: self.presence_penalty,
             enable_thinking: self.enable_thinking.unwrap_or(false),
+            seed: None,
         }
     }
 }

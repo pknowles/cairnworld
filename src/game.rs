@@ -3217,6 +3217,8 @@ mod tests {
         }
     }
 
+    const DEVICE_TEST_SEED: u64 = 1;
+
     impl DeviceModel {
         pub(crate) async fn load() -> Self {
             let _ = tracing_subscriber::fmt()
@@ -3243,7 +3245,12 @@ mod tests {
             .expect("device-test model should load");
             Self {
                 backend: Arc::new(backend),
-                sampling: settings.sampling(&model),
+                // A fixed seed makes a scenario repeat exactly, so one run shows whether a
+                // change altered a choice.
+                sampling: Sampling {
+                    seed: Some(DEVICE_TEST_SEED),
+                    ..settings.sampling(&model)
+                },
                 path: model.path,
                 limits: settings.limits,
             }
@@ -4565,6 +4572,12 @@ mod tests {
         )
         .await;
         scenario(
+            "seed",
+            60,
+            backend_tests::a_fixed_seed_repeats_the_same_sampled_output(backend),
+        )
+        .await;
+        scenario(
             "streaming",
             60,
             backend_tests::streaming_completion_leaves_the_model_available_for_the_next_turn(
@@ -4654,6 +4667,12 @@ mod tests {
             "player speech",
             120,
             real_model_player_agent_says_what_the_player_says_and_stops(&model),
+        )
+        .await;
+        scenario(
+            "every tool",
+            120,
+            real_model_every_tool_can_be_called(&model),
         )
         .await;
         println!(
@@ -11425,6 +11444,185 @@ mod tests {
                 .any(|entry| entry.role == Role::Assistant),
             "a later opening must persist the reply that makes reconnects viewers only"
         );
+    }
+
+    /// The request each kind of agent is sent in a short scripted game, as the
+    /// running system builds it: the GM deciding actions, a player acting, a
+    /// player asked whether they intervene, and an NPC deciding.
+    async fn one_request_per_kind_of_agent() -> Vec<(&'static str, crate::llm::Request)> {
+        let scene = speech_scene().await;
+        let toma = character_id(&scene, "Toma").await;
+        let second = scene.second.character_id;
+        let speaker = scene.names[0].clone();
+        scene.responses.lock().unwrap().extend([
+            take_flour(false),
+            calls(&[(
+                "intervention_check",
+                serde_json::json!({"action_id": 1, "character_ids": [second, toma]}),
+            )]),
+            propose("Wait!", &speaker, 2),
+        ]);
+        scene
+            .game
+            .player_message(scene.first.clone(), "Take the flour sack.")
+            .await
+            .unwrap();
+        scene.responses.lock().unwrap().extend([
+            do_nothing(),
+            approve(1),
+            approve(2),
+            tool_call("narrate_nothing", serde_json::json!({})),
+            do_nothing(),
+            do_nothing(),
+            do_nothing(),
+        ]);
+        scene
+            .game
+            .player_message(scene.second.clone(), "I let it happen.")
+            .await
+            .unwrap();
+        wait_for_npc_work(&scene).await;
+
+        let requests = scene.requests.lock().unwrap().clone();
+        let has = |request: &crate::llm::Request, tool: &str| {
+            request.tools.iter().any(|candidate| candidate.name == tool)
+        };
+        let opening = |request: &crate::llm::Request| {
+            request
+                .messages
+                .iter()
+                .find_map(|message| match &message.content {
+                    MessageContent::Text(text) if message.role == Role::System => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+        };
+        let pick = |wanted: &dyn Fn(&crate::llm::Request) -> bool| {
+            requests
+                .iter()
+                .find(|request| wanted(request))
+                .expect("the scripted game produces this kind of request")
+                .clone()
+        };
+        vec![
+            ("GM", pick(&|request| has(request, "split_group"))),
+            ("player", pick(&|request| has(request, "party_presence"))),
+            (
+                "asked player",
+                pick(&|request| {
+                    has(request, "do_nothing")
+                        && !has(request, "party_presence")
+                        && !opening(request).is_some_and(|text| text.contains("alongside others"))
+                }),
+            ),
+            (
+                "NPC",
+                pick(&|request| {
+                    has(request, "do_nothing")
+                        && opening(request).is_some_and(|text| text.contains("alongside others"))
+                }),
+            ),
+        ]
+    }
+
+    /// Every tool, asked for by name in the context of the agent that has it,
+    /// is called, and a player asked whether they intervene who says they do
+    /// not mind does nothing, using the model's production sampling. It is only
+    /// repeatable once sampling takes a fixed seed (plans/llm-context-size.md).
+    async fn real_model_every_tool_can_be_called(model: &DeviceModel) {
+        let kinds = one_request_per_kind_of_agent().await;
+        let mut wrong = Vec::new();
+        let mut tried = std::collections::BTreeSet::new();
+        for (kind, base) in &kinds {
+            for tool in &base.tools {
+                // The same tool in another agent's context is covered by that agent's scenarios.
+                if !tried.insert(tool.name.clone()) {
+                    continue;
+                }
+                let mut request = base.clone();
+                request.sampling = model.sampling.clone();
+                // Only the agent's standing instructions: its earlier conversation would
+                // pull the choice toward what that conversation was about.
+                request
+                    .messages
+                    .retain(|message| message.role == Role::System);
+                request.messages.push(Message::text(
+                    Role::User,
+                    format!(
+                        "Call the `{}` tool now ({}). Groups 1 and 2 are at this location.",
+                        tool.name, tool.description
+                    ),
+                ));
+                let response = model
+                    .backend
+                    .complete(request, |_| {})
+                    .await
+                    .expect("the model answers");
+                let called: Vec<String> = match response.content {
+                    Content::ToolCalls(calls) => calls.into_iter().map(|call| call.name).collect(),
+                    Content::Text(_) => vec![],
+                };
+                if called.first() != Some(&tool.name) {
+                    wrong.push(format!("{kind} {}: called {called:?}", tool.name));
+                }
+            }
+        }
+        let asked = &kinds
+            .iter()
+            .find(|(kind, _)| *kind == "asked player")
+            .expect("the asked player's request")
+            .1;
+        let mut request = asked.clone();
+        request.sampling = model.sampling.clone();
+        request
+            .messages
+            .push(Message::text(Role::User, "I don't mind. Let him take it."));
+        let response = model
+            .backend
+            .complete(request, |_| {})
+            .await
+            .expect("the model answers");
+        let chose = match response.content {
+            Content::ToolCalls(calls) => calls.first().map(|call| call.name.clone()),
+            Content::Text(_) => None,
+        };
+        if chose.as_deref() != Some("do_nothing") {
+            wrong.push(format!(
+                "asked player who does not mind: chose {chose:?}, not do_nothing"
+            ));
+        }
+        assert!(wrong.is_empty(), "tool calls went wrong: {wrong:#?}");
+    }
+
+    #[tokio::test]
+    async fn the_capture_for_the_every_tool_scenario_finds_all_four_kinds_of_agent() {
+        let kinds = one_request_per_kind_of_agent().await;
+        let counts: Vec<(&str, usize)> = kinds
+            .iter()
+            .map(|(kind, request)| (*kind, request.tools.len()))
+            .collect();
+        assert_eq!(
+            counts,
+            [("GM", 10), ("player", 4), ("asked player", 4), ("NPC", 4)]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn a_fixed_seed_repeats_the_same_sampled_output() {
+        let model = DeviceModel::load().await;
+        crate::mistralrs_backend::tests::a_fixed_seed_repeats_the_same_sampled_output(
+            &model.backend,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn every_tool_can_be_called() {
+        let model = DeviceModel::load().await;
+        real_model_every_tool_can_be_called(&model).await;
     }
 
     async fn real_model_opening_reaches_a_stored_player_reply(model: &DeviceModel) {

@@ -271,6 +271,9 @@ pub(crate) fn request_builder(
     if let Some(presence_penalty) = sampling.presence_penalty {
         request_builder = request_builder.set_sampler_presence_penalty(presence_penalty);
     }
+    if let Some(seed) = sampling.seed {
+        request_builder = request_builder.set_sampler_seed(seed);
+    }
     Ok(request_builder
         .set_tools(
             request
@@ -830,6 +833,42 @@ pub(crate) mod tests {
         );
         backend.complete(request_for(1), |_| {}).await.unwrap();
         log_gpu_memory("after fixed-cache rejection and recovery").unwrap();
+    }
+
+    /// The same seed repeats a sampled answer exactly; another seed does not.
+    pub(crate) async fn a_fixed_seed_repeats_the_same_sampled_output(backend: &MistralRsBackend) {
+        let ask = |seed: u64| Request {
+            messages: vec![Message::text(
+                Role::User,
+                "Name five unusual animals, separated by commas, and nothing else.",
+            )],
+            tools: vec![],
+            sampling: Sampling {
+                temperature: 1.0,
+                top_k: Some(40),
+                seed: Some(seed),
+                ..Default::default()
+            },
+        };
+        let mut answers = Vec::new();
+        for seed in [7, 7, 8] {
+            let response = backend
+                .complete(ask(seed), |_| {})
+                .await
+                .expect("the sampled completion succeeds");
+            let Content::Text(text) = response.content else {
+                panic!("the model should answer in text");
+            };
+            answers.push(text);
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "the same seed must repeat the output"
+        );
+        assert_ne!(
+            answers[0], answers[2],
+            "another seed should differ: {answers:?}"
+        );
     }
 
     pub(crate) async fn streaming_completion_leaves_the_model_available_for_the_next_turn(
