@@ -55,6 +55,10 @@ Use integrated edit/search tools rather than grep/sed when at all possible.
 Do not create files in /tmp - this gets cleared when the machine is rebooted and
 that can happen between your turns.
 
+Include and commit my changes to user written documents when they relate to a
+feature you implement or rules you should be following. This keeps history
+together.
+
 # Post-feature and pre-commit checklist
 
 The following items must have been completed after implementing a feature and
