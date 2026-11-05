@@ -327,9 +327,7 @@ role = """\
     3. point out contradictions and weakly connected elements, and encourage dropping \
     or rewriting what does not fit a cohesive story;
     4. resolve ambiguity and add detail, once the foundation of the setting is solid.
-    As the world matures, ask more critical review questions. The world is complete \
-    once its summary has the setting, factions, the most important NPCs and their \
-    motives, and where they start.\
+    As the world matures, ask more critical review questions.\
     """
 
 # Edit these lists freely: they prime the Questioner before it asks. Each world
@@ -356,7 +354,7 @@ world_state = """\
 {summary}\
     """
 
-ask_request = "Ask the Storyteller up to five thought-provoking questions, or call world_summary_complete if the foundation is complete."
+ask_request = "Call world_summary_complete if the summary covers the setting, the factions, the important NPCs with their motives, and where the story starts. Otherwise ask the Storyteller the questions that would add what is missing."
 
 # Review of the objects the Storyteller created. {seed} {summary} {objects}
 review_state = """\

@@ -337,6 +337,14 @@ impl Store {
                 if connection.from == connection.to {
                     return reject("A connection cannot join a location to itself.".into());
                 }
+                // A connection is named by its ends, and is reviewed by that name.
+                Self::ensure_unused(
+                    &mut transaction,
+                    world_id,
+                    ObjectKind::Connection,
+                    &format!("{} -> {}", connection.from, connection.to),
+                )
+                .await?;
                 let from = Self::named_id(
                     &mut transaction,
                     world_id,
@@ -951,5 +959,43 @@ mod tests {
                 .unwrap()
                 .contains("Toma")
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_connection_between_the_same_locations_is_refused() {
+        let (store, _db, world) = building_world().await;
+        for name in ["hut", "yard"] {
+            store
+                .create_object(world, NewObject::Location(&location(name)))
+                .await
+                .unwrap();
+        }
+        let path = Connection {
+            from: "hut".into(),
+            to: "yard".into(),
+            travel_time: 1,
+            description: String::new(),
+            notes: Notes::default(),
+        };
+        store
+            .create_object(world, NewObject::Connection(&path))
+            .await
+            .unwrap();
+        let twice = store
+            .create_object(world, NewObject::Connection(&path))
+            .await
+            .unwrap_err();
+        assert!(format!("{twice:#}").contains("already has a connection called `hut -> yard`"));
+        // The other direction is a different connection.
+        let back = Connection {
+            from: "yard".into(),
+            to: "hut".into(),
+            ..path
+        };
+        let counts = store
+            .create_object(world, NewObject::Connection(&back))
+            .await
+            .unwrap();
+        assert_eq!(counts.connections, 2);
     }
 }

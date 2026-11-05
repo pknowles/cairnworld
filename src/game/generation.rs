@@ -59,7 +59,7 @@ fn ask_questions_tool() -> Result<Tool> {
 }
 
 /// While the summary develops, the Questioner ends its turn with exactly one of these.
-fn questioner_tools() -> Result<Vec<Tool>> {
+pub(super) fn questioner_tools() -> Result<Vec<Tool>> {
     let prompts = prompts::current()?;
     let ask = ask_questions_tool()?;
     let complete = Tool::terminal(

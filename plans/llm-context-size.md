@@ -90,10 +90,12 @@ the 4,096 limit. The player agent's and NPCs' contexts have not been measured.
   the summary request omits tools and context. Measure first: how often
   compaction runs, what the summary request costs in time, and whether turning
   prefix caching on is safe with the fixed KV capacity and paged attention.
-  The summary request now carries the agent's own tools and context, so it costs
-  as much as the agent's own request minus the messages kept. With the 17
-  Storyteller tools (about 2,000 tokens of 8,000 characters of mostly schema
-  structure, only ~2,300 of them hand-written text) that does not fit the
+  The summary request keeps the agent's role text but not its tools or context.
+  Measured on the real model: given the Questioner's tools, the summary request
+  is answered with a tool call instead of a summary, so reusing the agent's whole
+  leading content would first need a way to get text back. The 17 Storyteller
+  tools are about 2,000 tokens (8,000 characters, of which only ~2,300 are
+  hand-written text; the rest is schema structure), which does not fit the
   4096-token device-test context once a response of many tool calls lands; the
   product default is 16384. Merging each create/update pair would roughly halve
   the schema.

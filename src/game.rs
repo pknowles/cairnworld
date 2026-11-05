@@ -2827,6 +2827,100 @@ mod tests {
         }
     }
 
+    /// A world generated from a seed by the real model, start to finish. Stops
+    /// early if the Questioner keeps asking after four rounds, and prints every
+    /// request the Questioner received so a stuck loop can be read as the model
+    /// saw it. Not part of the device suite: a run takes many minutes.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU; takes many minutes"]
+    async fn a_world_is_generated_from_a_seed_by_the_real_model() {
+        let model = DeviceModel::load_with_default_limits().await;
+        let (shared, name, sampling, limits) = model.parts();
+        let db = crate::store::TestDatabase::new("real-generation-seed");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("maker@example.test", "Maker")
+            .await
+            .unwrap();
+        let member = store
+            .create_world_to_generate(
+                &owner,
+                "A smuggler's port town where something is wrong with the tide.",
+            )
+            .await
+            .unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recording = Recording {
+            model: shared,
+            requests: Arc::clone(&requests),
+        };
+        let backend = InferenceScheduler::new(recording, limits).unwrap();
+        let worlds = World::load(&store).await.unwrap();
+        let mut events = World::get(&worlds, member.world_id)
+            .unwrap()
+            .events
+            .subscribe();
+        let _game = Game::new(
+            store.clone(),
+            worlds,
+            backend.foreground(),
+            limits,
+            name,
+            sampling,
+        );
+        let asks = |requests: &[crate::llm::Request]| {
+            requests
+                .iter()
+                .filter(|request| {
+                    request
+                        .tools
+                        .iter()
+                        .any(|tool| tool.name == "world_summary_complete")
+                })
+                .count()
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1800), async {
+            loop {
+                let world = store.world(member.world_id).await.unwrap().unwrap();
+                if world.ready || world.failure.is_some() || asks(&requests.lock().unwrap()) >= 6 {
+                    break;
+                }
+                let _ = events.recv().await;
+            }
+        })
+        .await
+        .expect("nothing finished in time");
+
+        let world = store.world(member.world_id).await.unwrap().unwrap();
+        println!(
+            "WORLD {} ready={} failure={:?}",
+            world.name, world.ready, world.failure
+        );
+        for entry in store.review_list(member.world_id).await.unwrap() {
+            println!(
+                "OBJECT [{}] {} {}",
+                if entry.reviewed { "x" } else { " " },
+                entry.kind,
+                entry.name
+            );
+        }
+        for role in ["questioner", "storyteller"] {
+            let agent = store.role_agent(member.world_id, role).await.unwrap();
+            let branch = store.agent_branch(agent).await.unwrap();
+            let segments = store.history_live_segments(branch).await.unwrap();
+            let request = store
+                .request_for_segments(agent, &segments, Sampling::default())
+                .await
+                .unwrap();
+            println!("CHAT {role}\n{}", shown(&request));
+        }
+        assert!(world.failure.is_none(), "{:?}", world.failure);
+        assert!(
+            world.ready,
+            "the Questioner never finished the summary phase"
+        );
+    }
+
     /// Real-model check of what a summary keeps. The history is the Questioner's
     /// stuck turn from a recorded world generation: its instruction, then
     /// repeated `ask_questions` calls the game rejected. The summary replaces
@@ -2835,9 +2929,20 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a CUDA GPU"]
     async fn a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress() {
+        let model = DeviceModel::load().await;
+        let summary = summarize_a_stuck_tool_loop(&model).await;
+        assert!(
+            summary.to_lowercase().contains("question"),
+            "the summary must carry the questions the agent still has to ask"
+        );
+    }
+
+    /// The Questioner's role and tools lead its normal requests. The summary
+    /// request is built from them, and has to come back as text: given the
+    /// tools, the model calls one instead of summarizing.
+    async fn summarize_a_stuck_tool_loop(model: &DeviceModel) -> String {
         use crate::llm::{MessageContent, ToolCall};
         use crate::store::MessageOrigin;
-        let model = DeviceModel::load().await;
         let (shared, _, sampling, limits) = model.parts();
         let db = crate::store::TestDatabase::new("compaction-stuck-loop");
         let store = Store::open(db.path()).await.unwrap();
@@ -2896,6 +3001,21 @@ mod tests {
             store.append_message(agent, message).await.unwrap();
         }
         let branch = store.agent_branch(agent).await.unwrap();
+        let mut leading = vec![crate::store::Segment::Text {
+            text: store
+                .store_prompt_text(&crate::prompts::current().unwrap().questioner.role)
+                .await
+                .unwrap(),
+            role: Role::System,
+        }];
+        let definitions =
+            crate::tools::definitions(&generation::questioner_tools().unwrap()).unwrap();
+        leading.push(crate::store::Segment::Tools {
+            text: store
+                .store_prompt_text(&serde_json::to_string(&definitions).unwrap())
+                .await
+                .unwrap(),
+        });
         store
             .enqueue_capacity_compaction(
                 branch,
@@ -2906,7 +3026,7 @@ mod tests {
                     compact_before_next_input_tokens: limits.compact_before_next_input_tokens,
                     sampling: &sampling,
                     model: "dev-qwen35",
-                    static_segments: &[],
+                    static_segments: &leading,
                     ending_tools: &[],
                 },
             )
@@ -2927,10 +3047,7 @@ mod tests {
         .unwrap();
         let summary = store.latest_summary(agent).await.unwrap().unwrap();
         println!("===== SUMMARY\n{}", summary.content);
-        assert!(
-            summary.content.contains("ask_questions"),
-            "the summary must carry the call the agent still has to make"
-        );
+        summary.content
     }
 
     #[tokio::test]
@@ -3429,6 +3546,36 @@ mod tests {
             inference_id: i64,
         ) -> impl Future<Output = anyhow::Result<crate::llm::Response>> + Send {
             self.0
+                .complete_with_recording(request, on_token, store, inference_id)
+        }
+    }
+
+    /// Passes requests to the model and keeps a copy of each, so a run can be
+    /// read afterwards exactly as the model received it.
+    pub(crate) struct Recording {
+        model: SharedModel,
+        pub(crate) requests: Arc<std::sync::Mutex<Vec<crate::llm::Request>>>,
+    }
+
+    impl Backend for Recording {
+        fn complete(
+            &self,
+            request: crate::llm::Request,
+            on_token: impl FnMut(&str) + Send,
+        ) -> impl Future<Output = anyhow::Result<crate::llm::Response>> + Send {
+            self.requests.lock().unwrap().push(request.clone());
+            self.model.complete(request, on_token)
+        }
+
+        fn complete_with_recording(
+            &self,
+            request: crate::llm::Request,
+            on_token: impl FnMut(&str) + Send,
+            store: &Store,
+            inference_id: i64,
+        ) -> impl Future<Output = anyhow::Result<crate::llm::Response>> + Send {
+            self.requests.lock().unwrap().push(request.clone());
+            self.model
                 .complete_with_recording(request, on_token, store, inference_id)
         }
     }

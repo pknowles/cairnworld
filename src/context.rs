@@ -186,9 +186,9 @@ pub async fn segments(
 }
 
 /// Keep everything before the history in a normal recipe: role text, dynamic
-/// context and tools. Deferred compaction rebuilds raw history live, but
-/// summarizes with this same leading content so the agent writes its own
-/// summary, and measures capacity fallbacks against it after a restart.
+/// context and tools. Deferred compaction rebuilds raw history live, but keeps
+/// the role text for the agent's own summary and measures capacity fallbacks
+/// against all of it after a restart.
 pub fn static_segments(segments: &[Segment]) -> Vec<Segment> {
     segments
         .iter()

@@ -695,6 +695,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   shown to the agent as tool results. Names the summary marks as `[[Name]]` and no object has yet are
   A chat summary reaches the model as the first user-role message after the system message, so a
   compacted request always has the user turn chat templates require.
+  The summary request is the agent's role text, the history to replace and the summary prompt: its
+  tools stay out because a model given them answers by calling one. `a_world_is_generated_from_a_seed_by_the_real_model`
+  (ignored, GPU) runs the whole flow from a seed to a ready world; `a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress`
+  and `the_real_model_questioner_catches_what_the_storyteller_left_out` cover the summary and the review.
   added to the build request. The first round of Storyteller answers uses
   `first_round_temperature`; each world samples `sample_size` example and meta-questions. Not built yet:
   the extended summary and detail phases.

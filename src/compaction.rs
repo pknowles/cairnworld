@@ -179,10 +179,15 @@ async fn summary_segments(
         .store_prompt_text(&crate::prompts::current()?.compaction.summary_request)
         .await
         .context("storing compaction prompt")?;
-    // The agent writes its own summary: the request is its normal one (role
-    // text, context, tools), with the newest messages left out and the summary
-    // request added at the end. Its history mentions its tools, so it keeps them.
-    let mut segments = leading.to_vec();
+    // The agent writes its own summary: its role text, the history to replace
+    // and the summary request. Its tools stay out on purpose: measured on the
+    // real model, an agent given its tools answers the summary request by
+    // calling one (a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress).
+    let mut segments: Vec<Segment> = leading
+        .iter()
+        .filter(|segment| matches!(segment, Segment::Text { .. }))
+        .cloned()
+        .collect();
     if let Some(summary) = previous {
         segments.push(Segment::Summary {
             summary: summary.id,
