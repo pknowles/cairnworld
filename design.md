@@ -520,6 +520,20 @@ parent order. The resulting group gets a new branch with those bounded parents;
 source groups retire. Character membership and the new head commit together.
 The resulting GM context includes both histories. No transcript is copied.
 
+**Awareness of other groups.** A GM sees the other active groups at its location: each
+group's id and its characters (id and name), and nothing else of them. Groups have no position
+within a location, so there is no group position or description to show; the location is the
+same for every group there. A merge is due when characters of different groups could perceive
+each other; a split is due when characters move away from a group. Other groups' NPCs and
+players are shown alike.
+
+TODO (needs unified game time, plans/unified-game-time.md): batch splits so that a party
+following one player is one split. The first split of a group schedules a pending split that the
+split call returns before it resolves; it resolves once every player's game time passes the
+first mover's move time plus a combat turn, and the GM sees the pending split meanwhile.
+`split_group` may name an existing or pending group to move a character into, so a character can
+leave one group and join another in one call.
+
 **Tool boundary.** Grouping tools produce a typed pending topology change in
 `ToolOutcome`; it is applied at the end of the current model-returned tool batch.
 The recorded invoking Game Master establishes the world. Group IDs resolve only

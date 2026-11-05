@@ -115,6 +115,17 @@ turn_time + 10)` update and immediate tool-call order as declared constraints.
   work uses the world loop; wall-clock human/presence deadlines retain their
   existing earliest-deadline wake-up. Do not add per-character polling loops.
 
+## Batched group splits
+
+User direction (2026-11-05, user_exerpts.md): when every player follows one player, each moving
+individually, the group should split once, not split and merge repeatedly. The first split of a
+group schedules a pending split. The split call returns before it resolves, and the GM sees the
+pending split. It resolves when every player's game time has passed the first mover's move time
+plus a combat turn. `split_group` can name an existing or pending group to move a character into,
+so one call splits one character out and into the pending group. Needs the time state above, so
+it follows the time checkpoint. Design first: the pending split's stored form, what the GM sees,
+and how a stale pending split is rejected.
+
 ## Dependent features and explicit exclusions
 
 - [GM editing](gm-editing.md) adds actual within-location Move/CombatMove using

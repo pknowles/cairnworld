@@ -6,31 +6,18 @@ need prompt/context tuning once the features they depend on exist. Follow the
 [prompt standards](../prompt_standards.md): read the full model input of a failing
 run, find the cause, change context, replay on the real model.
 
-## HIGH SEVERITY: the GM cannot see other groups, so it cannot split or merge correctly
+## HIGH SEVERITY: the GM cannot see other groups, so it cannot merge correctly
 
-`GmScene` ([src/store.rs](../src/store.rs)) holds the location, the interacting group's
-own description and notes, items, and that group's characters. Things the GM needs
-are missing, so the `split_group` and `merge_groups` tools exist but a real GM cannot use
-them reliably:
+Decided with the user (2026-11-05; user_exerpts.md): the GM's `GmScene`
+([src/store.rs](../src/store.rs)) gains the other active groups at its location, each as a
+group id and its characters (id and name) only. No group description or position: groups have
+none. Merge when characters of different groups could perceive each other; split when
+characters move away. `split_group` already acts on the GM's own group (it takes no group id).
 
-- **Its own group id** is not needed by the GM at all: it operates on one group, so
-  `split_group` should drop its `group_id` argument and act on the GM's own group
-  (today the tool asks the model for it, which is a design flaw, not a context gap).
-- **The other groups at its location.** `merge_groups` needs `group_ids`; the GM cannot
-  see that another group, its members, or its ids exist.
-- **When to merge.** A merge is due when any two members of different groups could cross
-  paths. The GM sees neither the other groups nor where their members are headed, so it
-  has no basis to notice this.
-- **When to split.** A split is due when members of a group part ways. The GM is never
-  shown the characters' intentions or movement as a signal to partition, so it splits
-  or fails to split by chance.
-
-Fix needs context design first (what the packet shows about sibling groups: ids, members,
-descriptions, what each can perceive of the other; a prompt telling the GM when to
-merge and split), then real-model checks of valid calls: partitions complete, ids taken
-from the packet, resulting groups read from stored membership, for both a split when
-characters go separate ways and a merge when they cross paths. Measure repeat rate;
-keep in `device_suite` only if reliable.
+Still to do: the packet change, then real-model checks of valid calls (ids taken from the
+packet, resulting groups read from stored membership) for a merge when characters cross paths
+and a split when they part, repeated enough to know the rate. The batched, delayed split and a
+split that moves a character into another group belong to plans/unified-game-time.md.
 
 ## The GM names the wrong character in an intervention check
 

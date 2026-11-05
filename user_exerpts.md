@@ -1059,3 +1059,33 @@ allows only as separate, optional, removable files:
 > my hunch is we should stick to what the model was trained with for now and worry about it later
 > after we have implemented the rest of the project
 
+## 2026-11-05: What the GM sees of other groups, and when groups merge and split
+
+The GM must know which other groups are at its location so it can merge. It sees only their
+characters, and nothing relative within a location, because groups have no position:
+
+> gms should see other groups at a location so they can call merge, yes. only characters and
+> their location description
+
+> - Group
+>   - Location ID (no sub-Location position description since groups cannot move;
+>     they only define interacting characters).
+>
+> It would be too confusing to have a relative position within a group or maintain a group location
+
+When to merge and split, and how to avoid a split-and-merge storm when a party follows one player:
+
+> merge happens when any characters of different groups could perceive each other. split happens
+> when characters move away from a group. We may need some mechanism to batch splits so when all
+> players follow one player (necessarily moving individually) that is just one split and not many
+> splits and merges. maybe we can have a pending split time for a group and only resolve that
+> split after all player game times (not implemented yet) move past the initial player's move time
+> (plus a combat turn length for a margin). maybe this could all be done in the standard split
+> tool call, where the initial split schedules a lazy pending split and we just delay resolving
+> that tool call for a bit. the GM would then see the pending split and perhaps split could take a
+> target group to transfer a character so it can effectively split and merge a single character to
+> the new pending group in one call
+
+The free-text group description is not shown to the GM about other groups (the user dropped it).
+The pending, batched split depends on unified game time, which does not exist yet.
+
