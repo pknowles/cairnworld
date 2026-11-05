@@ -280,10 +280,12 @@ description = "Stay silent for now."
 # waste both summary space and model attention.
 summary_request = """\
     The conversation above is your own history. Replace it with a summary your \
-    next turn will read in its place: keep the facts, decisions, open questions, \
+    next turn will read in its place, in under 150 words because your context is \
+    small: keep the facts, decisions, open questions, \
     and commitments that still matter, such as the task you are in the middle of, \
-    what you tried that did not work, and what to do next. Drop small talk and \
-    anything your standing instructions or tools already provide.\
+    what you tried that did not work, and what to do next. Drop small talk, \
+    anything your standing instructions or tools already provide, and the current \
+    state of the world, which is shown again, up to date, with every request.\
     """
 
 # ---------------------------------------------------------------------------
@@ -406,15 +408,15 @@ description = "Say the world summary has a solid foundation. The Storyteller the
 description = "Read everything about one object the Storyteller created."
 
 [questioner.tools.read_object.arguments]
-kind = "What sort of object it is."
-name = "The object's name. A connection is named `from -> to`."
+object = "What sort of object it is."
+id = "Its ID from the object list."
 
 [questioner.tools.mark_object_reviewed]
 description = "Record that you reviewed an object and it is ready for play, or that it is not."
 
 [questioner.tools.mark_object_reviewed.arguments]
-kind = "What sort of object it is."
-name = "The object's name. A connection is named `from -> to`."
+object = "What sort of object it is."
+id = "Its ID from the object list."
 reviewed = "True once the object is ready for play, false to mark it unreviewed again."
 
 [questioner.tools.core_objects_created]
@@ -466,7 +468,7 @@ name_request = "Reply with only a short name for this world."
 # Added to a build request when the summary marks names that have no object yet. {names}
 uncreated_mentions = "The summary marks these names but no object has them yet: {names}. Create the ones that need an object and ignore the rest."
 
-build_request = "The world summary is complete. Create the world's objects from it with the tools: its locations, the connections between them, the groups of people and the NPCs in them, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
+build_request = "The world summary is complete. Create the world's objects from it: locations, their connections, groups and NPCs, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
 
 # {questions}
 fix_request = """\
@@ -481,152 +483,56 @@ objects_state = """\
 {objects}\
     """
 
-[storyteller.tools.create_location]
-description = "Create a location."
+[storyteller.tools.create_object]
+description = "Create an object. Fields: location name, kind, description; connection from_id, to_id, travel_time, description; group name, location_id, description; npc name, group_id, description, background, motive, ambition, sheet; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id."
 
-[storyteller.tools.create_location.arguments]
-name = "Unique name."
-kind = "Such as village, forest or cellar."
+[storyteller.tools.create_object.arguments]
+object = "The object's kind."
+name = "Unique name, where it has one."
+kind = "What kind of location it is."
 description = "What it is like."
-
-[storyteller.tools.create_connection]
-description = "Create a route between two locations."
-
-[storyteller.tools.create_connection.arguments]
-from = "Name of the starting location."
-to = "Name of the destination location."
+from_id = "Starting location ID."
+to_id = "Destination location ID."
 travel_time = "Minutes."
-description = "What the route is like."
+location_id = "Location ID."
+group_id = "Group ID."
+item_type_id = "Item type ID."
+held_by_id = "NPC ID holding the item."
+background = "What only the NPC knows."
+motive = "What the NPC wants now."
+ambition = "What the NPC wants in the long run."
+sheet = "NPC stats: numbers hp, str, dex, wil, armor, and weapon with name and damage."
+stats = "Item type rules numbers."
 
-[storyteller.tools.create_group]
-description = "Create a group of characters at a location."
+[storyteller.tools.update_object]
+description = "Change an object's fields. Omitted fields stay."
 
-[storyteller.tools.create_group.arguments]
-name = "Unique name."
-location = "Name of its location."
-description = "Who they are and what they are doing."
+[storyteller.tools.update_object.arguments]
+object = "The object's kind."
+id = "Its ID from the object list."
+name = "New unique name."
+kind = "New location kind."
+description = "New description."
+from_id = "A connection's ends cannot change."
+to_id = "A connection's ends cannot change."
+travel_time = "New minutes."
+location_id = "New location ID."
+group_id = "New group ID."
+item_type_id = "New item type ID."
+held_by_id = "NPC ID holding the item."
+background = "New NPC background."
+motive = "New NPC motive."
+ambition = "New NPC ambition."
+sheet = "New NPC stats, in the same form."
+stats = "New item type rules numbers."
 
-[storyteller.tools.create_npc]
-description = "Create an NPC in a group."
+[storyteller.tools.delete_object]
+description = "Flag an object deleted. Dependencies may require one option."
 
-[storyteller.tools.create_npc.arguments]
-name = "Unique name."
-group = "Name of its group."
-description = "What anyone can see."
-background = "What only they know."
-motive = "What they want now."
-ambition = "What they want in the long run."
-sheet = "Stats: hp, str, dex, wil, armor and weapon (name, damage)."
-
-[storyteller.tools.create_item_type]
-description = "Create an item type."
-
-[storyteller.tools.create_item_type.arguments]
-name = "Unique name."
-description = "What it is."
-stats = "Rules numbers, if any."
-
-[storyteller.tools.create_item]
-description = "Create an item, lying at a location or held by an NPC."
-
-[storyteller.tools.create_item.arguments]
-name = "Unique name."
-item_type = "Name of its item type."
-location = "Name of the location where it lies. Omit if held."
-held_by = "Name of the NPC holding it. Omit if it lies somewhere."
-description = "What it is like."
-
-[storyteller.tools.update_location]
-description = "Change fields of a location. Omitted fields stay."
-
-[storyteller.tools.update_location.arguments]
-name = "Name of the location."
-new_name = "Unique new name."
-kind = "Such as village, forest or cellar."
-description = "What it is like."
-
-[storyteller.tools.update_connection]
-description = "Change fields of a route. Omitted fields stay."
-
-[storyteller.tools.update_connection.arguments]
-from = "Name of the starting location."
-to = "Name of the destination location."
-travel_time = "Minutes."
-description = "What the route is like."
-
-[storyteller.tools.update_group]
-description = "Change fields of a group. Omitted fields stay."
-
-[storyteller.tools.update_group.arguments]
-name = "Name of the group."
-new_name = "Unique new name."
-location = "Name of its new location."
-description = "Who they are and what they are doing."
-
-[storyteller.tools.update_npc]
-description = "Change fields of an NPC. Omitted fields stay."
-
-[storyteller.tools.update_npc.arguments]
-name = "Name of the NPC."
-new_name = "Unique new name."
-group = "Name of its new group."
-description = "What anyone can see."
-background = "What only they know."
-motive = "What they want now."
-ambition = "What they want in the long run."
-sheet = "Stats: hp, str, dex, wil, armor and weapon (name, damage)."
-
-[storyteller.tools.update_item_type]
-description = "Change fields of an item type. Omitted fields stay."
-
-[storyteller.tools.update_item_type.arguments]
-name = "Name of the item type."
-new_name = "Unique new name."
-description = "What it is."
-stats = "Rules numbers, if any."
-
-[storyteller.tools.update_item]
-description = "Change fields of an item. Omitted fields stay."
-
-[storyteller.tools.update_item.arguments]
-name = "Name of the item."
-new_name = "Unique new name."
-item_type = "Name of its new item type."
-location = "Name of the location where it now lies."
-held_by = "Name of the NPC now holding it."
-description = "What it is like."
-
-[storyteller.tools.delete_location]
-description = "Delete a location and its routes. Items must be moved first."
-
-[storyteller.tools.delete_location.arguments]
-name = "Name of the location."
-delete_groups = "Also delete its empty groups. Otherwise groups there block the delete."
-
-[storyteller.tools.delete_connection]
-description = "Delete a route."
-
-[storyteller.tools.delete_connection.arguments]
-from = "Name of the starting location."
-to = "Name of the destination location."
-
-[storyteller.tools.delete_npc]
-description = "Delete an NPC. Its group goes with its last member. Items it carries must be left somewhere or deleted."
-
-[storyteller.tools.delete_npc.arguments]
-name = "Name of the NPC."
-item_location = "Name of the location to leave its items at."
-item_description = "New description for each item left there."
-delete_items = "Delete its items too."
-
-[storyteller.tools.delete_item_type]
-description = "Delete an item type that no item has."
-
-[storyteller.tools.delete_item_type.arguments]
-name = "Name of the item type."
-
-[storyteller.tools.delete_item]
-description = "Delete an item."
-
-[storyteller.tools.delete_item.arguments]
-name = "Name of the item."
+[storyteller.tools.delete_object.arguments]
+object = "The object's kind."
+id = "Its ID from the object list."
+delete_groups = "Delete a location's empty groups too."
+item_location_id = "Location ID for an NPC's carried items."
+item_description = "New description for each dropped item."
+delete_items = "Delete an NPC's carried items too."

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 'location' AS \"kind!: String\", id AS \"id!: i64\", name AS \"name!: String\", EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'location' AND object_id = location.id) AS \"reviewed!: bool\" FROM location WHERE world_id = ?1 AND deleted = 0 UNION ALL SELECT 'connection', connection.id, origin.name || ' -> ' || target.name, EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'connection' AND object_id = connection.id) FROM connection JOIN location AS origin ON origin.id = connection.from_location_id JOIN location AS target ON target.id = connection.to_location_id WHERE connection.world_id = ?1 AND connection.deleted = 0 UNION ALL SELECT 'group', id, name, EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'group' AND object_id = \"group\".id) FROM \"group\" WHERE world_id = ?1 AND deleted = 0 UNION ALL SELECT 'npc', id, name, EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'npc' AND object_id = character.id) FROM character WHERE world_id = ?1 AND role = 'npc' AND deleted = 0 UNION ALL SELECT 'item_type', id, name, EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'item_type' AND object_id = item_type.id) FROM item_type WHERE world_id = ?1 AND deleted = 0 UNION ALL SELECT 'item', id, name, EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'item' AND object_id = item.id) FROM item JOIN item_location ON item_location.item_id = item.id WHERE world_id = ?1 AND item.deleted = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "reviewed!: bool",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0bc40f59d7fec254656daedd1f13eead24db2ed1013d505786004ff1e9c37f91"
+}

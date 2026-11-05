@@ -361,7 +361,7 @@ where
                     .review_list(scope.world.id)
                     .await?
                     .iter()
-                    .map(|entry| format!("- {} {}\n", entry.kind, entry.name))
+                    .map(|entry| format!("- {} {} {}\n", entry.kind, entry.id, entry.name))
                     .collect();
                 if !objects.is_empty() {
                     request.context.push(prompts::fill(
@@ -380,7 +380,7 @@ where
                     .iter()
                     .map(|entry| {
                         let mark = if entry.reviewed { "x" } else { " " };
-                        format!("- [{mark}] {} {}\n", entry.kind, entry.name)
+                        format!("- [{mark}] {} {} {}\n", entry.kind, entry.id, entry.name)
                     })
                     .collect();
                 let mut world_state = prompts::fill(
@@ -394,7 +394,7 @@ where
                     .uncreated_names(scope.world.id, &generation.summary)
                     .await?;
                 if !uncreated.is_empty() {
-                    world_state.push_str("\n");
+                    world_state.push('\n');
                     world_state.push_str(&prompts::fill(
                         &questioner.review_missing,
                         &[("names", &uncreated.join(", "))],

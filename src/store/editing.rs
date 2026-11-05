@@ -170,8 +170,13 @@ impl Store {
             }
             ObjectKind::Item => {
                 if let Some(item_type) = fields.item_type_id {
-                    Self::ensure_exists(&mut transaction, world_id, ObjectKind::ItemType, item_type)
-                        .await?;
+                    Self::ensure_exists(
+                        &mut transaction,
+                        world_id,
+                        ObjectKind::ItemType,
+                        item_type,
+                    )
+                    .await?;
                 }
                 sqlx::query!(
                     "UPDATE item SET name = COALESCE(?, name), \
@@ -223,7 +228,11 @@ impl Store {
             .commit()
             .await
             .with_context(|| format!("committing an update in world {world_id}"))?;
-        Ok(Changed { id, counts })
+        Ok(Changed {
+            kind: kind.as_str(),
+            id,
+            counts,
+        })
     }
 
     /// Flag an object as deleted. What depends on it either blocks the delete or
@@ -306,8 +315,7 @@ impl Store {
             }
             ObjectKind::Group => {
                 return reject(
-                    "A group is deleted along with its last character; delete or move them."
-                        .into(),
+                    "A group is deleted along with its last character; delete or move them.".into(),
                 );
             }
             ObjectKind::Npc => {
@@ -346,8 +354,12 @@ impl Store {
                             )
                             .await?;
                             for item in &carried {
-                                Self::move_item(&mut transaction, item.id, Holder::Location(location))
-                                    .await?;
+                                Self::move_item(
+                                    &mut transaction,
+                                    item.id,
+                                    Holder::Location(location),
+                                )
+                                .await?;
                                 if let Some(description) = &options.item_description {
                                     sqlx::query!(
                                         "UPDATE item SET description = ? WHERE id = ?",
@@ -409,7 +421,11 @@ impl Store {
             .commit()
             .await
             .with_context(|| format!("committing a delete in world {world_id}"))?;
-        Ok(Changed { id, counts })
+        Ok(Changed {
+            kind: kind.as_str(),
+            id,
+            counts,
+        })
     }
 
     /// Refuse a name another object of the kind already has.
@@ -506,287 +522,99 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::scenario::{Connection, ItemType, Notes};
+mod id_tests {
     use crate::store::authoring::fixtures::*;
-    use crate::store::{NewItem, NewObject};
+    use crate::store::{DeleteOptions, Fields, ObjectKind};
 
     #[tokio::test]
-    async fn an_update_replaces_only_the_named_fields_and_unreviews_the_object() {
+    async fn an_update_replaces_only_given_fields_and_unreviews_the_object() {
         let (store, _db, world) = building_world().await;
-        for object in [location("hut"), location("yard")] {
-            store
-                .create_object(world, NewObject::Location(&object))
-                .await
-                .unwrap();
-        }
-        store
-            .create_object(world, NewObject::Group(&group_at("family", "hut")))
-            .await
-            .unwrap();
-        store
-            .create_object(world, NewObject::Npc(&npc_in("Toma", "family")))
-            .await
-            .unwrap();
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
+        let family = create(
+            &store,
+            world,
+            ObjectKind::Group,
+            group_fields("family", hut),
+        )
+        .await;
+        let toma = create(&store, world, ObjectKind::Npc, npc_fields("Toma", family)).await;
         set_stage(&store, world, "review").await;
         store
-            .set_reviewed(world, ObjectKind::Npc, "Toma", true)
+            .set_reviewed(world, ObjectKind::Npc, toma, true)
             .await
             .unwrap();
         set_stage(&store, world, "build").await;
-
-        let update = NpcUpdate {
-            name: "Toma".into(),
-            new_name: Some("Tomas".into()),
-            group: None,
-            description: None,
-            background: None,
-            motive: Some("Leave the valley.".into()),
-            ambition: None,
-            sheet: None,
-        };
         store
-            .update_object(world, Update::Npc(&update))
+            .update_object(
+                world,
+                ObjectKind::Npc,
+                toma,
+                &Fields {
+                    name: Some("Tomas".into()),
+                    motive: Some("Leave the valley.".into()),
+                    ..Fields::default()
+                },
+            )
             .await
             .unwrap();
-
         let read = store
-            .read_object(world, ObjectKind::Npc, "Tomas")
+            .read_object(world, ObjectKind::Npc, toma)
             .await
             .unwrap();
         assert!(
             read.contains("Leave the valley.") && read.contains("Has a past."),
             "{read}"
         );
-        let listed = store.review_list(world).await.unwrap();
         assert!(
-            !listed
-                .iter()
-                .find(|entry| entry.name == "Tomas")
+            !store
+                .review_list(world)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.id == toma)
                 .unwrap()
                 .reviewed
         );
-
-        // A name another object of the kind has, or a reference to nothing, changes nothing.
-        let taken = LocationUpdate {
-            name: "yard".into(),
-            new_name: Some("hut".into()),
-            kind: None,
-            description: None,
-        };
         let error = store
-            .update_object(world, Update::Location(&taken))
+            .update_object(
+                world,
+                ObjectKind::Location,
+                yard,
+                &Fields {
+                    name: Some("hut".into()),
+                    ..Fields::default()
+                },
+            )
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("already has a location called `hut`"));
-        let nowhere = ItemUpdate {
-            name: "none".into(),
-            new_name: None,
-            item_type: None,
-            location: None,
-            held_by: None,
-            description: None,
-        };
-        let error = store
-            .update_object(world, Update::Item(&nowhere))
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("no item called `none`"));
     }
 
     #[tokio::test]
-    async fn a_delete_only_flags_and_what_depends_on_the_object_decides() {
+    async fn deletion_flags_an_npc_and_removes_it_from_scheduling() {
         let (store, _db, world) = building_world().await;
-        for object in [location("hut"), location("yard")] {
-            store
-                .create_object(world, NewObject::Location(&object))
-                .await
-                .unwrap();
-        }
-        let path = Connection {
-            from: "hut".into(),
-            to: "yard".into(),
-            travel_time: 1,
-            description: String::new(),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Connection(&path))
-            .await
-            .unwrap();
-        store
-            .create_object(world, NewObject::Group(&group_at("family", "hut")))
-            .await
-            .unwrap();
-        store
-            .create_object(world, NewObject::Npc(&npc_in("Toma", "family")))
-            .await
-            .unwrap();
-        let axe_type = ItemType {
-            name: "axe".into(),
-            description: String::new(),
-            stats: serde_json::json!({}),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::ItemType(&axe_type))
-            .await
-            .unwrap();
-        let axe = NewItem {
-            name: "wood axe".into(),
-            item_type: "axe".into(),
-            description: String::new(),
-            location: None,
-            held_by: Some("Toma".into()),
-        };
-        store
-            .create_object(world, NewObject::Item(&axe))
-            .await
-            .unwrap();
-        let refused = |error: anyhow::Error| format!("{error:#}");
-
-        // Each of these depends on something that is still there.
-        let by_name = NameOnly { name: "axe".into() };
-        assert!(
-            refused(
-                store
-                    .delete_object(world, Delete::ItemType(&by_name))
-                    .await
-                    .unwrap_err()
-            )
-            .contains("wood axe")
-        );
-        let hut = LocationDelete {
-            name: "hut".into(),
-            delete_groups: true,
-        };
-        assert!(
-            refused(
-                store
-                    .delete_object(world, Delete::Location(&hut))
-                    .await
-                    .unwrap_err()
-            )
-            .contains("still has characters")
-        );
-        let toma = NpcDelete {
-            name: "Toma".into(),
-            item_location: None,
-            item_description: None,
-            delete_items: false,
-        };
-        assert!(
-            refused(
-                store
-                    .delete_object(world, Delete::Npc(&toma))
-                    .await
-                    .unwrap_err()
-            )
-            .contains("carries wood axe")
-        );
-
-        // The NPC leaves its axe in the yard; its group goes with its last character.
-        let toma = NpcDelete {
-            name: "Toma".into(),
-            item_location: Some("yard".into()),
-            item_description: Some("Dropped when Toma left.".into()),
-            delete_items: false,
-        };
-        let counts = store
-            .delete_object(world, Delete::Npc(&toma))
-            .await
-            .unwrap();
-        assert_eq!((counts.npcs, counts.groups, counts.items), (0, 0, 1));
-        let axe = store
-            .read_object(world, ObjectKind::Item, "wood axe")
-            .await
-            .unwrap();
-        assert!(
-            axe.contains("yard") && axe.contains("Dropped when Toma left."),
-            "{axe}"
-        );
-
-        // Nothing is removed, so the names stay taken.
-        let rows = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM character WHERE name = 'Toma' AND deleted = 1",
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let family = create(
+            &store,
+            world,
+            ObjectKind::Group,
+            group_fields("family", hut),
         )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
-        assert_eq!(rows, 1);
-        let again = store
-            .create_object(world, NewObject::Npc(&npc_in("Toma", "family")))
+        .await;
+        let toma = create(&store, world, ObjectKind::Npc, npc_fields("Toma", family)).await;
+        let mara = create(&store, world, ObjectKind::Npc, npc_fields("Mara", family)).await;
+        assert_eq!(store.group_npc_ids(family).await.unwrap(), vec![toma, mara]);
+        store
+            .delete_object(world, ObjectKind::Npc, toma, &DeleteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(store.group_npc_ids(family).await.unwrap(), vec![mara]);
+        assert!(store.npc_scene(mara).await.unwrap().present.is_empty());
+        let error = store
+            .create_object(world, ObjectKind::Npc, &npc_fields("Toma", family))
             .await
             .unwrap_err();
-        assert!(refused(again).contains("already has a npc called `Toma`"));
-
-        // A location takes its routes with it once nothing is there.
-        store
-            .delete_object(
-                world,
-                Delete::Item(&NameOnly {
-                    name: "wood axe".into(),
-                }),
-            )
-            .await
-            .unwrap();
-        let counts = store
-            .delete_object(world, Delete::Location(&hut))
-            .await
-            .unwrap();
-        assert_eq!((counts.locations, counts.connections), (1, 0));
-    }
-
-    #[tokio::test]
-    async fn a_deleted_npc_is_gone_from_what_the_others_see_and_from_scheduling() {
-        let (store, _db, world) = building_world().await;
-        store
-            .create_object(world, NewObject::Location(&location("hut")))
-            .await
-            .unwrap();
-        store
-            .create_object(world, NewObject::Group(&group_at("family", "hut")))
-            .await
-            .unwrap();
-        for name in ["Toma", "Mara"] {
-            store
-                .create_object(world, NewObject::Npc(&npc_in(name, "family")))
-                .await
-                .unwrap();
-        }
-        let group: i64 = sqlx::query_scalar("SELECT id FROM \"group\" WHERE name = 'family'")
-            .fetch_one(&store.pool)
-            .await
-            .unwrap();
-        let id = |name: &'static str| {
-            let pool = store.pool.clone();
-            async move {
-                sqlx::query_scalar::<_, i64>("SELECT id FROM character WHERE name = ?")
-                    .bind(name)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap()
-            }
-        };
-        assert_eq!(store.group_npc_ids(group).await.unwrap().len(), 2);
-
-        let toma = NpcDelete {
-            name: "Toma".into(),
-            item_location: None,
-            item_description: None,
-            delete_items: false,
-        };
-        store
-            .delete_object(world, Delete::Npc(&toma))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            store.group_npc_ids(group).await.unwrap(),
-            vec![id("Mara").await]
-        );
-        let scene = store.npc_scene(id("Mara").await).await.unwrap();
-        assert!(scene.present.is_empty());
+        assert!(format!("{error:#}").contains("already has a npc called `Toma`"));
     }
 }

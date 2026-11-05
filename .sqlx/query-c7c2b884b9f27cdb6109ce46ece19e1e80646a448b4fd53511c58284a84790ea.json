@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM connection WHERE world_id = ? AND from_location_id = ? AND to_location_id = ? AND deleted = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c7c2b884b9f27cdb6109ce46ece19e1e80646a448b4fd53511c58284a84790ea"
+}

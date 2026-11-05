@@ -2462,26 +2462,26 @@ mod tests {
             text("  The Drowned Bell \n"),
             calls(&[
                 (
-                    "create_location",
-                    r#"{"name":"Belfry","kind":"tower","description":"A tower above the water."}"#,
+                    "create_object",
+                    r#"{"object":"location","name":"Belfry","kind":"tower","description":"A tower above the water."}"#,
                 ),
                 (
-                    "create_group",
-                    r#"{"name":"Wardens","location":"Belfry","description":"The tide-wardens."}"#,
+                    "create_object",
+                    r#"{"object":"group","name":"Wardens","location_id":1,"description":"The tide-wardens."}"#,
                 ),
                 (
-                    "create_npc",
-                    r#"{"name":"Ysolde","group":"Wardens","description":"A stern warden.","background":"Lost her brother to the tide.","motive":"Keep the bell silent."}"#,
+                    "create_object",
+                    r#"{"object":"npc","name":"Ysolde","group_id":1,"description":"A stern warden.","background":"Lost her brother to the tide.","motive":"Keep the bell silent."}"#,
                 ),
                 (
-                    "create_location",
-                    r#"{"name":"Belfry","kind":"tower","description":"Again."}"#,
+                    "create_object",
+                    r#"{"object":"location","name":"Belfry","kind":"tower","description":"Again."}"#,
                 ),
             ]),
             text("The objects exist."),
             // The first review asks a question instead of completing...
             calls(&[
-                ("read_object", r#"{"kind":"npc","name":"Ysolde"}"#),
+                ("read_object", r#"{"object":"npc","id":2}"#),
                 (
                     "ask_questions",
                     r#"{"questions":["Who stands against Ysolde?"]}"#,
@@ -2489,27 +2489,27 @@ mod tests {
             ]),
             // ...the Storyteller adds an object for it...
             calls(&[(
-                "create_npc",
-                r#"{"name":"Corvin","group":"Wardens","description":"A rival warden.","background":"Wants her post.","motive":"Replace Ysolde."}"#,
+                "create_object",
+                r#"{"object":"npc","name":"Corvin","group_id":1,"description":"A rival warden.","background":"Wants her post.","motive":"Replace Ysolde."}"#,
             )]),
             text("Added."),
             // ...and the second review marks everything and completes.
             calls(&[
                 (
                     "mark_object_reviewed",
-                    r#"{"kind":"location","name":"Belfry","reviewed":true}"#,
+                    r#"{"object":"location","id":1,"reviewed":true}"#,
                 ),
                 (
                     "mark_object_reviewed",
-                    r#"{"kind":"group","name":"Wardens","reviewed":true}"#,
+                    r#"{"object":"group","id":1,"reviewed":true}"#,
                 ),
                 (
                     "mark_object_reviewed",
-                    r#"{"kind":"npc","name":"Ysolde","reviewed":true}"#,
+                    r#"{"object":"npc","id":2,"reviewed":true}"#,
                 ),
                 (
                     "mark_object_reviewed",
-                    r#"{"kind":"npc","name":"Corvin","reviewed":true}"#,
+                    r#"{"object":"npc","id":3,"reviewed":true}"#,
                 ),
                 ("core_objects_created", "{}"),
             ]),
@@ -2536,10 +2536,11 @@ mod tests {
         // Nine steps (meta, ask, two answers, summary, ask, name, build, review)
         // run until the world is ready; a failed world never becomes ready.
         while !store.world_is_ready(member.world_id).await.unwrap() {
-            tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
-                .await
-                .expect("a generation step did not finish")
-                .unwrap();
+            let waited =
+                tokio::time::timeout(std::time::Duration::from_secs(10), events.recv()).await;
+            let failure = store.world(member.world_id).await.unwrap().unwrap().failure;
+            assert!(failure.is_none(), "the world failed: {failure:?}");
+            waited.expect("a generation step did not finish").unwrap();
         }
 
         assert!(
@@ -2621,7 +2622,7 @@ mod tests {
             shown[7]
         );
         assert!(
-            shown[7].contains("create_npc") && shown[7].contains("a city ruled by tide-wardens")
+            shown[7].contains("create_object") && shown[7].contains("a city ruled by tide-wardens")
         );
         // A refused call reaches the Storyteller as a tool result it can act on.
         assert!(
@@ -2630,7 +2631,7 @@ mod tests {
             shown[8]
         );
         // The Questioner reviews the objects, not the Storyteller's answers.
-        assert!(shown[9].contains("- [ ] npc Ysolde") && shown[9].contains("read_object"));
+        assert!(shown[9].contains("- [ ] npc 2 Ysolde") && shown[9].contains("read_object"));
         assert!(!shown[9].contains("The tide-wardens rule."));
         // It is told which marked name has no object, and not the one that has.
         assert!(
@@ -2647,8 +2648,8 @@ mod tests {
         );
         assert!(
             shown[10].contains("The world has these objects so far")
-                && shown[10].contains("- location Belfry")
-                && shown[10].contains("- npc Ysolde"),
+                && shown[10].contains("- location 1 Belfry")
+                && shown[10].contains("- npc 2 Ysolde"),
             "{}",
             shown[10]
         );
@@ -2719,10 +2720,9 @@ mod tests {
     /// With `leave_gaps` the Storyteller's building is replaced by a partial
     /// world, so the first thing that happens is the Questioner's review.
     async fn real_core_object_phases(leave_gaps: bool) {
-        use crate::scenario::{Group, Location, Notes, Npc};
-        use crate::store::{Advance, NewObject};
+        use crate::store::{Advance, Fields, ObjectKind};
         const SUMMARY: &str = "Saltgate is a smuggler town on an estuary whose tide has stopped             coming in. The Harbor Guild, led by Warden [[Ysolde Varn]], blames the smugglers and             wants the channel dredged. The smugglers, led by [[Captain Brannoch]], hide their             cargo in the [[Bell Cellar]] below [[Saltgate Quay]], where a drowned bell rings             against the tide; Brannoch wants the tide to stay wrong because it hides his boats.             Ysolde's brother drowned near the bell and she will not let the cellar stay hidden.             Players arrive at the quay with a [[Guild writ]] from a distant client who wants the             bell silenced, and must choose between the Guild, the smugglers and their own aims.";
-        let model = DeviceModel::load_with_default_limits().await;
+        let model = DeviceModel::load().await;
         let (shared, name, sampling, limits) = model.parts();
         let db = crate::store::TestDatabase::new("real-generation");
         let store = Store::open(db.path()).await.unwrap();
@@ -2752,38 +2752,47 @@ mod tests {
                 .unwrap();
         }
         if leave_gaps {
-            let quay = Location {
-                name: "Saltgate Quay".into(),
-                kind: "village".into(),
-                description: "A smuggler town on a still estuary.".into(),
-                notes: Notes::default(),
-            };
-            let guild = Group {
-                name: "The Harbor Guild".into(),
-                location: "Saltgate Quay".into(),
-                description: "Officials who want the channel dredged.".into(),
-                notes: Notes::default(),
-            };
-            let ysolde = Npc {
-                name: "Ysolde Varn".into(),
-                group: "The Harbor Guild".into(),
-                description: "A stern Guild warden.".into(),
-                background: "Her brother drowned near the bell.".into(),
-                motive: "Dredge the channel.".into(),
-                ambition: String::new(),
-                sheet: serde_json::json!({}),
-                notes: Notes::default(),
-            };
-            store
-                .create_object(member.world_id, NewObject::Location(&quay))
+            let quay = store
+                .create_object(
+                    member.world_id,
+                    ObjectKind::Location,
+                    &Fields {
+                        name: Some("Saltgate Quay".into()),
+                        kind: Some("village".into()),
+                        description: Some("A smuggler town on a still estuary.".into()),
+                        ..Fields::default()
+                    },
+                )
                 .await
-                .unwrap();
-            store
-                .create_object(member.world_id, NewObject::Group(&guild))
+                .unwrap()
+                .id;
+            let guild = store
+                .create_object(
+                    member.world_id,
+                    ObjectKind::Group,
+                    &Fields {
+                        name: Some("The Harbor Guild".into()),
+                        location_id: Some(quay),
+                        description: Some("Officials who want the channel dredged.".into()),
+                        ..Fields::default()
+                    },
+                )
                 .await
-                .unwrap();
+                .unwrap()
+                .id;
             store
-                .create_object(member.world_id, NewObject::Npc(&ysolde))
+                .create_object(
+                    member.world_id,
+                    ObjectKind::Npc,
+                    &Fields {
+                        name: Some("Ysolde Varn".into()),
+                        group_id: Some(guild),
+                        description: Some("A stern Guild warden.".into()),
+                        background: Some("Her brother drowned near the bell.".into()),
+                        motive: Some("Dredge the channel.".into()),
+                        ..Fields::default()
+                    },
+                )
                 .await
                 .unwrap();
             store
@@ -2873,7 +2882,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a CUDA GPU; takes many minutes"]
     async fn a_world_is_generated_from_a_seed_by_the_real_model() {
-        let model = DeviceModel::load_with_default_limits().await;
+        let model = DeviceModel::load().await;
         let (shared, name, sampling, limits) = model.parts();
         let db = crate::store::TestDatabase::new("real-generation-seed");
         let store = Store::open(db.path()).await.unwrap();
@@ -3623,19 +3632,6 @@ mod tests {
         pub(crate) async fn load() -> Self {
             Self::load_with(
                 Settings::for_device_test("dev-qwen35").expect("default.toml should load"),
-            )
-            .await
-        }
-
-        /// The model under the product's own limits instead of the small-card
-        /// ones, for work whose requests do not fit a 4096-token context.
-        async fn load_with_default_limits() -> Self {
-            Self::load_with(
-                Settings::for_test(
-                    "model = \"dev-qwen35\"
-",
-                )
-                .expect("default.toml should load"),
             )
             .await
         }

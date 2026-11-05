@@ -12,8 +12,8 @@ use sqlx::{Sqlite, Transaction, types::Json};
 use super::{CharacterSeed, Store};
 use crate::scenario::{Connection, Group, ItemType, Location, Notes, Npc};
 
-// The kinds of top-level object the Questioner reviews. Also the allowed
-// values of its tools' `kind` argument.
+// The kinds of top-level object the Questioner reviews, and the allowed values
+// of the Storyteller and Questioner tools' `object` argument.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[schemars(inline)]
@@ -95,6 +95,17 @@ pub struct Fields {
 }
 
 impl Fields {
+    /// All fields the generic creation and update tools accept.
+    pub fn names() -> Vec<String> {
+        serde_json::to_value(Self::default())
+            .expect("default fields should serialize")
+            .as_object()
+            .expect("fields should serialize as an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// The names of the fields that have a value.
     fn given(&self) -> Vec<String> {
         match serde_json::to_value(self) {
@@ -134,17 +145,33 @@ impl Fields {
 }
 
 /// What to do about what depends on an object being deleted.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 pub struct DeleteOptions {
+    #[serde(default)]
     pub delete_groups: bool,
     pub item_location_id: Option<i64>,
     pub item_description: Option<String>,
+    #[serde(default)]
     pub delete_items: bool,
+}
+
+impl DeleteOptions {
+    /// All fields the generic deletion tool accepts.
+    pub fn names() -> Vec<String> {
+        serde_json::to_value(Self::default())
+            .expect("default delete options should serialize")
+            .as_object()
+            .expect("delete options should serialize as an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
 }
 
 /// The object a change created or acted on, and what the world holds after it.
 #[derive(Debug, Serialize)]
 pub struct Changed {
+    pub kind: &'static str,
     pub id: i64,
     pub counts: Counts,
 }
@@ -477,8 +504,13 @@ impl Store {
                 let name = need(&fields.name, "name")?;
                 Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
                 let location_id = need(&fields.location_id, "location_id")?;
-                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, location_id)
-                    .await?;
+                Self::ensure_exists(
+                    &mut transaction,
+                    world_id,
+                    ObjectKind::Location,
+                    location_id,
+                )
+                .await?;
                 let group = Group {
                     name,
                     location: String::new(),
@@ -500,7 +532,10 @@ impl Store {
                     background: need(&fields.background, "background")?,
                     motive: need(&fields.motive, "motive")?,
                     ambition: fields.ambition.clone().unwrap_or_default(),
-                    sheet: fields.sheet.clone().unwrap_or_else(|| serde_json::json!({})),
+                    sheet: fields
+                        .sheet
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({})),
                     notes,
                 };
                 Self::insert_npc(&mut transaction, world_id, group_id, &npc).await?
@@ -511,7 +546,10 @@ impl Store {
                 let item_type = ItemType {
                     name,
                     description: need(&fields.description, "description")?,
-                    stats: fields.stats.clone().unwrap_or_else(|| serde_json::json!({})),
+                    stats: fields
+                        .stats
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({})),
                     notes,
                 };
                 Self::insert_item_type(&mut transaction, world_id, &item_type).await?
@@ -520,8 +558,13 @@ impl Store {
                 let name = need(&fields.name, "name")?;
                 Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
                 let item_type_id = need(&fields.item_type_id, "item_type_id")?;
-                Self::ensure_exists(&mut transaction, world_id, ObjectKind::ItemType, item_type_id)
-                    .await?;
+                Self::ensure_exists(
+                    &mut transaction,
+                    world_id,
+                    ObjectKind::ItemType,
+                    item_type_id,
+                )
+                .await?;
                 let holder = match (fields.location_id, fields.held_by_id) {
                     (Some(location), None) => {
                         Self::ensure_exists(
@@ -564,7 +607,11 @@ impl Store {
             .commit()
             .await
             .with_context(|| format!("committing an object of world {world_id}"))?;
-        Ok(Changed { id, counts })
+        Ok(Changed {
+            kind: kind.as_str(),
+            id,
+            counts,
+        })
     }
 
     /// The object of `kind` called `name` in the world, if there is one.
@@ -822,10 +869,7 @@ impl Store {
 /// Fixtures the tests of the three authoring modules share.
 #[cfg(test)]
 pub(in crate::store) mod fixtures {
-    use crate::{
-        scenario::{Group, Location, Notes, Npc},
-        store::{Store, TestDatabase},
-    };
+    use crate::store::{Fields, ObjectKind, Store, TestDatabase};
 
     pub(in crate::store) async fn building_world() -> (Store, TestDatabase, i64) {
         let db = TestDatabase::new("authoring");
@@ -849,37 +893,6 @@ pub(in crate::store) mod fixtures {
         (store, db, world_id)
     }
 
-    pub(in crate::store) fn location(name: &str) -> Location {
-        Location {
-            name: name.into(),
-            kind: "room".into(),
-            description: format!("The {name}."),
-            notes: Notes::default(),
-        }
-    }
-
-    pub(in crate::store) fn group_at(name: &str, location: &str) -> Group {
-        Group {
-            name: name.into(),
-            location: location.into(),
-            description: String::new(),
-            notes: Notes::default(),
-        }
-    }
-
-    pub(in crate::store) fn npc_in(name: &str, group: &str) -> Npc {
-        Npc {
-            name: name.into(),
-            group: group.into(),
-            description: String::new(),
-            background: "Has a past.".into(),
-            motive: "Has a goal.".into(),
-            ambition: String::new(),
-            sheet: serde_json::json!({}),
-            notes: Notes::default(),
-        }
-    }
-
     pub(in crate::store) async fn set_stage(store: &Store, world: i64, stage: &str) {
         sqlx::query("UPDATE world SET generation_stage = ? WHERE id = ?")
             .bind(stage)
@@ -888,250 +901,117 @@ pub(in crate::store) mod fixtures {
             .await
             .unwrap();
     }
+
+    pub(in crate::store) async fn create(
+        store: &Store,
+        world: i64,
+        kind: ObjectKind,
+        fields: Fields,
+    ) -> i64 {
+        store.create_object(world, kind, &fields).await.unwrap().id
+    }
+
+    pub(in crate::store) fn location_fields(name: &str) -> Fields {
+        Fields {
+            name: Some(name.into()),
+            kind: Some("room".into()),
+            description: Some(format!("The {name}.")),
+            ..Fields::default()
+        }
+    }
+
+    pub(in crate::store) fn group_fields(name: &str, location_id: i64) -> Fields {
+        Fields {
+            name: Some(name.into()),
+            location_id: Some(location_id),
+            description: Some(String::new()),
+            ..Fields::default()
+        }
+    }
+
+    pub(in crate::store) fn npc_fields(name: &str, group_id: i64) -> Fields {
+        Fields {
+            name: Some(name.into()),
+            group_id: Some(group_id),
+            description: Some(String::new()),
+            background: Some("Has a past.".into()),
+            motive: Some("Has a goal.".into()),
+            ..Fields::default()
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
+mod id_tests {
     use super::fixtures::*;
     use super::*;
-    use crate::scenario::{Group, ItemType, Notes, Npc};
 
     #[tokio::test]
     async fn the_storyteller_builds_a_world_one_object_at_a_time() {
         let (store, _db, world) = building_world().await;
-        let hut = location("hut");
-        let yard = location("yard");
-        store
-            .create_object(world, NewObject::Location(&hut))
-            .await
-            .unwrap();
-        store
-            .create_object(world, NewObject::Location(&yard))
-            .await
-            .unwrap();
-        let path = Connection {
-            from: "hut".into(),
-            to: "yard".into(),
-            travel_time: 1,
-            description: "A short path.".into(),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Connection(&path))
-            .await
-            .unwrap();
-        let family = Group {
-            name: "family".into(),
-            location: "hut".into(),
-            description: "The household.".into(),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Group(&family))
-            .await
-            .unwrap();
-        let toma = Npc {
-            name: "Toma".into(),
-            group: "family".into(),
-            description: "A farmer.".into(),
-            background: "Owes money.".into(),
-            motive: "Keep the farm.".into(),
-            ambition: String::new(),
-            sheet: serde_json::json!({}),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Npc(&toma))
-            .await
-            .unwrap();
-        let loaf = ItemType {
-            name: "loaf".into(),
-            description: "Bread.".into(),
-            stats: serde_json::json!({}),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::ItemType(&loaf))
-            .await
-            .unwrap();
-        let counts = store
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
+        create(
+            &store,
+            world,
+            ObjectKind::Connection,
+            Fields {
+                from_id: Some(hut),
+                to_id: Some(yard),
+                travel_time: Some(1),
+                description: Some("A short path.".into()),
+                ..Fields::default()
+            },
+        )
+        .await;
+        let family = create(
+            &store,
+            world,
+            ObjectKind::Group,
+            group_fields("family", hut),
+        )
+        .await;
+        let toma = create(&store, world, ObjectKind::Npc, npc_fields("Toma", family)).await;
+        let loaf = create(
+            &store,
+            world,
+            ObjectKind::ItemType,
+            Fields {
+                name: Some("loaf".into()),
+                description: Some("Bread.".into()),
+                ..Fields::default()
+            },
+        )
+        .await;
+        let changed = store
             .create_object(
                 world,
-                NewObject::Item(&NewItem {
-                    name: "stale loaf".into(),
-                    item_type: "loaf".into(),
-                    location: Some("hut".into()),
-                    held_by: None,
-                    description: "Hard.".into(),
-                }),
+                ObjectKind::Item,
+                &Fields {
+                    name: Some("stale loaf".into()),
+                    item_type_id: Some(loaf),
+                    location_id: Some(hut),
+                    description: Some("Hard.".into()),
+                    ..Fields::default()
+                },
             )
             .await
             .unwrap();
+        assert_eq!(changed.id, 1);
         assert_eq!(
-            counts,
+            changed.counts,
             Counts {
                 locations: 2,
                 connections: 1,
                 groups: 1,
                 npcs: 1,
                 item_types: 1,
-                items: 1
+                items: 1,
             }
         );
-
-        // The NPC is a real one: it has its own agent and chat.
-        let npc_agents = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM npc_agent JOIN character ON character.id = npc_agent.character_id \
-             WHERE character.world_id = ?",
-            world,
-        )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
-        assert_eq!(npc_agents, 1);
-    }
-
-    #[tokio::test]
-    async fn a_rejected_object_changes_nothing() {
-        let (store, _db, world) = building_world().await;
-        let hut = location("hut");
-        store
-            .create_object(world, NewObject::Location(&hut))
-            .await
-            .unwrap();
-        let twice = store
-            .create_object(world, NewObject::Location(&hut))
-            .await
-            .unwrap_err();
-        assert!(format!("{twice:#}").contains("already has a location called `hut`"));
-        let stranger = Npc {
-            name: "Toma".into(),
-            group: "nobody".into(),
-            description: String::new(),
-            background: String::new(),
-            motive: String::new(),
-            ambition: String::new(),
-            sheet: serde_json::json!({}),
-            notes: Notes::default(),
-        };
-        let missing = store
-            .create_object(world, NewObject::Npc(&stranger))
-            .await
-            .unwrap_err();
-        assert!(format!("{missing:#}").contains("no group called `nobody`"));
-        let yard = location("yard");
-        let counts = store
-            .create_object(world, NewObject::Location(&yard))
-            .await
-            .unwrap();
-        assert_eq!((counts.locations, counts.npcs), (2, 0));
-    }
-
-    #[tokio::test]
-    async fn objects_are_only_created_while_the_world_is_being_built() {
-        let (store, _db, world) = building_world().await;
-        sqlx::query!(
-            "UPDATE world SET generation_stage = 'review' WHERE id = ?",
-            world
-        )
-        .execute(&store.pool)
-        .await
-        .unwrap();
-        let hut = location("hut");
-        let error = store
-            .create_object(world, NewObject::Location(&hut))
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("not `build`"));
-    }
-
-    #[tokio::test]
-    async fn an_item_an_npc_holds_belongs_to_the_npc_and_unreviews_it() {
-        let (store, _db, world) = building_world().await;
-        store
-            .create_object(world, NewObject::Location(&location("hut")))
-            .await
-            .unwrap();
-        let group = Group {
-            name: "family".into(),
-            location: "hut".into(),
-            description: String::new(),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Group(&group))
-            .await
-            .unwrap();
-        let toma = Npc {
-            name: "Toma".into(),
-            group: "family".into(),
-            description: String::new(),
-            background: "b".into(),
-            motive: "m".into(),
-            ambition: String::new(),
-            sheet: serde_json::json!({}),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Npc(&toma))
-            .await
-            .unwrap();
-        let axe_type = ItemType {
-            name: "axe".into(),
-            description: String::new(),
-            stats: serde_json::json!({}),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::ItemType(&axe_type))
-            .await
-            .unwrap();
-        sqlx::query!(
-            "UPDATE world SET generation_stage = 'review' WHERE id = ?",
-            world
-        )
-        .execute(&store.pool)
-        .await
-        .unwrap();
-        store
-            .set_reviewed(world, ObjectKind::Npc, "Toma", true)
-            .await
-            .unwrap();
-        sqlx::query!(
-            "UPDATE world SET generation_stage = 'build' WHERE id = ?",
-            world
-        )
-        .execute(&store.pool)
-        .await
-        .unwrap();
-
-        let axe = |holder: (Option<&str>, Option<&str>)| NewItem {
-            name: "wood axe".into(),
-            item_type: "axe".into(),
-            description: String::new(),
-            location: holder.0.map(Into::into),
-            held_by: holder.1.map(Into::into),
-        };
-        let both = store
-            .create_object(world, NewObject::Item(&axe((Some("hut"), Some("Toma")))))
-            .await
-            .unwrap_err();
-        assert!(format!("{both:#}").contains("either a location or an NPC"));
-        store
-            .create_object(world, NewObject::Item(&axe((None, Some("Toma")))))
-            .await
-            .unwrap();
-
-        let listed = store.review_list(world).await.unwrap();
-        assert!(
-            listed.iter().all(|entry| entry.kind != "item"),
-            "{listed:?}"
-        );
-        let toma = listed.iter().find(|entry| entry.name == "Toma").unwrap();
-        assert!(!toma.reviewed);
         assert!(
             store
-                .read_object(world, ObjectKind::Item, "wood axe")
+                .read_object(world, ObjectKind::Npc, toma)
                 .await
                 .unwrap()
                 .contains("Toma")
@@ -1139,40 +1019,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_connection_between_the_same_locations_is_refused() {
+    async fn rejected_creation_changes_nothing_and_creation_requires_building() {
         let (store, _db, world) = building_world().await;
-        for name in ["hut", "yard"] {
-            store
-                .create_object(world, NewObject::Location(&location(name)))
-                .await
-                .unwrap();
-        }
-        let path = Connection {
-            from: "hut".into(),
-            to: "yard".into(),
-            travel_time: 1,
-            description: String::new(),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Connection(&path))
-            .await
-            .unwrap();
-        let twice = store
-            .create_object(world, NewObject::Connection(&path))
+        create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let error = store
+            .create_object(world, ObjectKind::Location, &location_fields("hut"))
             .await
             .unwrap_err();
-        assert!(format!("{twice:#}").contains("already has a connection called `hut -> yard`"));
-        // The other direction is a different connection.
-        let back = Connection {
-            from: "yard".into(),
-            to: "hut".into(),
-            ..path
-        };
-        let counts = store
-            .create_object(world, NewObject::Connection(&back))
+        assert!(format!("{error:#}").contains("already has a location called `hut`"));
+        let error = store
+            .create_object(
+                world,
+                ObjectKind::Npc,
+                &Fields {
+                    name: Some("Toma".into()),
+                    group_id: Some(99),
+                    description: Some(String::new()),
+                    background: Some(String::new()),
+                    motive: Some(String::new()),
+                    ..Fields::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("no group with id 99"));
+        let changed = store
+            .create_object(world, ObjectKind::Location, &location_fields("yard"))
             .await
             .unwrap();
-        assert_eq!(counts.connections, 2);
+        assert_eq!((changed.counts.locations, changed.counts.npcs), (2, 0));
+        set_stage(&store, world, "review").await;
+        let error = store
+            .create_object(world, ObjectKind::Location, &location_fields("field"))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not `build`"));
+    }
+
+    #[tokio::test]
+    async fn held_items_are_reviewed_with_their_npc() {
+        let (store, _db, world) = building_world().await;
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let family = create(
+            &store,
+            world,
+            ObjectKind::Group,
+            group_fields("family", hut),
+        )
+        .await;
+        let toma = create(&store, world, ObjectKind::Npc, npc_fields("Toma", family)).await;
+        let axe_type = create(
+            &store,
+            world,
+            ObjectKind::ItemType,
+            Fields {
+                name: Some("axe".into()),
+                description: Some(String::new()),
+                ..Fields::default()
+            },
+        )
+        .await;
+        set_stage(&store, world, "review").await;
+        store
+            .set_reviewed(world, ObjectKind::Npc, toma, true)
+            .await
+            .unwrap();
+        set_stage(&store, world, "build").await;
+        let error = store
+            .create_object(
+                world,
+                ObjectKind::Item,
+                &Fields {
+                    name: Some("wood axe".into()),
+                    item_type_id: Some(axe_type),
+                    location_id: Some(hut),
+                    held_by_id: Some(toma),
+                    description: Some(String::new()),
+                    ..Fields::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("either location_id or held_by_id"));
+        let item = create(
+            &store,
+            world,
+            ObjectKind::Item,
+            Fields {
+                name: Some("wood axe".into()),
+                item_type_id: Some(axe_type),
+                held_by_id: Some(toma),
+                description: Some(String::new()),
+                ..Fields::default()
+            },
+        )
+        .await;
+        assert!(
+            store
+                .review_list(world)
+                .await
+                .unwrap()
+                .iter()
+                .all(|entry| entry.kind != "item")
+        );
+        assert!(
+            store
+                .read_object(world, ObjectKind::Item, item)
+                .await
+                .unwrap()
+                .contains("Toma")
+        );
+        assert!(
+            !store
+                .review_list(world)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.id == toma)
+                .unwrap()
+                .reviewed
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_connections_are_refused_by_their_ids() {
+        let (store, _db, world) = building_world().await;
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
+        let fields = Fields {
+            from_id: Some(hut),
+            to_id: Some(yard),
+            travel_time: Some(1),
+            description: Some(String::new()),
+            ..Fields::default()
+        };
+        create(&store, world, ObjectKind::Connection, fields.clone()).await;
+        let error = store
+            .create_object(world, ObjectKind::Connection, &fields)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("already leads"));
     }
 }

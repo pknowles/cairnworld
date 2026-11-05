@@ -48,11 +48,7 @@ struct DeleteObject {
 pub(super) fn storyteller_tools(store: &Store, world: &Arc<World>) -> Result<Vec<Tool>> {
     let world = (store, world);
     let with = |extra: &[&str], names: Vec<String>| -> Vec<String> {
-        extra
-            .iter()
-            .map(ToString::to_string)
-            .chain(names)
-            .collect()
+        extra.iter().map(ToString::to_string).chain(names).collect()
     };
     Ok(vec![
         changer::<CreateObject>(
@@ -267,5 +263,33 @@ fn rejection_or_failure(error: anyhow::Error) -> Result<ToolOutcome> {
     match error.downcast_ref::<Rejected>() {
         Some(rejected) => Ok(ToolOutcome::Rejected(rejected.0.clone())),
         None => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Store, TestDatabase};
+
+    /// Every tool stays visible to the agent, so what they cost in every request
+    /// has to fit the smallest context the game supports (4096 tokens).
+    #[tokio::test]
+    async fn the_storyteller_tools_stay_small_enough_for_a_small_context() {
+        let db = TestDatabase::new("tool-size");
+        let store = Store::open(db.path()).await.unwrap();
+        let owner = store
+            .find_or_create_user("maker@example.test", "Maker")
+            .await
+            .unwrap();
+        let member = store.create_world_to_generate(&owner, "x").await.unwrap();
+        let worlds = World::load(&store).await.unwrap();
+        let world = World::get(&worlds, member.world_id).unwrap();
+        let characters: usize = storyteller_tools(&store, &world)
+            .unwrap()
+            .iter()
+            .map(|tool| serde_json::to_string(&tool.definition()).unwrap().len())
+            .sum();
+        println!("STORYTELLER_TOOL_CHARACTERS {characters}");
+        assert!(characters < 4_200, "the tools are {characters} characters");
     }
 }

@@ -1032,3 +1032,18 @@ The last is an idea to try, not a decision: the summary request could list the a
 names without descriptions, so the summarizer knows what the agent can do and so what to keep.
 Measured so far: with the Questioner's full tools in the summary request, the model answered
 by calling one instead of summarizing.
+
+## 2026-11-05: Temporary first-group entry placement
+
+On placing a player who joined during generation:
+
+> for a temporary solution, sure, but make sure it's well commented as such and we do not accidentally keep this. I think ideally the storyteller should decide which groups players enter (possibly even a brand new one), which would then be handled by the GM as the PC joins the group
+
+Status (assistant's note, not a quote): until the Storyteller gameplay plan supplies its
+post-creation entry decision, core-generation completion places waiting Adventurers in the
+first group. The implementation labels this temporary behaviour and names the replacement
+flow.
+
+On integration order:
+
+> lets finish getting this branch up to scractch and make it possible to generate a small world that's playable. then I'll merge the branches and we can continue to the detailed world

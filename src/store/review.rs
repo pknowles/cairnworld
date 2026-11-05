@@ -361,8 +361,9 @@ impl Store {
         Ok(problems)
     }
 
-    /// Put the Adventurers that joined while the world was being created into
-    /// its first group.
+    /// TEMPORARY: put Adventurers that joined while the world was being created
+    /// into its first group. Entry placement belongs to the Storyteller after
+    /// character creation; replace this when that gameplay flow exists.
     pub(super) async fn place_waiting_adventurers(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
@@ -389,46 +390,36 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::scenario::{Group, Notes, Npc};
-    use crate::store::NewObject;
+mod id_tests {
     use crate::store::authoring::fixtures::*;
+    use crate::store::{Fields, ObjectKind};
 
     #[tokio::test]
     async fn core_objects_are_not_whole_until_connected_complete_and_reviewed() {
         let (store, _db, world) = building_world().await;
-        for name in ["hut", "yard"] {
-            store
-                .create_object(world, NewObject::Location(&location(name)))
-                .await
-                .unwrap();
-        }
-        let group = Group {
-            name: "family".into(),
-            location: "hut".into(),
-            description: String::new(),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Group(&group))
-            .await
-            .unwrap();
-        let toma = Npc {
-            name: "Toma".into(),
-            group: "family".into(),
-            description: String::new(),
-            background: String::new(),
-            motive: String::new(),
-            ambition: String::new(),
-            sheet: serde_json::json!({}),
-            notes: Notes::default(),
-        };
-        store
-            .create_object(world, NewObject::Npc(&toma))
-            .await
-            .unwrap();
-
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
+        let family = create(
+            &store,
+            world,
+            ObjectKind::Group,
+            group_fields("family", hut),
+        )
+        .await;
+        let toma = create(
+            &store,
+            world,
+            ObjectKind::Npc,
+            Fields {
+                name: Some("Toma".into()),
+                group_id: Some(family),
+                description: Some(String::new()),
+                background: Some(String::new()),
+                motive: Some(String::new()),
+                ..Fields::default()
+            },
+        )
+        .await;
         let problems = store.core_object_problems(world).await.unwrap().join(" ");
         assert!(problems.contains("cannot be reached"), "{problems}");
         assert!(
@@ -437,28 +428,46 @@ mod tests {
         );
         assert!(problems.contains("Not yet reviewed"), "{problems}");
 
-        // Reviewing needs the review stage and clears the review problem only.
-        sqlx::query!(
-            "UPDATE world SET generation_stage = 'review' WHERE id = ?",
-            world
+        create(
+            &store,
+            world,
+            ObjectKind::Connection,
+            Fields {
+                from_id: Some(hut),
+                to_id: Some(yard),
+                travel_time: Some(1),
+                description: Some(String::new()),
+                ..Fields::default()
+            },
         )
-        .execute(&store.pool)
-        .await
-        .unwrap();
+        .await;
+        set_stage(&store, world, "review").await;
         for entry in store.review_list(world).await.unwrap() {
             let kind = match entry.kind.as_str() {
                 "location" => ObjectKind::Location,
+                "connection" => ObjectKind::Connection,
                 "group" => ObjectKind::Group,
                 "npc" => ObjectKind::Npc,
                 other => panic!("unexpected {other}"),
             };
             store
-                .set_reviewed(world, kind, &entry.name, true)
+                .set_reviewed(world, kind, entry.id, true)
                 .await
                 .unwrap();
         }
         let problems = store.core_object_problems(world).await.unwrap().join(" ");
         assert!(!problems.contains("Not yet reviewed"), "{problems}");
-        assert!(problems.contains("cannot be reached"), "{problems}");
+        assert!(!problems.contains("cannot be reached"), "{problems}");
+        assert!(
+            problems.contains("NPC Toma needs a background and a motive"),
+            "{problems}"
+        );
+        assert!(
+            store
+                .read_object(world, ObjectKind::Npc, toma)
+                .await
+                .unwrap()
+                .contains("Toma")
+        );
     }
 }

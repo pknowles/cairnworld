@@ -9,7 +9,7 @@ mod prompt;
 mod review;
 mod speech;
 use authoring::Holder;
-pub use authoring::{Changed, DeleteOptions, Fields, ObjectKind, Rejected};
+pub use authoring::{DeleteOptions, Fields, ObjectKind, Rejected};
 pub use editing::Change;
 pub use generation::{Advance, Generation, GenerationStage};
 use history::EntryKind;
