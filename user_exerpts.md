@@ -1001,3 +1001,34 @@ and now starts with the agent's role text. The KV-cache idea is not implemented:
 backend disables prefix caching (`with_prefix_cache_n(None)`), and the summary request omits
 the tool definitions and dynamic context, so it shares only the role text with the agent's
 normal requests. Reuse would need the summary request to keep the same leading context.
+
+## 2026-11-05: World generation targets small cards, uses IDs, and keeps every tool
+
+On whether world generation should need the larger context:
+
+> less context. same tools. make it fit. this needs to run on a 3070 GPU with WAY less
+> RAM! like 5gb
+>
+> we cannot sactifice tools. some progress has been made in the main worktree to reduce
+> size too. we should merge and re-branch soon. I'm planning to once you have small worlds
+> working
+
+On tool identifiers (the assistant had built them by name; the answer chose IDs):
+
+> Switch to IDs
+
+On merging each create/update pair:
+
+> switching to a generic tool and enums might help. we did that for at least one of the GM tools
+
+On the summary request and tools:
+
+> prob doesn't need tools, certainly not the full description. doesn't hurt. opportunity to
+> save some tokens maybe. could think about listing tools without descriptions since what an
+> agent can control would be great context to infer what info needs to be kept (this might
+> be useful in user exerpts)
+
+The last is an idea to try, not a decision: the summary request could list the agent's tool
+names without descriptions, so the summarizer knows what the agent can do and so what to keep.
+Measured so far: with the Questioner's full tools in the summary request, the model answered
+by calling one instead of summarizing.

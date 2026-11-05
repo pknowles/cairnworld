@@ -2479,8 +2479,22 @@ mod tests {
                 ),
             ]),
             text("The objects exist."),
+            // The first review asks a question instead of completing...
             calls(&[
                 ("read_object", r#"{"kind":"npc","name":"Ysolde"}"#),
+                (
+                    "ask_questions",
+                    r#"{"questions":["Who stands against Ysolde?"]}"#,
+                ),
+            ]),
+            // ...the Storyteller adds an object for it...
+            calls(&[(
+                "create_npc",
+                r#"{"name":"Corvin","group":"Wardens","description":"A rival warden.","background":"Wants her post.","motive":"Replace Ysolde."}"#,
+            )]),
+            text("Added."),
+            // ...and the second review marks everything and completes.
+            calls(&[
                 (
                     "mark_object_reviewed",
                     r#"{"kind":"location","name":"Belfry","reviewed":true}"#,
@@ -2492,6 +2506,10 @@ mod tests {
                 (
                     "mark_object_reviewed",
                     r#"{"kind":"npc","name":"Ysolde","reviewed":true}"#,
+                ),
+                (
+                    "mark_object_reviewed",
+                    r#"{"kind":"npc","name":"Corvin","reviewed":true}"#,
                 ),
                 ("core_objects_created", "{}"),
             ]),
@@ -2537,12 +2555,12 @@ mod tests {
         assert!(world.ready, "reviewed core objects open play");
         assert!(world.failure.is_none());
         let objects = store.review_list(member.world_id).await.unwrap();
-        assert_eq!(objects.len(), 3);
+        assert_eq!(objects.len(), 4);
         assert!(objects.iter().all(|object| object.reviewed));
         store.character_group_id(member.character_id).await.unwrap();
 
         let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
-        assert_eq!(shown.len(), 10);
+        assert_eq!(shown.len(), 13);
         assert!(shown[0].contains("A drowned city"));
         let prompts = crate::prompts::current().unwrap();
         let sampled = |questions: &[String]| {
@@ -2614,6 +2632,27 @@ mod tests {
         // The Questioner reviews the objects, not the Storyteller's answers.
         assert!(shown[9].contains("- [ ] npc Ysolde") && shown[9].contains("read_object"));
         assert!(!shown[9].contains("The tide-wardens rule."));
+        // It is told which marked name has no object, and not the one that has.
+        assert!(
+            shown[9].contains("no object has them yet: Drowned Bell"),
+            "{}",
+            shown[9]
+        );
+        // The Questioner's question sends the Storyteller back to build, and it
+        // is shown what already exists (a fact, not kept in its chat).
+        assert!(
+            shown[10].contains("Who stands against Ysolde?"),
+            "{}",
+            shown[10]
+        );
+        assert!(
+            shown[10].contains("The world has these objects so far")
+                && shown[10].contains("- location Belfry")
+                && shown[10].contains("- npc Ysolde"),
+            "{}",
+            shown[10]
+        );
+        assert!(!shown[7].contains("The world has these objects so far"));
     }
 
     #[tokio::test]

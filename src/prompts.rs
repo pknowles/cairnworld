@@ -50,6 +50,7 @@ pub struct Questioner {
     pub ask_reminder: String,
     pub review_request: String,
     pub review_state: String,
+    pub review_missing: String,
     pub review_reminder: String,
     pub sample_size: usize,
     pub example_questions: Vec<String>,
@@ -70,6 +71,7 @@ pub struct Storyteller {
     pub uncreated_mentions: String,
     pub build_request: String,
     pub fix_request: String,
+    pub objects_state: String,
     pub tools: Tools,
 }
 

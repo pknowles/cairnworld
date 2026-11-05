@@ -367,6 +367,9 @@ review_state = """\
 {objects}\
     """
 
+# Added to the review state when the summary marks names that no object has. {names}
+review_missing = "The summary marks these names but no object has them yet: {names}."
+
 review_request = "Review the objects the Storyteller created against the summary. Read the ones you have not reviewed and mark each once it is ready for play. If something is missing or wrong, call ask_questions with questions that lead the Storyteller to fix it. Call core_objects_created once every object is reviewed and nothing is missing."
 
 review_reminder = "End your turn by calling ask_questions or core_objects_created."
@@ -470,6 +473,12 @@ fix_request = """\
     The Questioner reviewed the world and asks:
 {questions}
     Use the tools to add what is missing. Reply with a short note when you are done.\
+    """
+
+# What exists in the world, shown with every build request. {objects}
+objects_state = """\
+    The world has these objects so far:
+{objects}\
     """
 
 [storyteller.tools.create_location]

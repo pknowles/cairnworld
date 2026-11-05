@@ -340,11 +340,9 @@ where
                 };
                 // A reminder, not a requirement: the Storyteller decides which
                 // marked names need an object.
-                let created = self.store.object_names(scope.world.id).await?;
-                let uncreated: Vec<String> = marked_names(&generation.summary)
-                    .into_iter()
-                    .filter(|name| !created.iter().any(|made| made.eq_ignore_ascii_case(name)))
-                    .collect();
+                let uncreated = self
+                    .uncreated_names(scope.world.id, &generation.summary)
+                    .await?;
                 if !uncreated.is_empty() {
                     text.push_str("\n\n");
                     text.push_str(&prompts::fill(
@@ -352,10 +350,25 @@ where
                         &[("names", &uncreated.join(", "))],
                     )?);
                 }
-                let request = Request {
+                let mut request = Request {
                     tools: authoring::storyteller_tools(&self.store, scope.world)?,
                     ..storyteller_request(text)?
                 };
+                // What already exists, so it neither repeats nor invents what is
+                // there: shown with this request, not kept in its chat.
+                let objects: String = self
+                    .store
+                    .review_list(scope.world.id)
+                    .await?
+                    .iter()
+                    .map(|entry| format!("- {} {}\n", entry.kind, entry.name))
+                    .collect();
+                if !objects.is_empty() {
+                    request.context.push(prompts::fill(
+                        &storyteller.objects_state,
+                        &[("objects", &objects)],
+                    )?);
+                }
                 self.generation_turn(scope, request).await?;
                 Ok(Advance::Built)
             }
@@ -370,10 +383,23 @@ where
                         format!("- [{mark}] {} {}\n", entry.kind, entry.name)
                     })
                     .collect();
-                let world_state = prompts::fill(
+                let mut world_state = prompts::fill(
                     &questioner.review_state,
                     &[("seed", seed), ("summary", summary), ("objects", &objects)],
                 )?;
+                // Comparing the summary's marked names with the objects is
+                // plain code, so the Questioner is told the result rather than
+                // left to notice what is absent.
+                let uncreated = self
+                    .uncreated_names(scope.world.id, &generation.summary)
+                    .await?;
+                if !uncreated.is_empty() {
+                    world_state.push_str("\n");
+                    world_state.push_str(&prompts::fill(
+                        &questioner.review_missing,
+                        &[("names", &uncreated.join(", "))],
+                    )?);
+                }
                 let mut tools = vec![ask_questions_tool()?];
                 tools.extend(authoring::review_tools(&self.store, scope.world.id)?);
                 let settled = self
@@ -407,6 +433,15 @@ where
                 )
             }
         }
+    }
+
+    /// The names the summary marks that no object of the world has.
+    async fn uncreated_names(&self, world_id: i64, summary: &str) -> Result<Vec<String>> {
+        let created = self.store.object_names(world_id).await?;
+        Ok(marked_names(summary)
+            .into_iter()
+            .filter(|name| !created.iter().any(|made| made.eq_ignore_ascii_case(name)))
+            .collect())
     }
 
     async fn generation_turn(
