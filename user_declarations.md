@@ -1305,7 +1305,7 @@ the case may be.
   actual split action for all characters that follow the initial character
   moving away from a group. Merging groups is always handled by moving
   characters in the current group to the target group. A shortcut to specify the
-  whole group rather than individual characters would probably be useful.
+  whole group rather than individual characters so far went unused.
 
 Saves could be rolled immediately by rust code. Character agents do not roll or
 resolve saves. If a player's character is making a save, we may want to add an
