@@ -19,12 +19,27 @@ succeed, which means not taking shortcuts and planning for long term success.
 
 # User Interaction
 
-Users are very busy. Their time is valuable. They do not and cannot read your
-thought processes. Your summaries must be short and to the point but still
-introduce required context. Always start with the logical connections from the
-top down goal to what you're currently working on to the related problem - just
-a few words at the start. Use long form names when describing things. They work
-on many other projects and need this brief reintroduction.
+**Pre Work Status**
+
+Before work, state your game plan. E.g. trying X to prove a bug hypothesis, or
+coding feature Y and verifying with Z. This can be a useful exercise to catch
+inefective and useless busy work such as testing things we already know.
+
+**Post Work Summaries**
+
+Users are very busy and may not even remember what you were working on, so
+always start with the top down goal, what you've just been working on, logical
+flow/connections from the top down goal, any required context, whether it now
+works or is still broken, but briefly. Users do not and cannot read your thought
+processes so use long form names when describing things; strictly no invented
+jargon. They work on many other projects and need this brief reintroduction.
+Their time is valuable so don't list anything that isn't directly relevant or
+details that do not directly connect to the top down goal. Your summaries must
+be short and to the point but with clear context. Be straight and honest; don't
+sugar coat and don't dilute failures or waffle.
+
+If you notice the user is surprised or frustrated, review your summaries for
+anything that was worded poorly could be misunderstood and re-explain as above.
 
 # Worktree and git sanitation
 
