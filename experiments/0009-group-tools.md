@@ -58,7 +58,7 @@ everyone in one group. Four cases, 3 seeds, same fixture:
 With the first wording the GM called `split_group` to join an existing group in nearly every run, naming
 the new group after the one it was joining. Saying where each applies fixed it.
 
-### Whole-group shortcut: tried, not used
+### Whole-group shortcut: tried, not used, removed
 
 `move_to_group` with no characters listed moves the GM's whole group (the user asked for a shortcut for
 large groups). Eleven characters outside, 3 to 4 seeds each:
@@ -81,6 +81,13 @@ With positions given to the GM it made no merge call in any run:
 | Committed | `split_group` of Rowan alone or no group call, 0/7 seen |
 | Plus "the characters in this group: those who can interact with each other, directly or through others" | no group call, 4/4, and again 4/4 with every crowd member given a position |
 | Plus "all of them joining merges the two" | `split_group` of Rowan alone 3/4, no call 1/4 |
+
+A separate `merge_group` tool (this group and another group id, no character list; the role named it for
+"the whole group and another come into range") was tried instead of the empty list. In the fair test it
+was never called: no group call in 3/3 runs, the other cases unchanged (a single character joining
+Toma 3/3, so it did not pull single joins into merges). Where everyone climbs into the hut together it
+was never called either: `move_to_group` with all eleven ids, 2/2 (the process then died on the third
+seed). The empty list and the separate tool were both unused, so the shortcut was removed.
 
 The GM never reached the choice between listing the crowd and listing none, so the shortcut has no
 measured use. What the input showed: the scene packet lists every character with an id, and the only

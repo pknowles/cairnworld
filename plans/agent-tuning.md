@@ -15,7 +15,7 @@ none. Merge when characters of different groups could perceive each other; split
 characters move away. `split_group` already acts on the GM's own group (it takes no group id).
 
 Done: the packet lists the other groups; the tools are `split_group` (a new group),
-`move_to_group` (into an existing group; every character of the group moving, or none listed, is a merge) with the GM
+`move_to_group` (into an existing group; every character of the group moving is a merge) with the GM
 naming the groups, made unique when they clash; the tools act on the acting character's current
 group; mistral.rs's Qwen parser needs an optional integer's schema type to be plain (`"integer"`,
 not `["integer","null"]`), which the schema normaliser now does. Do not add string-to-integer
@@ -28,7 +28,7 @@ and back are mostly right.
 Where each tool applies is stated in its description (split: "go off where no other group is"; move:
 "go to where its characters are"). Measured with four cases, 3 seeds, 11 of 12 right against 2 of 12 for
 the earlier wording; walking back missed once. The empty-list shortcut on `move_to_group` was not used by
-the GM in any run, and a fair test of a whole group merging because one character moved into range made
+the GM in any run and was removed; a fair test of a whole group merging because one character moved into range made
 no merge call (experiments/0009-group-tools.md). Open: the GM does not turn "now in range of another
 group" into a merge.
 The batched, delayed split belongs to plans/unified-game-time.md.

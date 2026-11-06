@@ -200,13 +200,13 @@ new_group_name = "A short phrase for the new group: who is in it and where."
 [gm.tools.move_to_group]
 description = """\
     Move characters into another group at this location when they go to where its \
-    characters are. The others stay together. List none if the whole group goes: the \
-    two groups become one. Applies after every other call in this turn's batch has \
-    run.\
+    characters are. The others stay together; if every character of this group \
+    moves, the two groups become one. Applies after every other call in this turn's \
+    batch has run.\
     """
 
 [gm.tools.move_to_group.arguments]
-character_ids = "The characters moving. Empty for the whole group."
+character_ids = "The characters moving."
 group_id = "The other group they join."
 current_group_name = "A short phrase for the group left behind: who is in it and where."
 joined_group_name = "A short phrase for the group they join, with them in it: who is in it and where."

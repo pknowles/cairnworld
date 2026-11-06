@@ -2090,12 +2090,10 @@ where
                         Ok(moving) => moving,
                         Err(error) => return Ok(ToolOutcome::rejected(error)),
                     };
-                    // Moving every character of the group, or listing none, is the groups merging.
+                    // Moving every character of the group is the groups merging.
                     let mut moving_ids = moving.character_ids.clone();
                     moving_ids.sort_unstable();
-                    if moving_ids.is_empty()
-                        || moving_ids == store.group_character_ids(group_id).await?
-                    {
+                    if moving_ids == store.group_character_ids(group_id).await? {
                         return Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Merge {
                             group_ids: vec![group_id, moving.group_id],
                             name: moving.joined_group_name,
@@ -2658,7 +2656,7 @@ struct SplitGroup {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MoveToGroup {
-    // The characters moving. Empty for the whole group.
+    // The characters moving.
     character_ids: Vec<i64>,
     // The other group at this location they join.
     group_id: i64,
@@ -10721,6 +10719,7 @@ mod tests {
             .await
             .unwrap();
         let earliest = store.presence_narration(alone).await.unwrap().due_at;
+        let players_members = store.group_character_ids(players).await.unwrap();
         responses.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-2".into(),
@@ -10737,7 +10736,7 @@ mod tests {
                     id: "merge-1".into(),
                     name: "move_to_group".into(),
                     arguments: serde_json::json!({
-                        "character_ids": [],
+                        "character_ids": players_members,
                         "group_id": alone,
                         "current_group_name": "the players",
                         "joined_group_name": "reunited",
