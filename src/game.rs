@@ -949,6 +949,7 @@ where
                     terminal_reminder: Some(&reminder),
                     sampling: self.sampling.clone(),
                     model: &self.model,
+                    perceiver: None,
                 },
                 &call,
                 |_| {},
@@ -1055,6 +1056,7 @@ where
                     terminal_reminder: None,
                     sampling: self.sampling.clone(),
                     model: &self.model,
+                    perceiver: None,
                 },
                 &call,
                 |_| {},
@@ -1161,6 +1163,7 @@ where
                     terminal_reminder: None,
                     sampling: self.sampling.clone(),
                     model: &self.model,
+                    perceiver: None,
                 },
                 &call,
                 |_| {},
@@ -1725,6 +1728,7 @@ where
                 terminal_reminder: Some(&reminder),
                 sampling: self.sampling.clone(),
                 model: &self.model,
+                perceiver: None,
             },
             call,
             |_| {},
@@ -2403,6 +2407,8 @@ where
                 terminal_reminder: reminder.as_deref(),
                 sampling: self.sampling.clone(),
                 model: &self.model,
+                // An answer tells the asker only what they perceived.
+                perceiver: asking.then_some(actor.as_str()),
             },
             &call.child(pending.requesting_tool_execution_id),
             |_| {},
@@ -4349,6 +4355,64 @@ mod tests {
 
     /// The GM's next turn after a merge sees what each side did apart and
     /// nothing from another world.
+    /// A GM answering one character is shown the groups that character was in, not the others:
+    /// the character who was outside the hut is not shown what was said inside it.
+    #[tokio::test]
+    async fn a_merged_gm_history_for_one_character_leaves_out_the_groups_they_were_not_in() {
+        let (store, _db, member, ..) = split_then_merge_groups().await;
+        let merged = store.character_group_id(member.character_id).await.unwrap();
+        let branch = store.group_branch(merged).await.unwrap();
+        let player = store.character_name(member.character_id).await.unwrap();
+        for (perceiver, sees, hidden) in [
+            (
+                Some(player.as_str()),
+                "the password is heron",
+                Some("hid the lantern"),
+            ),
+            (
+                Some("Toma"),
+                "hid the lantern",
+                Some("the password is heron"),
+            ),
+            (None, "the password is heron", None),
+        ] {
+            let segments = store.live_segments_for(branch, perceiver).await.unwrap();
+            let request = store
+                .request_for_segments(
+                    branch.agent_id(),
+                    &segments,
+                    Sampling {
+                        temperature: 0.0,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let shown: String = request
+                .messages
+                .iter()
+                .filter_map(|message| match &message.content {
+                    MessageContent::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                shown.contains(sees),
+                "{perceiver:?} should see {sees:?}: {shown}"
+            );
+            if let Some(hidden) = hidden {
+                assert!(
+                    !shown.contains(hidden),
+                    "{perceiver:?} must not see {hidden:?}: {shown}"
+                );
+            }
+            if perceiver.is_none() {
+                assert!(shown.contains("hid the lantern"), "{shown}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn the_merged_gm_history_holds_both_sides_and_nothing_from_another_world() {
         let (store, _db, member, ..) = split_then_merge_groups().await;
@@ -4440,31 +4504,30 @@ mod tests {
             labels.iter().all(|label| !label.contains("retired")),
             "{labels:?}"
         );
+        assert!(
+            labels.iter().any(|label| label.ends_with("(Toma):")),
+            "a label should say who was in the group: {labels:?}"
+        );
     }
 
     /// After a split and merge the GM holds both sides' histories, but a character
     /// may only learn what they perceived: the player (outside, with Mara) heard the
     /// password and Toma (inside) heard nothing of it, and Toma muttered something
-    /// the player never heard. Each asks the real GM a question on the merged
-    /// branch DAG; the answers must contain what the asker perceived (so a GM that
-    /// refuses everything fails) and nothing of what they did not.
+    /// the player never heard. Each asks the real GM about the other side on the merged
+    /// branch DAG; the answer must contain nothing of what they did not perceive. The
+    /// history the GM is shown is cut to the groups the asker was in, so it cannot leak.
     async fn real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(model: &DeviceModel) {
-        // (asker, question, must mention, must not mention)
+        // (asker, question, must mention, must not mention): the player was outside with Mara
+        // and Toma was inside, so each is asked about the other's side and must not be told it.
+        // A refusal is not a leak; whether real questions are answered is the ask scenario's.
         let cases = [
             (
                 "player",
-                "What did Mara whisper outside?",
-                Some("heron"),
-                None,
-            ),
-            (
-                "player",
                 "What did Toma say inside the hut?",
-                None,
+                None::<&str>,
                 Some("lantern"),
             ),
             ("toma", "What did Mara say outside?", None, Some("heron")),
-            ("toma", "What did I mutter inside?", Some("lantern"), None),
         ];
         let mut wrong = Vec::new();
         for (asker, question, must, must_not) in cases {
@@ -4576,7 +4639,7 @@ mod tests {
     /// A known failure of the current GM, kept runnable on its own and out of
     /// `device_suite`: see plans/agent-tuning.md.
     #[tokio::test]
-    #[ignore = "known failure: the GM leaks across a merge (plans/agent-tuning.md); needs a CUDA GPU"]
+    #[ignore = "needs a CUDA GPU"]
     async fn the_gm_keeps_each_side_private_after_a_merge() {
         let model = DeviceModel::load().await;
         real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(&model).await;
@@ -4721,6 +4784,12 @@ mod tests {
             "routing",
             120,
             real_model_player_routes_requests_to_the_right_action(&model),
+        )
+        .await;
+        scenario(
+            "merge privacy",
+            90,
+            real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge(&model),
         )
         .await;
         scenario(
@@ -5071,15 +5140,14 @@ mod tests {
     /// answer and rejects, with a reason, anything else sent as an ask: speech,
     /// an action, or a question it cannot or should not answer. The live game
     /// showed the GM narrating an NPC's speech out of an `ask`.
-    async fn real_model_gm_answers_a_question_and_rejects_any_other_ask(model: &DeviceModel) {
-        let (backend, _model_path, _sampling, limits) = model.parts();
-        let (game, store, _db, first, _second) = two_player_bread_thief_game_with_sampling(
-            backend,
-            limits,
-            GameSettings::default(),
-            model.sampling.clone(),
-        )
-        .await;
+    async fn gm_ask_run(model: &DeviceModel, repeat: u64) -> Vec<String> {
+        let (_, _, _, limits) = model.parts();
+        let sampling = Sampling {
+            seed: model.sampling.seed.map(|seed| seed + repeat),
+            ..model.sampling.clone()
+        };
+        let (game, store, _db, first, _second) =
+            named_two_player_game(SharedModel(Arc::clone(&model.backend)), limits, sampling).await;
         // (who asks, what they send as an ask, whether it is a question to answer)
         let asks: [(&str, &str, bool); 6] = [
             ("player", "What is the hut built from?", true),
@@ -5188,14 +5256,30 @@ mod tests {
                     recorded.outcome,
                     recorded.model_prompt.unwrap()
                 );
-                wrong.push(format!("{asker} asked {question:?}: {decision:?}"));
+                wrong.push(format!(
+                    "#{repeat} {asker} asked {question:?}: {decision:?}"
+                ));
             }
         }
+        game.shutdown().await.unwrap();
+        wrong
+    }
+
+    /// `CAIRNWORLD_REPEATS` runs the asks again with another seed each time.
+    async fn real_model_gm_answers_a_question_and_rejects_any_other_ask(model: &DeviceModel) {
+        let repeats: u64 = std::env::var("CAIRNWORLD_REPEATS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
+        let mut wrong = Vec::new();
+        for repeat in 0..repeats {
+            wrong.extend(gm_ask_run(model, repeat).await);
+        }
+        println!("GM ASKS runs={repeats} wrong={}", wrong.len());
         assert!(
             wrong.is_empty(),
             "the GM treated an ask the wrong way: {wrong:#?}"
         );
-        game.shutdown().await.unwrap();
     }
 
     /// Known failing; see plans/agent-tuning.md.

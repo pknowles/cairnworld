@@ -151,6 +151,8 @@ pub struct Turn<'a> {
     pub terminal_reminder: Option<&'a str>,
     pub sampling: Sampling,
     pub model: &'a str,
+    /// The character this turn answers and may only tell what they perceived.
+    pub perceiver: Option<&'a str>,
 }
 
 /// A settled turn's final completion: a plain-text reply, or the tool calls
@@ -301,6 +303,7 @@ pub async fn complete_with_call_context<B: Backend>(
                     compact_before_next_input_tokens: budget
                         .limits()
                         .compact_before_next_input_tokens,
+                    perceiver: turn.perceiver,
                 },
                 &mut on_token,
             )
@@ -738,6 +741,7 @@ mod tests {
                 ..Default::default()
             },
             model: "scripted",
+            perceiver: None,
         }
     }
 
@@ -1739,6 +1743,7 @@ mod tests {
             terminal_reminder: None,
             sampling: Sampling::default(),
             model: "test-model",
+            perceiver: None,
         };
         let changes = vec![(
             "merge-1".to_string(),

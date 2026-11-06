@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP, name = name || ' (retired ' || id || ')', final_members = (SELECT group_concat(member, ', ') FROM ( SELECT character.name AS member FROM character_group JOIN character ON character.id = character_group.character_id WHERE character_group.group_id = ?1 ORDER BY character.id)) WHERE id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2dbff15c5669d9991de0c5f3ae9366d8f610af285b13a87adec82f69fec0adbd"
+}

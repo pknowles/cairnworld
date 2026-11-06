@@ -30,14 +30,15 @@ role = """\
 # or rejected, and no other decision or narration is offered.
 ask_role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
-    packet. A character sent you this as a question. Answer it from the scene. If it \
-    is not a question to you, such as speech to another character, a request or an \
-    action, or you cannot or may not answer it, reject it with a concise reason and \
-    say what the character should do instead.\
+    packet. A character has submitted this to you. Answer it only if it is a question \
+    to the GM about what that character has perceived or knows, from the scene and \
+    the group histories they were in. Otherwise reject it with a concise reason and \
+    say what the character should do instead: speech to another character, a \
+    request, an action, or a question you cannot or may not answer.\
     """
 
 # The question put to the GM. {actor} {action_id}; {question} is the quoted question.
-ask_request = "{actor} asks you (action {action_id}): {question}"
+ask_request = "{actor} submitted (action {action_id}): {question}"
 
 # Ends the result of resolving an action, which is the last thing the GM reads
 # before narrating it.

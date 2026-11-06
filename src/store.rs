@@ -2602,7 +2602,12 @@ impl Store {
     /// active group in the world may then use.
     async fn retire_group(transaction: &mut Transaction<'_, Sqlite>, group_id: i64) -> Result<()> {
         sqlx::query!(
-            "UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP, name = name || ' (retired ' || id || ')' WHERE id = ?",
+            "UPDATE \"group\" SET retired_at = CURRENT_TIMESTAMP, name = name || ' (retired ' || id || ')', \
+             final_members = (SELECT group_concat(member, ', ') FROM ( \
+                 SELECT character.name AS member FROM character_group \
+                 JOIN character ON character.id = character_group.character_id \
+                 WHERE character_group.group_id = ?1 ORDER BY character.id)) \
+             WHERE id = ?1",
             group_id,
         )
         .execute(&mut **transaction)
@@ -4940,8 +4945,19 @@ impl Store {
 
     /// Load live history through a branch whose ownership was established at
     /// the turn/inspection boundary.
+    #[cfg(test)]
     pub async fn live_segments(&self, branch: AgentBranch) -> Result<Vec<Segment>> {
-        self.history_live_segments(branch).await
+        self.history_live_segments(branch, None).await
+    }
+
+    /// As `live_segments`, for a GM answering the character named `perceiver`: a merged
+    /// history is cut to the groups that character was in.
+    pub async fn live_segments_for(
+        &self,
+        branch: AgentBranch,
+        perceiver: Option<&str>,
+    ) -> Result<Vec<Segment>> {
+        self.history_live_segments(branch, perceiver).await
     }
 
     /// This branch's own raw message count not yet covered by its own newest

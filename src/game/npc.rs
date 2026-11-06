@@ -162,6 +162,7 @@ where
                 sampling: self.sampling.clone(),
                 model: &self.model,
                 compact_before_next_input_tokens: self.limits.compact_before_next_input_tokens,
+                perceiver: None,
             },
             |_| {},
         )

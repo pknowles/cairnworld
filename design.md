@@ -586,7 +586,9 @@ summaries and the retained raw ranges, not every historical message. A bounded
 cut applies only to that branch's own entries. Thus root `[a,b]`, left suffix
 `[c,d]`, right suffix `[e]`, merge suffix `[f]` assembles `[a,b,c,d,e,f]`;
 wall-clock interleaving never changes it. Labels identify branch/group provenance
-without adding another model role. Input recipes record the resulting ordered
+without adding another model role: each names its group and lists who was in it (the members it
+ended with, once retired). A GM answering one character's ask is shown only the groups that
+character was in, since a character may only learn what they perceived (Observed Events). Input recipes record the resulting ordered
 ranges, not a pointer to a mutable current head.
 
 **Summaries.** Resolve each summary's covered ranges to original message IDs.

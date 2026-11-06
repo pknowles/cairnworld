@@ -431,6 +431,7 @@ async fn run_chat(
                 terminal_reminder: None,
                 sampling: sampling.clone(),
                 model: &model.path,
+                perceiver: None,
             },
             |token| {
                 print!("{token}");

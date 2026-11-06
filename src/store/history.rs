@@ -276,28 +276,50 @@ impl Store {
     /// within its bounded cut, `covered_ranges` decoding (bounded by branch
     /// count, not entry count) finds how far it covers *this* branch, and a
     /// second query per branch selects only the uncovered message positions.
-    pub async fn history_live_segments(&self, branch: AgentBranch) -> Result<Vec<Segment>> {
+    pub async fn history_live_segments(
+        &self,
+        branch: AgentBranch,
+        perceiver: Option<&str>,
+    ) -> Result<Vec<Segment>> {
         let mut segments = Vec::new();
         let cut = self.current_cut(branch.branch_id).await?;
         let reached = self.reach(branch, cut).await?;
         let branched = reached.len() > 1;
         for (branch_id, cut) in reached {
             if branched {
-                let name: String =
-                    sqlx::query_scalar("SELECT name FROM \"group\" WHERE branch_id = ?")
-                        .bind(branch_id)
-                        .fetch_one(&self.pool)
-                        .await
-                        .with_context(|| {
-                            format!("loading group provenance for branch {branch_id}")
-                        })?;
+                let (name, retired, final_members): (String, Option<String>, Option<String>) =
+                    sqlx::query_as(
+                        "SELECT name, retired_at, final_members FROM \"group\" WHERE branch_id = ?",
+                    )
+                    .bind(branch_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .with_context(|| format!("loading group provenance for branch {branch_id}"))?;
+                // Who was in it: those it ended with, or those in it now.
+                let members: String = match (retired, final_members) {
+                    (Some(_), Some(members)) => members,
+                    _ => sqlx::query_scalar(
+                        "SELECT COALESCE(group_concat(member, ', '), '') FROM ( \
+                         SELECT character.name AS member FROM character_group \
+                         JOIN character ON character.id = character_group.character_id \
+                         JOIN \"group\" ON \"group\".id = character_group.group_id \
+                         WHERE \"group\".branch_id = ? ORDER BY character.id)",
+                    )
+                    .bind(branch_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .with_context(|| format!("loading the members of branch {branch_id}"))?,
+                };
+                // A character is shown only the groups it was in: what happened elsewhere it
+                // did not perceive, and deciding that is not left to the model.
+                if perceiver.is_some_and(|name| !members.split(", ").any(|member| member == name)) {
+                    continue;
+                }
                 // A retired group's name carries a "(retired N)" suffix to free the name; the
                 // model is shown the name the group had.
                 let name = name.split(" (retired ").next().unwrap_or(&name);
                 let text = self
-                    .store_prompt_text(&format!(
-                        "GM history for group {name:?} (branch {branch_id}):"
-                    ))
+                    .store_prompt_text(&format!("GM history for group {name:?} ({members}):"))
                     .await?;
                 segments.push(Segment::Provenance { provenance: text });
             }

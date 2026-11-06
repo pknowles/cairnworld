@@ -68,7 +68,18 @@ Tried without gain (experiment 0008): GM role and tool wording, a separate tool,
 question" framing, a neutral instead of an asserting request line (an action then answered
 13/20), and the criterion on the tool descriptions (the unanswerable question then answered
 20/20). Not tried: `answer` requiring the question it answers to be quoted.
-Runnable check: `cargo test the_gm_answers_a_question_and_rejects_any_other_ask -- --ignored`.
+
+Cause found (experiments/0010-ask-precedent.md): the GM repeats whatever it decided on the
+previous submission, whatever the new one says. Its earlier asks stay in its history, so in a
+run of submissions the answer to the one before is the strongest cue. Asks put in the order
+non-questions first were all rejected correctly and then the real questions after them were
+rejected too (8 of 8 wrong); in the original order 2 of 24 were answered wrongly. Moving the
+rule next to each submission did not help. A fix that does not depend on the model resisting
+its own precedent keeps earlier ask decisions out of the history an ask is judged against
+(for instance judging it on a branch forked from the group's head and dropping it afterwards).
+That changes where the GM's history is kept, so it is the user's call.
+Runnable check: `cargo test the_gm_answers_a_question_and_rejects_any_other_ask -- --ignored`
+(`CAIRNWORLD_REPEATS=N` for seeds).
 
 ## NPC chatter with three or more NPCs, and NPC reactions to the entrance narration
 
@@ -80,33 +91,19 @@ them a response opportunity with nobody to talk to). Add no filter for it; run t
 model several times, read the recorded contexts, and record the counts in the experiment
 file.
 
-## The GM leaks one side of a split to the other after a merge
+## The GM leaks one side of a split to the other after a merge (fixed)
 
 Declaration: a character may only learn what they perceived
 ([Observed Events](../user_declarations.md#observed-events)); after a merge the GM
-holds both groups' histories ([user_declarations.md](../user_declarations.md), merged
-histories) but must not reveal one side's secrets to a character who was on the other.
+holds both groups' histories but must not reveal one side's secrets to a character who was on
+the other. Measured 2026-10-28 and again 2026-11-05: 2 of 4 questions leaked (a character was
+told what had been said where they were not), with the group labels naming groups but not who
+was in them, and the role saying only "answer it from the scene".
 
-Runnable check (not in `device_suite`): `cargo test the_gm_keeps_each_side_private_after_a_merge -- --ignored`
-(`real_model_gm_does_not_leak_one_side_to_the_other_after_a_merge`). The player was
-outside with Mara and heard "the password is heron"; Toma, inside, muttered "I hid the
-lantern". Four questions to the real GM on the merged history: the player asks about
-Mara's whisper (must mention heron) and about Toma's words (must not mention lantern);
-Toma asks about Mara's words (must not mention heron) and about his own (must mention
-lantern).
+Fixed by context, not by asking the model to keep a secret: each group's label in a merged
+history says who was in it (kept when the group retires, migration 0018), and a GM answering
+an ask is shown only the groups the asker was in (`live_segments_for`, the `perceiver` of a
+turn). The real-model check (`the_gm_keeps_each_side_private_after_a_merge`, in the suite as
+"merge privacy") passes, and a scripted test checks the cut. Narration to several characters
+still relies on the GM's recipients; only the answers to asks are cut this way.
 
-The check now reads the delivered answer instead of looking only for
-`narrate_*` calls: questions use the private `answer` tool. Its split/merge setup
-also removes obsolete player follow-up responses (actions end the player's turn)
-and shuts down each scripted game before opening the next. Re-measure before
-treating the older failures below as current behaviour.
-
-Measured 2026-10-28, 6 runs, none passed. Causes seen:
-- Toma asked what Mara said outside and the GM narrated "heron" (3 of 6 runs).
-- The GM called `narrate_group` with a `character_ids` field, which it does not have
-  (that belongs to `narrate_characters`), so the call was rejected as invalid
-  (3 of 6 runs). It looks as if the GM wanted to address the narration to one character.
-- One empty narration for the player's control question.
-
-The high-severity group-visibility limitation above should be fixed first: this check's
-setup (the GM merging by guessed ids) depends on it.

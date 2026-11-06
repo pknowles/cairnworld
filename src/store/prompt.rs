@@ -161,6 +161,7 @@ mod tests {
             &request.messages,
             &[],
             &[],
+            None,
         )
         .await
         .unwrap();

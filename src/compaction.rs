@@ -279,7 +279,7 @@ mod tests {
         static_messages: &[Message],
     ) {
         let branch = store.agent_branch(agent_id).await.unwrap();
-        let segments = context::segments(store, branch, static_messages, &[], &[])
+        let segments = context::segments(store, branch, static_messages, &[], &[], None)
             .await
             .unwrap();
         let static_segments = context::static_segments(&segments);

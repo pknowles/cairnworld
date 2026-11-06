@@ -298,7 +298,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   while a summary's activation is a distinct entry from the message range it
   covers (`summary.covered_ranges`, JSON `[{branch_id, first_position,
   last_position}, ...]`). `history_parent(branch_id, agent_id, ordinal, parent_branch_id,
-  through_position)` is the bounded-parent list `split_group`/`move_to_group`
+  through_position)` is the bounded-parent list `split_group`/`move_to_group` (a retired group keeps its
+  `final_members`, migration 0018, for the history labels; `Store::live_segments_for` cuts a merged
+  history to the groups one character was in, for a GM answering their ask)
   (D4, `Store::spawn_group_branch`) populate: the group left behind by a split gets one parent
   (the source), the characters' group gets the source and, with a target group, the target as well; a
   merge's resulting branch gets one

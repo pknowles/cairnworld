@@ -610,6 +610,7 @@ pub(crate) mod tests {
             &request.messages,
             &[],
             &request.tools,
+            None,
         )
         .await
         .unwrap();
