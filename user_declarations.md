@@ -1296,18 +1296,16 @@ the case may be.
   Storyteller make actions, update notes in turn. Any GM visible changes the
   storyteller makes should be included in the tool's result. I.e. notes and
   changes to characters in the group, location etc..
-- SplitGroup - takes a list of characters to remove from the GM's group, new
-  names for the current and target group, and an optional target group ID. Used
-  when one or more characters move away from a group, out of possible
-  interaction range. If the target group is not specified a new group will be
-  formed. Groups created by the split are created lazily and only resolved once
-  the game time of all characters catches up to the time the first character
-  created the group. The intent of this is to batch the actual split action for
-  all characters that follow the initial character moving away from a group.
-- MergeGroup - takes the group ID of another group, a new group name, and merges
-  the other group with the current group. Used by the GM when one of the
-  characters moves into interaction range of another character in another group
-  at the current location.
+- MoveToGroup/SplitGroup - takes a list of characters to remove from the GM's
+  group, a target group ID if MoveToGroup and new names for the current and
+  target/new group. Used when one or more characters move away from a group, out
+  of possible interaction range. Groups created by splitting are created lazily
+  and only resolved once the game time of all characters catches up to the time
+  the first character created the group. The intent of this is to batch the
+  actual split action for all characters that follow the initial character
+  moving away from a group. Merging groups is always handled by moving
+  characters in the current group to the target group. A shortcut to specify the
+  whole group rather than individual characters would probably be useful.
 
 Saves could be rolled immediately by rust code. Character agents do not roll or
 resolve saves. If a player's character is making a save, we may want to add an

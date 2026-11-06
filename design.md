@@ -520,7 +520,7 @@ behind get a new group whose single parent is the old head. The source groups re
 branch ownership change in one transaction, and the ids of the resulting groups are returned.
 
 **Merge.** There is no separate merge tool. When `move_to_group` names every character of the GM's
-group, the two groups become one: a merge of both histories into a new group, each source
+group, or none (the shortcut for a large group), the two groups become one: a merge of both histories into a new group, each source
 compacted first as a merge prepares (`TopologyChanges::merge_branches`) and its history labelled
 with the group's name. With a merge tool beside `move_to_group` the GM chose to merge the whole
 group when one character joined another, 2 of 2 times, and with it withheld it moved only that

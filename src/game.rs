@@ -2090,10 +2090,12 @@ where
                         Ok(moving) => moving,
                         Err(error) => return Ok(ToolOutcome::rejected(error)),
                     };
-                    // Moving every character of the group is the groups merging.
+                    // Moving every character of the group, or listing none, is the groups merging.
                     let mut moving_ids = moving.character_ids.clone();
                     moving_ids.sort_unstable();
-                    if moving_ids == store.group_character_ids(group_id).await? {
+                    if moving_ids.is_empty()
+                        || moving_ids == store.group_character_ids(group_id).await?
+                    {
                         return Ok(ToolOutcome::PendingTopologyChange(TopologyChange::Merge {
                             group_ids: vec![group_id, moving.group_id],
                             name: moving.joined_group_name,
@@ -2656,7 +2658,7 @@ struct SplitGroup {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MoveToGroup {
-    // The characters moving.
+    // The characters moving. Empty for the whole group.
     character_ids: Vec<i64>,
     // The other group at this location they join.
     group_id: i64,
@@ -5420,7 +5422,7 @@ mod tests {
         let (_, _, _, limits) = model.parts();
         let mut failures = Vec::new();
         for repeat in 0..repeats {
-            for case in ["joins Toma", "walks off", "walks back"] {
+            for case in ["joins Toma", "all join Toma", "walks off", "walks back"] {
                 let sampling = Sampling {
                     seed: model.sampling.seed.map(|seed| seed + repeat),
                     ..model.sampling.clone()
@@ -5457,12 +5459,16 @@ mod tests {
                 let mut turns = Vec::new();
                 let start = store.character_group_id(rowan).await.unwrap();
                 let description = match case {
-                    "joins Toma" => {
+                    "joins Toma" | "all join Toma" => {
                         store
                             .split_group_for_test(start, None, vec![toma], ("outside", "inside"))
                             .await
                             .unwrap();
-                        "I climb through the rear window into the hut to join Toma."
+                        if case == "joins Toma" {
+                            "I climb through the rear window into the hut to join Toma."
+                        } else {
+                            "We all climb through the rear window into the hut to join Toma."
+                        }
                     }
                     "walks off" => {
                         "I walk off down the path to the stream, out of sight and hearing of everyone."
@@ -5494,6 +5500,7 @@ mod tests {
                             && !together(vec![rowan, iris]).await
                             && together(vec![iris, mara]).await
                     }
+                    "all join Toma" => together(vec![rowan, iris, mara, toma]).await,
                     "walks off" => {
                         !together(vec![rowan, iris]).await
                             && !together(vec![rowan, mara]).await
@@ -10658,7 +10665,6 @@ mod tests {
             .await
             .unwrap();
         let earliest = store.presence_narration(alone).await.unwrap().due_at;
-        let players_members = store.group_character_ids(players).await.unwrap();
         responses.lock().unwrap().extend([
             response(Content::ToolCalls(vec![ToolCall {
                 id: "look-2".into(),
@@ -10675,7 +10681,7 @@ mod tests {
                     id: "merge-1".into(),
                     name: "move_to_group".into(),
                     arguments: serde_json::json!({
-                        "character_ids": players_members,
+                        "character_ids": [],
                         "group_id": alone,
                         "current_group_name": "the players",
                         "joined_group_name": "reunited",

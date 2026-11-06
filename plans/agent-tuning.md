@@ -15,7 +15,7 @@ none. Merge when characters of different groups could perceive each other; split
 characters move away. `split_group` already acts on the GM's own group (it takes no group id).
 
 Done: the packet lists the other groups; the tools are `split_group` (a new group),
-`move_to_group` (into an existing group; every character of the group moving is a merge) with the GM
+`move_to_group` (into an existing group; every character of the group moving, or none listed, is a merge) with the GM
 naming the groups, made unique when they clash; the tools act on the acting character's current
 group; mistral.rs's Qwen parser needs an optional integer's schema type to be plain (`"integer"`,
 not `["integer","null"]`), which the schema normaliser now does. Do not add string-to-integer
@@ -25,6 +25,10 @@ Still open (user, 2026-11-05: the GM must regroup characters; the ignored test i
 `the_gm_regroups_characters_as_they_move`, `CAIRNWORLD_REPEATS=N` for seeds). Results are in
 experiments/0009-group-tools.md. Joining another group now works with `merge_group` removed; the GM
 often makes no group call at all when a character walks off, or back to the others.
+When a whole group walks into another (the "all join Toma" case), the GM called `split_group`
+listing all of them in 3 of 3 seeds, so it never reached the whole-group shortcut (an empty
+`character_ids` on `move_to_group`, scripted-tested). Changing "some join" to "they join" in the role
+did not change that.
 The batched, delayed split belongs to plans/unified-game-time.md.
 
 ## Whole-suite test time
