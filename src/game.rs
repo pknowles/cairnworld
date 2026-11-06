@@ -5140,7 +5140,7 @@ mod tests {
     /// answer and rejects, with a reason, anything else sent as an ask: speech,
     /// an action, or a question it cannot or should not answer. The live game
     /// showed the GM narrating an NPC's speech out of an `ask`.
-    async fn gm_ask_run(model: &DeviceModel, repeat: u64, only: Option<usize>) -> Vec<String> {
+    async fn gm_ask_run(model: &DeviceModel, repeat: u64) -> Vec<String> {
         let (_, _, _, limits) = model.parts();
         let sampling = Sampling {
             seed: model.sampling.seed.map(|seed| seed + repeat),
@@ -5174,10 +5174,7 @@ mod tests {
             ("player", "What will happen at the end of the story?", false),
         ];
         let mut wrong = Vec::new();
-        for (index, (asker, question, should_answer)) in asks.into_iter().enumerate() {
-            if only.is_some_and(|only| only != index) {
-                continue;
-            }
+        for (asker, question, should_answer) in asks {
             let (actor, branch) = if asker == "player" {
                 (
                     store.player_actor(&first).await.unwrap(),
@@ -5276,7 +5273,7 @@ mod tests {
             .unwrap_or(1);
         let mut wrong = Vec::new();
         for repeat in 0..repeats {
-            wrong.extend(gm_ask_run(model, repeat, None).await);
+            wrong.extend(gm_ask_run(model, repeat).await);
         }
         println!("GM ASKS runs={repeats} wrong={}", wrong.len());
         assert!(

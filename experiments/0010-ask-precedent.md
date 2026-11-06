@@ -31,7 +31,6 @@ building it, the same six asks were run each in a fresh game (4 seeds, 24 decisi
 | "Mara asks the Adventurer to retrieve the flour from the hut." | 4 of 4: answered |
 
 So the order-dependent errors go: with no earlier submissions to copy, the GM judged every ask but one
-correctly. The remaining one is not a precedent effect. It was rejected correctly in the run of asks
-only because the submission before it had been rejected, so precedent decided that case by accident.
+correctly. The remaining one is not a precedent effect, since there is nothing earlier to copy.
 A submission that reads like a question and is a request to someone else ("Mara asks ...") is
-answered. A fresh context gives the model's own accuracy on a text (20 of 24 here), not 24 of 24.
+answered. This was run with a temporary per-ask switch in the test, since removed. A fresh context gives the model's own accuracy on a text (20 of 24 here), not 24 of 24.
