@@ -27,8 +27,10 @@ experiments/0009-group-tools.md. Joining another group, alone or as a group of e
 and back are mostly right.
 Where each tool applies is stated in its description (split: "go off where no other group is"; move:
 "go to where its characters are"). Measured with four cases, 3 seeds, 11 of 12 right against 2 of 12 for
-the earlier wording; walking back missed once. Eleven characters moving together were listed in full every
-time, so the empty-list shortcut on `move_to_group` has no measured use yet. See experiments/0009-group-tools.md.
+the earlier wording; walking back missed once. The empty-list shortcut on `move_to_group` was not used by
+the GM in any run, and a fair test of a whole group merging because one character moved into range made
+no merge call (experiments/0009-group-tools.md). Open: the GM does not turn "now in range of another
+group" into a merge.
 The batched, delayed split belongs to plans/unified-game-time.md.
 
 ## Whole-suite test time

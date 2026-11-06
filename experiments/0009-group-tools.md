@@ -56,6 +56,34 @@ everyone in one group. Four cases, 3 seeds, same fixture:
 | Split "when they go off where no other group is", move "when they go to where its characters are" | 3/3 | 3/3 | 3/3 | 2/3 |
 
 With the first wording the GM called `split_group` to join an existing group in nearly every run, naming
-the new group after the one it was joining. Saying where each applies fixed it. In all three eleven-character
-runs the GM listed all eleven ids; it never used the empty list. A group that size is still listed correctly,
-so the whole-group shortcut (an empty `character_ids`) has not been needed; it stays because the user declared it.
+the new group after the one it was joining. Saying where each applies fixed it.
+
+### Whole-group shortcut: tried, not used
+
+`move_to_group` with no characters listed moves the GM's whole group (the user asked for a shortcut for
+large groups). Eleven characters outside, 3 to 4 seeds each:
+
+| What changed | Result |
+|---|---|
+| Action names everyone ("I lead Iris, Mara and all eight villagers in") | All eleven ids listed, 3/3. Confounded: the action itself lists everyone. |
+| Same, role "when characters join", argument "Leave character_ids empty to move this whole group" | All eleven ids listed, 4/4. Same confound. |
+| Action "Everyone outside follows me" | Only Rowan moved, by `split_group`, 4/4: it reads as the others acting for themselves. |
+| Action "We all climb in" (three characters, earlier wording) | Only the two players listed. |
+
+A group is the characters who can interact, and the GM acts on one character's action at a time, so a
+whole group moves because one character's action brings another group into range, not because it is
+told to. The fair test is that: eleven characters close together, Toma a separate group just out of
+earshot of the crowd, Rowan walks a few steps until he can talk to Toma, and everyone ends in one group.
+With positions given to the GM it made no merge call in any run:
+
+| Role text | Result (4 seeds each) |
+|---|---|
+| Committed | `split_group` of Rowan alone or no group call, 0/7 seen |
+| Plus "the characters in this group: those who can interact with each other, directly or through others" | no group call, 4/4, and again 4/4 with every crowd member given a position |
+| Plus "all of them joining merges the two" | `split_group` of Rowan alone 3/4, no call 1/4 |
+
+The GM never reached the choice between listing the crowd and listing none, so the shortcut has no
+measured use. What the input showed: the scene packet lists every character with an id, and the only
+way to bring Toma into the crowd is to move the crowd into Toma's group, a backwards phrasing for
+"Toma is now in range". Not tested: whether the GM sees range changing at all (thinking is off, so
+its reasoning is not visible), and a result text that says who is now in range of whom.
