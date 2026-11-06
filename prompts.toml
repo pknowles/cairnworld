@@ -187,8 +187,8 @@ character_ids = "The characters to ask. Not the character taking the action."
 
 [gm.tools.split_group]
 description = """\
-    Form a new group from the listed characters when they separate from the rest of \
-    this group. The others stay together. Applies after every other call in this \
+    Form a new group from the listed characters when they go off where no other \
+    group is. The others stay together. Applies after every other call in this \
     turn's batch has run.\
     """
 
@@ -199,10 +199,10 @@ new_group_name = "A short phrase for the new group: who is in it and where."
 
 [gm.tools.move_to_group]
 description = """\
-    Move the listed characters into another group at this location when they join \
-    its characters. The others stay together; if every character of this group \
-    moves, or none are listed, the two groups become one. Applies after every other \
-    call in this turn's batch has run.\
+    Move characters into another group at this location when they go to where its \
+    characters are. The others stay together. List none if the whole group goes: the \
+    two groups become one. Applies after every other call in this turn's batch has \
+    run.\
     """
 
 [gm.tools.move_to_group.arguments]

@@ -42,3 +42,20 @@ writes are descriptive but not always accurate ("outside: Rowan and the Adventur
 
 Why `merge_group` went: with it beside `move_to_group` the GM took "join" to mean merging, which pulls the
 other characters along; it names who moves when only a move is offered.
+
+## Where each tool applies, and a group of eleven
+
+The fixture groups were named "outside" and "inside", which the GM copied into its own names, so
+they are now what the GM would write ("Toma in the hut"). A fourth case has eleven characters outside
+(Rowan, Iris, Mara, eight villagers) and the action leads all of them in to join Toma; right is
+everyone in one group. Four cases, 3 seeds, same fixture:
+
+| Tool descriptions | Joins Toma | Eleven join Toma | Walks off | Walks back |
+|---|---|---|---|---|
+| Committed: split "when they separate from the rest", move "when they join its characters" | 1/3 | 0/3 | 1/3 | 0/3 |
+| Split "when they go off where no other group is", move "when they go to where its characters are" | 3/3 | 3/3 | 3/3 | 2/3 |
+
+With the first wording the GM called `split_group` to join an existing group in nearly every run, naming
+the new group after the one it was joining. Saying where each applies fixed it. In all three eleven-character
+runs the GM listed all eleven ids; it never used the empty list. A group that size is still listed correctly,
+so the whole-group shortcut (an empty `character_ids`) has not been needed; it stays because the user declared it.

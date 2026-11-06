@@ -23,12 +23,12 @@ coercion in the game for it.
 
 Still open (user, 2026-11-05: the GM must regroup characters; the ignored test is
 `the_gm_regroups_characters_as_they_move`, `CAIRNWORLD_REPEATS=N` for seeds). Results are in
-experiments/0009-group-tools.md. Joining another group now works with `merge_group` removed; the GM
-often makes no group call at all when a character walks off, or back to the others.
-When a whole group walks into another (the "all join Toma" case), the GM called `split_group`
-listing all of them in 3 of 3 seeds, so it never reached the whole-group shortcut (an empty
-`character_ids` on `move_to_group`, scripted-tested). Changing "some join" to "they join" in the role
-did not change that.
+experiments/0009-group-tools.md. Joining another group, alone or as a group of eleven, now works; walking off
+and back are mostly right.
+Where each tool applies is stated in its description (split: "go off where no other group is"; move:
+"go to where its characters are"). Measured with four cases, 3 seeds, 11 of 12 right against 2 of 12 for
+the earlier wording; walking back missed once. Eleven characters moving together were listed in full every
+time, so the empty-list shortcut on `move_to_group` has no measured use yet. See experiments/0009-group-tools.md.
 The batched, delayed split belongs to plans/unified-game-time.md.
 
 ## Whole-suite test time

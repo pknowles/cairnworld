@@ -5356,13 +5356,28 @@ mod tests {
         PlayerAgent,
         PlayerAgent,
     ) {
-        let (game, store, db, first, second) = two_player_bread_thief_game_with_sampling(
-            backend,
-            limits,
-            GameSettings::default(),
-            sampling,
-        )
-        .await;
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/hut_scenario.json"
+        ))
+        .unwrap();
+        named_two_player_game_in(scenario, backend, limits, sampling).await
+    }
+
+    async fn named_two_player_game_in<B: Backend + Send + Sync + 'static>(
+        scenario: Scenario,
+        backend: B,
+        limits: Limits,
+        sampling: Sampling,
+    ) -> (
+        Arc<Game<B>>,
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        PlayerAgent,
+    ) {
+        let (game, store, db, first, second) =
+            two_player_game_in(scenario, backend, limits, GameSettings::default(), sampling).await;
         for (player, name) in [(&first, "Rowan"), (&second, "Iris")] {
             sqlx::query("UPDATE character SET name = ?, sheet = ? WHERE id = ?")
                 .bind(name)
@@ -5422,12 +5437,37 @@ mod tests {
         let (_, _, _, limits) = model.parts();
         let mut failures = Vec::new();
         for repeat in 0..repeats {
-            for case in ["joins Toma", "all join Toma", "walks off", "walks back"] {
+            for case in [
+                "joins Toma",
+                "a crowd joins Toma",
+                "walks off",
+                "walks back",
+            ] {
                 let sampling = Sampling {
                     seed: model.sampling.seed.map(|seed| seed + repeat),
                     ..model.sampling.clone()
                 };
-                let (game, store, _db, first, second) = named_two_player_game(
+                // Eight villagers stand with the others, so listing the group is long.
+                let mut scenario = Scenario::read(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/testdata/hut_scenario.json"
+                ))
+                .unwrap();
+                let crowd = if case == "a crowd joins Toma" { 8 } else { 0 };
+                for number in 1..=crowd {
+                    scenario.npcs.push(crate::scenario::Npc {
+                        name: format!("Villager {number}"),
+                        group: "charcoal hut".into(),
+                        description: "A villager who came with Mara to help.".into(),
+                        background: String::new(),
+                        motive: String::new(),
+                        ambition: String::new(),
+                        sheet: serde_json::json!({}),
+                        notes: Default::default(),
+                    });
+                }
+                let (game, store, _db, first, second) = named_two_player_game_in(
+                    scenario,
                     SharedModel(Arc::clone(&model.backend)),
                     limits,
                     sampling,
@@ -5459,15 +5499,20 @@ mod tests {
                 let mut turns = Vec::new();
                 let start = store.character_group_id(rowan).await.unwrap();
                 let description = match case {
-                    "joins Toma" | "all join Toma" => {
+                    "joins Toma" | "a crowd joins Toma" => {
                         store
-                            .split_group_for_test(start, None, vec![toma], ("outside", "inside"))
+                            .split_group_for_test(
+                                start,
+                                None,
+                                vec![toma],
+                                ("Rowan and others by the hut", "Toma in the hut"),
+                            )
                             .await
                             .unwrap();
                         if case == "joins Toma" {
                             "I climb through the rear window into the hut to join Toma."
                         } else {
-                            "We all climb through the rear window into the hut to join Toma."
+                            "I lead Iris, Mara and all eight villagers through the rear window into the hut to join Toma."
                         }
                     }
                     "walks off" => {
@@ -5475,7 +5520,12 @@ mod tests {
                     }
                     _ => {
                         store
-                            .split_group_for_test(start, None, vec![rowan], ("others", "alone"))
+                            .split_group_for_test(
+                                start,
+                                None,
+                                vec![rowan],
+                                ("Mara, Toma and Iris at the hut", "Rowan down the path"),
+                            )
                             .await
                             .unwrap();
                         "I walk back to the hut and stand with the others."
@@ -5500,7 +5550,13 @@ mod tests {
                             && !together(vec![rowan, iris]).await
                             && together(vec![iris, mara]).await
                     }
-                    "all join Toma" => together(vec![rowan, iris, mara, toma]).await,
+                    "a crowd joins Toma" => {
+                        let everyone = sqlx::query_scalar::<_, i64>("SELECT id FROM character")
+                            .fetch_all(&store.pool())
+                            .await
+                            .unwrap();
+                        together(everyone).await
+                    }
                     "walks off" => {
                         !together(vec![rowan, iris]).await
                             && !together(vec![rowan, mara]).await
@@ -10880,17 +10936,37 @@ mod tests {
     where
         B: Backend + Send + Sync + 'static,
     {
+        let scenario = Scenario::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/hut_scenario.json"
+        ))
+        .unwrap();
+        two_player_game_in(scenario, backend, limits, rules, sampling).await
+    }
+
+    /// The two-player game in the given scenario.
+    async fn two_player_game_in<B>(
+        scenario: Scenario,
+        backend: B,
+        limits: Limits,
+        rules: GameSettings,
+        sampling: Sampling,
+    ) -> (
+        Arc<Game<B>>,
+        Store,
+        crate::store::TestDatabase,
+        PlayerAgent,
+        PlayerAgent,
+    )
+    where
+        B: Backend + Send + Sync + 'static,
+    {
         let db = crate::store::TestDatabase::new("presence-test");
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("warden@example.test", "Warden")
             .await
             .unwrap();
-        let scenario = Scenario::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/testdata/hut_scenario.json"
-        ))
-        .unwrap();
         let installed = store.install_scenario(&owner, &scenario).await.unwrap();
         let companion = store
             .create_player_character(owner.id, installed.world_id)
