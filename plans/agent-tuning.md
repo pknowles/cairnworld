@@ -77,7 +77,10 @@ rejected too (8 of 8 wrong); in the original order 2 of 24 were answered wrongly
 rule next to each submission did not help. A fix that does not depend on the model resisting
 its own precedent keeps earlier ask decisions out of the history an ask is judged against
 (for instance judging it on a branch forked from the group's head and dropping it afterwards).
-That changes where the GM's history is kept, so it is the user's call.
+That changes where the GM's history is kept, so it is the user's call; it was not built. With
+each ask in a fresh game, 20 of 24 decisions were right and the 4 wrong were one request written
+as a statement ("Mara asks the Adventurer to retrieve the flour from the hut."), answered every
+time. Left open: the scenario stays an ignored requirement.
 Runnable check: `cargo test the_gm_answers_a_question_and_rejects_any_other_ask -- --ignored`
 (`CAIRNWORLD_REPEATS=N` for seeds).
 
