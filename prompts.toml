@@ -273,9 +273,9 @@ description = "Stay silent for now."
 # Compaction: asking an agent to replace its older history with a summary.
 # ---------------------------------------------------------------------------
 [compaction]
-# This request only sees the material it replaces. Static role context and tools
-# are deliberately absent: they are supplied to every normal inference and would
-# waste both summary space and model attention.
+# This request only sees the material it replaces. Role text, context and tools
+# are deliberately absent: they are supplied to every normal inference, and a
+# role given here is followed instead of summarising.
 summary_request = """\
     The conversation above is your own history. Replace it with a summary your \
     next turn will read in its place, in under 150 words because your context is \

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT agent.world_id, history_branch.agent_id, pending_compaction.branch_id, position, sequence_id, cause_inference_id, pending_compaction.reason, next_input_tokens, sampling, model, static_segments FROM pending_compaction JOIN history_branch ON history_branch.id = pending_compaction.branch_id JOIN agent ON agent.id = history_branch.agent_id WHERE pending_compaction.branch_id = ?",
+  "query": "SELECT agent.world_id, history_branch.agent_id, pending_compaction.branch_id, position, sequence_id, cause_inference_id, pending_compaction.reason, next_input_tokens, sampling, model FROM pending_compaction JOIN history_branch ON history_branch.id = pending_compaction.branch_id JOIN agent ON agent.id = history_branch.agent_id ORDER BY pending_compaction.branch_id",
   "describe": {
     "columns": [
       {
@@ -52,15 +52,10 @@
         "name": "model",
         "ordinal": 9,
         "type_info": "Text"
-      },
-      {
-        "name": "static_segments",
-        "ordinal": 10,
-        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -72,9 +67,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "52ae4633f5cb4b4768071258021cbac1b4c930982388ff1b214ad5ab53e2a115"
+  "hash": "3177dff25904ae295680661a34ec3d6635eec47fdb00c03a4a22f719609a08cc"
 }

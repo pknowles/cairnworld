@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, reason, next_input_tokens, sampling, model) VALUES (?, ?, ?, ?, 'capacity_recovery', ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "760be87cbf547231f27f1983ffb19d58ee1c718145d475e61cd410b9c77cb187"
+}

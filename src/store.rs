@@ -935,9 +935,6 @@ pub struct PendingCompaction {
     pub next_input_tokens: usize,
     pub sampling: Sampling,
     pub model: String,
-    /// Role text, context and tool segments from the normal request that queued
-    /// this job. Raw history is always rebuilt from its current stored form.
-    pub static_segments: Vec<Segment>,
 }
 
 /// The compaction policy `finish_chat_inference` checks a turn-ending reply
@@ -950,7 +947,6 @@ pub struct CompactionPolicy<'a> {
     pub compact_before_next_input_tokens: usize,
     pub sampling: &'a Sampling,
     pub model: &'a str,
-    pub static_segments: &'a [Segment],
     /// Names of the tools whose completed call ends an agent's turn.
     pub ending_tools: &'a [String],
 }
@@ -967,7 +963,6 @@ struct PendingCompactionRow {
     next_input_tokens: i64,
     sampling: String,
     model: String,
-    static_segments: String,
 }
 
 impl TryFrom<PendingCompactionRow> for PendingCompaction {
@@ -989,8 +984,6 @@ impl TryFrom<PendingCompactionRow> for PendingCompaction {
             sampling: serde_json::from_str(&row.sampling)
                 .context("deserializing pending compaction sampling")?,
             model: row.model,
-            static_segments: serde_json::from_str(&row.static_segments)
-                .context("deserializing pending compaction static segments")?,
         })
     }
 }
@@ -4486,7 +4479,7 @@ impl Store {
             PendingCompactionRow,
             "SELECT agent.world_id, history_branch.agent_id, \
                     pending_compaction.branch_id, position, sequence_id, cause_inference_id, pending_compaction.reason, \
-                    next_input_tokens, sampling, model, static_segments \
+                    next_input_tokens, sampling, model \
              FROM pending_compaction \
              JOIN history_branch ON history_branch.id = pending_compaction.branch_id \
              JOIN agent ON agent.id = history_branch.agent_id \
@@ -4518,7 +4511,7 @@ impl Store {
             PendingCompactionRow,
             "SELECT agent.world_id, history_branch.agent_id, \
                     pending_compaction.branch_id, position, sequence_id, cause_inference_id, pending_compaction.reason, \
-                    next_input_tokens, sampling, model, static_segments \
+                    next_input_tokens, sampling, model \
              FROM pending_compaction \
              JOIN history_branch ON history_branch.id = pending_compaction.branch_id \
              JOIN agent ON agent.id = history_branch.agent_id \
@@ -4561,12 +4554,10 @@ impl Store {
         );
         let sampling_json = serde_json::to_string(policy.sampling)
             .context("serializing capacity compaction sampling")?;
-        let static_segments_json = serde_json::to_string(policy.static_segments)
-            .context("serializing capacity compaction static context")?;
         let requested_tokens = i64::try_from(requested_tokens)
             .context("capacity-rejected input token count is too large")?;
         sqlx::query!(
-            "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, reason, next_input_tokens, sampling, model, static_segments) VALUES (?, ?, ?, ?, 'capacity_recovery', ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
+            "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, reason, next_input_tokens, sampling, model) VALUES (?, ?, ?, ?, 'capacity_recovery', ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
             branch_id,
             position,
             policy.sequence_id,
@@ -4574,7 +4565,6 @@ impl Store {
             requested_tokens,
             sampling_json,
             policy.model,
-            static_segments_json,
         )
         .execute(&self.pool)
         .await
@@ -5276,12 +5266,10 @@ impl Store {
             {
                 let sampling_json = serde_json::to_string(policy.sampling)
                     .context("serializing compaction sampling")?;
-                let static_segments_json = serde_json::to_string(policy.static_segments)
-                    .context("serializing static compaction context")?;
                 let next_input_tokens = i64::try_from(next_input_tokens)
                     .context("next-input token count is too large")?;
                 sqlx::query!(
-                    "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model, static_segments) VALUES (?, (SELECT position FROM history_entry WHERE id = ?), ?, ?, ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
+                    "INSERT INTO pending_compaction (branch_id, position, sequence_id, cause_inference_id, next_input_tokens, sampling, model) VALUES (?, (SELECT position FROM history_entry WHERE id = ?), ?, ?, ?, ?, ?) ON CONFLICT(branch_id) DO NOTHING",
                     branch_id,
                     message_id,
                     policy.sequence_id,
@@ -5289,7 +5277,6 @@ impl Store {
                     next_input_tokens,
                     sampling_json,
                     policy.model,
-                    static_segments_json,
                 )
                 .execute(&mut *transaction)
                 .await
@@ -6378,7 +6365,6 @@ pub(crate) async fn record_tool_batch_for_test(
                 compact_before_next_input_tokens: usize::MAX,
                 sampling: &sampling,
                 model: "scripted",
-                static_segments: &[],
                 ending_tools: &[],
             },
         )
@@ -6449,7 +6435,6 @@ mod tests {
                     compact_before_next_input_tokens: 1,
                     sampling: &sampling,
                     model: "test-model",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )
@@ -8416,7 +8401,6 @@ mod tests {
                     compact_before_next_input_tokens: usize::MAX,
                     sampling: &Sampling::default(),
                     model: "test-model",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )
@@ -8474,7 +8458,6 @@ mod tests {
                     compact_before_next_input_tokens: usize::MAX,
                     sampling: &Sampling::default(),
                     model: "test-model",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )
@@ -8971,7 +8954,6 @@ mod tests {
                     compact_before_next_input_tokens: 1,
                     sampling: &Sampling::default(),
                     model: "test-model",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )
@@ -9135,7 +9117,6 @@ mod tests {
                     compact_before_next_input_tokens: 1,
                     sampling: &Sampling::default(),
                     model: "test-model",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )
@@ -9201,7 +9182,6 @@ mod tests {
                     compact_before_next_input_tokens: 1,
                     sampling: &Sampling::default(),
                     model: "test-model",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )
@@ -9361,7 +9341,6 @@ mod tests {
                         compact_before_next_input_tokens: 1,
                         sampling: &Sampling::default(),
                         model: "test-model",
-                        static_segments: &[],
                         ending_tools: &[],
                     },
                 )
@@ -10294,7 +10273,6 @@ mod tests {
                     compact_before_next_input_tokens: 1,
                     sampling: &Sampling::default(),
                     model: "test",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )

@@ -3236,25 +3236,6 @@ mod tests {
             store.append_message(agent, message).await.unwrap();
         }
         let branch = store.agent_branch(agent).await.unwrap();
-        let mut leading = vec![crate::store::Segment::Text {
-            text: store
-                .store_prompt_text(&crate::prompts::current().unwrap().questioner.role)
-                .await
-                .unwrap(),
-            role: Role::System,
-        }];
-        let tools = &crate::prompts::current().unwrap().questioner.tools;
-        let definitions: Vec<crate::llm::ToolDefinition> =
-            ["ask_questions", "world_summary_complete"]
-                .into_iter()
-                .map(|name| tools.tool(name, crate::prompts::no_arguments()).unwrap())
-                .collect();
-        leading.push(crate::store::Segment::Tools {
-            text: store
-                .store_prompt_text(&serde_json::to_string(&definitions).unwrap())
-                .await
-                .unwrap(),
-        });
         store
             .enqueue_capacity_compaction(
                 branch,
@@ -3265,7 +3246,6 @@ mod tests {
                     compact_before_next_input_tokens: limits.compact_before_next_input_tokens,
                     sampling: &sampling,
                     model: "dev-qwen35",
-                    static_segments: &leading,
                     ending_tools: &[],
                 },
             )

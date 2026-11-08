@@ -50,7 +50,6 @@ pub async fn complete_recorded<B: Backend>(
             completion.tools,
         )
         .await?;
-        let static_segments_snapshot = static_segments(&segments);
         match complete_recipe(
             store,
             backend,
@@ -68,7 +67,6 @@ pub async fn complete_recorded<B: Backend>(
                 compact_before_next_input_tokens: completion.compact_before_next_input_tokens,
                 sampling: &completion.sampling,
                 model: completion.model,
-                static_segments: &static_segments_snapshot,
                 ending_tools: completion.ending_tools,
             },
             &mut on_token,
@@ -91,7 +89,6 @@ pub async fn complete_recorded<B: Backend>(
                 // A rejection after an earlier recovery means the messages it
                 // kept were too big, so the next one keeps fewer (halving, down
                 // to none); once nothing is left to summarize it fails.
-                let static_segments = static_segments(&segments);
                 store
                     .enqueue_capacity_compaction(
                         completion.branch,
@@ -105,7 +102,6 @@ pub async fn complete_recorded<B: Backend>(
                                 .compact_before_next_input_tokens,
                             sampling: &completion.sampling,
                             model: completion.model,
-                            static_segments: &static_segments,
                             ending_tools: completion.ending_tools,
                         },
                     )
@@ -178,23 +174,6 @@ pub async fn segments(
             .context("assembling agent message context")?,
     );
     Ok(segments)
-}
-
-/// Keep everything before the history in a normal recipe: role text, dynamic
-/// context and tools. Deferred compaction rebuilds raw history live, but keeps
-/// the role text for the agent's own summary and measures capacity fallbacks
-/// against all of it after a restart.
-pub fn static_segments(segments: &[Segment]) -> Vec<Segment> {
-    segments
-        .iter()
-        .filter(|segment| {
-            matches!(
-                segment,
-                Segment::Text { .. } | Segment::Context { .. } | Segment::Tools { .. }
-            )
-        })
-        .cloned()
-        .collect()
 }
 
 /// Carried by the error of a request the fixed context rejected: the recorded

@@ -712,7 +712,6 @@ async fn compact_merge_sources<B: Backend>(
                         compact_before_next_input_tokens: 0,
                         sampling: &turn.sampling,
                         model: turn.model,
-                        static_segments: &[],
                         ending_tools: &[],
                     },
                 )
@@ -1790,7 +1789,6 @@ mod tests {
                         compact_before_next_input_tokens: usize::MAX,
                         sampling: &Sampling::default(),
                         model: "test-model",
-                        static_segments: &[],
                         ending_tools: &[],
                     },
                 )

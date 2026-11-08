@@ -102,7 +102,7 @@ async fn run_invocation<B: Backend>(
     }
     loop {
         let (segments, branch_id, split, covered) =
-            summary_segments(store, job.branch.branch_id(), &job.static_segments, keep).await?;
+            summary_segments(store, job.branch.branch_id(), keep).await?;
         if split <= covered {
             // Keeping this many raw messages did not fit, so keep half as many,
             // down to none. The message count is a configured preference; the
@@ -184,7 +184,6 @@ async fn run_invocation<B: Backend>(
 async fn summary_segments(
     store: &Store,
     branch_id: i64,
-    leading: &[Segment],
     keep_raw_messages: usize,
 ) -> Result<(Vec<Segment>, i64, i64, i64)> {
     let previous = store.latest_summary_for_branch(branch_id).await?;
@@ -201,15 +200,14 @@ async fn summary_segments(
         .store_prompt_text(&crate::prompts::current()?.compaction.summary_request)
         .await
         .context("storing compaction prompt")?;
-    // The agent writes its own summary: its role text, the history to replace
-    // and the summary request. Its tools stay out on purpose: measured on the
-    // real model, an agent given its tools answers the summary request by
-    // calling one (a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress).
-    let mut segments: Vec<Segment> = leading
-        .iter()
-        .filter(|segment| matches!(segment, Segment::Text { .. }))
-        .cloned()
-        .collect();
+    // The agent writes its own summary from the history to replace and the
+    // summary request alone. Its tools stay out because, measured on the real
+    // model, an agent given its tools answers by calling one
+    // (a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress). Its role
+    // stays out because a role such as the Storyteller's, given a history with
+    // little in it, is followed instead: the summary became an invented story
+    // that every later summary then repeated.
+    let mut segments: Vec<Segment> = Vec::new();
     if let Some(summary) = previous {
         segments.push(Segment::Summary {
             summary: summary.id,
@@ -313,7 +311,6 @@ mod tests {
         let segments = context::segments(store, branch, static_messages, &[], &[])
             .await
             .unwrap();
-        let static_segments = context::static_segments(&segments);
         let invocation_id = store
             .start_invocation(None, branch, None, None)
             .await
@@ -341,7 +338,6 @@ mod tests {
                     ..Default::default()
                 },
                 model: "scripted",
-                static_segments: &static_segments,
                 ending_tools: &[],
             },
             |_| {},
@@ -407,55 +403,6 @@ mod tests {
             merge_branch_messages: 64,
             presence_departure_seconds: 60,
         }
-    }
-
-    #[tokio::test]
-    async fn capacity_job_retains_its_static_recipe_across_reload() {
-        let db = database();
-        let store = Store::open(db.path()).await.unwrap();
-        let agent = agent_with_history(&store).await;
-        let backend = ScriptedBackend {
-            responses: Mutex::new(VecDeque::from([
-                response_with_usage("reply", 50, 50),
-                response("summary"),
-            ])),
-            requests: Mutex::new(Vec::new()),
-        };
-        complete_turn(
-            &store,
-            &backend,
-            agent,
-            limits(2),
-            &[Message::text(Role::System, "standing instruction")],
-        )
-        .await;
-        let reopened = Store::open(db.path()).await.unwrap();
-        let job = reopened.pending_compaction(agent).await.unwrap().unwrap();
-        assert!(matches!(
-            job.static_segments.as_slice(),
-            [Segment::Text {
-                role: Role::System,
-                ..
-            }]
-        ));
-
-        // The agent's role text leads its own summary request.
-        run(
-            &reopened,
-            &backend,
-            &job,
-            limits(2),
-            tokio::sync::broadcast::channel(256).0,
-        )
-        .await
-        .unwrap();
-        let requests = backend.requests.lock().unwrap();
-        let summary_request = requests.last().unwrap();
-        assert!(matches!(
-            &summary_request.messages[0],
-            Message { role: Role::System, content: MessageContent::Text(text), .. }
-                if text.contains("standing instruction")
-        ));
     }
 
     #[tokio::test]
@@ -551,7 +498,6 @@ mod tests {
                     compact_before_next_input_tokens: limits.compact_before_next_input_tokens,
                     sampling: &sampling,
                     model: "scripted",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )

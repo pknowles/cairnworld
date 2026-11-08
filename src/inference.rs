@@ -533,7 +533,6 @@ mod tests {
                         ..Default::default()
                     },
                     model: "test",
-                    static_segments: &[],
                     ending_tools: &[],
                 },
             )

@@ -714,8 +714,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   and meta-questions.
 
   A chat summary reaches the model as the first user-role message after the system message, so a
-  compacted request always has the user turn chat templates require. The summary request is the agent's
-  role text, the history to replace and the summary prompt (under 150 words, beginning with the last request the
+  compacted request always has the user turn chat templates require. The summary request is the
+  history to replace and the summary prompt (no role text: a role such as the Storyteller's was followed instead of summarising) (under 150 words, beginning with the last request the
   agent was given, leaving out the world state
   that is shown again with each request): its tools stay out because a model given them answers by
   calling one. The Storyteller's three tools are about 4 thousand characters, guarded by a test (under 4,200). Real-model
