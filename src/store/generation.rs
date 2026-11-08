@@ -16,16 +16,13 @@ const UNNAMED_WORLD: &str = "Unnamed world";
 pub enum GenerationStage {
     /// The Questioner answers the meta-questions.
     Meta,
-    /// The Questioner asks questions or declares the world complete.
+    /// The Questioner asks the Storyteller questions, each answered within its
+    /// turn, until it declares the world summary complete.
     Ask,
-    /// The Storyteller answers the current question as text.
-    Answer,
-    /// The Storyteller replies with the world summary.
-    Summarize,
     /// The Storyteller replies with the world name.
     Name,
     /// The Storyteller creates objects with the authoring tools.
-    Build,
+    CreateObjects,
     /// The Questioner reviews the objects.
     Review,
     Failed,
@@ -38,10 +35,8 @@ impl GenerationStage {
         match self {
             Self::Meta => "meta",
             Self::Ask => "ask",
-            Self::Answer => "answer",
-            Self::Summarize => "summarize",
             Self::Name => "name",
-            Self::Build => "build",
+            Self::CreateObjects => "create_objects",
             Self::Review => "review",
             Self::Failed => "failed",
             Self::Complete => "complete",
@@ -52,10 +47,8 @@ impl GenerationStage {
         Ok(match stage {
             "meta" => Self::Meta,
             "ask" => Self::Ask,
-            "answer" => Self::Answer,
-            "summarize" => Self::Summarize,
             "name" => Self::Name,
-            "build" => Self::Build,
+            "create_objects" => Self::CreateObjects,
             "review" => Self::Review,
             "failed" => Self::Failed,
             "complete" => Self::Complete,
@@ -67,15 +60,11 @@ impl GenerationStage {
 /// What one finished step produced, which decides the next stage.
 pub enum Advance {
     MetaQuestionsAnswered,
-    /// The Questioner's questions for the Storyteller to answer.
-    Questions(Vec<String>),
-    /// The Questioner is satisfied.
+    /// The Questioner is satisfied with the world summary.
     WorldSummaryComplete,
-    QuestionAnswered,
-    Summary(String),
     Name(String),
-    /// The Storyteller finished a round of creating objects.
-    Built,
+    /// The Storyteller finished creating the summary's objects.
+    ObjectsCreated,
     /// Every core object is reviewed and the world is whole.
     CoreObjectsCreated,
 }
@@ -87,8 +76,6 @@ pub struct Generation {
     pub seed: String,
     /// The latest world summary; empty before the first round.
     pub summary: String,
-    pub questions: Vec<String>,
-    pub next_question: usize,
     /// Inferences spent so far, restored into the shared budget.
     pub spent: u32,
     pub questioner: AgentBranch,
@@ -201,7 +188,6 @@ impl Store {
     pub async fn next_generation(&self, world_id: i64) -> Result<Option<Generation>> {
         let Some(row) = sqlx::query!(
             "SELECT world.generation_stage, world.initial_prompt, world.storyteller_summary, \
-                    world_generation.questions, world_generation.next_question, \
                     world_generation.spent, \
                     questioner.agent_id AS questioner_agent_id, \
                     questioner_chat.branch_id AS questioner_branch_id, \
@@ -229,10 +215,8 @@ impl Store {
             stage,
             GenerationStage::Meta
                 | GenerationStage::Ask
-                | GenerationStage::Answer
-                | GenerationStage::Summarize
                 | GenerationStage::Name
-                | GenerationStage::Build
+                | GenerationStage::CreateObjects
                 | GenerationStage::Review
         ) {
             return Ok(None);
@@ -241,10 +225,6 @@ impl Store {
             stage,
             seed: row.initial_prompt,
             summary: row.storyteller_summary,
-            questions: serde_json::from_str(&row.questions)
-                .with_context(|| format!("decoding the questions of world {world_id}"))?,
-            next_question: usize::try_from(row.next_question)
-                .context("the next question is negative")?,
             spent: u32::try_from(row.spent).context("the spent inferences are out of range")?,
             questioner: AgentBranch {
                 world_id,
@@ -274,7 +254,7 @@ impl Store {
             .await
             .with_context(|| format!("advancing generation of world {world_id}"))?;
         let current = sqlx::query!(
-            "SELECT world.generation_stage, world_generation.questions, world_generation.next_question \
+            "SELECT world.generation_stage \
              FROM world JOIN world_generation ON world_generation.world_id = world.id \
              WHERE world.id = ?",
             world_id,
@@ -285,70 +265,7 @@ impl Store {
         let stage = GenerationStage::parse(&current.generation_stage)?;
         let next = match (stage, advance) {
             (GenerationStage::Meta, Advance::MetaQuestionsAnswered) => GenerationStage::Ask,
-            (
-                stage @ (GenerationStage::Ask | GenerationStage::Review),
-                Advance::Questions(questions),
-            ) => {
-                ensure!(!questions.is_empty(), "the Questioner asked no questions");
-                let questions = serde_json::to_string(&questions).context("encoding questions")?;
-                sqlx::query!(
-                    "UPDATE world_generation SET questions = ?, next_question = 0 WHERE world_id = ?",
-                    questions,
-                    world_id,
-                )
-                .execute(&mut *transaction)
-                .await
-                .context("recording the round's questions")?;
-                if stage == GenerationStage::Review {
-                    GenerationStage::Build
-                } else {
-                    GenerationStage::Answer
-                }
-            }
-            (GenerationStage::Ask, Advance::WorldSummaryComplete) => {
-                // The last round's questions are answered; building starts fresh.
-                sqlx::query!(
-                    "UPDATE world_generation SET questions = '[]', next_question = 0 WHERE world_id = ?",
-                    world_id,
-                )
-                .execute(&mut *transaction)
-                .await
-                .context("clearing the answered questions")?;
-                GenerationStage::Name
-            }
-            (GenerationStage::Answer, Advance::QuestionAnswered) => {
-                let answered = current.next_question + 1;
-                let asked: Vec<String> = serde_json::from_str(&current.questions)
-                    .context("decoding the round's questions")?;
-                sqlx::query!(
-                    "UPDATE world_generation SET next_question = ? WHERE world_id = ?",
-                    answered,
-                    world_id,
-                )
-                .execute(&mut *transaction)
-                .await
-                .context("recording the answered question")?;
-                if usize::try_from(answered).is_ok_and(|answered| answered >= asked.len()) {
-                    GenerationStage::Summarize
-                } else {
-                    GenerationStage::Answer
-                }
-            }
-            (GenerationStage::Summarize, Advance::Summary(summary)) => {
-                ensure!(
-                    !summary.trim().is_empty(),
-                    "the Storyteller's summary is empty"
-                );
-                sqlx::query!(
-                    "UPDATE world SET storyteller_summary = ? WHERE id = ?",
-                    summary,
-                    world_id,
-                )
-                .execute(&mut *transaction)
-                .await
-                .context("storing the world summary")?;
-                GenerationStage::Ask
-            }
+            (GenerationStage::Ask, Advance::WorldSummaryComplete) => GenerationStage::Name,
             (GenerationStage::Name, Advance::Name(name)) => {
                 let name = name.trim();
                 ensure!(!name.is_empty(), "the Storyteller's world name is empty");
@@ -356,18 +273,9 @@ impl Store {
                     .execute(&mut *transaction)
                     .await
                     .context("storing the world name")?;
-                GenerationStage::Build
+                GenerationStage::CreateObjects
             }
-            (GenerationStage::Build, Advance::Built) => {
-                sqlx::query!(
-                    "UPDATE world_generation SET questions = '[]', next_question = 0 WHERE world_id = ?",
-                    world_id,
-                )
-                .execute(&mut *transaction)
-                .await
-                .context("clearing the answered questions")?;
-                GenerationStage::Review
-            }
+            (GenerationStage::CreateObjects, Advance::ObjectsCreated) => GenerationStage::Review,
             (GenerationStage::Review, Advance::CoreObjectsCreated) => {
                 let problems = Self::core_problems(&mut transaction, world_id).await?;
                 ensure!(
@@ -390,6 +298,23 @@ impl Store {
             .commit()
             .await
             .with_context(|| format!("committing generation of world {world_id}"))
+    }
+
+    /// Store the world summary the Storyteller just wrote, replacing the last.
+    pub async fn save_world_summary(&self, world_id: i64, summary: &str) -> Result<()> {
+        ensure!(
+            !summary.trim().is_empty(),
+            "the Storyteller's summary is empty"
+        );
+        sqlx::query!(
+            "UPDATE world SET storyteller_summary = ? WHERE id = ?",
+            summary,
+            world_id,
+        )
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("storing the summary of world {world_id}"))?;
+        Ok(())
     }
 
     /// Mark a world's initialization failed. The error stays on the failing
@@ -501,7 +426,7 @@ mod tests {
     async fn a_step_that_does_not_apply_changes_nothing() {
         let (store, _db, world_id) = new_world("generation-order").await;
         let error = store
-            .advance_generation(world_id, Advance::Summary("too early".into()), 3)
+            .advance_generation(world_id, Advance::ObjectsCreated, 3)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("does not apply"));
@@ -512,7 +437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_round_uses_the_same_one_chat_per_role_and_progress_is_kept() {
+    async fn the_summary_is_replaced_and_both_roles_keep_their_one_chat() {
         let (store, _db, world_id) = new_world("generation-rounds").await;
         let first = store.next_generation(world_id).await.unwrap().unwrap();
 
@@ -520,88 +445,31 @@ mod tests {
             .advance_generation(world_id, Advance::MetaQuestionsAnswered, 1)
             .await
             .unwrap();
-        let asked = vec!["one?".to_string(), "two?".to_string()];
         store
-            .advance_generation(world_id, Advance::Questions(asked.clone()), 2)
+            .save_world_summary(world_id, "A flooded city.")
             .await
             .unwrap();
-        let round_one = store.next_generation(world_id).await.unwrap().unwrap();
-        assert_eq!(round_one.stage, GenerationStage::Answer);
-        assert_eq!(round_one.questions, asked);
-        assert_eq!(round_one.next_question, 0);
-        assert_eq!(round_one.spent, 2);
+        store
+            .save_world_summary(world_id, "A drowned port.")
+            .await
+            .unwrap();
+        let asking = store.next_generation(world_id).await.unwrap().unwrap();
+        assert_eq!(asking.stage, GenerationStage::Ask);
+        assert_eq!(asking.summary, "A drowned port.", "the newest summary wins");
+        assert_eq!(asking.spent, 1);
         assert_eq!(
-            round_one.storyteller.branch_id(),
+            asking.storyteller.branch_id(),
             first.storyteller.branch_id()
         );
-        assert_eq!(
-            round_one.storyteller.agent_id(),
-            first.storyteller.agent_id()
-        );
-        assert_eq!(
-            round_one.questioner.branch_id(),
-            first.questioner.branch_id()
-        );
-
-        store
-            .advance_generation(world_id, Advance::QuestionAnswered, 3)
-            .await
-            .unwrap();
-        assert_eq!(stage(&store, world_id).await, GenerationStage::Answer);
-        store
-            .advance_generation(world_id, Advance::QuestionAnswered, 4)
-            .await
-            .unwrap();
-        assert_eq!(stage(&store, world_id).await, GenerationStage::Summarize);
-        store
-            .advance_generation(world_id, Advance::Summary("A flooded city.".into()), 5)
-            .await
-            .unwrap();
-        let after = store.next_generation(world_id).await.unwrap().unwrap();
-        assert_eq!(after.stage, GenerationStage::Ask);
-        assert_eq!(after.summary, "A flooded city.");
-
-        store
-            .advance_generation(world_id, Advance::Questions(asked), 6)
-            .await
-            .unwrap();
-        let round_two = store.next_generation(world_id).await.unwrap().unwrap();
-        assert_eq!(
-            round_two.storyteller.branch_id(),
-            round_one.storyteller.branch_id(),
-            "the Storyteller keeps its one chat"
-        );
-        assert_eq!(
-            round_two.summary, "A flooded city.",
-            "the summary carries over"
-        );
+        assert_eq!(asking.questioner.branch_id(), first.questioner.branch_id());
+        assert!(store.save_world_summary(world_id, "  \n").await.is_err());
     }
 
     #[tokio::test]
-    async fn an_empty_summary_or_name_is_refused_and_a_name_ends_the_steps() {
+    async fn a_name_ends_the_summary_and_an_empty_one_is_refused() {
         let (store, _db, world_id) = new_world("generation-empty").await;
         store
             .advance_generation(world_id, Advance::MetaQuestionsAnswered, 1)
-            .await
-            .unwrap();
-        store
-            .advance_generation(world_id, Advance::Questions(vec!["q?".into()]), 2)
-            .await
-            .unwrap();
-        store
-            .advance_generation(world_id, Advance::QuestionAnswered, 3)
-            .await
-            .unwrap();
-        assert!(
-            store
-                .advance_generation(world_id, Advance::Summary("  \n".into()), 4)
-                .await
-                .is_err()
-        );
-        assert_eq!(stage(&store, world_id).await, GenerationStage::Summarize);
-
-        store
-            .advance_generation(world_id, Advance::Summary("Summary.".into()), 4)
             .await
             .unwrap();
         store
@@ -618,7 +486,10 @@ mod tests {
             .advance_generation(world_id, Advance::Name(" Saltmarsh \n".into()), 6)
             .await
             .unwrap();
-        assert_eq!(stage(&store, world_id).await, GenerationStage::Build);
+        assert_eq!(
+            stage(&store, world_id).await,
+            GenerationStage::CreateObjects
+        );
         assert_eq!(
             store.world(world_id).await.unwrap().unwrap().name,
             "Saltmarsh"

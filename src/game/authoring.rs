@@ -1,9 +1,11 @@
 //! The tools of world creation's object phase (design.md's Storyteller world
 //! creation): the Storyteller creates, changes and deletes objects, and the
 //! Questioner reads them, marks them reviewed and says when they are whole.
-//! Three tools with an `object` kind stand in for the declared per-kind
-//! Create/Update/Delete tools, so the model is shown each field once. Every tool
-//! is built for one world, so a call can only touch that world.
+//! `create_object` and `update_object` take the kind as an argument; creating
+//! requires a description, which every kind has, and changing carries no field
+//! text of its own, so each field is described once. There is no tool for a
+//! group: an NPC joins one or starts one, and a group goes with its last NPC.
+//! Every tool is built for one world, so a call can only touch that world.
 
 use std::sync::Arc;
 
@@ -13,6 +15,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::{
     inspection::DevEvent,
+    llm::ToolDefinition,
     prompts,
     store::{Change, DeleteOptions, Fields, ObjectKind, Rejected, Store},
     tools::{Tool, ToolOutcome},
@@ -47,80 +50,123 @@ struct DeleteObject {
 /// something depends on) is an ordinary tool result.
 pub(super) fn storyteller_tools(store: &Store, world: &Arc<World>) -> Result<Vec<Tool>> {
     let world = (store, world);
-    let with = |extra: &[&str], names: Vec<String>| -> Vec<String> {
-        extra.iter().map(ToString::to_string).chain(names).collect()
-    };
-    Ok(vec![
-        changer::<CreateObject>(
-            world,
-            "create_object",
-            "Created",
-            with(&["object"], Fields::names()),
-            |call| Change::Create {
-                kind: call.object,
-                fields: &call.fields,
-            },
-        )?,
-        changer::<UpdateObject>(
-            world,
-            "update_object",
-            "Changed",
-            with(&["object", "id"], Fields::names()),
-            |call| Change::Update {
-                kind: call.object,
-                id: call.id,
-                fields: &call.fields,
-            },
-        )?,
-        changer::<DeleteObject>(
-            world,
-            "delete_object",
-            "Deleted",
-            with(&["object", "id"], DeleteOptions::names()),
-            |call| Change::Delete {
-                kind: call.object,
-                id: call.id,
-                options: &call.options,
-            },
-        )?,
-    ])
+    let prompts = prompts::current()?;
+    let tools = &prompts.storyteller.tools;
+    let mut list = Vec::new();
+    let mut create = tools.tool(
+        "create_object",
+        serde_json::to_value(schema_for!(CreateObject)).expect("object schema should serialize"),
+    )?;
+    drop_null_types(&mut create.schema);
+    // Every kind it creates has a description, so the schema can say it is needed.
+    create.schema["required"]
+        .as_array_mut()
+        .expect("the schema lists what is required")
+        .push("description".into());
+    remove_group_kind(&mut create.schema);
+    list.push(changer::<CreateObject>(
+        world,
+        create,
+        ["object"]
+            .map(String::from)
+            .into_iter()
+            .chain(Fields::names())
+            .collect(),
+        Box::new(|call| Change::Create {
+            kind: call.object,
+            fields: &call.fields,
+        }),
+    ));
+    let mut update = tools.tool(
+        "update_object",
+        serde_json::to_value(schema_for!(UpdateObject)).expect("object schema should serialize"),
+    )?;
+    drop_null_types(&mut update.schema);
+    remove_group_kind(&mut update.schema);
+    list.push(changer::<UpdateObject>(
+        world,
+        update,
+        ["object", "id"]
+            .map(String::from)
+            .into_iter()
+            .chain(Fields::names())
+            .collect(),
+        Box::new(|call| Change::Update {
+            kind: call.object,
+            id: call.id,
+            fields: &call.fields,
+        }),
+    ));
+    let mut delete = tools.tool(
+        "delete_object",
+        serde_json::to_value(schema_for!(DeleteObject)).expect("object schema should serialize"),
+    )?;
+    drop_null_types(&mut delete.schema);
+    remove_group_kind(&mut delete.schema);
+    list.push(changer::<DeleteObject>(
+        world,
+        delete,
+        ["object", "id"]
+            .map(String::from)
+            .into_iter()
+            .chain(DeleteOptions::names())
+            .collect(),
+        Box::new(|call| Change::Delete {
+            kind: call.object,
+            id: call.id,
+            options: &call.options,
+        }),
+    ));
+    Ok(list)
 }
+
+/// A group is not created, changed or deleted through these tools, so they do
+/// not offer it as a kind.
+fn remove_group_kind(schema: &mut serde_json::Value) {
+    if let Some(kinds) = schema["properties"]["object"]["enum"].as_array_mut() {
+        kinds.retain(|kind| kind != "group");
+    }
+}
+
+type Wrap<T> = Box<dyn for<'a> Fn(&'a T) -> Change<'a> + Send + Sync>;
 
 fn changer<T>(
     (store, world): (&Store, &Arc<World>),
-    name: &'static str,
-    done: &'static str,
+    definition: ToolDefinition,
     allowed: Vec<String>,
-    wrap: for<'a> fn(&'a T) -> Change<'a>,
-) -> Result<Tool>
+    wrap: Wrap<T>,
+) -> Tool
 where
-    T: DeserializeOwned + JsonSchema + Send + 'static,
+    T: DeserializeOwned + Send + 'static,
 {
-    let mut definition = prompts::current()?.storyteller.tools.tool(
-        name,
-        serde_json::to_value(schema_for!(T)).expect("object schema should serialize"),
-    )?;
-    drop_null_types(&mut definition.schema);
     let store = store.clone();
     let world = Arc::clone(world);
-    Ok(Tool::new(definition, move |context| {
+    let wrap = Arc::new(wrap);
+    Tool::new(definition, move |context| {
         let arguments = context.arguments.to_string();
         let store = store.clone();
         let world = Arc::clone(&world);
         let allowed = allowed.clone();
+        let wrap = Arc::clone(&wrap);
         Box::pin(async move {
             let call: T = match parse(&arguments, &allowed) {
                 Ok(call) => call,
                 Err(error) => return Ok(ToolOutcome::rejected(error)),
             };
-            match store.change_object(world.id, wrap(&call)).await {
+            let change = wrap(&call);
+            let done = change.past_tense();
+            match store.change_object(world.id, change).await {
                 Ok(changed) => {
                     world.publish(DevEvent::Changed {
                         sequence_id: None,
                         inference_id: None,
                     });
+                    let group = changed
+                        .group
+                        .map(|group| format!(" in new group {group}"))
+                        .unwrap_or_default();
                     Ok(ToolOutcome::Completed(format!(
-                        "{done} {} {}. The world now has {}.",
+                        "{done} {} {}{group}. The world now has {}.",
                         changed.kind,
                         changed.id,
                         serde_json::to_string(&changed.counts)?
@@ -129,7 +175,7 @@ where
                 Err(error) => rejection_or_failure(error),
             }
         })
-    }))
+    })
 }
 
 /// An argument that may be left out is already absent from `required`, so
@@ -167,25 +213,36 @@ pub(super) fn review_tools(store: &Store, world_id: i64) -> Result<Vec<Tool>> {
     let tools = &prompts::current()?.questioner.tools;
     let allowed = ["object", "id", "reviewed"].map(String::from).to_vec();
     let read_store = store.clone();
-    let read_allowed = allowed.clone();
+    let read_allowed = vec!["objects".to_string()];
     let read = Tool::new(
         tools.tool(
             "read_object",
-            serde_json::to_value(schema_for!(ObjectId)).expect("schema should serialize"),
+            serde_json::to_value(schema_for!(ReadObjects)).expect("schema should serialize"),
         )?,
         move |context| {
             let arguments = context.arguments.to_string();
             let store = read_store.clone();
             let allowed = read_allowed.clone();
             Box::pin(async move {
-                let object: ObjectId = match parse(&arguments, &allowed) {
-                    Ok(object) => object,
+                let read: ReadObjects = match parse(&arguments, &allowed) {
+                    Ok(read) => read,
                     Err(error) => return Ok(ToolOutcome::rejected(error)),
                 };
-                match store.read_object(world_id, object.object, object.id).await {
-                    Ok(text) => Ok(ToolOutcome::Completed(text)),
-                    Err(error) => rejection_or_failure(error),
+                if read.objects.is_empty() {
+                    return Ok(ToolOutcome::Rejected("Name at least one object.".into()));
                 }
+                let mut texts = Vec::new();
+                for object in read.objects {
+                    match store.read_object(world_id, object.object, object.id).await {
+                        Ok(text) => texts.push(text),
+                        Err(error) => return rejection_or_failure(error),
+                    }
+                }
+                Ok(ToolOutcome::Completed(texts.join(
+                    "
+
+",
+                )))
             })
         },
     );
@@ -251,6 +308,12 @@ struct ObjectId {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadObjects {
+    objects: Vec<ObjectId>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct MarkReviewed {
     object: ObjectKind,
     id: i64,
@@ -284,11 +347,25 @@ mod tests {
         let member = store.create_world_to_generate(&owner, "x").await.unwrap();
         let worlds = World::load(&store).await.unwrap();
         let world = World::get(&worlds, member.world_id).unwrap();
-        let characters: usize = storyteller_tools(&store, &world)
+        let sizes: Vec<(String, usize)> = storyteller_tools(&store, &world)
             .unwrap()
             .iter()
-            .map(|tool| serde_json::to_string(&tool.definition()).unwrap().len())
-            .sum();
+            .map(|tool| {
+                let definition = tool.definition();
+                (
+                    definition.name.clone(),
+                    serde_json::to_string(&definition).unwrap().len(),
+                )
+            })
+            .collect();
+        println!("STORYTELLER_TOOL_SIZES {sizes:?}");
+        for tool in storyteller_tools(&store, &world).unwrap() {
+            println!(
+                "TOOL {}",
+                serde_json::to_string(&tool.definition()).unwrap()
+            );
+        }
+        let characters: usize = sizes.iter().map(|(_, size)| size).sum();
         println!("STORYTELLER_TOOL_CHARACTERS {characters}");
         assert!(characters < 4_200, "the tools are {characters} characters");
     }

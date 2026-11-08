@@ -10,19 +10,17 @@ CREATE TABLE world_role_agent (
 -- Where a world is in its initialization, whatever filled it in: complete
 -- means ready to play (a scenario import is complete at once). Otherwise it
 -- selects the next finite step: the Questioner answers the meta-questions
--- (meta), asks questions or declares the world complete (ask), the Storyteller
--- answers one question (answer), replies with the summary (summarize) and, once
--- the Questioner is satisfied, the name (name); the Storyteller then creates objects with the authoring
--- tools (build) and the Questioner reviews them (review). A failed step's error stays on its sequence.
+-- (meta), asks the Storyteller questions until the world summary is complete
+-- (ask), then the Storyteller replies with the name (name), creates objects with
+-- the authoring tools (create_objects) and the Questioner reviews them (review). A failed
+-- step's error stays on its sequence.
 ALTER TABLE world ADD COLUMN generation_stage TEXT NOT NULL DEFAULT 'complete'
-    CHECK (generation_stage IN ('meta', 'ask', 'answer', 'summarize', 'name', 'build', 'review', 'failed', 'complete'));
+    CHECK (generation_stage IN ('meta', 'ask', 'name', 'create_objects', 'review', 'failed', 'complete'));
 
 -- What the Questioner/Storyteller loop is working on. Each step's outputs commit
 -- with the next stage, so a restart resumes at the stored one.
 CREATE TABLE world_generation (
     world_id INTEGER PRIMARY KEY NOT NULL REFERENCES world(id),
-    questions TEXT NOT NULL DEFAULT '[]',
-    next_question INTEGER NOT NULL DEFAULT 0,
     -- Inferences spent so far, restored into the shared Budget for each step.
     spent INTEGER NOT NULL DEFAULT 0,
     questioner_branch_id INTEGER NOT NULL REFERENCES history_branch(id),

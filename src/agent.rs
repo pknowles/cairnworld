@@ -135,6 +135,27 @@ impl Drop for ActiveAgent {
     }
 }
 
+/// A boxed future that reads the current state from the store.
+pub type ContextFuture<'a> =
+    std::pin::Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>>;
+
+/// The current-state text shown with a request and never stored in the chat.
+/// `Fresh` is read again before every inference of a turn, so a turn whose
+/// tools change that state always shows the agent the state as it is.
+pub enum DynamicContext<'a> {
+    Fixed(&'a [&'a str]),
+    Fresh(&'a (dyn Fn() -> ContextFuture<'a> + Send + Sync)),
+}
+
+impl DynamicContext<'_> {
+    async fn read(&self) -> Result<Vec<String>> {
+        match self {
+            Self::Fixed(texts) => Ok(texts.iter().map(|text| text.to_string()).collect()),
+            Self::Fresh(read) => read().await,
+        }
+    }
+}
+
 /// All stored inputs for one agent completion. The callbacks that surface its
 /// live output remain invocation-local rather than becoming persisted state.
 pub struct Turn<'a> {
@@ -142,7 +163,7 @@ pub struct Turn<'a> {
     /// The branch selected and validated before this invocation begins.
     pub branch: AgentBranch,
     pub static_messages: &'a [Message],
-    pub dynamic_context: &'a [&'a str],
+    pub dynamic_context: DynamicContext<'a>,
     pub tools: &'a [Tool],
     /// Set exactly when `tools` holds a terminal tool: the turn then ends only
     /// through one, and an agent that answers in plain text is told this and
@@ -256,11 +277,15 @@ pub async fn complete_aside<B: Backend>(
             .before_agent(store, turn.branch, &turn.events)
             .await
             .context("waiting for earlier deferred work for this agent")?;
+        let dynamic_context = turn.dynamic_context.read().await?;
         let mut segments = context::segments(
             store,
             turn.branch,
             turn.static_messages,
-            turn.dynamic_context,
+            &dynamic_context
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             &[],
         )
         .await?;
@@ -364,6 +389,8 @@ pub async fn complete_with_call_context<B: Backend>(
                 .spend(chat_spent)
                 .context("resolving this chat turn")?;
             chat_spent += 1;
+            let dynamic_context = turn.dynamic_context.read().await?;
+            let dynamic_context: Vec<&str> = dynamic_context.iter().map(String::as_str).collect();
             let completion = context::complete_recorded(
                 store,
                 backend,
@@ -373,7 +400,7 @@ pub async fn complete_with_call_context<B: Backend>(
                     sequence_id: call.sequence_id,
                     invocation_id,
                     static_messages: turn.static_messages,
-                    dynamic_context: turn.dynamic_context,
+                    dynamic_context: &dynamic_context,
                     tools: &definitions,
                     ending_tools: &ending_tools,
                     sampling: turn.sampling.clone(),
@@ -774,7 +801,7 @@ mod tests {
             events: tokio::sync::broadcast::channel(256).0,
             branch,
             static_messages: &[],
-            dynamic_context: &[],
+            dynamic_context: DynamicContext::Fixed(&[]),
             tools,
             terminal_reminder: tools
                 .iter()
@@ -1791,7 +1818,7 @@ mod tests {
             events: tokio::sync::broadcast::channel(256).0,
             branch: store.group_branch(over_group_id).await.unwrap(),
             static_messages: &[],
-            dynamic_context: &[],
+            dynamic_context: DynamicContext::Fixed(&[]),
             tools: &[],
             terminal_reminder: None,
             sampling: Sampling::default(),

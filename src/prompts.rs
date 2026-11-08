@@ -45,7 +45,9 @@ pub struct WorldTexts {
 pub struct Questioner {
     pub role: String,
     pub meta_request: String,
-    pub world_state: String,
+    pub summary_result: String,
+    pub summary_state: String,
+    pub objects_result: String,
     pub ask_request: String,
     pub ask_reminder: String,
     pub review_request: String,
@@ -69,7 +71,7 @@ pub struct Storyteller {
     pub summary_request: String,
     pub name_request: String,
     pub uncreated_mentions: String,
-    pub build_request: String,
+    pub create_objects_request: String,
     pub fix_request: String,
     pub objects_state: String,
     pub tools: Tools,
@@ -137,6 +139,10 @@ struct ToolPrompt {
     /// One text per argument the tool takes.
     #[serde(default)]
     arguments: BTreeMap<String, String>,
+    /// The arguments carry no text: their meaning is given where they are
+    /// created, and repeating it would cost context in every request.
+    #[serde(default)]
+    bare: bool,
     /// Texts for the fields of objects inside an argument, by that argument.
     #[serde(default)]
     nested: BTreeMap<String, BTreeMap<String, String>>,
@@ -248,8 +254,17 @@ impl Tools {
             .0
             .get(name)
             .with_context(|| format!("the prompt file has no tool {name} here"))?;
-        describe(&mut schema, &prompt.arguments)
-            .with_context(|| format!("describing the arguments of tool {name}"))?;
+        if prompt.bare {
+            // Names and types only: the arguments are described by another
+            // tool that takes the same ones.
+            ensure!(
+                prompt.arguments.is_empty(),
+                "tool {name} is bare, so it has no argument text"
+            );
+        } else {
+            describe(&mut schema, &prompt.arguments)
+                .with_context(|| format!("describing the arguments of tool {name}"))?;
+        }
         for (argument, fields) in &prompt.nested {
             let definition = schema["properties"][argument]
                 .get("$ref")

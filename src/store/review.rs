@@ -28,7 +28,7 @@ impl Store {
         Self::review_entries(&mut connection, world_id).await
     }
 
-    async fn review_entries(
+    pub(super) async fn review_entries(
         connection: &mut sqlx::SqliteConnection,
         world_id: i64,
     ) -> Result<Vec<ReviewEntry>> {
@@ -95,7 +95,7 @@ impl Store {
             .begin()
             .await
             .with_context(|| format!("reviewing an object of world {world_id}"))?;
-        Self::ensure_stage(&mut transaction, world_id, "review").await?;
+        Self::ensure_stage(&mut transaction, world_id, &["review"]).await?;
         Self::ensure_exists(&mut transaction, world_id, kind, id).await?;
         let kind = kind.as_str();
         if reviewed {
@@ -396,30 +396,26 @@ mod id_tests {
 
     #[tokio::test]
     async fn core_objects_are_not_whole_until_connected_complete_and_reviewed() {
-        let (store, _db, world) = building_world().await;
+        let (store, _db, world) = world_creating_objects().await;
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
         let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
-        let family = create(
-            &store,
-            world,
-            ObjectKind::Group,
-            group_fields("family", hut),
-        )
-        .await;
-        let toma = create(
-            &store,
-            world,
-            ObjectKind::Npc,
-            Fields {
-                name: Some("Toma".into()),
-                group_id: Some(family),
-                description: Some(String::new()),
-                background: Some(String::new()),
-                motive: Some(String::new()),
-                ..Fields::default()
-            },
-        )
-        .await;
+        let toma = store
+            .create_object(
+                world,
+                ObjectKind::Npc,
+                &Fields {
+                    name: Some("Toma".into()),
+                    group_name: Some("family".into()),
+                    location_id: Some(hut),
+                    description: Some(String::new()),
+                    background: Some(String::new()),
+                    motive: Some(String::new()),
+                    ..Fields::default()
+                },
+            )
+            .await
+            .unwrap()
+            .id;
         let problems = store.core_object_problems(world).await.unwrap().join(" ");
         assert!(problems.contains("cannot be reached"), "{problems}");
         assert!(
@@ -468,6 +464,15 @@ mod id_tests {
                 .await
                 .unwrap()
                 .contains("Toma")
+        );
+        // A missing id says which ones exist.
+        let missing = store
+            .read_object(world, ObjectKind::Npc, toma + 100)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{missing:#}").contains(&format!("Existing npc ids: {toma}.")),
+            "{missing:#}"
         );
     }
 }

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT inference.id, inference.error, (inference.output IS NULL AND inference.error IS NULL AND inference.finished_at IS NULL) AS \"running!: bool\", CASE WHEN inference.output IS NOT NULL AND NOT EXISTS (SELECT 1 FROM message WHERE message.source_inference_id = inference.id) AND NOT EXISTS (SELECT 1 FROM summary WHERE summary.inference_id = inference.id) THEN inference.output END AS \"aside_content?: i64\" FROM inference WHERE inference.history_entry_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "error",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "running!: bool",
+        "ordinal": 2,
+        "type_info": "Null"
+      },
+      {
+        "name": "aside_content?: i64",
+        "ordinal": 3,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "05363f33c801e8d04387f36fee35b3a8ec0b21244a254140e3af15d1e5a65a87"
+}

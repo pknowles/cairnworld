@@ -281,11 +281,11 @@ description = "Stay silent for now."
 summary_request = """\
     The conversation above is your own history. Replace it with a summary your \
     next turn will read in its place, in under 150 words because your context is \
-    small: keep the facts, decisions, open questions, \
-    and commitments that still matter, such as the task you are in the middle of, \
-    what you tried that did not work, and what to do next. Drop small talk, \
-    anything your standing instructions or tools already provide, and the current \
-    state of the world, which is shown again, up to date, with every request.\
+    small. Begin with the last request you were given and what is still left to do \
+    for it. Then keep the facts, decisions and open questions that still matter, and \
+    what you tried that did not work. Drop small talk, anything your standing \
+    instructions or tools already provide, and the current state of the world, \
+    which is shown again, up to date, with every request.\
     """
 
 # ---------------------------------------------------------------------------
@@ -346,14 +346,24 @@ meta_request = """\
 {questions}\
     """
 
-# The Questioner's view of the world, replaced each time it asks rather than
-# stored in its history. {seed} {summary}
-world_state = """\
-    Seed prompt for the world: {seed}
+# What ask_questions returns while the summary develops: what changed.
+summary_result = "The Storyteller answered and rewrote the world summary. Your context now holds the new version."
 
-    The Storyteller's world summary so far, which already includes its answers to \
-    any questions you asked before:
+# The current summary, shown with every request while the summary develops. {summary}
+summary_state = """\
+    The world summary:
 {summary}\
+    """
+
+# What ask_questions returns while reviewing: the Storyteller's own account and
+# what it did to the world. A changed object is no longer marked reviewed.
+# {reply} {changes}
+objects_result = """\
+    The Storyteller replied:
+{reply}
+
+    Changes to the world:
+{changes}\
     """
 
 ask_request = "Call world_summary_complete if the summary covers the setting, the factions, the important NPCs with their motives, and where the story starts. Otherwise ask the Storyteller the questions that would add what is missing."
@@ -396,7 +406,7 @@ meta_questions = [
 ]
 
 [questioner.tools.ask_questions]
-description = "Ask the Storyteller thought-provoking questions that add interest and depth to the world."
+description = "Ask the Storyteller questions. The result shows what the Storyteller did about them."
 
 [questioner.tools.ask_questions.arguments]
 questions = "Up to five questions, each one a single question."
@@ -405,11 +415,10 @@ questions = "Up to five questions, each one a single question."
 description = "Say the world summary has a solid foundation. The Storyteller then names the world and creates its objects."
 
 [questioner.tools.read_object]
-description = "Read everything about one object the Storyteller created."
+description = "Read everything about the objects you name. Your context is small, so read only a few at a time, about five: review and mark those, then read more."
 
 [questioner.tools.read_object.arguments]
-object = "What sort of object it is."
-id = "Its ID from the object list."
+objects = "The objects to read, each with its kind (object) and its ID from the object list (id)."
 
 [questioner.tools.mark_object_reviewed]
 description = "Record that you reviewed an object and it is ready for play, or that it is not."
@@ -428,8 +437,9 @@ description = "Say the objects are complete and every one is reviewed. This ends
 first_round_temperature = 1.2
 role = """\
     You are the Storyteller creating the world for a text RPG that a small group of \
-    players will explore, using the Cairn rules. Answer the Questioner with specific, \
-    vivid ideas, and keep the world small and simple enough to play.\
+    players will explore, using the Cairn rules. Keep the world small and simple \
+    enough to play. A reply is cut off after about 600 words, so make a few tool \
+    calls at a time.\
     """
 
 # The Storyteller's view of the world, replaced on every request rather than
@@ -444,7 +454,7 @@ world_state = """\
 # The first message of a round. {count} {question}
 round_start = """\
     The Questioner has {count} questions, asked one at a time. Answer each in a short \
-    paragraph.
+    paragraph with specific, vivid ideas.
 
     Question 1: {question}\
     """
@@ -465,26 +475,26 @@ summary_request = """\
 # The Questioner is satisfied. The reply becomes the world name.
 name_request = "Reply with only a short name for this world."
 
-# Added to a build request when the summary marks names that have no object yet. {names}
+# Added to the create-objects request when the summary marks names that have no object yet. {names}
 uncreated_mentions = "The summary marks these names but no object has them yet: {names}. Create the ones that need an object and ignore the rest."
 
-build_request = "The world summary is complete. Create the world's objects from it, for a small first world of about three locations, two groups and three NPCs: locations, their connections, groups and NPCs, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
+create_objects_request = "The world summary is complete. Create the world's objects from it, for a small first world of about three locations, two groups and three NPCs: locations, their connections, groups and NPCs, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
 
 # {questions}
 fix_request = """\
     The Questioner reviewed the world and asks:
 {questions}
-    Use the tools to add what is missing. Reply with a short note when you are done.\
+    Use the tools to add what is missing. Then reply with a short note: what you changed or, if you changed nothing, why - for example the questions were unclear, you disagree, or you could not do it.\
     """
 
-# What exists in the world, shown with every build request. {objects}
+# What exists in the world, shown with every create-objects request. {objects}
 objects_state = """\
     The world has these objects so far:
 {objects}\
     """
 
 [storyteller.tools.create_object]
-description = "Create an object. Fields: location name, location_kind, description; connection from_id, to_id, travel_time, description; group name, location_id, description; npc name, group_id, description, background, motive, ambition, sheet; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
+description = "Create an object. Fields: location name, location_kind, description; connection from_id, to_id, travel_time, description; npc name, description, background, motive, ambition, sheet, and either group_id to join a group or group_name and location_id to start a new one; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. A group goes with its last NPC. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
 
 [storyteller.tools.create_object.arguments]
 object = "The object's kind."
@@ -494,9 +504,10 @@ description = "What it is like."
 from_id = "Starting location ID."
 to_id = "Destination location ID."
 travel_time = "Minutes."
-location_id = "Location ID."
-group_id = "Group ID."
-item_type_id = "Item type ID."
+location_id = "The location an item is at, or where an NPC's new group is."
+group_id = "The existing group this NPC joins."
+group_name = "Unique name of the new group this NPC starts."
+item_type_id = "The item type this item is of."
 held_by_id = "NPC ID holding the item."
 background = "What only the NPC knows."
 motive = "What the NPC wants now."
@@ -504,27 +515,10 @@ ambition = "What the NPC wants in the long run."
 sheet = "NPC stats: numbers hp, str, dex, wil, armor, and weapon with name and damage."
 stats = "Item type rules numbers."
 
+# The fields are those of create_object, so they are not described again.
 [storyteller.tools.update_object]
-description = "Change an object's fields. Omitted fields stay."
-
-[storyteller.tools.update_object.arguments]
-object = "The object's kind."
-id = "Its ID from the object list."
-name = "New unique name."
-location_kind = "New kind of place."
-description = "New description."
-from_id = "A connection's ends cannot change."
-to_id = "A connection's ends cannot change."
-travel_time = "New minutes."
-location_id = "New location ID."
-group_id = "New group ID."
-item_type_id = "New item type ID."
-held_by_id = "NPC ID holding the item."
-background = "New NPC background."
-motive = "New NPC motive."
-ambition = "New NPC ambition."
-sheet = "New NPC stats, in the same form."
-stats = "New item type rules numbers."
+description = "Change an object by its ID, giving the create_object fields to change: only those change. A connection's ends cannot change. To move an NPC to another group, give group_id, or group_name and location_id for a new one."
+bare = true
 
 [storyteller.tools.delete_object]
 description = "Flag an object deleted. Dependencies may require one option."
@@ -532,7 +526,6 @@ description = "Flag an object deleted. Dependencies may require one option."
 [storyteller.tools.delete_object.arguments]
 object = "The object's kind."
 id = "Its ID from the object list."
-delete_groups = "Delete a location's empty groups too."
 item_location_id = "Location ID for an NPC's carried items."
 item_description = "New description for each dropped item."
 delete_items = "Delete an NPC's carried items too."

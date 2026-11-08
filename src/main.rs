@@ -108,6 +108,28 @@ enum Command {
         /// Inference record ID to reconstruct and re-run.
         inference_id: i64,
     },
+    /// Generate a world from a seed with the real model and the real world
+    /// worker, without the browser. Everything is recorded in the database, so
+    /// `serve` can open it in Developer Mode afterwards.
+    GenerateWorld {
+        /// SQLite database receiving the new world.
+        #[arg(long, default_value = "cairnworld.sqlite")]
+        database: String,
+        /// Configured model name or GGUF path. Falls back to `model` in settings.
+        #[arg(long)]
+        model: Option<String>,
+        /// Sampling temperature; overrides the model's configured value.
+        #[arg(long)]
+        temperature: Option<f32>,
+        /// Permit a model that does not fit entirely in GPU memory.
+        #[arg(long)]
+        allow_cpu: bool,
+        /// Development identity that will own the world.
+        #[arg(long, default_value = "maker@example.test")]
+        owner_email: String,
+        /// The world seed prompt.
+        seed: String,
+    },
     /// Serve the OAuth-only browser interface.
     Serve {
         /// SQLite database holding game and session data.
@@ -186,6 +208,75 @@ async fn main() -> Result<()> {
                 allow_cpu,
             )
             .await
+        }
+        Command::GenerateWorld {
+            database,
+            model,
+            temperature,
+            allow_cpu,
+            owner_email,
+            seed,
+        } => {
+            let settings = Settings::load()?;
+            let store = Store::open(&database)
+                .await
+                .context("opening world database")?;
+            let model = resolve_model(model.as_deref(), None, &settings)?;
+            let mut sampling = settings.sampling(&model);
+            if let Some(temperature) = temperature {
+                sampling.temperature = temperature;
+            }
+            let owner = store
+                .find_or_create_user(&owner_email, "Maker")
+                .await
+                .context("creating the owner")?;
+            let member = store
+                .create_world_to_generate(&owner, &seed)
+                .await
+                .context("creating the world")?;
+            let worlds = world::World::load(&store).await?;
+            let backend =
+                load_game_backend(&store, &worlds, &model, settings.limits, allow_cpu).await?;
+            let mut events = world::World::get(&worlds, member.world_id)
+                .context("the new world has no worker")?
+                .events
+                .subscribe();
+            let _game = game::Game::with_rules(
+                store.clone(),
+                worlds,
+                backend,
+                settings.limits,
+                model.path,
+                sampling,
+                settings.game,
+            );
+            let world = loop {
+                let world = store
+                    .world(member.world_id)
+                    .await?
+                    .context("the world disappeared")?;
+                if world.ready || world.failure.is_some() {
+                    break world;
+                }
+                let _ = events.recv().await;
+            };
+            println!(
+                "world {} \"{}\": ready={} failure={:?}",
+                member.world_id, world.name, world.ready, world.failure
+            );
+            for entry in store.review_list(member.world_id).await? {
+                println!(
+                    "  [{}] {} {} {}",
+                    if entry.reviewed { "x" } else { " " },
+                    entry.kind,
+                    entry.id,
+                    entry.name
+                );
+            }
+            println!(
+                "Open {database} with `serve --database {database}` to read it in Developer Mode."
+            );
+            Ok(())
         }
         Command::Serve {
             database,
@@ -422,7 +513,7 @@ async fn run_chat(
                 events: events.clone(),
                 branch,
                 static_messages: &static_messages,
-                dynamic_context: &[],
+                dynamic_context: agent::DynamicContext::Fixed(&[]),
                 tools: &tools,
                 terminal_reminder: None,
                 sampling: sampling.clone(),

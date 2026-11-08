@@ -808,7 +808,7 @@ where
                     events: world.events.clone(),
                     branch,
                     static_messages: &[role],
-                    dynamic_context: &[scene_packet.as_str()],
+                    dynamic_context: agent::DynamicContext::Fixed(&[scene_packet.as_str()]),
                     tools: &narrate.tools,
                     terminal_reminder: Some(&reminder),
                     sampling: self.sampling.clone(),
@@ -883,6 +883,9 @@ where
                 )
                 .await
                 .context("storing player message")?;
+            // Show the player their own message now, with its inspection
+            // link, not when the whole reply is ready.
+            let _no_live_viewers = world.broadcasts.send(ChatChange::Entries);
             let ready = self
                 .store
                 .is_ready_to_begin(&member)
@@ -906,7 +909,7 @@ where
                     events: world.events.clone(),
                     branch: self.store.agent_branch(member.agent_id).await?,
                     static_messages: &[prompt],
-                    dynamic_context: &[],
+                    dynamic_context: agent::DynamicContext::Fixed(&[]),
                     tools: &tools,
                     terminal_reminder: None,
                     sampling: self.sampling.clone(),
@@ -1013,7 +1016,7 @@ where
                     events: world.events.clone(),
                     branch,
                     static_messages: &[prompt],
-                    dynamic_context: &[],
+                    dynamic_context: agent::DynamicContext::Fixed(&[]),
                     tools: &tools,
                     terminal_reminder: None,
                     sampling: self.sampling.clone(),
@@ -1483,7 +1486,7 @@ where
                 events: self.world(member.world_id)?.events.clone(),
                 branch,
                 static_messages: &[role],
-                dynamic_context: &[scene_packet.as_str()],
+                dynamic_context: agent::DynamicContext::Fixed(&[scene_packet.as_str()]),
                 tools: &narrate.tools,
                 terminal_reminder: Some(&reminder),
                 sampling: self.sampling.clone(),
@@ -2006,7 +2009,7 @@ where
                 events: self.world(pending.world_id)?.events.clone(),
                 branch,
                 static_messages: &[role],
-                dynamic_context: &[scene_packet.as_str()],
+                dynamic_context: agent::DynamicContext::Fixed(&[scene_packet.as_str()]),
                 tools: &tools,
                 terminal_reminder: Some(&reminder),
                 sampling: self.sampling.clone(),
@@ -2467,11 +2470,7 @@ mod tests {
                 ),
                 (
                     "create_object",
-                    r#"{"object":"group","name":"Wardens","location_id":1,"description":"The tide-wardens."}"#,
-                ),
-                (
-                    "create_object",
-                    r#"{"object":"npc","name":"Ysolde","group_id":1,"description":"A stern warden.","background":"Lost her brother to the tide.","motive":"Keep the bell silent."}"#,
+                    r#"{"object":"npc","name":"Ysolde","group_name":"Wardens","location_id":1,"description":"A stern warden.","background":"Lost her brother to the tide.","motive":"Keep the bell silent."}"#,
                 ),
                 (
                     "create_object",
@@ -2481,7 +2480,7 @@ mod tests {
             text("The objects exist."),
             // The first review asks a question instead of completing...
             calls(&[
-                ("read_object", r#"{"object":"npc","id":2}"#),
+                ("read_object", r#"{"objects":[{"object":"npc","id":2}]}"#),
                 (
                     "ask_questions",
                     r#"{"questions":["Who stands against Ysolde?"]}"#,
@@ -2492,7 +2491,7 @@ mod tests {
                 "create_object",
                 r#"{"object":"npc","name":"Corvin","group_id":1,"description":"A rival warden.","background":"Wants her post.","motive":"Replace Ysolde."}"#,
             )]),
-            text("Added."),
+            text("Added Corvin."),
             // ...and the second review marks everything and completes.
             calls(&[
                 (
@@ -2533,13 +2532,25 @@ mod tests {
             },
         );
 
-        // Nine steps (meta, ask, two answers, summary, ask, name, build, review)
-        // run until the world is ready; a failed world never becomes ready.
+        // Five steps (meta, ask, name, create objects, review) run until the world is
+        // ready; a failed world never becomes ready.
         while !store.world_is_ready(member.world_id).await.unwrap() {
             let waited =
                 tokio::time::timeout(std::time::Duration::from_secs(10), events.recv()).await;
             let failure = store.world(member.world_id).await.unwrap().unwrap().failure;
-            assert!(failure.is_none(), "the world failed: {failure:?}");
+            if failure.is_some() {
+                let seen = requests.lock().unwrap();
+                panic!(
+                    "the world failed after {} requests: {failure:?}\nlast: {}",
+                    seen.len(),
+                    seen.last()
+                        .map(|request| {
+                            let text = shown(request);
+                            text[text.len().saturating_sub(1800)..].to_string()
+                        })
+                        .unwrap_or_default()
+                );
+            }
             waited.expect("a generation step did not finish").unwrap();
         }
 
@@ -2610,7 +2621,7 @@ mod tests {
                 .all(|temperature| *temperature == 0.0)
         );
 
-        // The Storyteller builds with creation tools and sees the one summary.
+        // The Storyteller creates objects with creation tools and sees the one summary.
         assert!(
             shown[7].contains("no object has them yet: Ysolde, Drowned Bell"),
             "{}",
@@ -2625,11 +2636,7 @@ mod tests {
             shown[7].contains("create_object") && shown[7].contains("a city ruled by tide-wardens")
         );
         // A refused call reaches the Storyteller as a tool result it can act on.
-        assert!(
-            shown[8].contains("already has a location called `Belfry`"),
-            "{}",
-            shown[8]
-        );
+        assert!(shown[8].contains("called `Belfry`"), "{}", shown[8]);
         // The Questioner reviews the objects, not the Storyteller's answers.
         assert!(shown[9].contains("- [ ] npc 2 Ysolde") && shown[9].contains("read_object"));
         assert!(!shown[9].contains("The tide-wardens rule."));
@@ -2639,7 +2646,7 @@ mod tests {
             "{}",
             shown[9]
         );
-        // The Questioner's question sends the Storyteller back to build, and it
+        // The Questioner's question sends the Storyteller back to create objects, and it
         // is shown what already exists (a fact, not kept in its chat).
         assert!(
             shown[10].contains("Who stands against Ysolde?"),
@@ -2654,6 +2661,28 @@ mod tests {
             shown[10]
         );
         assert!(!shown[7].contains("The world has these objects so far"));
+        // The Storyteller's change comes back to the Questioner as the result
+        // of its own question, in the same turn.
+        assert!(
+            shown[12].contains("Added Corvin.")
+                && shown[12].contains("Changes to the world:")
+                && shown[12].contains("- added npc 3 Corvin")
+                && !shown[12].contains("create_object"),
+            "{}",
+            shown[12]
+        );
+        // The result says the summary changed; the summary itself is the
+        // Questioner's context.
+        assert!(
+            shown[5].contains("rewrote the world summary")
+                && shown[5].contains("The world summary:"),
+            "{}",
+            shown[5]
+        );
+        // It is the new summary, once, in the request after the change and not
+        // in the request before it.
+        assert_eq!(shown[5].matches("a city ruled by tide-wardens").count(), 1);
+        assert!(!shown[1].contains("a city ruled by tide-wardens"));
     }
 
     #[tokio::test]
@@ -2698,33 +2727,14 @@ mod tests {
         );
     }
 
-    /// The object phases on the real model: from a finished summary the
-    /// Storyteller builds the objects with its tools and the Questioner
-    /// reviews them. Prints what was made and both chats. Not part of the
-    /// device suite: a run takes several minutes.
-    #[tokio::test]
-    #[ignore = "needs a CUDA GPU; takes several minutes"]
-    async fn the_real_model_builds_and_reviews_core_objects_from_a_summary() {
-        real_core_object_phases(false).await;
-    }
-
-    /// The Questioner's review on the real model: part of the world is already
-    /// built and the rest is missing, so the review has to notice that and ask
-    /// the Storyteller to add it before it can complete the phase.
-    #[tokio::test]
-    #[ignore = "needs a CUDA GPU; takes several minutes"]
-    async fn the_real_model_questioner_catches_what_the_storyteller_left_out() {
-        real_core_object_phases(true).await;
-    }
-
-    /// With `leave_gaps` the Storyteller's building is replaced by a partial
-    /// world, so the first thing that happens is the Questioner's review.
-    async fn real_core_object_phases(leave_gaps: bool) {
-        use crate::store::{Advance, Fields, ObjectKind};
-        const SUMMARY: &str = "Saltgate is a smuggler town on an estuary whose tide has stopped             coming in. The Harbor Guild, led by Warden [[Ysolde Varn]], blames the smugglers and             wants the channel dredged. The smugglers, led by [[Captain Brannoch]], hide their             cargo in the [[Bell Cellar]] below [[Saltgate Quay]], where a drowned bell rings             against the tide; Brannoch wants the tide to stay wrong because it hides his boats.             Ysolde's brother drowned near the bell and she will not let the cellar stay hidden.             Players arrive at the quay with a [[Guild writ]] from a distant client who wants the             bell silenced, and must choose between the Guild, the smugglers and their own aims.";
-        let model = DeviceModel::load().await;
-        let (shared, name, sampling, limits) = model.parts();
-        let db = crate::store::TestDatabase::new("real-generation");
+    /// A world whose summary is finished and named, ready for the Storyteller
+    /// to create its objects.
+    async fn saltgate_ready_for_objects(
+        name: &str,
+    ) -> (crate::store::TestDatabase, Store, crate::store::PlayerAgent) {
+        use crate::store::Advance;
+        const SALTGATE_SUMMARY: &str = "Saltgate is a smuggler town on an estuary whose tide has stopped             coming in. The Harbor Guild, led by Warden [[Ysolde Varn]], blames the smugglers and             wants the channel dredged. The smugglers, led by [[Captain Brannoch]], hide their             cargo in the [[Bell Cellar]] below [[Saltgate Quay]], where a drowned bell rings             against the tide; Brannoch wants the tide to stay wrong because it hides his boats.             Ysolde's brother drowned near the bell and she will not let the cellar stay hidden.             Players arrive at the quay with a [[Guild writ]] from a distant client who wants the             bell silenced, and must choose between the Guild, the smugglers and their own aims.";
+        let db = crate::store::TestDatabase::new(name);
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
             .find_or_create_user("maker@example.test", "Maker")
@@ -2737,12 +2747,12 @@ mod tests {
             )
             .await
             .unwrap();
-        // The summary phase is done; start where the objects are built.
+        store
+            .save_world_summary(member.world_id, SALTGATE_SUMMARY)
+            .await
+            .unwrap();
         for advance in [
             Advance::MetaQuestionsAnswered,
-            Advance::Questions(vec!["Who rules the town?".into()]),
-            Advance::QuestionAnswered,
-            Advance::Summary(SUMMARY.into()),
             Advance::WorldSummaryComplete,
             Advance::Name("Saltgate".into()),
         ] {
@@ -2751,6 +2761,183 @@ mod tests {
                 .await
                 .unwrap();
         }
+        (db, store, member)
+    }
+
+    /// The Storyteller creating objects on the real model, nothing else: counts what
+    /// its create and update calls did. `CAIRNWORLD_TEST_TEMPERATURE` varies the
+    /// sample. Prints one METRIC line; a creation that names an ID of its own
+    /// kind (a group with `group_id`) is the invented-ID failure.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU; takes a few minutes"]
+    async fn the_real_storyteller_creates_objects_without_naming_ids_of_its_own() {
+        let model = DeviceModel::load().await;
+        let (shared, name, mut sampling, limits) = model.parts();
+        if let Ok(temperature) = std::env::var("CAIRNWORLD_TEST_TEMPERATURE") {
+            sampling.temperature = temperature.parse().expect("a number");
+        }
+        let observed = model.observed();
+        let (db, store, member) = saltgate_ready_for_objects("real-objects").await;
+        let backend = InferenceScheduler::new(shared, limits).unwrap();
+        let worlds = World::load(&store).await.unwrap();
+        let mut events = World::get(&worlds, member.world_id)
+            .unwrap()
+            .events
+            .subscribe();
+        let _game = Game::new(
+            store.clone(),
+            worlds,
+            backend.foreground(),
+            limits,
+            name,
+            sampling,
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(900), async {
+            loop {
+                let world = store.world(member.world_id).await.unwrap().unwrap();
+                let creating = store
+                    .next_generation(member.world_id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|generation| {
+                        generation.stage == crate::store::GenerationStage::CreateObjects
+                    });
+                if !creating || world.failure.is_some() {
+                    println!("LOOP EXIT creating={creating} failure={:?}", world.failure);
+                    break;
+                }
+                let _ = events.recv().await;
+            }
+        })
+        .await
+        .expect("creating the objects neither finished nor failed in time");
+
+        if let Some(first) = observed.lock().unwrap().first() {
+            println!(
+                "FIRST OBJECT PROMPT ({} tokens)
+{}",
+                first.tokens.len(),
+                first.prompt
+            );
+        }
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db.path().display()))
+            .await
+            .unwrap();
+        let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM recorded_content")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let (mut creates, mut changes, mut invented) = (0, 0, 0);
+        for body in bodies {
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(&body) else {
+                continue;
+            };
+            let Some(calls) = body["content"]["value"].as_array() else {
+                continue;
+            };
+            for call in calls.iter() {
+                let name = call["name"].as_str().unwrap_or_default();
+                let Some(arguments) = call["arguments"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                else {
+                    continue;
+                };
+                if name == "update_object" {
+                    changes += 1;
+                } else if name == "create_object" {
+                    creates += 1;
+                    // A creation that names an ID of its own: `id`, or its own kind's.
+                    let kind = arguments["object"].as_str().unwrap_or_default();
+                    if arguments.get("id").is_some()
+                        || arguments.get(format!("{kind}_id")).is_some()
+                    {
+                        invented += 1;
+                        println!("INVENTED {name} {arguments}");
+                    }
+                }
+            }
+        }
+        for body in sqlx::query_scalar::<_, String>("SELECT body FROM recorded_content")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        {
+            if let Ok(body) = serde_json::from_str::<serde_json::Value>(&body)
+                && body["content"]["type"] == "Text"
+                && body["content"]["value"]
+                    .as_str()
+                    .is_some_and(|text| text.len() > 1500)
+            {
+                println!(
+                    "LONG TEXT REPLY
+{}",
+                    body["content"]["value"].as_str().unwrap()
+                );
+                break;
+            }
+        }
+        let (replies, capped, output_tokens): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(output_tokens >= 1000), 0), COALESCE(SUM(output_tokens), 0)              FROM inference WHERE output_tokens IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let rejected: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tool_execution WHERE status = 'rejected'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let world = store.world(member.world_id).await.unwrap().unwrap();
+        let objects = store.review_list(member.world_id).await.unwrap();
+        let count = |kind: &str| objects.iter().filter(|entry| entry.kind == kind).count();
+        println!(
+            "METRIC temperature={} replies={replies} capped={capped} output_tokens={output_tokens} creates={creates} changes={changes} invented_own_id={invented} rejected_calls={rejected} locations={} connections={} groups={} npcs={} item_types={} items={} failure={:?}",
+            std::env::var("CAIRNWORLD_TEST_TEMPERATURE").unwrap_or_else(|_| "default".into()),
+            count("location"),
+            count("connection"),
+            count("group"),
+            count("npc"),
+            count("item_type"),
+            count("item"),
+            world.failure
+        );
+        assert!(world.failure.is_none(), "{:?}", world.failure);
+        assert!(count("location") > 0 && count("group") > 0 && count("npc") > 0);
+    }
+
+    /// The object phases on the real model: from a finished summary the
+    /// Storyteller creates the objects with its tools and the Questioner
+    /// reviews them. Prints what was made and both chats. Not part of the
+    /// device suite: a run takes several minutes.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU; takes several minutes"]
+    async fn the_real_model_creates_and_reviews_core_objects_from_a_summary() {
+        real_core_object_phases(false).await;
+    }
+
+    /// The Questioner's review on the real model: part of the world is already
+    /// built and the rest is missing, so the review has to notice that and ask
+    /// the Storyteller to add it before it can complete the phase.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU; takes several minutes"]
+    async fn the_real_model_questioner_catches_what_the_storyteller_left_out() {
+        real_core_object_phases(true).await;
+    }
+
+    /// With `leave_gaps` the Storyteller's creating of objects is replaced by a partial
+    /// world, so the first thing that happens is the Questioner's review.
+    async fn real_core_object_phases(leave_gaps: bool) {
+        use crate::store::{Advance, Fields, ObjectKind};
+        let model = DeviceModel::load().await;
+        let (shared, name, sampling, limits) = model.parts();
+        // Sampling is deterministic; a different temperature gives a different sample.
+        let mut sampling = sampling;
+        if let Ok(temperature) = std::env::var("CAIRNWORLD_TEST_TEMPERATURE") {
+            sampling.temperature = temperature.parse().expect("a number");
+        }
+        let observed = model.observed();
+        let (_db, store, member) = saltgate_ready_for_objects("real-generation").await;
         if leave_gaps {
             let quay = store
                 .create_object(
@@ -2796,7 +2983,7 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .advance_generation(member.world_id, Advance::Built, 0)
+                .advance_generation(member.world_id, Advance::ObjectsCreated, 0)
                 .await
                 .unwrap();
         }
@@ -2853,6 +3040,38 @@ mod tests {
                 shown(&request)
             );
         }
+        // What the model was actually sent in the review: the first and last
+        // prompts that carry the Questioner's review tools.
+        {
+            let prompts = observed.lock().unwrap();
+            let review: Vec<_> = prompts
+                .iter()
+                .filter(|seen| seen.prompt.contains("core_objects_created"))
+                .collect();
+            println!("REVIEW PROMPTS {}", review.len());
+            for (label, seen) in [("FIRST", review.first()), ("LAST", review.last())] {
+                if let Some(seen) = seen {
+                    println!(
+                        "{label} REVIEW PROMPT ({} tokens)
+{}",
+                        seen.tokens.len(),
+                        seen.prompt
+                    );
+                }
+            }
+            if let Some(seen) = prompts
+                .iter()
+                .rev()
+                .find(|seen| seen.prompt.contains("\"name\": \"create_object\""))
+            {
+                println!(
+                    "LAST STORYTELLER PROMPT ({} tokens)
+{}",
+                    seen.tokens.len(),
+                    seen.prompt
+                );
+            }
+        }
         assert!(world.failure.is_none(), "{:?}", world.failure);
         assert!(world.ready);
         if leave_gaps {
@@ -2876,7 +3095,7 @@ mod tests {
     }
 
     /// A world generated from a seed by the real model, start to finish. Stops
-    /// early if the Questioner keeps asking after four rounds, and prints every
+    /// early if the Questioner keeps asking through 24 requests, and prints every
     /// request the Questioner received so a stuck loop can be read as the model
     /// saw it. Not part of the device suite: a run takes many minutes.
     #[tokio::test]
@@ -2930,7 +3149,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1800), async {
             loop {
                 let world = store.world(member.world_id).await.unwrap().unwrap();
-                if world.ready || world.failure.is_some() || asks(&requests.lock().unwrap()) >= 6 {
+                if world.ready || world.failure.is_some() || asks(&requests.lock().unwrap()) >= 24 {
                     break;
                 }
                 let _ = events.recv().await;
@@ -3056,8 +3275,12 @@ mod tests {
                 .unwrap(),
             role: Role::System,
         }];
-        let definitions =
-            crate::tools::definitions(&generation::questioner_tools().unwrap()).unwrap();
+        let tools = &crate::prompts::current().unwrap().questioner.tools;
+        let definitions: Vec<crate::llm::ToolDefinition> =
+            ["ask_questions", "world_summary_complete"]
+                .into_iter()
+                .map(|name| tools.tool(name, crate::prompts::no_arguments()).unwrap())
+                .collect();
         leading.push(crate::store::Segment::Tools {
             text: store
                 .store_prompt_text(&serde_json::to_string(&definitions).unwrap())
@@ -3151,21 +3374,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut finished = 0;
-        while finished < 9 {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+        // The scripted responses end with the name; the world fails after that.
+        while store.world(member.world_id).await.unwrap().unwrap().name == "Unnamed world" {
+            tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
                 .await
                 .expect("a generation step did not finish")
                 .unwrap();
-            if matches!(
-                event,
-                crate::inspection::DevEvent::Changed {
-                    inference_id: None,
-                    ..
-                }
-            ) {
-                finished += 1;
-            }
         }
 
         let summary_request = crate::prompts::current()

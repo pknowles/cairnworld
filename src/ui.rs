@@ -894,6 +894,17 @@ fn inspect_pane(
                 sequence_id,
                 parent_inference_id,
             } => {
+                if let Some(InspectSelection::AgentHistory {
+                    agent_id: open_agent_id,
+                    ..
+                }) = selection.get_untracked()
+                    && open_agent_id == agent_id
+                    && let Some(selected) = selection.get_untracked()
+                {
+                    let for_generation = generation.get_untracked();
+                    fetch_selection(world_id, selected, for_generation, fetch_state);
+                    return;
+                }
                 let Some(InspectSelection::Sequence {
                     id: open_sequence_id,
                     ..
@@ -1970,7 +1981,17 @@ fn RawHistoryEntryRow(
                 <CompactionCard inference_id cause_inference_id text covered_ranges selection reason retained_messages/>
             </li>
         }.into_any(),
-        RawHistoryEntry::Inference { id, history_entry_id, error, aside } => {
+        RawHistoryEntry::Inference { id, history_entry_id, error, aside, running } => {
+            if running {
+                return view! {
+                    <li class="flex items-center gap-2 text-sm text-base-content/60" role="status">
+                        <span class="loading loading-dots loading-sm" aria-hidden="true"></span>
+                        <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>
+                            "View inference"
+                        </button>
+                    </li>
+                }.into_any();
+            }
             if let Some(content) = aside {
                 return view! {
                 <li class=move || format!("rounded border border-dashed border-warning p-2 {}", if history_entry_selected(history_entry_id, selection) { "ring-2 ring-primary" } else { "" })>
@@ -1984,7 +2005,9 @@ fn RawHistoryEntryRow(
                 </li>
                 }.into_any();
             }
-            let Some(error) = error else { return ().into_any(); };
+            let Some(error) = error else {
+                return ().into_any();
+            };
             view! {
             <li class=move || format!("alert alert-error text-sm {}", if history_entry_selected(history_entry_id, selection) { "ring-2 ring-primary" } else { "" })>
                 <button class="badge badge-outline badge-sm" on:click=move |_| selection.set(Some(InspectSelection::Inference(id)))>
@@ -2311,15 +2334,40 @@ pub fn PlayerChat(
     #[cfg(feature = "hydrate")]
     let never_mind_socket = socket.clone();
 
+    // New entries scroll the chat down only while the reader is already at the
+    // bottom; someone reading earlier messages is not pulled away. Sending a
+    // message brings the reader back to the bottom.
     #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
-        entries.track();
-        activity.track();
-        if let Some(chat) = chat.get() {
+    let at_bottom = std::rc::Rc::new(std::cell::Cell::new(true));
+    #[cfg(feature = "hydrate")]
+    {
+        let at_bottom = at_bottom.clone();
+        let listening = std::rc::Rc::new(std::cell::Cell::new(false));
+        Effect::new(move |_| {
+            entries.track();
+            activity.track();
+            let Some(chat) = chat.get() else {
+                return;
+            };
             let chat: HtmlElement = chat.unchecked_into();
-            chat.set_scroll_top(chat.scroll_height());
-        }
-    });
+            if !listening.replace(true) {
+                let at_bottom = at_bottom.clone();
+                let element = chat.clone();
+                let on_scroll = Closure::<dyn FnMut(Event)>::new(move |_| {
+                    at_bottom.set(
+                        element.scroll_height() - element.scroll_top() - element.client_height()
+                            <= 24,
+                    );
+                });
+                let _ = chat
+                    .add_event_listener_with_callback("scroll", on_scroll.as_ref().unchecked_ref());
+                on_scroll.forget();
+            }
+            if at_bottom.get() {
+                chat.set_scroll_top(chat.scroll_height());
+            }
+        });
+    }
 
     let on_submit = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
@@ -2351,6 +2399,7 @@ pub fn PlayerChat(
                 })
             }) {
                 Ok(()) => {
+                    at_bottom.set(true);
                     entries.update(|entries| {
                         entries.push(ChatEntry {
                             role: ChatRole::User,

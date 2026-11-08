@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world.generation_stage FROM world JOIN world_generation ON world_generation.world_id = world.id WHERE world.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation_stage",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "79361967770a554e744ce93448fd3d25a8d3dbe653cb77cd8ea1f0c2504803cc"
+}

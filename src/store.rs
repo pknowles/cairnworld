@@ -16,6 +16,7 @@ use history::EntryKind;
 pub use history::{AgentBranch, PositionRange, RawCursor};
 pub use npc::{Decision, NpcStep, ResponseCollection, with_eagerness};
 pub use prompt::PromptEvidence;
+pub use review::ReviewEntry;
 pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SpeakAction};
 
 // Developer Mode's inspection view types are shared with the browser; see
@@ -5988,6 +5989,7 @@ impl Store {
                 // is a side inference: its reply never entered this chat.
                 let row = sqlx::query!(
                     "SELECT inference.id, inference.error, \
+                            (inference.output IS NULL AND inference.error IS NULL AND inference.finished_at IS NULL) AS \"running!: bool\", \
                             CASE WHEN inference.output IS NOT NULL \
                                   AND NOT EXISTS (SELECT 1 FROM message WHERE message.source_inference_id = inference.id) \
                                   AND NOT EXISTS (SELECT 1 FROM summary WHERE summary.inference_id = inference.id) \
@@ -6007,6 +6009,7 @@ impl Store {
                     history_entry_id: entry.id,
                     error: row.error,
                     aside,
+                    running: row.running,
                 }
             }
         })

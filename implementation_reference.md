@@ -528,7 +528,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   boundary. `cairnworld import-scenario --owner-email <email> --owner-name
   <name> [--database <path>] <scenario.json>` initializes a fresh scenario
   world without loading model settings; `export-scenario [--database <path>]
-  <world-id> <output.json>` writes its reusable scenario template. Agent roles
+  <world-id> <output.json>` writes its reusable scenario template.
+  `generate-world [--database <path>] [--temperature <t>] <seed>` creates a world and
+  runs its generation to ready or failed with the real model, printing the objects
+  (`serve` on the same database shows it in Developer Mode). Agent roles
   come from their game relationships, not a `kind` switch.
 - `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
   loader/validator and the checked-in Bread Thief setup: a shared hut location,
@@ -666,34 +669,42 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   The world worker takes one step per stage after NPC steps (`Store::next_generation`,
   `Game::run_generation_step`, restoring `spent` into the shared `Budget`): the
   Questioner answers `questioner.example_questions` and `meta_questions` once (its
-  history keeps them), then each round asks (`ask_questions` or `world_summary_complete`)
-  with the seed and current summary as per-request context, not stored history; the
-  Storyteller answers each question as text in its one chat (migration 0017; both
-  roles have exactly one chat), seeing the seed and the one current summary as
-  per-request context. Its summary is a side inference (`agent::complete_aside`):
+  history keeps them), then one `ask` turn: `ask_questions` runs the Storyteller inside the call
+  (`Game::summary_round`; its turns nest under the call) and returns that the summary was rewritten (the
+  current summary is in the Questioner's per-request context), so the Questioner keeps asking in the same turn until it calls the terminal
+  `world_summary_complete`. The Storyteller answers each question as text in its one chat
+  (migration 0017; both roles have exactly one chat), seeing the seed and the one current summary
+  as per-request context. Its summary is a side inference (`agent::complete_aside`):
   the request and reply never enter its chat, so it never sees a replaced summary;
   Developer Mode lists it in its history as a labelled "Side inference"
-  (`RawHistoryEntry::Inference.aside`). The reply becomes `storyteller_summary`, and after
-  `world_summary_complete` its reply becomes the name. `Store::advance_generation` is the
+  (`RawHistoryEntry::Inference.aside`). Per-request context (`agent::DynamicContext::Fresh`, read before
+  every inference, appended to the system message) appears only in the inference view. The reply becomes
+  `storyteller_summary` (`Store::save_world_summary`), and after
+  `world_summary_complete` the Storyteller's reply becomes the name. `Store::advance_generation` is the
   one transition table; a failing step fails the world with the error on its
   sequence. `Game::admit`/`queue_player_message` refuse input until `world_is_ready`;
   players can open the play page, whose chat says the world is being created until
   it is ready (`play_connected`). The world page shows the status,
   failure and expandable seed, and with Developer Mode on hosts the Inspect panel
   (`WorldInspector` island; `ui.rs`'s `Inspector` is shared with `PlayerChat`).
-  After the name the Storyteller builds (`build`) with three tools that take an `object` kind and the IDs
-  the tools return: `create_object`, `update_object`, `delete_object` (`game/authoring.rs`; their schema is
-  `Fields`, and `ObjectKind::fields` is the one list of what each kind has, which the tool refuses to go
-  beyond). An item lies at a location or is held by an NPC. `Store::change_object` creates
+  After the name the Storyteller creates the world's objects (the stage stored as `create_objects`) with three
+  tools that take an `object` kind and the IDs the tools return: `create_object` (every kind requires a
+  description), `update_object` (the same fields, described once in `create_object`) and `delete_object`
+  (`game/authoring.rs`). A group has no tool of its own: an NPC joins one with `group_id` or starts one with
+  `group_name` and `location_id` (`Store::npc_group`), and moving or deleting a group's last NPC deletes the
+  group, so no group is ever empty. Its schema is `Fields`, and `ObjectKind::fields` is the one list of what each
+  kind has, which the tool refuses to go beyond. An item lies at a location or is held by an NPC. `Store::change_object` creates
   (`store/authoring.rs`, sharing its per-object inserts with `install_scenario`), updates and deletes
   (`store/editing.rs`); a delete only sets `deleted`, and the gameplay queries that enumerate characters,
   items, locations and connections skip deleted ones; Developer Mode lists them labelled. Each result
-  carries the object counts. The Questioner reviews (`review`, `store/review.rs`): `read_object`,
-  `mark_object_reviewed`, `ask_questions` (back to `build`) or `core_objects_created`. Reviewed flags are
+  carries the object counts. The Questioner reviews (`review`, `store/review.rs`): `read_object` (takes any number of objects),
+  `mark_object_reviewed`, `ask_questions` (runs a Storyteller fix turn inside the call, `Game::objects_round`;
+  the result lists the objects it added, changed or removed; Storyteller tools work in the object-creation and review stages)
+  or the terminal `core_objects_created`. Reviewed flags are
   `object_reviewed` rows, cleared when an object or what it holds changes. `Store::core_object_problems`
   is the one readiness check, run by the tool and again by `advance_generation`, which then marks the
   world `complete` and places waiting Adventurers in its first group (interim, until entry placement).
-  Rule refusals are `Rejected` errors, shown to the agent as tool results. Every build request shows the
+  Rule refusals are `Rejected` errors, shown to the agent as tool results. Every request to create objects shows the
   Storyteller the objects that exist; the Questioner's review request lists the summary's `[[Name]]`
   marks that no object has (found by code, as is the same reminder given to the Storyteller). The first
   round of Storyteller answers uses `first_round_temperature`; each world samples `sample_size` example
@@ -701,12 +712,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 
   A chat summary reaches the model as the first user-role message after the system message, so a
   compacted request always has the user turn chat templates require. The summary request is the agent's
-  role text, the history to replace and the summary prompt (under 150 words, leaving out the world state
+  role text, the history to replace and the summary prompt (under 150 words, beginning with the last request the
+  agent was given, leaving out the world state
   that is shown again with each request): its tools stay out because a model given them answers by
-  calling one. The Storyteller's three tools are 3.8 thousand characters, guarded by a test. Real-model
+  calling one. The Storyteller's three tools are about 4 thousand characters, guarded by a test (under 4,200). Real-model
   tests (ignored, GPU, device-test settings: 4096-token context): `a_world_is_generated_from_a_seed_by_the_real_model`
   runs the whole flow from a seed to a ready world; `a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress`
-  and `the_real_model_questioner_catches_what_the_storyteller_left_out` cover the summary and the review.
+  and `the_real_model_questioner_catches_what_the_storyteller_left_out` cover the summary and the review;
+  `the_real_storyteller_creates_objects_without_naming_ids_of_its_own` runs only the Storyteller creating objects
+  and prints counts of replies, rejected calls and objects made, and `cairnworld generate-world` runs the real
+  worker without the browser.
   Not built yet: the extended summary and detail phases.
 - NPC speech responses (design.md: Character perceptions and NPC responses; migrations
   0005-0006; `src/store/npc.rs`, `src/game/npc.rs`). Committing speech

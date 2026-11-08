@@ -1,11 +1,17 @@
 # Storyteller world initialization
 
-Pending implementation and verification.
+Phases 1 and 2 are implemented and committed; not yet verified. With the device-test settings (4096-token
+context, compaction at 2048) real-model runs from a seed do not reliably reach a ready world: the object
+creation step took between 13 and 68 model calls across runs, and no run has finished review within 25
+minutes (the Storyteller re-creates objects that already exist, and chat summaries sometimes replace its
+task with an in-story one). Next round: make the tools' alternatives explicit as `prompt_standards.md` now asks
+(an NPC joining a group or starting one; an item at a location or held by an NPC), and fix the
+re-creation loop from the real model's inputs. Phases 3 and 4 and the smaller-world checkbox wait for that.
 
 ## Goal and authority
 
 Creating a game starts generation immediately: the declared Questioner/Storyteller
-process develops the world, and the Storyteller builds it by calling the authoring
+process develops the world, and the Storyteller creates its objects by calling the authoring
 tools, never by emitting a scenario file. With Developer Mode enabled the owner can
 watch it live in the web UI: both agents and their inferences, the world summary on
 the world, and each object and NPC as it is created. The Questioner leads the
@@ -40,11 +46,11 @@ after their rules dependencies. Campaign completion remains a separate plan.
 
 | Approach | Benefit | Cost and decision |
 | --- | --- | --- |
-| Generate one complete scenario JSON and import it | Reuses the scenario format | Rejected: the declarations have the Storyteller build the world with tools. Scenario import remains only for hand-written scenarios and is never a generation output. |
+| Generate one complete scenario JSON and import it | Reuses the scenario format | Rejected: the declarations have the Storyteller create the world's objects with tools. Scenario import remains only for hand-written scenarios and is never a generation output. |
 | Extend existing constructors and field access with scoped authoring tools | Reuses identities, validation, recording and editing | Requires explicit authoring permissions and lifecycle checks. Selected. |
 | Add a separate draft-object model or world-generation framework | Could isolate draft data | Duplicates game objects and needs a conversion path. Use ordinary objects inside an initializing world instead. |
 
-## Build order
+## Order of work
 
 1. **Generation from world creation.** The create-world form takes the optional
    [seed prompt](../user_declarations.md#world-detail-page); creation stores it,
@@ -98,31 +104,27 @@ the last implemented phase makes a generated world ready.
 - Every world has `generation_stage`, whatever filled it in: `complete` means
   ready to play (a scenario import is `complete` at once, and DetailObjectsCreated
   will set it). Otherwise it selects the next finite step, as `next_npc_step` does: `meta`,
-  `ask`, `answer`, `summarize`, `name`, `build`, `review`, `failed`. A failed step's
+  `ask`, `name`, `create_objects`, `review`, `failed`. A failed step's
   error stays on its sequence; the stage only marks the world failed.
-- `world_generation(world_id, questions, next_question, spent)` is the loop's
-  working data; `spent` is restored into the shared `Budget` each step, as NPC
-  discussions do with `Budget::restore`, so the total limit bounds the whole
-  generation. The two chats are found through `world_role_agent`. `questions` copies the
-  arguments of the Questioner's recorded `ask_questions` call: read them from
-  that recording instead, and drop the column, if the store makes that cheap.
+- `world_generation(world_id, spent)` is the loop's working data; `spent` is
+  restored into the shared `Budget` each step, as NPC discussions do with
+  `Budget::restore`, so the total limit bounds the whole generation. The two chats
+  are found through `world_role_agent`.
 - Each stage is one finite step run by the world worker; its outputs and next
   stage commit together, so a restart resumes at the stored stage. `meta`: the
   Questioner is given the seed, example questions and meta-questions from
-  `prompts.toml` and answers the meta-questions. `ask`: given the seed prompt and
-  latest summary as per-request context (replaced each round, so it does not pile
-  up in its history) it asks questions with `ask_questions`, or calls
-  `world_summary_complete` once the summary has a solid foundation. Its role text
+  `prompts.toml` and answers the meta-questions. `ask`: one Questioner turn. It
+  asks with `ask_questions`, whose call runs the Storyteller (answers one at a
+  time, then a new summary as a side inference) and returns what changed (the summary was
+  rewritten; the Questioner's context holds it), as declared; it calls the terminal `world_summary_complete` once
+  the summary has a solid foundation. Its role text
   carries the declared priority order (interest, depth and internal connections;
   multiple player pathways; contradictions and weak coupling; then detail) and
   switches to critical-review questions as the summary matures.
-  `answer`: the Storyteller answers one question as plain text. `summarize`: its
-  text reply is stored as the world summary, then `ask` runs again. After
-  `world_summary_complete`, `name`: its text reply is stored as the world name, then
-  `build` follows, in which the Storyteller creates the summary's core objects. An empty summary or name reply fails its step
-  visibly; it is not replaced or retried. The Storyteller has no tools here; the only
-  tools are the Questioner's two, and step 2's editing tools let the Storyteller
-  revise the summary and name afterwards.
+  After `world_summary_complete`, `name`: the Storyteller's text reply is stored as the world name, then
+  `create_objects` follows, in which the Storyteller creates the summary's core objects. An empty summary or name reply fails its step
+  visibly; it is not replaced or retried. The Storyteller has no tools while
+  answering; step 2's editing tools let it revise the summary and name afterwards.
 - Reuse, not copies: split `create_adventurer` into creating the Adventurer and
   placing it in a group (joining a ready world does both; one still initializing only the first;
   entry placement later uses the second); readiness (`generation_stage` is
@@ -160,12 +162,11 @@ chat and are compacted like any chat's.
   stage before starting inference. Keep only the progress needed to select the
   next stage/object and reference committed outputs; use ordinary recordings for
   inference inputs/results, not another transcript or per-tool replay journal.
-- (Built as three tools with an `object` kind, `create_object`, `update_object` and
-  `delete_object`, addressed by ID: the user's 2026-11-05 decision, so the tools fit a 4096-token
-  context.) Provide Create and Update variants for Location, Connection, NPC, Group,
-  ItemType and Item, and Delete variants for all but Group (a Group goes when its
-  last NPC does; this departs from the declarations' DeleteGroup and awaits the
-  user's decision). Create requires all initial fields; Update names the
+- (Built as three tools with an `object` kind, `create_object`, `update_object` and `delete_object`,
+  addressed by ID: the user's 2026-11-05 decision, so the tools fit a 4096-token context.) Provide Create,
+  Update and Delete for Location, Connection, NPC, ItemType and Item. There is no tool for a group: the
+  declarations say NPCs "must have a group - either existing or created with their first NPC", and a group
+  goes when its last NPC does. Create requires all initial fields; Update names the
   object ID and only fields being replaced. Return assigned IDs, real changes
   and current location/connection/group/NPC/item counts. Use world-scoped typed
   arguments and shared constructors/validation. Return full validation errors as

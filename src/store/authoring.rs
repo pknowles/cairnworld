@@ -27,7 +27,7 @@ pub enum ObjectKind {
 }
 
 impl ObjectKind {
-    pub(super) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Location => "location",
             Self::Connection => "connection",
@@ -40,7 +40,7 @@ impl ObjectKind {
 
     /// The fields an object of this kind has, and whether creating one needs it.
     /// An item needs exactly one of `location_id` and `held_by_id`.
-    pub(super) fn fields(self) -> &'static [(&'static str, bool)] {
+    pub fn fields(self) -> &'static [(&'static str, bool)] {
         match self {
             Self::Location => &[
                 ("name", true),
@@ -53,10 +53,14 @@ impl ObjectKind {
                 ("travel_time", true),
                 ("description", true),
             ],
-            Self::Group => &[("name", true), ("location_id", true), ("description", true)],
+            // A group is never created or changed by itself: an NPC joins one or
+            // makes one, and it goes with its last NPC.
+            Self::Group => &[],
             Self::Npc => &[
                 ("name", true),
-                ("group_id", true),
+                ("group_id", false),
+                ("group_name", false),
+                ("location_id", false),
                 ("description", true),
                 ("background", true),
                 ("motive", true),
@@ -87,6 +91,7 @@ pub struct Fields {
     pub travel_time: Option<i64>,
     pub location_id: Option<i64>,
     pub group_id: Option<i64>,
+    pub group_name: Option<String>,
     pub item_type_id: Option<i64>,
     pub held_by_id: Option<i64>,
     pub background: Option<String>,
@@ -148,11 +153,9 @@ impl Fields {
     }
 }
 
-/// What to do about what depends on an object being deleted.
+// What to do about what depends on an object being deleted.
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 pub struct DeleteOptions {
-    #[serde(default)]
-    pub delete_groups: bool,
     pub item_location_id: Option<i64>,
     pub item_description: Option<String>,
     #[serde(default)]
@@ -177,6 +180,8 @@ impl DeleteOptions {
 pub struct Changed {
     pub kind: &'static str,
     pub id: i64,
+    /// The group made for an NPC that started a new one.
+    pub group: Option<i64>,
     pub counts: Counts,
 }
 
@@ -438,7 +443,7 @@ impl Store {
         Ok(character_id)
     }
 
-    /// Add one object to a world whose Storyteller is building it. The fields
+    /// Add one object to a world whose Storyteller is creating its objects. The fields
     /// are checked against the kind, every reference must be an object of the
     /// world, and a name already taken changes nothing.
     pub async fn create_object(
@@ -447,14 +452,21 @@ impl Store {
         kind: ObjectKind,
         fields: &Fields,
     ) -> Result<Changed> {
+        if kind == ObjectKind::Group {
+            return reject(
+                "A group is made with its first NPC: give the NPC group_name and location_id."
+                    .into(),
+            );
+        }
         fields.check(kind, true)?;
         let mut transaction = self
             .pool
             .begin()
             .await
             .with_context(|| format!("creating an object in world {world_id}"))?;
-        Self::ensure_stage(&mut transaction, world_id, "build").await?;
+        Self::ensure_stage(&mut transaction, world_id, &["create_objects", "review"]).await?;
         let notes = Notes::default();
+        let mut made_group = None;
         let id = match kind {
             ObjectKind::Location => {
                 let name = need(&fields.name, "name")?;
@@ -504,31 +516,19 @@ impl Store {
                 };
                 Self::insert_connection(&mut transaction, world_id, from, to, &connection).await?
             }
-            ObjectKind::Group => {
-                let name = need(&fields.name, "name")?;
-                Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
-                let location_id = need(&fields.location_id, "location_id")?;
-                Self::ensure_exists(
-                    &mut transaction,
-                    world_id,
-                    ObjectKind::Location,
-                    location_id,
-                )
-                .await?;
-                let group = Group {
-                    name,
-                    location: String::new(),
-                    description: need(&fields.description, "description")?,
-                    notes,
-                };
-                Self::insert_group(&mut transaction, world_id, location_id, &group).await?
-            }
+            ObjectKind::Group => unreachable!("a group is refused before it is made"),
             ObjectKind::Npc => {
                 let name = need(&fields.name, "name")?;
                 Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
-                let group_id = need(&fields.group_id, "group_id")?;
-                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Group, group_id)
-                    .await?;
+                let Some((group_id, made)) =
+                    Self::npc_group(&mut transaction, world_id, fields).await?
+                else {
+                    return reject(
+                        "An NPC needs a group: give group_id to join one, or group_name and location_id to make one."
+                            .into(),
+                    );
+                };
+                made_group = made.then_some(group_id);
                 let npc = Npc {
                     name,
                     group: String::new(),
@@ -614,8 +614,44 @@ impl Store {
         Ok(Changed {
             kind: kind.as_str(),
             id,
+            group: made_group,
             counts,
         })
+    }
+
+    /// The group an NPC goes into: an existing one, or a new one made for it, so
+    /// a group never exists without a character. The flag says it was made.
+    pub(super) async fn npc_group(
+        transaction: &mut Transaction<'_, Sqlite>,
+        world_id: i64,
+        fields: &Fields,
+    ) -> Result<Option<(i64, bool)>> {
+        let new_group = fields.group_name.is_some() || fields.location_id.is_some();
+        match (fields.group_id, &fields.group_name, fields.location_id) {
+            (Some(_), _, _) if new_group => reject(
+                "Give group_id to join a group, or group_name and location_id to make one, not both."
+                    .into(),
+            ),
+            (Some(id), _, _) => {
+                Self::ensure_exists(transaction, world_id, ObjectKind::Group, id).await?;
+                Ok(Some((id, false)))
+            }
+            (None, Some(name), Some(location_id)) => {
+                Self::ensure_unused(transaction, world_id, ObjectKind::Group, name).await?;
+                Self::ensure_exists(transaction, world_id, ObjectKind::Location, location_id)
+                    .await?;
+                let group = Group {
+                    name: name.clone(),
+                    location: String::new(),
+                    description: String::new(),
+                    notes: Notes::default(),
+                };
+                let id = Self::insert_group(transaction, world_id, location_id, &group).await?;
+                Ok(Some((id, true)))
+            }
+            (None, None, None) => Ok(None),
+            (None, _, _) => reject("A new group needs group_name and location_id.".into()),
+        }
     }
 
     /// The object of `kind` called `name` in the world, if there is one.
@@ -750,10 +786,25 @@ impl Store {
         .with_context(|| format!("looking up {} {id}", kind.as_str()))?;
         match found {
             Some(_) => Ok(()),
-            None => reject(format!(
-                "There is no {} with id {id} in the world.",
-                kind.as_str()
-            )),
+            None => {
+                // Say which ids do exist, so the next attempt can use one.
+                let existing: Vec<String> = Self::review_entries(transaction, world_id)
+                    .await?
+                    .into_iter()
+                    .filter(|entry| entry.kind == kind.as_str())
+                    .map(|entry| entry.id.to_string())
+                    .collect();
+                reject(format!(
+                    "There is no {} with id {id} in the world. Existing {} ids: {}.",
+                    kind.as_str(),
+                    kind.as_str(),
+                    if existing.is_empty() {
+                        "none".to_string()
+                    } else {
+                        existing.join(", ")
+                    }
+                ))
+            }
         }
     }
 
@@ -764,16 +815,13 @@ impl Store {
         name: &str,
     ) -> Result<()> {
         // A deleted object keeps its name, since it still exists.
-        if Self::find_by_name(transaction, world_id, kind, name, true)
-            .await?
-            .is_some()
-        {
-            return reject(format!(
-                "The world already has a {} called `{name}`.",
+        match Self::find_by_name(transaction, world_id, kind, name, true).await? {
+            Some(id) => reject(format!(
+                "The world already has {} {id} called `{name}`; give id {id} to change it.",
                 kind.as_str()
-            ));
+            )),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// The Questioner's review no longer holds for an object that changed.
@@ -797,14 +845,15 @@ impl Store {
     pub(super) async fn ensure_stage(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
-        wanted: &str,
+        wanted: &[&str],
     ) -> Result<()> {
         let stage =
             sqlx::query_scalar!("SELECT generation_stage FROM world WHERE id = ?", world_id)
                 .fetch_one(&mut **transaction)
                 .await
                 .with_context(|| format!("loading world {world_id}"))?;
-        if stage != wanted {
+        if !wanted.contains(&stage.as_str()) {
+            let wanted = wanted.join("` or `");
             return reject(format!(
                 "That does not apply now: the world is at the `{stage}` stage, not `{wanted}`."
             ));
@@ -875,7 +924,7 @@ impl Store {
 pub(in crate::store) mod fixtures {
     use crate::store::{Fields, ObjectKind, Store, TestDatabase};
 
-    pub(in crate::store) async fn building_world() -> (Store, TestDatabase, i64) {
+    pub(in crate::store) async fn world_creating_objects() -> (Store, TestDatabase, i64) {
         let db = TestDatabase::new("authoring");
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -888,7 +937,7 @@ pub(in crate::store) mod fixtures {
             .unwrap()
             .world_id;
         sqlx::query!(
-            "UPDATE world SET generation_stage = 'build' WHERE id = ?",
+            "UPDATE world SET generation_stage = 'create_objects' WHERE id = ?",
             world_id
         )
         .execute(&store.pool)
@@ -924,19 +973,33 @@ pub(in crate::store) mod fixtures {
         }
     }
 
-    pub(in crate::store) fn group_fields(name: &str, location_id: i64) -> Fields {
-        Fields {
-            name: Some(name.into()),
-            location_id: Some(location_id),
-            description: Some(String::new()),
-            ..Fields::default()
-        }
+    /// An NPC that starts a new group: the group's and the NPC's IDs.
+    pub(in crate::store) async fn group_with_npc(
+        store: &Store,
+        world: i64,
+        group: &str,
+        location_id: i64,
+        npc: &str,
+    ) -> (i64, i64) {
+        let changed = store
+            .create_object(
+                world,
+                ObjectKind::Npc,
+                &Fields {
+                    group_name: Some(group.into()),
+                    location_id: Some(location_id),
+                    ..npc_fields(npc, 0)
+                },
+            )
+            .await
+            .unwrap();
+        (changed.group.expect("a new group"), changed.id)
     }
 
     pub(in crate::store) fn npc_fields(name: &str, group_id: i64) -> Fields {
         Fields {
             name: Some(name.into()),
-            group_id: Some(group_id),
+            group_id: (group_id != 0).then_some(group_id),
             description: Some(String::new()),
             background: Some("Has a past.".into()),
             motive: Some("Has a goal.".into()),
@@ -951,8 +1014,8 @@ mod id_tests {
     use super::*;
 
     #[tokio::test]
-    async fn the_storyteller_builds_a_world_one_object_at_a_time() {
-        let (store, _db, world) = building_world().await;
+    async fn the_storyteller_creates_a_world_one_object_at_a_time() {
+        let (store, _db, world) = world_creating_objects().await;
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
         let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
         create(
@@ -968,14 +1031,7 @@ mod id_tests {
             },
         )
         .await;
-        let family = create(
-            &store,
-            world,
-            ObjectKind::Group,
-            group_fields("family", hut),
-        )
-        .await;
-        let toma = create(&store, world, ObjectKind::Npc, npc_fields("Toma", family)).await;
+        let (_, toma) = group_with_npc(&store, world, "family", hut, "Toma").await;
         let loaf = create(
             &store,
             world,
@@ -1023,14 +1079,14 @@ mod id_tests {
     }
 
     #[tokio::test]
-    async fn rejected_creation_changes_nothing_and_creation_requires_building() {
-        let (store, _db, world) = building_world().await;
+    async fn rejected_creation_changes_nothing_and_creation_requires_the_creating_stage() {
+        let (store, _db, world) = world_creating_objects().await;
         create(&store, world, ObjectKind::Location, location_fields("hut")).await;
         let error = store
             .create_object(world, ObjectKind::Location, &location_fields("hut"))
             .await
             .unwrap_err();
-        assert!(format!("{error:#}").contains("already has a location called `hut`"));
+        assert!(format!("{error:#}").contains("called `hut`"));
         let error = store
             .create_object(
                 world,
@@ -1052,26 +1108,19 @@ mod id_tests {
             .await
             .unwrap();
         assert_eq!((changed.counts.locations, changed.counts.npcs), (2, 0));
-        set_stage(&store, world, "review").await;
+        set_stage(&store, world, "ask").await;
         let error = store
             .create_object(world, ObjectKind::Location, &location_fields("field"))
             .await
             .unwrap_err();
-        assert!(format!("{error:#}").contains("not `build`"));
+        assert!(format!("{error:#}").contains("not `create_objects` or `review`"));
     }
 
     #[tokio::test]
     async fn held_items_are_reviewed_with_their_npc() {
-        let (store, _db, world) = building_world().await;
+        let (store, _db, world) = world_creating_objects().await;
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
-        let family = create(
-            &store,
-            world,
-            ObjectKind::Group,
-            group_fields("family", hut),
-        )
-        .await;
-        let toma = create(&store, world, ObjectKind::Npc, npc_fields("Toma", family)).await;
+        let (_, toma) = group_with_npc(&store, world, "family", hut, "Toma").await;
         let axe_type = create(
             &store,
             world,
@@ -1088,7 +1137,7 @@ mod id_tests {
             .set_reviewed(world, ObjectKind::Npc, toma, true)
             .await
             .unwrap();
-        set_stage(&store, world, "build").await;
+        set_stage(&store, world, "create_objects").await;
         let error = store
             .create_object(
                 world,
@@ -1147,7 +1196,7 @@ mod id_tests {
 
     #[tokio::test]
     async fn duplicate_connections_are_refused_by_their_ids() {
-        let (store, _db, world) = building_world().await;
+        let (store, _db, world) = world_creating_objects().await;
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
         let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
         let fields = Fields {
@@ -1167,7 +1216,7 @@ mod id_tests {
 
     #[tokio::test]
     async fn a_kind_refuses_fields_it_does_not_have_and_creation_needs_the_ones_it_does() {
-        let (store, _db, world) = building_world().await;
+        let (store, _db, world) = world_creating_objects().await;
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
 
         // A field of another kind is refused, and the kind's fields are listed.
@@ -1189,7 +1238,7 @@ mod id_tests {
             "{error:#}"
         );
 
-        // Creating needs every required field, naming the missing ones.
+        // A group has no creation of its own, and an NPC needs one.
         let error = store
             .create_object(
                 world,
@@ -1202,7 +1251,30 @@ mod id_tests {
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("A group needs location_id, description"),
+            format!("{error:#}").contains("A group is made with its first NPC"),
+            "{error:#}"
+        );
+        let error = store
+            .create_object(world, ObjectKind::Npc, &npc_fields("Toma", 0))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("An NPC needs a group"),
+            "{error:#}"
+        );
+        let error = store
+            .create_object(
+                world,
+                ObjectKind::Npc,
+                &Fields {
+                    group_name: Some("family".into()),
+                    ..npc_fields("Toma", 0)
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("A new group needs group_name and location_id"),
             "{error:#}"
         );
 

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT world.generation_stage, world.initial_prompt, world.storyteller_summary, world_generation.spent, questioner.agent_id AS questioner_agent_id, questioner_chat.branch_id AS questioner_branch_id, storyteller.agent_id AS storyteller_agent_id, storyteller_chat.branch_id AS storyteller_branch_id FROM world JOIN world_generation ON world_generation.world_id = world.id JOIN world_role_agent AS questioner ON questioner.world_id = world.id AND questioner.role = 'questioner' JOIN agent_history AS questioner_chat ON questioner_chat.agent_id = questioner.agent_id JOIN world_role_agent AS storyteller ON storyteller.world_id = world.id AND storyteller.role = 'storyteller' JOIN agent_history AS storyteller_chat ON storyteller_chat.agent_id = storyteller.agent_id WHERE world.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation_stage",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "initial_prompt",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "storyteller_summary",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "spent",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "questioner_agent_id",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "questioner_branch_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "storyteller_agent_id",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "storyteller_branch_id",
+        "ordinal": 7,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f91c3e267033de9d0c412873dfdbfe0245b42a67f05a291863618bdb284489f8"
+}

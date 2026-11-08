@@ -17,6 +17,8 @@ binary has subcommands:
   with edited prompts
 - `cairnworld import-scenario` / `export-scenario` - reusable checked-in
   scenario templates
+- `cairnworld generate-world <seed>` - generate a world with the real model and
+  world worker without the browser; everything is recorded for Developer Mode
 
 Layers, each depending only on those above it:
 
@@ -1893,10 +1895,21 @@ and NPC simulation are blocked. The normal page exposes status/error and the
 expandable seed, not the spoiler-bearing summary. Developer Mode exposes world
 objects, progress and both roles' recorded interactions.
 
-Questioner first answers supplied meta-questions in one inference, then emits
-AskQuestions or WorldSummaryComplete in the next. Storyteller answers questions one
-at a time as text to itself, then writes/edits the world summary. Its next round
-starts from the seed and current summary without earlier answer transcripts.
+Questioner first answers supplied meta-questions in one inference, then calls
+AskQuestions or WorldSummaryComplete. AskQuestions runs the Storyteller inside the
+call and returns the effect as its result: while the summary develops the
+Storyteller answers the questions one at a time as text to itself, then writes the
+world summary; the result says it was rewritten and the Questioner's context holds the
+current summary. While reviewing objects it changes them and
+the result lists what it added, changed and removed. The Questioner continues in
+the same turn. WorldSummaryComplete ends the turn. The Storyteller's next round
+starts from the seed and current summary without earlier answer transcripts. The
+seed and summary are shown with each Storyteller request but are not chat
+messages and are read again before every inference, so they are never stale while
+tools change the world. The exact request of each inference, with that context
+appended to the system message, is shown in the inference view, not in the chat
+history. When the Storyteller changes objects for a question the
+result also carries its own reply, so a refusal or confusion is visible.
 Questioner reviews world artifacts, including that summary and the objects
 created so far, not Storyteller's answer history. During conceptual development
 the summary supplies the artifact under review; construction review includes

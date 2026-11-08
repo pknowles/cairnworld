@@ -1066,3 +1066,87 @@ On naming a field that said `kind` in the generic object tools:
 > sure all kinds have a prefix if the containing object is not named too
 
 The location's field is `location_kind`; the object's own kind argument is `object`.
+
+## 2026-11-06: The questions are a call that returns the Storyteller's effect; one-shot context is visible once
+
+On the Questioner's questions, seen in Developer Mode as an ending-the-turn tool that answered
+"Questions recorded.":
+
+> why is this a thing? "ends your turn"? the user decs say the question is a call that returns
+> with the result of the storyteller updates. i.e. it updates the summary or makes changes to the
+> world with tool calls
+>
+> why "recorded"??? we don't want to record questions. we want to ask them to the storyteller.
+
+and, on the Storyteller's results reaching the Questioner:
+
+> the result should be changes made to the world. NOT raw tool results from the storyteller's tool calls
+
+`ask_questions` now runs the Storyteller inside the call. While the summary develops, the result
+is the new summary; while reviewing, it lists the objects the Storyteller added, changed and
+removed. `world_summary_complete` and `core_objects_created` are the only turn-ending calls.
+
+On context that is supplied with a request but is not a chat message (the Storyteller's seed and
+summary):
+
+> one-shot context should be visible so I can see it and then complain to you that we should
+> present this once and only once in the chat history. two issues found
+
+Per-request context is not a chat message, so it stays out of the chat history and appears only
+in the inference view, which shows the exact input. (A history card for it was tried and removed
+the same day: "it is not something that appears in the chat history".)
+
+## 2026-11-08: Follow the declared tools; groups; plain names; temperature
+
+On the Storyteller's tools, after a dedicated group tool and a finishing tool were added that the
+declarations do not list:
+
+> this is NOT what I wrote. please remove them
+>
+> in fact in general, jutst follow AGENTS.md, user declarations and bring up contadictions or
+> issues to discuss with me if there is something that sounds like it won't actually achieve my
+> intent
+
+and, on the finishing tool: "changes_complete ?? please read the user decs tools". The Storyteller
+creates, updates and deletes locations, connections, NPCs, item types and items. It has no tool for
+a group, and no finishing tool: its turn ends with a reply, which is its note to the Questioner.
+
+On groups:
+
+> there should be NO group update. makes no sense. NPC update with new group ID moves to another group.
+
+> yes, IDs. groups do not have a sub-location description. [...] it only has a location ID
+> groups do not have a description either. remove it if you mistakenly added it
+
+> there is a name. if you have a reason to remove the name, let me know
+
+An NPC joins a group (`group_id`) or starts a new one (`group_name` and `location_id`); the
+declarations say "NPCs must have a group - either existing or created with their first NPC". A group
+goes with its last NPC. The game's group table, scenario files and GM scene text still carry a group
+description, which the declarations do not list: the user has been asked whether to remove it from the
+whole game.
+
+On naming:
+
+> build means compiling. pplease don't make up confusing shit
+
+> yes I want bad words for shit renamed
+
+The Storyteller creating the world's objects is the `create_objects` stage, and prompts, code and
+documents no longer call it "build".
+
+On temperature:
+
+> the questioner should have the normal project low temperature always. only the very initial
+> storyteller questions should have a higher (but not too high) temperature
+
+On tool design and prompt fixes:
+
+> best to avoid failures before they happen
+
+> expecting empty optional arguments is bad for LLMs
+
+> ffs. what a waste of time. can you act on this?
+
+The create tool requires `description`; the update tool carries field names and types only. Real-model
+runs use the production temperature only, and results are checked while a run is still going.
