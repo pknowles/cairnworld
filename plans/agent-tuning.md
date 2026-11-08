@@ -9,7 +9,7 @@ run, find the cause, change context, replay on the real model.
 ## HIGH SEVERITY: the GM cannot see other groups, so it cannot split or merge correctly
 
 `GmScene` ([src/store.rs](../src/store.rs)) holds the location, the interacting group's
-own description and notes, items, and that group's characters. Things the GM needs
+own notes, items, and that group's characters. Things the GM needs
 are missing, so the `split_group` and `merge_groups` tools exist but a real GM cannot use
 them reliably:
 

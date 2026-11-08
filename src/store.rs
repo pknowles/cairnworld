@@ -577,10 +577,9 @@ pub struct GmScene {
     pub location_name: String,
     pub location_description: String,
     pub gm_notes: serde_json::Value,
-    /// The interacting group's own description and GM notes - distinct from
-    /// the physical location's, since multiple groups may share one location
-    /// (design.md's "Groups and shared GM history").
-    pub group_description: String,
+    /// The interacting group's own GM notes - distinct from the physical
+    /// location's, since multiple groups may share one location (design.md's
+    /// "Groups and shared GM history").
     pub group_gm_notes: serde_json::Value,
     pub items: Vec<SceneItem>,
     /// Every character in the group, however it is controlled: the GM judges
@@ -2094,12 +2093,9 @@ impl Store {
                     partitions,
                     continue_with_character_id,
                 },
-                tools::TopologyChange::Merge {
-                    name, description, ..
-                } => tools::TopologyChange::Merge {
+                tools::TopologyChange::Merge { name, .. } => tools::TopologyChange::Merge {
                     group_ids: groups,
                     name,
-                    description,
                 },
             });
             resolved.push((call_id, execution_id, scoped));
@@ -2155,19 +2151,8 @@ impl Store {
                     )
                     .await?
                 }
-                Ok(tools::TopologyChange::Merge {
-                    group_ids,
-                    name,
-                    description,
-                }) => {
-                    Self::apply_merge(
-                        &mut transaction,
-                        group_ids,
-                        name,
-                        description,
-                        presence_seconds,
-                    )
-                    .await?
+                Ok(tools::TopologyChange::Merge { group_ids, name }) => {
+                    Self::apply_merge(&mut transaction, group_ids, name, presence_seconds).await?
                 }
                 Err(rejection) => Err(rejection),
             };
@@ -2218,7 +2203,6 @@ impl Store {
         world_gm_agent_id: i64,
         location_id: i64,
         name: &str,
-        description: &str,
         parents: &[(i64, i64)],
     ) -> Result<(i64, i64)> {
         let branch_id = sqlx::query_scalar!(
@@ -2244,12 +2228,11 @@ impl Store {
             .context("linking new group's branch to its parent")?;
         }
         let group_id = sqlx::query_scalar!(
-            "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id) \
-             VALUES (?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO \"group\" (world_id, name, location_id, branch_id) \
+             VALUES (?, ?, ?, ?) RETURNING id",
             world_id,
             name,
             location_id,
-            description,
             branch_id,
         )
         .fetch_one(&mut **transaction)
@@ -2332,20 +2315,20 @@ impl Store {
                 world_gm_agent_id,
                 location_id,
                 &partition.name,
-                &partition.description,
                 &[(branch_id, through_position)],
             )
             .await?;
             for character_id in &partition.character_ids {
                 sqlx::query!(
-                    "UPDATE character_group SET group_id = ?, description = ? WHERE character_id = ?",
+                    "UPDATE character_group SET group_id = ? WHERE character_id = ?",
                     new_group_id,
-                    partition.description,
                     character_id,
                 )
-                    .execute(&mut **transaction)
-                    .await
-                    .with_context(|| format!("moving character {character_id} into split group {new_group_id}"))?;
+                .execute(&mut **transaction)
+                .await
+                .with_context(|| {
+                    format!("moving character {character_id} into split group {new_group_id}")
+                })?;
             }
             result_group_ids.push(new_group_id);
         }
@@ -2382,7 +2365,6 @@ impl Store {
         transaction: &mut Transaction<'_, Sqlite>,
         mut groups: Vec<WorldGroup>,
         name: String,
-        description: String,
         presence_seconds: u64,
     ) -> Result<Result<String, String>> {
         groups.sort_unstable_by_key(|group| group.id);
@@ -2434,7 +2416,6 @@ impl Store {
             authority.agent_id(),
             location_id,
             &name,
-            &description,
             &parents,
         )
         .await?;
@@ -3258,22 +3239,21 @@ impl Store {
     /// location id - a world_gm plays several groups, so agent_id alone
     /// cannot select which one (design.md's `GroupHistory`).
     pub async fn gm_scene(&self, world_id: i64, branch_id: i64) -> Result<GmScene> {
-        let (group_id, location_id, location_name, location_description, gm_notes, group_description, group_gm_notes): (
+        let (group_id, location_id, location_name, location_description, gm_notes, group_gm_notes): (
             i64,
             i64,
-            String,
             String,
             String,
             String,
             String,
         ) = sqlx::query!(
             "SELECT \"group\".id AS group_id, location.id AS location_id, location.name AS location_name, location.description AS location_description, location.gm_notes, \
-                    \"group\".description AS group_description, \"group\".gm_notes AS group_gm_notes \
+                    \"group\".gm_notes AS group_gm_notes \
              FROM \"group\" JOIN location ON location.id = \"group\".location_id \
              WHERE \"group\".branch_id = ? AND \"group\".world_id = ?",
             branch_id,
             world_id,
-        ).map(|row| (row.group_id, row.location_id, row.location_name, row.location_description, row.gm_notes, row.group_description, row.group_gm_notes,))
+        ).map(|row| (row.group_id, row.location_id, row.location_name, row.location_description, row.gm_notes, row.group_gm_notes,))
         .fetch_optional(&self.pool)
         .await
         .context("loading group GM scene")?
@@ -3282,7 +3262,6 @@ impl Store {
             location_name,
             location_description,
             gm_notes: serde_json::from_str(&gm_notes).context("decoding location GM notes")?,
-            group_description,
             group_gm_notes: serde_json::from_str(&group_gm_notes)
                 .context("decoding group GM notes")?,
             items: Self::location_items(&self.pool, location_id).await?,
@@ -3987,12 +3966,12 @@ impl Store {
                 notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
             })).collect::<Result<_>>()?;
         let groups = sqlx::query!(
-            "SELECT \"group\".name, location.name AS location_name, \"group\".description, \"group\".gm_notes, \"group\".storyteller_notes \
+            "SELECT \"group\".name, location.name AS location_name, \"group\".gm_notes, \"group\".storyteller_notes \
              FROM \"group\" JOIN location ON location.id = \"group\".location_id WHERE \"group\".world_id = ? AND \"group\".deleted = 0 ORDER BY \"group\".id",
             world_id,
         ).fetch_all(&self.pool).await.context("loading scenario groups")?.into_iter()
             .map(|row| Ok(ScenarioGroup {
-                name: row.name, location: row.location_name, description: row.description,
+                name: row.name, location: row.location_name,
                 notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
             })).collect::<Result<_>>()?;
         let npcs = sqlx::query!(
@@ -6047,7 +6026,7 @@ impl Store {
             "WITH object_index AS ( \
                 SELECT 'character' AS object_type, id, name || IIF(deleted, ' (deleted)', '') AS name, description, gm_notes, storyteller_notes FROM character WHERE world_id = ? \
                 UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name || IIF(connection.deleted, ' (deleted)', ''), connection.description, connection.gm_notes, connection.storyteller_notes FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? \
-                UNION ALL SELECT 'group', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM \"group\" WHERE world_id = ? \
+                UNION ALL SELECT 'group', id, name || IIF(deleted, ' (deleted)', ''), '', gm_notes, storyteller_notes FROM \"group\" WHERE world_id = ? \
                 UNION ALL SELECT 'item', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM item WHERE world_id = ? \
                 UNION ALL SELECT 'item_type', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM item_type WHERE world_id = ? \
                 UNION ALL SELECT 'location', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM location WHERE world_id = ? \
@@ -6886,7 +6865,6 @@ mod tests {
             groups: vec![crate::scenario::Group {
                 name: "start".into(),
                 location: "start".into(),
-                description: String::new(),
                 notes: Notes::default(),
             }],
             npcs: vec![],
@@ -7245,12 +7223,10 @@ mod tests {
                 tools::GroupPartition {
                     character_ids: vec![installed.member.character_id],
                     name: "first".into(),
-                    description: String::new(),
                 },
                 tools::GroupPartition {
                     character_ids: vec![companion.character_id],
                     name: "second".into(),
-                    description: String::new(),
                 },
             ],
             None,
@@ -7588,10 +7564,6 @@ mod tests {
             .unwrap();
         assert_eq!(gm_scene.location_name, player_scene.location_name);
         assert!(gm_scene.gm_notes.get("interior").is_some());
-        assert_eq!(
-            gm_scene.group_description,
-            "Everyone present at the charcoal hut: the Adventurer, Mara and Toma."
-        );
         assert!(
             gm_scene.group_gm_notes.get("grouping").is_some(),
             "the group's own GM notes must be distinct from the location's"
@@ -9420,7 +9392,6 @@ mod tests {
             world_gm_agent_id,
             location_id,
             "left",
-            "left side",
             &[],
         )
         .await
@@ -9433,7 +9404,6 @@ mod tests {
             world_gm_agent_id,
             location_id,
             "right",
-            "right side",
             &[],
         )
         .await
@@ -9478,7 +9448,6 @@ mod tests {
             world_gm_agent_id,
             location_id,
             "merged",
-            "reunited",
             &[
                 (left_branch_id, left_through),
                 (right_branch_id, right_through),
@@ -9640,12 +9609,10 @@ mod tests {
                             tools::GroupPartition {
                                 character_ids: vec![installed.member.character_id, mara_id],
                                 name: "player side".into(),
-                                description: "outside".into(),
                             },
                             tools::GroupPartition {
                                 character_ids: vec![toma_id],
                                 name: "Toma side".into(),
-                                description: "inside".into(),
                             },
                         ],
                         continue_with_character_id: Some(installed.member.character_id),

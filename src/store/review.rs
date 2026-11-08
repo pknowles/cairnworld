@@ -173,7 +173,7 @@ impl Store {
             }
             ObjectKind::Group => {
                 let row = sqlx::query!(
-                    "SELECT \"group\".name, \"group\".description, location.name AS location \
+                    "SELECT \"group\".name, location.name AS location \
                      FROM \"group\" JOIN location ON location.id = \"group\".location_id \
                      WHERE \"group\".id = ?",
                     id,
@@ -191,8 +191,7 @@ impl Store {
                 .await
                 .context("reading a group's members")?;
                 serde_json::json!({
-                    "name": row.name, "location": row.location,
-                    "description": row.description, "members": members,
+                    "name": row.name, "location": row.location, "members": members,
                 })
             }
             ObjectKind::Npc => {

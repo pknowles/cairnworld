@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id) VALUES (?, ?, ?, ?, ?) RETURNING id",
+  "query": "INSERT INTO \"group\" (world_id, name, location_id, branch_id) VALUES (?, ?, ?, ?) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,11 @@
       }
     ],
     "parameters": {
-      "Right": 5
+      "Right": 4
     },
     "nullable": [
       false
     ]
   },
-  "hash": "f0e09be9b274e464580f7130a8dd906f2c526bbbb37f3b402614186f132c6ecf"
+  "hash": "a5d893b830d6049b3db8f3ab7c01919cdacceeb2df311c43e2c469c5a8cf983a"
 }

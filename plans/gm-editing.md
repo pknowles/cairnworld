@@ -28,8 +28,8 @@ Do not build item creation, a virtual filesystem, RAG or Cairn rule lookup here.
 
 ## Existing data and selected approach
 
-`character_group.description` already holds a character's relative placement;
-`group.description` describes the group's position in its location. Existing
+`character_group.description` already holds a character's relative placement; a group has
+no description of its own. Existing
 objects have descriptions and GM/Storyteller note columns, currently JSON-backed.
 Reuse those fields and existing object relationships. Do not introduce a second
 position store or copy placement into character identity and several notes.

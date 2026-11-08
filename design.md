@@ -519,7 +519,7 @@ the old chat through its settled position. The old group retires. Successor
 memberships, agents/chats and source references commit in one transaction without
 erasing predecessor membership. IDs of resulting groups are returned.
 
-**Merge.** `merge_groups(group_ids, description)` validates distinct nonempty
+**Merge.** `merge_groups(group_ids, name)` validates distinct nonempty
 groups at one location in the same world. Sort source group IDs ascending for
 parent order. The resulting group gets a new GM agent/chat with those bounded
 sources; source groups retire. Successor membership and the new GM/chat commit

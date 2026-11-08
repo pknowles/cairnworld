@@ -857,7 +857,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   delivery for departure-window cases. Regression tests also cover more presence
   transitions than a full action queue can hold during inference, failed presence
   writes, and release of idle world ownership. `gm_scene` includes group-local
-  description and notes and one list of the group's characters. The stable world chat channel carries only entry wake-ups
+  notes and one list of the group's characters. The stable world chat channel carries only entry wake-ups
   and failed sequence IDs. Existing sockets follow split/merge through their own
   authorized stored-history cursor. Failure details require current membership
   and player-agent or current-group invocation authorization.

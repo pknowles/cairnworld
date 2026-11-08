@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO \"group\" (world_id, name, location_id, branch_id, gm_notes, storyteller_notes, scene_narrated) VALUES (?, ?, ?, ?, ?, ?, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "2e20ae1c0b2f865ca71812495c1798d8a7b437065e1b051ea12c93e142fc313c"
+}

@@ -37,14 +37,12 @@ pub enum TopologyChange<G = i64> {
     Merge {
         group_ids: Vec<G>,
         name: String,
-        description: String,
     },
 }
 
 pub struct GroupPartition {
     pub character_ids: Vec<i64>,
     pub name: String,
-    pub description: String,
 }
 
 /// The model receives a rejected call as an ordinary tool result and can

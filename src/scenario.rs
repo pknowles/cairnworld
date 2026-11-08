@@ -72,7 +72,6 @@ pub struct Connection {
 pub struct Group {
     pub name: String,
     pub location: String,
-    pub description: String,
     #[serde(default)]
     #[schemars(skip)]
     pub notes: Notes,
@@ -284,7 +283,6 @@ mod tests {
             groups: vec![Group {
                 name: "hut".into(),
                 location: "hut".into(),
-                description: String::new(),
                 notes: Notes::default(),
             }],
             npcs: vec![Npc {

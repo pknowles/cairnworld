@@ -327,12 +327,11 @@ impl Store {
         let gm_notes = Json(&group.notes.gm);
         let storyteller_notes = Json(&group.notes.storyteller);
         Ok(sqlx::query!(
-            "INSERT INTO \"group\" (world_id, name, location_id, description, branch_id, gm_notes, storyteller_notes, scene_narrated) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            "INSERT INTO \"group\" (world_id, name, location_id, branch_id, gm_notes, storyteller_notes, scene_narrated) \
+             VALUES (?, ?, ?, ?, ?, ?, 0)",
             world_id,
             group.name,
             location_id,
-            group.description,
             branch_id,
             gm_notes,
             storyteller_notes,
@@ -643,7 +642,6 @@ impl Store {
                 let group = Group {
                     name: name.clone(),
                     location: String::new(),
-                    description: String::new(),
                     notes: Notes::default(),
                 };
                 let id = Self::insert_group(transaction, world_id, location_id, &group).await?;

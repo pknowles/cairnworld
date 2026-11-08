@@ -2038,12 +2038,10 @@ mod tests {
                                     viewer_character_id,
                                 ],
                                 name: "player side".into(),
-                                description: "outside".into(),
                             },
                             crate::tools::GroupPartition {
                                 character_ids: vec![toma_id],
                                 name: "Toma side".into(),
-                                description: "inside".into(),
                             },
                         ],
                         continue_with_character_id: Some(installed.member.character_id),
