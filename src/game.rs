@@ -3749,34 +3749,6 @@ mod tests {
         );
     }
 
-    /// TEMPORARY. DO NOT SUBMIT. Replays recorded requests on the real model.
-    #[tokio::test]
-    #[ignore = "needs a CUDA GPU"]
-    async fn zz_replay_requests() {
-        let requests: Vec<(String, crate::llm::Request)> = serde_json::from_str(
-            &std::fs::read_to_string(std::env::var("REPLAY_FILE").unwrap()).unwrap(),
-        )
-        .unwrap();
-        let model = DeviceModel::load().await;
-        let (shared, ..) = model.parts();
-        let mut results = Vec::new();
-        for (name, request) in requests {
-            let response = shared.complete(request, |_| {}).await;
-            results.push(serde_json::json!({
-                "name": name,
-                "response": match response {
-                    Ok(response) => serde_json::to_value(response).unwrap(),
-                    Err(error) => serde_json::json!({"error": format!("{error:#}")}),
-                },
-            }));
-        }
-        std::fs::write(
-            std::env::var("REPLAY_OUT").unwrap(),
-            serde_json::to_string_pretty(&results).unwrap(),
-        )
-        .unwrap();
-    }
-
     /// The device-test model, loaded once and shared by every scenario in
     /// `device_suite` so the whole suite pays the load a single time.
     pub(crate) struct DeviceModel {
