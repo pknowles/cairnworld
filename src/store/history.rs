@@ -48,6 +48,9 @@ pub struct RawCursor {
     cut: i64,
     next_branch_id: i64,
     next_position: i64,
+    /// Pages the entries strictly before `(next_branch_id, next_position)`
+    /// instead of the entries from it onwards.
+    backward: bool,
 }
 
 impl RawCursor {
@@ -222,6 +225,40 @@ impl Store {
         let limit_plus_one = limit + 1;
         let reach = serde_json::to_string(&self.reach(cursor.branch, cursor.cut).await?)
             .context("serializing raw history reach")?;
+        if cursor.backward {
+            // The `limit` entries just before the cursor, still oldest first.
+            let mut rows = sqlx::query_as::<_, HistoryEntryRow>(
+                "WITH bounded AS ( \
+                     SELECT json_extract(value, '$[0]') AS branch_id, \
+                            json_extract(value, '$[1]') AS cut \
+                     FROM json_each(?) \
+                 ) \
+                 SELECT history_entry.id, history_entry.branch_id, history_entry.position, history_entry.kind \
+                 FROM history_entry \
+                 JOIN bounded ON bounded.branch_id = history_entry.branch_id \
+                     AND history_entry.position <= bounded.cut \
+                 WHERE (history_entry.branch_id < ? \
+                          OR (history_entry.branch_id = ? AND history_entry.position < ?)) \
+                 ORDER BY history_entry.branch_id DESC, history_entry.position DESC \
+                 LIMIT ?",
+            )
+            .bind(&reach)
+            .bind(cursor.next_branch_id)
+            .bind(cursor.next_branch_id)
+            .bind(cursor.next_position)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .with_context(|| {
+                format!("loading earlier raw history from branch {}", cursor.branch.branch_id)
+            })?;
+            rows.reverse();
+            let entries = rows
+                .into_iter()
+                .map(HistoryEntry::try_from)
+                .collect::<Result<_>>()?;
+            return Ok((entries, None));
+        }
         let rows = sqlx::query_as!(
             HistoryEntryRow,
             "WITH bounded AS ( \
@@ -259,6 +296,21 @@ impl Store {
             None
         };
         Ok((entries, next))
+    }
+
+    /// Whether `entry` is the very first entry of the cursor's history, so
+    /// nothing earlier remains to page back to.
+    pub(super) async fn starts_history(
+        &self,
+        cursor: RawCursor,
+        entry: HistoryEntry,
+    ) -> Result<bool> {
+        let first_branch = self
+            .reach(cursor.branch, cursor.cut)
+            .await?
+            .first()
+            .map(|(branch_id, _)| *branch_id);
+        Ok(first_branch == Some(entry.branch_id) && entry.position == 0)
     }
 
     /// The live history is, per branch touched by the bounded-parent
@@ -463,6 +515,7 @@ impl Store {
             cut,
             next_branch_id,
             next_position: 0,
+            backward: false,
         })
     }
 
@@ -492,6 +545,7 @@ impl Store {
             cut,
             next_branch_id: branch.branch_id,
             next_position: position,
+            backward: false,
         })
     }
 
@@ -501,6 +555,7 @@ impl Store {
         cut: i64,
         next_branch_id: i64,
         next_position: i64,
+        backward: bool,
     ) -> Result<RawCursor> {
         ensure!(
             cut <= self.current_cut(branch.branch_id).await?,
@@ -519,6 +574,7 @@ impl Store {
             cut,
             next_branch_id,
             next_position,
+            backward,
         })
     }
 }

@@ -436,7 +436,10 @@ pub enum RawHistoryEntry {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RawHistoryPageResponse {
     pub entries: Vec<RawHistoryEntry>,
+    /// The next page after these entries, if any.
     pub cursor: Option<RawHistoryCursor>,
+    /// The page just before these entries, if any.
+    pub earlier: Option<RawHistoryCursor>,
 }
 
 /// An opaque paging cursor over one agent's raw history: the head it is
@@ -448,6 +451,9 @@ pub struct RawHistoryCursor {
     pub cut: i64,
     pub next_branch_id: i64,
     pub next_position: i64,
+    /// Pages the entries just before the key rather than from it onwards.
+    #[serde(default)]
+    pub backward: bool,
 }
 
 /// One branch in a world_gm agent's history DAG: its ordered bounded parents

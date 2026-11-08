@@ -24,9 +24,9 @@ pub use speech::{Hearing, InvalidHearing, MAX_PREFIX_CHARS, SpeakAction};
 // queries build and return them.
 pub use crate::inspection::{
     AgentInfo, BranchGroup, BranchNode, BranchParent, GameObject, InferenceMessage, MessageOrigin,
-    ObjectField, ObjectLink, ObjectType, RawHistoryCursor, RawHistoryEntry, RecordedAction,
-    RecordedInference, RecordedOutcome, Segment, SequenceInspection, SequenceNode, SequenceSummary,
-    WorldObjectCursor, WorldObjects,
+    ObjectField, ObjectLink, ObjectType, RawHistoryCursor, RawHistoryEntry, RawHistoryPageResponse,
+    RecordedAction, RecordedInference, RecordedOutcome, Segment, SequenceInspection, SequenceNode,
+    SequenceSummary, WorldObjectCursor, WorldObjects,
 };
 
 use std::{collections::HashMap, path::Path};
@@ -5873,32 +5873,58 @@ impl Store {
             cursor.cut,
             cursor.next_branch_id,
             cursor.next_position,
+            cursor.backward,
         )
         .await
     }
 
     /// Page a raw history from a cursor whose ownership, immutable cut and
     /// next key have already been validated.
+    #[cfg(test)]
     pub async fn agent_raw_history(
         &self,
         viewer_id: i64,
         cursor: RawCursor,
         limit: i64,
     ) -> Result<(Vec<RawHistoryEntry>, Option<RawHistoryCursor>)> {
+        let page = self.raw_history_window(viewer_id, cursor, limit).await?;
+        Ok((page.entries, page.cursor))
+    }
+
+    /// One page of raw history with the cursors to keep scrolling in either
+    /// direction: `cursor` for the entries after it and `earlier` for those
+    /// before it, so a page opened at an entry can still reach the start.
+    pub async fn raw_history_window(
+        &self,
+        viewer_id: i64,
+        cursor: RawCursor,
+        limit: i64,
+    ) -> Result<RawHistoryPageResponse> {
         self.inspecting(viewer_id, cursor.branch().world_id())
             .await?;
         let (page, next) = self.raw_page(cursor, limit).await?;
-        let mut entries = Vec::with_capacity(page.len());
-        for entry in page {
-            entries.push(self.resolve_raw_history_entry(entry).await?);
-        }
-        let next_cursor = next.map(|(next_branch_id, next_position)| RawHistoryCursor {
+        let cursor_at = |next_branch_id, next_position, backward| RawHistoryCursor {
             branch_id: cursor.branch().branch_id(),
             cut: cursor.cut(),
             next_branch_id,
             next_position,
-        });
-        Ok((entries, next_cursor))
+            backward,
+        };
+        let earlier = match page.first() {
+            Some(first) if !self.starts_history(cursor, *first).await? => {
+                Some(cursor_at(first.branch_id, first.position, true))
+            }
+            _ => None,
+        };
+        let mut entries = Vec::with_capacity(page.len());
+        for entry in page {
+            entries.push(self.resolve_raw_history_entry(entry).await?);
+        }
+        Ok(RawHistoryPageResponse {
+            entries,
+            cursor: next.map(|(branch_id, position)| cursor_at(branch_id, position, false)),
+            earlier,
+        })
     }
 
     async fn resolve_raw_history_entry(
@@ -10385,6 +10411,46 @@ mod tests {
             paged, whole,
             "paging through the cursor must see the exact same entries, in the same order, as one page"
         );
+
+        // A page opened at an entry still reaches everything before it.
+        let window = store
+            .raw_history_window(
+                owner.id,
+                store
+                    .raw_history_cursor_at(owner.id, world_id, agent, branch_id, messages[2])
+                    .await
+                    .unwrap(),
+                2,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(window.entries[0], RawHistoryEntry::Message { id, .. } if id == messages[2]),
+            "the page starts at the requested entry"
+        );
+        let mut scrolled = window.entries;
+        let mut earlier = window.earlier;
+        while let Some(cursor) = earlier {
+            let page = store
+                .raw_history_window(
+                    owner.id,
+                    store
+                        .resume_raw_history_cursor(owner.id, world_id, agent, cursor)
+                        .await
+                        .unwrap(),
+                    2,
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.cursor, None, "an earlier page has no later cursor");
+            scrolled.splice(0..0, page.entries);
+            earlier = page.earlier;
+        }
+        assert_eq!(
+            scrolled,
+            whole[..scrolled.len()],
+            "scrolling up from an entry reaches the start with nothing missing"
+        );
     }
 
     /// Two agents with very different message/inference counts must page
@@ -10484,6 +10550,7 @@ mod tests {
             cut: 0,
             next_branch_id: branch_id,
             next_position: 999,
+            backward: false,
         };
         let error = store
             .resume_raw_history_cursor(owner.id, world_id, agent, bogus_cursor)

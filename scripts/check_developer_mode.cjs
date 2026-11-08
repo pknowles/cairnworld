@@ -277,10 +277,14 @@ checkBrowser(server, async (tab, port) => {
   assert.equal((await inferenceHistory).status(), 200);
   await tab.locator("aside").getByText(/^Player agent.*chat history$/).waitFor();
   assert.match(tab.url(), new RegExp(`\\?inspect=history&agent=${fixture.agent_id}&branch=\\d+&entry=\\d+$`), "an inference history link keeps its exact durable branch and entry");
+  // Opening at an entry must not hide what came before it: scrolling up
+  // loads the earlier entries, down to the very first message.
+  await tab.locator("aside").getByText("The required rolls are complete. Begin play now.", { exact: true }).first().waitFor();
   // Design.md: exact text must be copyable without truncation. The button's
   // own click handler drives the copy, so this exercises the real code path.
-  await tab.locator("aside").getByRole("button", { name: "Copy text", exact: true }).first().click();
-  await tab.locator("aside").getByRole("button", { name: "Copied text", exact: true }).first().waitFor();
+  const toolCallRow = tab.locator("aside li").filter({ hasText: "ready_to_begin" });
+  await toolCallRow.getByRole("button", { name: "Copy text", exact: true }).first().click();
+  await toolCallRow.getByRole("button", { name: "Copied text", exact: true }).first().waitFor();
   const copied = await tab.evaluate(() => navigator.clipboard.readText());
   assert.equal(copied, "{}", "copy captures the exact tool call arguments, not a truncated or escaped version");
   assert.equal(await tab.locator("aside").getByText("Raw JSON", { exact: true }).count(), 0, "serialized HTTP transport data is not rendered as an inspection panel");

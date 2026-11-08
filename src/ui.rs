@@ -335,6 +335,7 @@ struct BranchSection {
     head: Option<BranchGroup>,
     entries: Vec<RawHistoryEntry>,
     cursor: Option<RawHistoryCursor>,
+    earlier: Option<RawHistoryCursor>,
 }
 
 /// Whichever view is currently loaded in the pane, keyed by `InspectSelection`.
@@ -770,6 +771,7 @@ fn inspect_pane(
                         head: head.clone(),
                         entries: page.entries,
                         cursor: page.cursor,
+                        earlier: page.earlier,
                     });
                     *remaining.borrow_mut() -= 1;
                     if *remaining.borrow() == 0 {
@@ -1170,7 +1172,7 @@ fn inspect_pane(
                             <InferenceCard inference selection agents live_tokens/>
                         }.into_any(),
                         Some(InspectData::AgentHistory { agent_id, branches }) => view! {
-                            <AgentHistoryView world_id agent_id branches agents selection data/>
+                            <AgentHistoryView world_id agent_id branches agents selection/>
                         }.into_any(),
                         Some(InspectData::Agents(agents)) => view! {
                             <AgentsList agents selection/>
@@ -1799,7 +1801,6 @@ fn AgentHistoryView(
     branches: Vec<BranchSection>,
     agents: RwSignal<Vec<AgentInfo>>,
     selection: RwSignal<Option<InspectSelection>>,
-    data: RwSignal<Option<InspectData>>,
 ) -> impl IntoView {
     let single = branches.len() == 1;
     let order: Vec<i64> = branches.iter().map(|section| section.branch_id).collect();
@@ -1807,16 +1808,17 @@ fn AgentHistoryView(
         <div class="flex flex-col gap-3">
             <h3 class="text-sm font-semibold">{move || format!("{} chat history", agent_label(agent_id, agents))}</h3>
             {branches.into_iter().map(|section| view! {
-                <BranchSectionView world_id agent_id agents section order=order.clone() show_heading=!single selection data/>
+                <BranchSectionView world_id agent_id agents section order=order.clone() show_heading=!single selection/>
             }).collect_view()}
         </div>
     }
 }
 
-/// One chat's own section: its entries, its own independent load-more
-/// state, and - only when the agent has more than one chat - a numbered
-/// heading naming the group it is currently the chat for (or "earlier" for a
-/// split/merge source) and the chats it continues from.
+/// One chat's own section: its entries, which scroll in both directions (a
+/// page opened at an entry starts there, with earlier entries above it), and -
+/// only when the agent has more than one chat - a numbered heading naming the
+/// group it is currently the chat for (or "earlier" for a split/merge source)
+/// and the chats it continues from.
 #[cfg(feature = "hydrate")]
 #[component]
 fn BranchSectionView(
@@ -1827,66 +1829,112 @@ fn BranchSectionView(
     order: Vec<i64>,
     show_heading: bool,
     selection: RwSignal<Option<InspectSelection>>,
-    data: RwSignal<Option<InspectData>>,
 ) -> impl IntoView {
     let branch_id = section.branch_id;
-    let loading_more = RwSignal::new(false);
-    let load_more_error = RwSignal::new(None::<String>);
-    let load_more = Rc::new(move |cursor: RawHistoryCursor| {
-        loading_more.set(true);
+    let entries = RwSignal::new(section.entries);
+    let later = RwSignal::new(section.cursor);
+    let earlier = RwSignal::new(section.earlier);
+    let loading = RwSignal::new(false);
+    let load_error = RwSignal::new(None::<String>);
+    let list = NodeRef::<leptos::html::Ul>::new();
+    let top = NodeRef::<leptos::html::Div>::new();
+    let bottom = NodeRef::<leptos::html::Div>::new();
+
+    // The pane that scrolls this list, so entries added above can keep what is
+    // on screen where it is.
+    let pane = move || {
+        list.get_untracked()
+            .and_then(|list| list.closest("aside").ok().flatten())
+    };
+    let load = Rc::new(move |cursor: RawHistoryCursor| {
+        loading.set(true);
         let query = serde_json::to_string(&cursor).expect("raw history cursor serializes");
         let encoded = js_sys::encode_uri_component(&query);
+        let height_before = pane().map(|pane| pane.scroll_height());
         fetch_json(
             format!("/world/{world_id}/inspect/agents/{agent_id}/history?after={encoded}"),
-            "next agent chat history page",
+            "agent chat history page",
             move |page: RawHistoryPageResponse| {
-                loading_more.set(false);
-                data.update(|data| {
-                    if let Some(InspectData::AgentHistory { branches, .. }) = data
-                        && let Some(section) = branches
-                            .iter_mut()
-                            .find(|section| section.branch_id == branch_id)
-                    {
-                        section.entries.extend(page.entries);
-                        section.cursor = page.cursor;
+                if cursor.backward {
+                    entries.update(|entries| {
+                        entries.splice(0..0, page.entries);
+                    });
+                    earlier.set(page.earlier);
+                    if let (Some(pane), Some(before)) = (pane(), height_before) {
+                        // Once the new entries are laid out.
+                        request_animation_frame(move || {
+                            pane.set_scroll_top(pane.scroll_top() + pane.scroll_height() - before);
+                        });
                     }
-                });
+                } else {
+                    entries.update(|entries| entries.extend(page.entries));
+                    later.set(page.cursor);
+                }
+                loading.set(false);
             },
-            load_more_error,
+            load_error,
         );
     });
-    let sentinel = NodeRef::<leptos::html::Div>::new();
-    if let Some(cursor) = section.cursor {
-        let auto_load = load_more.clone();
+
+    // Opened at an entry: bring it into view before anything above it loads.
+    Effect::new(move |_| {
+        if list.get().is_none() {
+            return;
+        }
+        let Some(InspectSelection::AgentHistory {
+            entry_id: Some(entry_id),
+            ..
+        }) = selection.get_untracked()
+        else {
+            return;
+        };
+        if let Some(row) = document().get_element_by_id(&format!("history-entry-{entry_id}")) {
+            row.scroll_into_view();
+        }
+    });
+
+    // Load the next page whenever a sentinel at either end is on screen. The
+    // observer is made again after each page so a sentinel that is still on
+    // screen asks for the page after it.
+    let watch = |sentinel: NodeRef<leptos::html::Div>,
+                 cursor: RwSignal<Option<RawHistoryCursor>>| {
+        let load = load.clone();
+        let observer: Rc<RefCell<Option<IntersectionObserver>>> = Rc::new(RefCell::new(None));
         Effect::new(move |_| {
-            let auto_load = auto_load.clone();
-            let Some(element) = sentinel.get() else {
+            let (Some(element), Some(next)) = (sentinel.get(), cursor.get()) else {
                 return;
             };
+            if let Some(old) = observer.borrow_mut().take() {
+                old.disconnect();
+            }
+            let load = load.clone();
             let callback = Closure::<dyn FnMut(js_sys::Array, IntersectionObserver)>::new(
-                move |entries: js_sys::Array, _: IntersectionObserver| {
-                    if entries
+                move |hits: js_sys::Array, _: IntersectionObserver| {
+                    if hits
                         .iter()
-                        .filter_map(|entry| entry.dyn_into::<IntersectionObserverEntry>().ok())
-                        .any(|entry| entry.is_intersecting())
-                        && !loading_more.get_untracked()
+                        .filter_map(|hit| hit.dyn_into::<IntersectionObserverEntry>().ok())
+                        .any(|hit| hit.is_intersecting())
+                        && !loading.get_untracked()
                     {
-                        auto_load(cursor);
+                        load(next);
                     }
                 },
             );
             match IntersectionObserver::new(callback.as_ref().unchecked_ref()) {
-                Ok(observer) => {
-                    observer.observe(&element);
+                Ok(created) => {
+                    created.observe(&element);
                     callback.forget();
-                    std::mem::forget(observer);
+                    *observer.borrow_mut() = Some(created);
                 }
-                Err(error) => load_more_error.set(Some(format!(
+                Err(error) => load_error.set(Some(format!(
                     "Could not observe more agent history: {error:?}"
                 ))),
             }
         });
-    }
+    };
+    watch(top, earlier);
+    watch(bottom, later);
+
     let heading = show_heading.then(|| {
         let number = |id: i64| order.iter().position(|&other| other == id).map_or(0, |index| index + 1);
         let label = match section.head.as_ref() {
@@ -1914,20 +1962,13 @@ fn BranchSectionView(
     view! {
         <div class="flex flex-col gap-2">
             {heading}
-            <ul class="flex flex-col gap-1 text-sm">
-                {section.entries.into_iter().map(|entry| view! { <RawHistoryEntryRow entry agent_id agents selection/> }).collect_view()}
+            <div node_ref=top class="h-px" aria-hidden="true"></div>
+            <ul node_ref=list class="flex flex-col gap-1 text-sm">
+                {move || entries.get().into_iter().map(|entry| view! { <RawHistoryEntryRow entry agent_id agents selection/> }).collect_view()}
             </ul>
-            {section.cursor.map(|cursor| view! {
-                <div node_ref=sentinel class="h-px" aria-hidden="true"></div>
-                <button
-                    class="btn btn-ghost btn-sm"
-                    disabled=move || loading_more.get()
-                    on:click=move |_| load_more(cursor)
-                >
-                    {move || if loading_more.get() { "Loading…" } else { "Load more" }}
-                </button>
-            })}
-            {move || load_more_error.get().map(|message| view! {
+            <div node_ref=bottom class="h-px" aria-hidden="true"></div>
+            {move || loading.get().then(|| view! { <div class="text-center text-xs text-base-content/60">"Loading…"</div> })}
+            {move || load_error.get().map(|message| view! {
                 <div class="alert alert-error text-sm">{message}</div>
             })}
         </div>
@@ -1951,7 +1992,7 @@ fn RawHistoryEntryRow(
                 return ().into_any();
             }
             view! {
-            <li class=move || history_entry_class(id, selection)>
+            <li id=format!("history-entry-{id}") class=move || history_entry_class(id, selection)>
                 <div class="flex flex-wrap items-center gap-2">
                     <span class="badge badge-ghost badge-sm">{format!("message {id}")}</span>
                     <span class="font-semibold">{move || message_label(role.clone(), origin.clone(), agent_id, agents)}</span>
@@ -1977,7 +2018,7 @@ fn RawHistoryEntryRow(
         }.into_any()
         },
         RawHistoryEntry::Summary { id, covered_ranges, inference_id, text, reason, retained_messages, cause_inference_id } => view! {
-            <li class=move || history_entry_class(id, selection)>
+            <li id=format!("history-entry-{id}") class=move || history_entry_class(id, selection)>
                 <CompactionCard inference_id cause_inference_id text covered_ranges selection reason retained_messages/>
             </li>
         }.into_any(),

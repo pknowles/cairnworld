@@ -332,10 +332,12 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   through it.
 - `first_raw_history_cursor`, `raw_history_cursor_at` and
   `resume_raw_history_cursor` validate browser selections before returning a
-  `RawCursor`. `Store::agent_raw_history(viewer_id, cursor, limit)` rechecks
+  `RawCursor`. `Store::raw_history_window(viewer_id, cursor, limit)` rechecks
   inspection access, pages through `raw_page`, resolves each entry's payload,
-  and returns an opaque `RawHistoryCursor{branch_id, cut, next_branch_id,
-  next_position}`. Page boundaries preserve failures and summary activations.
+  and returns `RawHistoryPageResponse{entries, cursor, earlier}`: opaque
+  `RawHistoryCursor{branch_id, cut, next_branch_id, next_position, backward}`
+  values for the next page and, when the page does not start the history, the
+  page just before it (a page opened at an entry still scrolls back to the start). Page boundaries preserve failures and summary activations.
   A failed inference resolves its own real `inference.id` (not the
   `history_entry.id` primary key its row shares) as the ID a browser
   inference-view link must name.
@@ -353,7 +355,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   branches: Vec<BranchSection>}` once all have arrived; a plain
   single-branch agent (`branches.len() == 1`) renders with no heading,
   identical to the pre-D6 view, while a real DAG renders each branch as its
-  own `BranchSectionView` (its own independent "Load more" state) labelled
+  own `BranchSectionView` (its own independent paging state) labelled
   by its number and current group head or "earlier", with a "continues from chat ...
   @position" note naming its parents - a shared ancestor branch is one
   `BranchSection`, never duplicated across the children that continue from
@@ -1028,11 +1030,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
     parallel, and renders each branch's raw messages with compaction
     summaries and inference failures inlined at the point they actually
     occurred in the ordered history index (`store/history.rs`'s traversal -
-    see "Persistence and recording" above). Each section observes its cursor
-    sentinel with `IntersectionObserver` to load its next page, while retaining
-    an accessible "Load more" button; both use that section's opaque
-    `RawHistoryCursor` (JSON-encoded in the `after` query param) and append
-    only to that branch's section. A plain player/NPC/Storyteller agent has exactly one
+    see "Persistence and recording" above). Each section watches a sentinel
+    above and below its entries with `IntersectionObserver` and loads the earlier
+    or later page (opaque `RawHistoryCursor`, JSON-encoded in the `after` query
+    param) into that branch's section only; a page opened at an entry scrolls
+    that entry into view first and keeps the view steady as earlier entries load. A plain player/NPC/Storyteller agent has exactly one
     branch and renders with no heading, identical to the view before D6; a
     world_gm agent whose groups have split/merged renders every branch as
     its own section labelled by its number and current group head or "earlier", with a

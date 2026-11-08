@@ -33,7 +33,7 @@ use tower_sessions_sqlx_store::{SqliteStore, sqlx::SqlitePool};
 
 use crate::{
     game::Game,
-    inspection::{ObjectType, RawHistoryPageResponse, WorldObjectCursor},
+    inspection::{ObjectType, WorldObjectCursor},
     llm::Backend,
     mistralrs_backend::MistralRsBackend,
     scenario::Scenario,
@@ -822,11 +822,11 @@ async fn inspect_agent_history(
             }
         },
     };
-    let (entries, cursor) = app
-        .store
-        .agent_raw_history(viewer.id, cursor, page.limit())
-        .await?;
-    Ok(Json(RawHistoryPageResponse { entries, cursor }))
+    Ok(Json(
+        app.store
+            .raw_history_window(viewer.id, cursor, page.limit())
+            .await?,
+    ))
 }
 
 /// The whole branch DAG an agent's history can form (a world_gm agent, once
@@ -2208,8 +2208,8 @@ mod tests {
                     hearing_npcs.retain(|id| members.contains(id));
                     calls.push(ToolCall {id: "split-chat".into(), name: "split_group".into(), arguments: serde_json::json!({
                         "partitions": [
-                            {"character_ids": members, "name": "chat players", "description": "together"},
-                            {"character_ids": [mara_id, isolated.character_id], "name": "chat companions", "description": "apart"}
+                            {"character_ids": members, "name": "chat players"},
+                            {"character_ids": [mara_id, isolated.character_id], "name": "chat companions"}
                         ]
                     }).to_string()});
                 } else if stage == 3 {
@@ -2218,7 +2218,7 @@ mod tests {
                         .await
                         .unwrap();
                     hearing_npcs.extend(store.group_npc_ids(other).await.unwrap());
-                    calls.push(ToolCall {id: "merge-chat".into(), name: "merge_groups".into(), arguments: serde_json::json!({"group_ids": [group, other], "name": "chat reunited", "description": "together"}).to_string()});
+                    calls.push(ToolCall {id: "merge-chat".into(), name: "merge_groups".into(), arguments: serde_json::json!({"group_ids": [group, other], "name": "chat reunited"}).to_string()});
                 }
                 let narration = [
                     "Passive split narration.",
