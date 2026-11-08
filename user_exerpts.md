@@ -1150,3 +1150,19 @@ On tool design and prompt fixes:
 
 The create tool requires `description`; the update tool carries field names and types only. Real-model
 runs use the production temperature only, and results are checked while a run is still going.
+
+On the group description, asked three times:
+
+> yes, for the 3rd time
+
+The game's groups no longer have a description: the column, the scenario field, the GM's scene text
+and the `split_group` and `merge_groups` arguments are gone (migration 0019). A character's own
+placement in a group (`character_group.description`) is a separate field and stays.
+
+On where a new character enters a finished world:
+
+> the storyteller must decide where new characters enter the world as part of the character ready call
+
+The player's `ready_to_begin` call will ask the Storyteller for the entry location and group
+(plans/storyteller-gameplay.md). Until that is built, waiting Adventurers are put in the world's
+first group when generation completes (`place_waiting_adventurers`, marked TEMPORARY).

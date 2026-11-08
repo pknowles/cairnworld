@@ -23,8 +23,8 @@ Follow [AGENTS.md](../AGENTS.md#post-feature-and-pre-commit-checklist),
   IDs. Only public descriptions reach the player agent. Acceptance records the
   chosen background and relevant private notes. Connect creation rolls and name
   approval/alternatives to the existing creation-state validator.
-- After character creation and player readiness, obtain the Storyteller's exact
-  entry location and group, either existing or a new group for a lone entrant.
+- After character creation, as part of the player's `ready_to_begin` call, obtain the
+  Storyteller's exact entry location and group, either existing or a new group for a lone entrant.
   Validate/apply placement before the destination GM's entrance narration.
   Replace development setup placement here; reconnecting an existing character
   does not repeat it.
