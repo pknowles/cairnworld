@@ -2863,13 +2863,26 @@ mod tests {
                 .await
                 .unwrap();
         let reasons: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT inference_id, COALESCE(error, '') FROM tool_execution WHERE status = 'rejected'",
+            "SELECT tool_execution.inference_id, recorded_content.body FROM tool_execution              JOIN recorded_content ON recorded_content.id = tool_execution.result_content_id              WHERE tool_execution.status = 'rejected'",
         )
         .fetch_all(&pool)
         .await
         .unwrap();
         for (inference, reason) in reasons {
             println!("REJECTED in inference {inference}: {reason}");
+        }
+        let calls: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT tool_execution.inference_id, tool_execution.ordinal, recorded_content.body FROM tool_execution              JOIN inference ON inference.id = tool_execution.inference_id              JOIN recorded_content ON recorded_content.id = inference.output              WHERE tool_execution.status = 'rejected'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (inference, ordinal, body) in calls {
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            println!(
+                "REJECTED CALL {inference}/{ordinal}: {}",
+                body["content"]["value"][usize::try_from(ordinal).unwrap()]["arguments"]
+            );
         }
         let world = store.world(member.world_id).await.unwrap().unwrap();
         let objects = store.review_list(member.world_id).await.unwrap();

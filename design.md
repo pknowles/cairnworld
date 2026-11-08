@@ -17,8 +17,6 @@ binary has subcommands:
   with edited prompts
 - `cairnworld import-scenario` / `export-scenario` - reusable checked-in
   scenario templates
-- `cairnworld generate-world <seed>` - generate a world with the real model and
-  world worker without the browser; everything is recorded for Developer Mode
 
 Layers, each depending only on those above it:
 
@@ -1899,8 +1897,9 @@ Questioner first answers supplied meta-questions in one inference, then calls
 AskQuestions or WorldSummaryComplete. AskQuestions runs the Storyteller inside the
 call and returns the effect as its result: while the summary develops the
 Storyteller answers the questions one at a time as text to itself, then writes the
-world summary; the result says it was rewritten and the Questioner's context holds the
-current summary. While reviewing objects it changes them and
+world summary, which is stored and replaces the previous one in the Questioner's
+system context, kept up to date; the result is a short note that it was rewritten.
+While reviewing objects it changes them and
 the result lists what it added, changed and removed. The Questioner continues in
 the same turn. WorldSummaryComplete ends the turn. The Storyteller's next round
 starts from the seed and current summary without earlier answer transcripts. The

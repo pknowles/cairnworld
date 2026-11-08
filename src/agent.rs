@@ -453,6 +453,7 @@ pub async fn complete_with_call_context<B: Backend>(
                 });
             };
             used_tools = true;
+            let cut_off = response.usage.output_tokens >= budget.limits().max_output_tokens;
             // Create every call's tool_execution row up front, keyed by its
             // output ordinal, before any of them execute (design.md: "Create
             // rows for every call before executing the batch") - so sibling
@@ -514,14 +515,23 @@ pub async fn complete_with_call_context<B: Backend>(
                     } else {
                         None
                     };
-                    let outcome = tools::execute(
-                        turn.tools,
-                        tool_call,
-                        *tool_execution_id,
-                        cannot_end_turn.as_deref(),
-                    )
-                    .await
-                    .with_context(|| format!("executing tool call {}", tool_call.id))?;
+                    // A reply that used its whole output allowance was cut off
+                    // inside its last call, which is incomplete.
+                    let outcome = if cut_off && later.is_empty() {
+                        tools::ToolOutcome::Rejected(
+                            "The reply reached its length limit before this call was complete, so it was not run."
+                                .to_string(),
+                        )
+                    } else {
+                        tools::execute(
+                            turn.tools,
+                            tool_call,
+                            *tool_execution_id,
+                            cannot_end_turn.as_deref(),
+                        )
+                        .await
+                        .with_context(|| format!("executing tool call {}", tool_call.id))?
+                    };
                     let (status, result, after_result) = match outcome {
                         tools::ToolOutcome::Completed(content) => ("completed", content, None),
                         tools::ToolOutcome::CompletedAfter {
@@ -1089,6 +1099,59 @@ mod tests {
             name: name.to_string(),
             arguments,
         }
+    }
+
+    #[tokio::test]
+    async fn the_last_call_of_a_reply_that_used_its_whole_output_allowance_is_not_run() {
+        let (store, _db, agent_id) = test_store().await;
+        let mut cut = response(
+            Content::ToolCalls(vec![
+                call("echo-1", "test_echo", test_echo_arguments("first")),
+                call("echo-2", "test_echo", test_echo_arguments("second")),
+            ]),
+            "",
+        );
+        cut.usage.output_tokens = 64;
+        let backend = ScriptedBackend::new([
+            cut,
+            response(
+                Content::ToolCalls(vec![call(
+                    "finish-1",
+                    "test_finish",
+                    test_echo_arguments("done"),
+                )]),
+                "",
+            ),
+        ]);
+        let tools = [tools::test_echo(), tools::test_finish()];
+        let limits = Limits {
+            max_output_tokens: 64,
+            ..Limits::default()
+        };
+        complete(
+            &store,
+            &backend,
+            &Budget::new(limits),
+            scripted_turn(store.agent_branch(agent_id).await.unwrap(), &tools),
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let entries = history(&store, agent_id).await;
+        let results: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                MessageContent::ToolResult { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(results[0].contains("first"), "{results:?}");
+        assert!(
+            results[1].contains("reached its length limit") && !results[1].contains("second"),
+            "{results:?}"
+        );
     }
 
     #[tokio::test]

@@ -246,14 +246,15 @@ trying to further consolidate too.
 ## Storyteller initialization output and tools
 
 At some point the storyteller must be able to initialize game state. The world
-summary is one output. It must also create locations like cities, roads,
-dungeons, connections between locations, NPCs and items at locations etc.. The
-Storyteller will have tool calls exposed so it can populate and edit locations.
-Then it must populate NPCs one at a time. Locations and NPCs require custom seed
-text to fully describe what they are and their purpose in the setting/dynamic
-story. This must be done in stages, especially NPCs, one at a time to allow the
-model to give focused descriptions to each. Rust should validate as much as it
-can, where explicit relations/IDs are given.
+summary is one output. It must also create locations like cities, roads (these
+are modelled as locations too), dungeons, connections between locations, NPCs
+and items at locations etc.. The Storyteller will have tool calls exposed so it
+can populate and edit locations. Then it must populate NPCs one at a time.
+Locations and NPCs require custom seed text to fully describe what they are and
+their purpose in the setting/dynamic story. This must be done in stages,
+especially NPCs, one at a time to allow the model to give focused descriptions
+to each. Rust should validate as much as it can, where explicit relations/IDs
+are given.
 
 For each NPC's location, the Questioner concept is again executed to add
 detail to each. The Questioner is given the world summary and the seed prompt

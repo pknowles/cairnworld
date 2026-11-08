@@ -104,6 +104,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   calling agent) from an actual execution failure, which propagates with its
   complete error context. It also rejects a model-facing tool schema unless it
   is an object with an explicit `properties` map; no-argument tools use `{}`.
+  The agent loop does not run the last call of a reply that used its whole
+  output allowance (`usage.output_tokens` at `max_output_tokens`): the call is
+  incomplete, and its result says the reply reached its length limit.
 - `third_party/mistral.rs` - submodule of https://github.com/pknowles/mistral.rs,
   depended on by path. It carries fixes for Qwen assistant tool-call rendering,
   a Qwen tool grammar with arbitrary parameters, structured paged-KV capacity
