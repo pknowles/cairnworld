@@ -2765,17 +2765,13 @@ mod tests {
     }
 
     /// The Storyteller creating objects on the real model, nothing else: counts what
-    /// its create and update calls did. `CAIRNWORLD_TEST_TEMPERATURE` varies the
-    /// sample. Prints one METRIC line; a creation that names an ID of its own
-    /// kind (a group with `group_id`) is the invented-ID failure.
+    /// its create and update calls did. Prints one METRIC line; a creation that names an ID of its own
+    /// kind is the invented-ID failure.
     #[tokio::test]
     #[ignore = "needs a CUDA GPU; takes a few minutes"]
     async fn the_real_storyteller_creates_objects_without_naming_ids_of_its_own() {
         let model = DeviceModel::load().await;
-        let (shared, name, mut sampling, limits) = model.parts();
-        if let Ok(temperature) = std::env::var("CAIRNWORLD_TEST_TEMPERATURE") {
-            sampling.temperature = temperature.parse().expect("a number");
-        }
+        let (shared, name, sampling, limits) = model.parts();
         let observed = model.observed();
         let (db, store, member) = saltgate_ready_for_objects("real-objects").await;
         let backend = InferenceScheduler::new(shared, limits).unwrap();
@@ -2803,7 +2799,6 @@ mod tests {
                         generation.stage == crate::store::GenerationStage::CreateObjects
                     });
                 if !creating || world.failure.is_some() {
-                    println!("LOOP EXIT creating={creating} failure={:?}", world.failure);
                     break;
                 }
                 let _ = events.recv().await;
@@ -2858,25 +2853,6 @@ mod tests {
                 }
             }
         }
-        for body in sqlx::query_scalar::<_, String>("SELECT body FROM recorded_content")
-            .fetch_all(&pool)
-            .await
-            .unwrap()
-        {
-            if let Ok(body) = serde_json::from_str::<serde_json::Value>(&body)
-                && body["content"]["type"] == "Text"
-                && body["content"]["value"]
-                    .as_str()
-                    .is_some_and(|text| text.len() > 1500)
-            {
-                println!(
-                    "LONG TEXT REPLY
-{}",
-                    body["content"]["value"].as_str().unwrap()
-                );
-                break;
-            }
-        }
         let (replies, capped, output_tokens): (i64, i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(output_tokens >= 1000), 0), COALESCE(SUM(output_tokens), 0)              FROM inference WHERE output_tokens IS NOT NULL",
         )
@@ -2892,8 +2868,7 @@ mod tests {
         let objects = store.review_list(member.world_id).await.unwrap();
         let count = |kind: &str| objects.iter().filter(|entry| entry.kind == kind).count();
         println!(
-            "METRIC temperature={} replies={replies} capped={capped} output_tokens={output_tokens} creates={creates} changes={changes} invented_own_id={invented} rejected_calls={rejected} locations={} connections={} groups={} npcs={} item_types={} items={} failure={:?}",
-            std::env::var("CAIRNWORLD_TEST_TEMPERATURE").unwrap_or_else(|_| "default".into()),
+            "METRIC replies={replies} capped={capped} output_tokens={output_tokens} creates={creates} changes={changes} invented_own_id={invented} rejected_calls={rejected} locations={} connections={} groups={} npcs={} item_types={} items={} failure={:?}",
             count("location"),
             count("connection"),
             count("group"),
@@ -2931,11 +2906,6 @@ mod tests {
         use crate::store::{Advance, Fields, ObjectKind};
         let model = DeviceModel::load().await;
         let (shared, name, sampling, limits) = model.parts();
-        // Sampling is deterministic; a different temperature gives a different sample.
-        let mut sampling = sampling;
-        if let Ok(temperature) = std::env::var("CAIRNWORLD_TEST_TEMPERATURE") {
-            sampling.temperature = temperature.parse().expect("a number");
-        }
         let observed = model.observed();
         let (_db, store, member) = saltgate_ready_for_objects("real-generation").await;
         if leave_gaps {
