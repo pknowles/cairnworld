@@ -2862,6 +2862,15 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
+        let reasons: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT inference_id, COALESCE(error, '') FROM tool_execution WHERE status = 'rejected'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (inference, reason) in reasons {
+            println!("REJECTED in inference {inference}: {reason}");
+        }
         let world = store.world(member.world_id).await.unwrap().unwrap();
         let objects = store.review_list(member.world_id).await.unwrap();
         let count = |kind: &str| objects.iter().filter(|entry| entry.kind == kind).count();
@@ -3725,6 +3734,34 @@ mod tests {
             rejected.is_empty(),
             "the model produced invalid output (inference, error): {rejected:?}; open them in Developer Mode"
         );
+    }
+
+    /// TEMPORARY. DO NOT SUBMIT. Replays recorded requests on the real model.
+    #[tokio::test]
+    #[ignore = "needs a CUDA GPU"]
+    async fn zz_replay_requests() {
+        let requests: Vec<(String, crate::llm::Request)> = serde_json::from_str(
+            &std::fs::read_to_string(std::env::var("REPLAY_FILE").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let model = DeviceModel::load().await;
+        let (shared, ..) = model.parts();
+        let mut results = Vec::new();
+        for (name, request) in requests {
+            let response = shared.complete(request, |_| {}).await;
+            results.push(serde_json::json!({
+                "name": name,
+                "response": match response {
+                    Ok(response) => serde_json::to_value(response).unwrap(),
+                    Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+                },
+            }));
+        }
+        std::fs::write(
+            std::env::var("REPLAY_OUT").unwrap(),
+            serde_json::to_string_pretty(&results).unwrap(),
+        )
+        .unwrap();
     }
 
     /// The device-test model, loaded once and shared by every scenario in

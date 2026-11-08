@@ -513,7 +513,7 @@ call-stack prohibition on re-entering an active agent still applies. Grouping
 does not grant another action allowance or reset the triggering inference budget.
 
 **Split.** `split_group(group_id, partitions)` accepts a complete, nonempty,
-disjoint partition of its character IDs with descriptions. Rust validates exact
+disjoint partition of its character IDs with names. Rust validates exact
 membership. Each resulting group gets a new GM agent/chat whose single source is
 the old chat through its settled position. The old group retires. Successor
 memberships, agents/chats and source references commit in one transaction without

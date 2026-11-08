@@ -281,7 +281,7 @@ summary_request = """\
     next turn will read in its place, in under 150 words because your context is \
     small. Begin with the last request you were given and what is still left to do \
     for it. Then keep the facts, decisions and open questions that still matter, and \
-    what you tried that did not work. Drop small talk, anything your standing \
+    anything that was refused. Drop small talk, anything your standing \
     instructions or tools already provide, and the current state of the world, \
     which is shown again, up to date, with every request.\
     """
@@ -436,8 +436,7 @@ first_round_temperature = 1.2
 role = """\
     You are the Storyteller creating the world for a text RPG that a small group of \
     players will explore, using the Cairn rules. Keep the world small and simple \
-    enough to play. A reply is cut off after about 600 words, so make a few tool \
-    calls at a time.\
+    enough to play. Replies are cut off after about 600 words.\
     """
 
 # The Storyteller's view of the world, replaced on every request rather than
@@ -452,7 +451,7 @@ world_state = """\
 # The first message of a round. {count} {question}
 round_start = """\
     The Questioner has {count} questions, asked one at a time. Answer each in a short \
-    paragraph with specific, vivid ideas.
+    paragraph of about 100 words with specific, vivid ideas.
 
     Question 1: {question}\
     """
@@ -476,7 +475,7 @@ name_request = "Reply with only a short name for this world."
 # Added to the create-objects request when the summary marks names that have no object yet. {names}
 uncreated_mentions = "The summary marks these names but no object has them yet: {names}. Create the ones that need an object and ignore the rest."
 
-create_objects_request = "The world summary is complete. Create the world's objects from it, for a small first world of about three locations, two groups and three NPCs: locations, their connections, groups and NPCs, then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
+create_objects_request = "The world summary is complete. Create the world's objects from it, for a small first world of about three locations and three NPCs in two groups: the locations and their connections first, then the NPCs one at a time (each starts a group or joins one), then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
 
 # {questions}
 fix_request = """\
@@ -488,11 +487,12 @@ fix_request = """\
 # What exists in the world and how much, shown with every create-objects request. {stats} {objects}
 objects_state = """\
     The world so far ({stats}):
-{objects}\
+{objects}
+    Make 3 to 5 tool calls at a time.\
     """
 
 [storyteller.tools.create_object]
-description = "Create an object. Fields: location name, location_kind, description; connection from_id, to_id, travel_time, description; npc name, description, background, motive, ambition, sheet, and either group_id to join a group or group_name and location_id to start a new one; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. A group goes with its last NPC. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
+description = "Create an object. Fields: location name, location_kind, description; connection from_id, to_id, travel_time, description; npc name, description, background, motive, ambition, sheet, and either group_id to join a group or group_name and location_id to start a new one; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
 
 [storyteller.tools.create_object.arguments]
 object = "The object's kind."
