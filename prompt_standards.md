@@ -18,8 +18,8 @@ to existing context. I.e. no pointless or distracting fluff. LLM models operate
 best with generic instruction. Avoid anything that smells of specific conditions
 or natural language processing.
 
-Give the model the smallest accurate world model it needs to reason and produce
-an accurate result with high confidence and no more.
+Give the model the smallest accurate description, context and understanding it
+needs to reason and produce an accurate result with high confidence and no more.
 
 Provide facts that let the model infer a useful response over instructions that
 prescribe a particular response. This allows the model to react appropriately in
@@ -40,6 +40,10 @@ ID may be returned from one call and given to another. If the tool call implies
 the last ID then you have hidden state and this will confuse the agent as it
 won't understand how the tool knows which ID to use. If additional tool context
 is truly implied, make sure it is documented for the tool caller.
+
+LLMs will frequently fill optional arguments even if it doesn't make sense. Try
+making alternatives explicit. I.e. avoid magic values such as an empty list that
+implies something special.
 
 # Prompt Guidelines
 
@@ -76,6 +80,9 @@ instructions. Less is more.
   meaning?
 - Are there any instructions where more accurate context would instead imply the
   desired action instead?
+- Did you introduce a fix for a failure path or imply the expected workflow
+  includes a prompt failure followed by a recovery? It's 10x better to make an
+  LLM do the correct thing initially
 - Can the same outcome be achieved by removing or correcting existing context?
 - Is each added sentence necessary for the normal path?
 - Does each sentence express a broad, useful rule, or is it narrowly reacting to
