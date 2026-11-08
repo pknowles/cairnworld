@@ -1166,3 +1166,14 @@ On where a new character enters a finished world:
 The player's `ready_to_begin` call will ask the Storyteller for the entry location and group
 (plans/storyteller-gameplay.md). Until that is built, waiting Adventurers are put in the world's
 first group when generation completes (`place_waiting_adventurers`, marked TEMPORARY).
+
+On what a tool result says, after the Storyteller's update came back with the world's counts:
+
+> why is the tool result for the storyteller listing unrelated shit to the tool call. the result should be the result of the tool call. it's in the name already
+>
+> the result of the storyteller's actions need summarising to the questioner, we do not summarise to the storyteller after explicit individual actions
+
+A Storyteller tool result says only what that call did ("Changed npc 2."). The counts of each kind of object
+are context: the Questioner and the Storyteller are given them in their per-request context
+(`user_declarations.md` now says so), and the Questioner receives a summary of the Storyteller's actions as
+the result of `ask_questions`.

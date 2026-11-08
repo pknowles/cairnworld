@@ -176,6 +176,33 @@ fn describe_changes(before: &[ReviewEntry], after: &[ReviewEntry]) -> String {
     lines
 }
 
+/// How many objects of each kind the world holds, so an agent can see what
+/// might be missing.
+fn world_stats(entries: &[ReviewEntry]) -> String {
+    let count = |kind: &str| entries.iter().filter(|entry| entry.kind == kind).count();
+    format!(
+        "locations: {}, connections: {}, groups: {}, npcs: {}, item types: {}, items: {}",
+        count("location"),
+        count("connection"),
+        count("group"),
+        count("npc"),
+        count("item_type"),
+        count("item"),
+    )
+}
+
+/// The world's objects, one per line, each marked once the Questioner reviewed
+/// it and it has not changed since.
+fn review_objects(entries: &[ReviewEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| {
+            let mark = if entry.reviewed { "x" } else { " " };
+            format!("- [{mark}] {} {} {}\n", entry.kind, entry.id, entry.name)
+        })
+        .collect()
+}
+
 /// The seed and summary as the agents are told them, with stand-ins for what
 /// does not exist yet.
 fn seed_and_summary(prompts: &prompts::Prompts, generation: &Generation) -> (String, String) {
@@ -445,20 +472,17 @@ where
                     &[("seed", &seed), ("summary", &summary)],
                 )?);
                 if matches!(kind, ContextKind::StorytellerCreatingObjects) {
-                    // What already exists, so it neither repeats nor invents what is there.
-                    let objects: String = self
-                        .store
-                        .review_list(world_id)
-                        .await?
+                    // What already exists and how much, so it neither repeats
+                    // nor invents what is there and can see what is missing.
+                    let entries = self.store.review_list(world_id).await?;
+                    let objects: String = entries
                         .iter()
                         .map(|entry| format!("- {} {} {}\n", entry.kind, entry.id, entry.name))
                         .collect();
-                    if !objects.is_empty() {
-                        texts.push(prompts::fill(
-                            &prompts.storyteller.objects_state,
-                            &[("objects", &objects)],
-                        )?);
-                    }
+                    texts.push(prompts::fill(
+                        &prompts.storyteller.objects_state,
+                        &[("stats", &world_stats(&entries)), ("objects", &objects)],
+                    )?);
                 }
             }
             ContextKind::QuestionerSummary => texts.push(prompts::fill(
@@ -466,12 +490,14 @@ where
                 &[("summary", &summary)],
             )?),
             ContextKind::Review => {
+                let entries = self.store.review_list(world_id).await?;
                 let mut state = prompts::fill(
                     &prompts.questioner.review_state,
                     &[
                         ("seed", &seed),
                         ("summary", &summary),
-                        ("objects", &self.review_objects(world_id).await?),
+                        ("stats", &world_stats(&entries)),
+                        ("objects", &review_objects(&entries)),
                     ],
                 )?;
                 if let Some(missing) = self.missing_note(world_id, &summary).await? {
@@ -611,21 +637,6 @@ where
             ..self.storyteller_request(&generation, text)?
         };
         self.generation_turn(scope, request).await
-    }
-
-    /// The world's objects, one per line, each marked once the Questioner
-    /// reviewed it and it has not changed since.
-    async fn review_objects(&self, world_id: i64) -> Result<String> {
-        Ok(self
-            .store
-            .review_list(world_id)
-            .await?
-            .iter()
-            .map(|entry| {
-                let mark = if entry.reviewed { "x" } else { " " };
-                format!("- [{mark}] {} {} {}\n", entry.kind, entry.id, entry.name)
-            })
-            .collect())
     }
 
     /// Comparing the summary's marked names with the objects is plain code, so

@@ -175,14 +175,13 @@ impl DeleteOptions {
     }
 }
 
-/// The object a change created or acted on, and what the world holds after it.
+/// The object a change created or acted on.
 #[derive(Debug, Serialize)]
 pub struct Changed {
     pub kind: &'static str,
     pub id: i64,
     /// The group made for an NPC that started a new one.
     pub group: Option<i64>,
-    pub counts: Counts,
 }
 
 /// Where an item is: exactly one of these.
@@ -216,18 +215,6 @@ fn need<T: Clone>(field: &Option<T>, name: &str) -> Result<T> {
 
 pub(super) fn reject<T>(message: String) -> Result<T> {
     Err(Rejected(message).into())
-}
-
-/// How much of each kind the world holds, returned after every change so the
-/// Storyteller can see what might be missing.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct Counts {
-    pub locations: i64,
-    pub connections: i64,
-    pub groups: i64,
-    pub npcs: i64,
-    pub item_types: i64,
-    pub items: i64,
 }
 
 impl Store {
@@ -605,7 +592,6 @@ impl Store {
                 .await?
             }
         };
-        let counts = Self::counts(&mut transaction, world_id).await?;
         transaction
             .commit()
             .await
@@ -614,7 +600,6 @@ impl Store {
             kind: kind.as_str(),
             id,
             group: made_group,
-            counts,
         })
     }
 
@@ -636,7 +621,13 @@ impl Store {
                 Ok(Some((id, false)))
             }
             (None, Some(name), Some(location_id)) => {
-                Self::ensure_unused(transaction, world_id, ObjectKind::Group, name).await?;
+                if let Some(existing) =
+                    Self::find_by_name(transaction, world_id, ObjectKind::Group, name, true).await?
+                {
+                    return reject(format!(
+                        "The world already has group {existing} called `{name}`: give group_id {existing} to join it."
+                    ));
+                }
                 Self::ensure_exists(transaction, world_id, ObjectKind::Location, location_id)
                     .await?;
                 let group = Group {
@@ -895,26 +886,6 @@ impl Store {
         .with_context(|| format!("placing item {item_id}"))?;
         Ok(())
     }
-
-    pub(super) async fn counts(
-        transaction: &mut Transaction<'_, Sqlite>,
-        world_id: i64,
-    ) -> Result<Counts> {
-        sqlx::query_as!(
-            Counts,
-            "SELECT \
-                (SELECT COUNT(*) FROM location WHERE world_id = ?1 AND deleted = 0) AS \"locations!: i64\", \
-                (SELECT COUNT(*) FROM connection WHERE world_id = ?1 AND deleted = 0) AS \"connections!: i64\", \
-                (SELECT COUNT(*) FROM \"group\" WHERE world_id = ?1 AND deleted = 0) AS \"groups!: i64\", \
-                (SELECT COUNT(*) FROM character WHERE world_id = ?1 AND role = 'npc' AND deleted = 0) AS \"npcs!: i64\", \
-                (SELECT COUNT(*) FROM item_type WHERE world_id = ?1 AND deleted = 0) AS \"item_types!: i64\", \
-                (SELECT COUNT(*) FROM item WHERE world_id = ?1 AND deleted = 0) AS \"items!: i64\"",
-            world_id,
-        )
-        .fetch_one(&mut **transaction)
-        .await
-        .with_context(|| format!("counting the objects of world {world_id}"))
-    }
 }
 
 /// Fixtures the tests of the three authoring modules share.
@@ -1056,17 +1027,6 @@ mod id_tests {
             .await
             .unwrap();
         assert_eq!(changed.id, 1);
-        assert_eq!(
-            changed.counts,
-            Counts {
-                locations: 2,
-                connections: 1,
-                groups: 1,
-                npcs: 1,
-                item_types: 1,
-                items: 1,
-            }
-        );
         assert!(
             store
                 .read_object(world, ObjectKind::Npc, toma)
@@ -1105,7 +1065,7 @@ mod id_tests {
             .create_object(world, ObjectKind::Location, &location_fields("yard"))
             .await
             .unwrap();
-        assert_eq!((changed.counts.locations, changed.counts.npcs), (2, 0));
+        assert_eq!(changed.id, 2);
         set_stage(&store, world, "ask").await;
         let error = store
             .create_object(world, ObjectKind::Location, &location_fields("field"))
@@ -1273,6 +1233,31 @@ mod id_tests {
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("A new group needs group_name and location_id"),
+            "{error:#}"
+        );
+        // Naming a group that exists says to join it, not to change it.
+        let orchard = create(
+            &store,
+            world,
+            ObjectKind::Location,
+            location_fields("orchard"),
+        )
+        .await;
+        let (family, _) = group_with_npc(&store, world, "family", orchard, "Toma").await;
+        let error = store
+            .create_object(
+                world,
+                ObjectKind::Npc,
+                &Fields {
+                    group_name: Some("family".into()),
+                    location_id: Some(orchard),
+                    ..npc_fields("Mara", 0)
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!("give group_id {family} to join it")),
             "{error:#}"
         );
 

@@ -2648,13 +2648,17 @@ mod tests {
             shown[10]
         );
         assert!(
-            shown[10].contains("The world has these objects so far")
+            shown[10]
+                .contains("The world so far (locations: 1, connections: 0, groups: 1, npcs: 1")
                 && shown[10].contains("- location 1 Belfry")
                 && shown[10].contains("- npc 2 Ysolde"),
             "{}",
             shown[10]
         );
-        assert!(!shown[7].contains("The world has these objects so far"));
+        // The first request already shows what is missing: nothing exists yet.
+        assert!(
+            shown[7].contains("The world so far (locations: 0, connections: 0, groups: 0, npcs: 0")
+        );
         // The Storyteller's change comes back to the Questioner as the result
         // of its own question, in the same turn.
         assert!(

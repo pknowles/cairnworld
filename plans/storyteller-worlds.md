@@ -167,8 +167,8 @@ chat and are compacted like any chat's.
   Update and Delete for Location, Connection, NPC, ItemType and Item. There is no tool for a group: the
   declarations say NPCs "must have a group - either existing or created with their first NPC", and a group
   goes when its last NPC does. Create requires all initial fields; Update names the
-  object ID and only fields being replaced. Return assigned IDs, real changes
-  and current location/connection/group/NPC/item counts. Use world-scoped typed
+  object ID and only fields being replaced. Return assigned IDs and the real
+  change. Use world-scoped typed
   arguments and shared constructors/validation. Return full validation errors as
   rejected tool results; execution failures propagate normally.
 - Create in reference dependency order: locations, connections/groups, then

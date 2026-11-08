@@ -238,7 +238,6 @@ impl Store {
             }
         }
         Self::clear_review(&mut transaction, kind, id).await?;
-        let counts = Self::counts(&mut transaction, world_id).await?;
         transaction
             .commit()
             .await
@@ -247,7 +246,6 @@ impl Store {
             kind: kind.as_str(),
             id,
             group: made_group,
-            counts,
         })
     }
 
@@ -424,7 +422,6 @@ impl Store {
                 Self::flag_deleted(&mut transaction, ObjectKind::ItemType, id).await?;
             }
         }
-        let counts = Self::counts(&mut transaction, world_id).await?;
         transaction
             .commit()
             .await
@@ -433,7 +430,6 @@ impl Store {
             kind: kind.as_str(),
             id,
             group: None,
-            counts,
         })
     }
 

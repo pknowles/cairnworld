@@ -366,14 +366,14 @@ objects_result = """\
 
 ask_request = "Call world_summary_complete if the summary covers the setting, the factions, the important NPCs with their motives, and where the story starts. Otherwise ask the Storyteller the questions that would add what is missing."
 
-# Review of the objects the Storyteller created. {seed} {summary} {objects}
+# Review of the objects the Storyteller created. {seed} {summary} {stats} {objects}
 review_state = """\
     Seed prompt for the world: {seed}
 
     The world summary:
 {summary}
-    The objects the Storyteller created, each marked [x] once you reviewed it and \
-    it has not changed since:
+    The objects the Storyteller created ({stats}), each marked [x] once you reviewed \
+    it and it has not changed since:
 {objects}\
     """
 
@@ -485,9 +485,9 @@ fix_request = """\
     Use the tools to add what is missing. Then reply with a short note: what you changed or, if you changed nothing, why - for example the questions were unclear, you disagree, or you could not do it.\
     """
 
-# What exists in the world, shown with every create-objects request. {objects}
+# What exists in the world and how much, shown with every create-objects request. {stats} {objects}
 objects_state = """\
-    The world has these objects so far:
+    The world so far ({stats}):
 {objects}\
     """
 

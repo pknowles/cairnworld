@@ -1075,12 +1075,16 @@ the same, wait, whatever.
 # Tool calls
 
 Many tool calls will have a short description that the player agent sees. When
-used, the GM is provided with an extended version from the rulebook. This
-prevents the GM's context from being overloaded with the entire rulebook text
-for all actions. For example, when a player attacks the GM will receive the
-weapon description and relevant rules from the rulebook to resolve the
-interaction. The same idea can apply to tool results, where additional context
-and rules are provided on a need-to-know basis.
+used, the GM can be provided with an extended version from the rulebook about
+what must happen next. This prevents the GM's context from being overloaded with
+the entire rulebook text for all actions. For example, when a player attacks the
+GM will receive the weapon description and relevant rules from the rulebook to
+resolve the interaction. The same idea can be applied to certain tool results,
+where additional context and rules can be added on a need-to-know basis.
+
+Tool results are generally just the result/side effects of the tool call. Think
+return value when calling a function. Confirmation to the agent about what
+actually happened.
 
 Many tool calls imply a roll will be made. Rolls are made by rust code, not
 LLMs! When implemented PC rolls will be made in the UI by players clicking a
@@ -1352,8 +1356,9 @@ opens the chest, the GM describes the item they found.
 During the initial world creation stage, much like character creation, the
 storyteller has access to the following tools. It will be prompted in a loop to
 complete and question/review steps until the Questioner is happy. For object
-creation stages the Storyteller should receive stats after changes to help it
-know what might be missing, for example connection, npc and item counts.
+creation stages the Questioner and Storyteller should be given stats in their
+context to help them know what might be missing, for example connection, npc and
+item counts.
 
 - CreateLocation/Connection/NPC/ItemType/Item - initial attributes and details
   for all fields must be given in the tool call. NPCs must have a group - either

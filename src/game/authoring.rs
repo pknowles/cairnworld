@@ -166,10 +166,8 @@ where
                         .map(|group| format!(" in new group {group}"))
                         .unwrap_or_default();
                     Ok(ToolOutcome::Completed(format!(
-                        "{done} {} {}{group}. The world now has {}.",
-                        changed.kind,
-                        changed.id,
-                        serde_json::to_string(&changed.counts)?
+                        "{done} {} {}{group}.",
+                        changed.kind, changed.id
                     )))
                 }
                 Err(error) => rejection_or_failure(error),
