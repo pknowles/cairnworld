@@ -918,7 +918,7 @@ Game objects
   - Player-specific character sheet info
 - Non-player characters
   - Character
-- Group
+- Group - temporary character grouping; empty groups are invalid state
   - Location ID (no sub-Location position description since groups cannot move;
     they only define interacting characters).
   - Travel Connection ID
@@ -1355,9 +1355,10 @@ complete and question/review steps until the Questioner is happy. For object
 creation stages the Storyteller should receive stats after changes to help it
 know what might be missing, for example connection, npc and item counts.
 
-- CreateLocation/Connection/NPC/Group/ItemType/Item - initial attributes and
-  details for all fields must be given in the tool call.
-- UpdateLocation/Connection/NPC/Group/ItemType/Item - Just like create, but
+- CreateLocation/Connection/NPC/ItemType/Item - initial attributes and details
+  for all fields must be given in the tool call. NPCs must have a group - either
+  existing or created with their first NPC.
+- UpdateLocation/Connection/NPC/ItemType/Item - Just like create, but
   supports replacing individual fields without specifing them all. 
 - DeleteLocation/Connection/NPC/ItemType/Item - flags them as deleted and
   filters. We don't want to let agents be actually destructive, ever. Still
