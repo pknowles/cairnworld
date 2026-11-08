@@ -1898,8 +1898,8 @@ AskQuestions or WorldSummaryComplete. AskQuestions runs the Storyteller inside t
 call and returns the effect as its result: while the summary develops the
 Storyteller answers the questions one at a time as text to itself, then writes the
 world summary, which is stored and replaces the previous one in the Questioner's
-system context, kept up to date; the result is a short note that it was rewritten.
-While reviewing objects it changes them and
+system context, kept up to date; the result is the Storyteller's own very short
+note of what it changed. While reviewing objects it changes them and
 the result lists what it added, changed and removed. The Questioner continues in
 the same turn. WorldSummaryComplete ends the turn. The Storyteller's next round
 starts from the seed and current summary without earlier answer transcripts. The

@@ -344,9 +344,6 @@ meta_request = """\
 {questions}\
     """
 
-# What ask_questions returns while the summary develops: what changed.
-summary_result = "The Storyteller answered and rewrote the world summary. Your context now holds the new version."
-
 # The current summary, shown with every request while the summary develops. {summary}
 summary_state = """\
     The world summary:
@@ -468,6 +465,10 @@ summary_request = """\
     dropping those that no longer fit. Put the names of characters, important items \
     and locations in double square brackets, like [[Name]].\
     """
+
+# After the summary is rewritten, asked as a side inference. The reply is the
+# result of the Questioner's questions.
+summary_note_request = "In about 20 words, say what your answers changed in the world summary."
 
 # The Questioner is satisfied. The reply becomes the world name.
 name_request = "Reply with only a short name for this world."

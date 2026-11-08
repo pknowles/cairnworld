@@ -520,7 +520,8 @@ where
 
     /// The Storyteller answers the Questioner's questions one at a time as text,
     /// then rewrites the world summary, which replaces the old one. The result
-    /// for the Questioner says so; the summary is in its context.
+    /// for the Questioner is the Storyteller's one-sentence note of the change;
+    /// the summary is in its context.
     async fn summary_round(
         self: &Arc<Self>,
         scope: &StepScope,
@@ -569,7 +570,15 @@ where
             sequence_id: None,
             inference_id: None,
         });
-        Ok(prompts.questioner.summary_result.clone())
+        // What the Questioner is told: the Storyteller's own account of the change.
+        let generation = self.current_generation(scope).await?;
+        let note = self
+            .generation_aside(
+                scope,
+                self.storyteller_request(&generation, storyteller.summary_note_request.clone())?,
+            )
+            .await?;
+        Ok(reply_text(&note)?.trim().to_string())
     }
 
     /// The Storyteller changes the world to answer the Questioner's questions.

@@ -2455,6 +2455,7 @@ mod tests {
             text("The tide-wardens rule."),
             text("The drowned bell."),
             text("Summary: a city ruled by tide-wardens. [[Ysolde]] guards the [[Drowned Bell]]."),
+            text("Added who rules and what is feared."),
             call("world_summary_complete", "{}"),
             text("  The Drowned Bell \n"),
             calls(&[
@@ -2566,7 +2567,7 @@ mod tests {
         store.character_group_id(member.character_id).await.unwrap();
 
         let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
-        assert_eq!(shown.len(), 13);
+        assert_eq!(shown.len(), 14);
         assert!(shown[0].contains("A drowned city"));
         let prompts = crate::prompts::current().unwrap();
         let sampled = |questions: &[String]| {
@@ -2595,9 +2596,9 @@ mod tests {
         );
         assert!(shown[3].contains("What is feared?"));
         // Only the summary reaches the Questioner, not the Storyteller's answers.
-        assert!(shown[5].contains("Summary: a city ruled by tide-wardens."));
+        assert!(shown[6].contains("Summary: a city ruled by tide-wardens."));
         assert!(
-            !shown[5].contains("The tide-wardens rule.") && !shown[5].contains("The drowned bell.")
+            !shown[6].contains("The tide-wardens rule.") && !shown[6].contains("The drowned bell.")
         );
 
         // Only the Storyteller's first round of answers runs at its own temperature.
@@ -2617,69 +2618,69 @@ mod tests {
 
         // The Storyteller creates objects with creation tools and sees the one summary.
         assert!(
-            shown[7].contains("no object has them yet: Ysolde, Drowned Bell"),
+            shown[8].contains("no object has them yet: Ysolde, Drowned Bell"),
             "{}",
-            shown[7]
+            shown[8]
         );
         assert!(
-            shown[7].contains("Create the world's objects"),
+            shown[8].contains("Create the world's objects"),
             "{}",
-            shown[7]
+            shown[8]
         );
         assert!(
-            shown[7].contains("create_object") && shown[7].contains("a city ruled by tide-wardens")
+            shown[8].contains("create_object") && shown[8].contains("a city ruled by tide-wardens")
         );
         // A refused call reaches the Storyteller as a tool result it can act on.
-        assert!(shown[8].contains("called `Belfry`"), "{}", shown[8]);
+        assert!(shown[9].contains("called `Belfry`"), "{}", shown[9]);
         // The Questioner reviews the objects, not the Storyteller's answers.
-        assert!(shown[9].contains("- [ ] npc 2 Ysolde") && shown[9].contains("read_object"));
-        assert!(!shown[9].contains("The tide-wardens rule."));
+        assert!(shown[10].contains("- [ ] npc 2 Ysolde") && shown[10].contains("read_object"));
+        assert!(!shown[10].contains("The tide-wardens rule."));
         // It is told which marked name has no object, and not the one that has.
         assert!(
-            shown[9].contains("no object has them yet: Drowned Bell"),
+            shown[10].contains("no object has them yet: Drowned Bell"),
             "{}",
-            shown[9]
+            shown[10]
         );
         // The Questioner's question sends the Storyteller back to create objects, and it
         // is shown what already exists (a fact, not kept in its chat).
         assert!(
-            shown[10].contains("Who stands against Ysolde?"),
+            shown[11].contains("Who stands against Ysolde?"),
             "{}",
-            shown[10]
+            shown[11]
         );
         assert!(
-            shown[10]
+            shown[11]
                 .contains("The world so far (locations: 1, connections: 0, groups: 1, npcs: 1")
-                && shown[10].contains("- location 1 Belfry")
-                && shown[10].contains("- npc 2 Ysolde"),
+                && shown[11].contains("- location 1 Belfry")
+                && shown[11].contains("- npc 2 Ysolde"),
             "{}",
-            shown[10]
+            shown[11]
         );
         // The first request already shows what is missing: nothing exists yet.
         assert!(
-            shown[7].contains("The world so far (locations: 0, connections: 0, groups: 0, npcs: 0")
+            shown[8].contains("The world so far (locations: 0, connections: 0, groups: 0, npcs: 0")
         );
         // The Storyteller's change comes back to the Questioner as the result
         // of its own question, in the same turn.
         assert!(
-            shown[12].contains("Added Corvin.")
-                && shown[12].contains("Changes to the world:")
-                && shown[12].contains("- added npc 3 Corvin")
-                && !shown[12].contains("create_object"),
+            shown[13].contains("Added Corvin.")
+                && shown[13].contains("Changes to the world:")
+                && shown[13].contains("- added npc 3 Corvin")
+                && !shown[13].contains("create_object"),
             "{}",
-            shown[12]
+            shown[13]
         );
-        // The result says the summary changed; the summary itself is the
-        // Questioner's context.
+        // The result is the Storyteller's note of the change; the summary itself
+        // is the Questioner's context.
         assert!(
-            shown[5].contains("rewrote the world summary")
-                && shown[5].contains("The world summary:"),
+            shown[6].contains("Added who rules and what is feared.")
+                && shown[6].contains("The world summary:"),
             "{}",
-            shown[5]
+            shown[6]
         );
         // It is the new summary, once, in the request after the change and not
         // in the request before it.
-        assert_eq!(shown[5].matches("a city ruled by tide-wardens").count(), 1);
+        assert_eq!(shown[6].matches("a city ruled by tide-wardens").count(), 1);
         assert!(!shown[1].contains("a city ruled by tide-wardens"));
     }
 
@@ -3321,9 +3322,11 @@ mod tests {
             call("ask_questions", r#"{"questions":["Q one?"]}"#),
             text("Answer one."),
             text("SUMMARY-ONE"),
+            text("NOTE-ONE"),
             call("ask_questions", r#"{"questions":["Q two?"]}"#),
             text("Answer two."),
             text("SUMMARY-TWO"),
+            text("NOTE-TWO"),
             call("world_summary_complete", "{}"),
             text("The Drowned Bell"),
         ]);
@@ -3358,19 +3361,21 @@ mod tests {
             .summary_request
             .clone();
         let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
-        assert_eq!(shown.len(), 9);
-        // Request 3 is the first summary, asked beside the chat; request 5 is
+        assert_eq!(shown.len(), 11);
+        // Request 3 is the first summary, asked beside the chat; request 6 is
         // the second round's answer and sees only the first summary, once.
         assert!(shown[3].contains(&summary_request));
-        assert!(shown[5].contains("Q two?") && shown[5].contains("Answer one."));
-        assert_eq!(shown[5].matches("SUMMARY-ONE").count(), 1);
-        assert!(!shown[5].contains(&summary_request));
-        // The second summary sees the first, once, and none of the second.
+        assert!(shown[6].contains("Q two?") && shown[6].contains("Answer one."));
         assert_eq!(shown[6].matches("SUMMARY-ONE").count(), 1);
-        assert!(!shown[6].contains("SUMMARY-TWO"));
-        // The name sees only the latest.
+        assert!(!shown[6].contains(&summary_request));
+        // The second summary sees the first, once, and none of the second.
+        assert_eq!(shown[7].matches("SUMMARY-ONE").count(), 1);
+        assert!(!shown[7].contains("SUMMARY-TWO"));
+        // The note of the change sees the new summary.
         assert_eq!(shown[8].matches("SUMMARY-TWO").count(), 1);
-        assert!(!shown[8].contains("SUMMARY-ONE"));
+        // The name sees only the latest.
+        assert_eq!(shown[10].matches("SUMMARY-TWO").count(), 1);
+        assert!(!shown[10].contains("SUMMARY-ONE"));
 
         // Developer Mode lists each side inference in the Storyteller's history.
         let storyteller = store
@@ -3398,7 +3403,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(asides, ["SUMMARY-ONE", "SUMMARY-TWO"]);
+        assert_eq!(
+            asides,
+            ["SUMMARY-ONE", "NOTE-ONE", "SUMMARY-TWO", "NOTE-TWO"]
+        );
     }
 
     #[tokio::test]

@@ -675,7 +675,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `Game::run_generation_step`, restoring `spent` into the shared `Budget`): the
   Questioner answers `questioner.example_questions` and `meta_questions` once (its
   history keeps them), then one `ask` turn: `ask_questions` runs the Storyteller inside the call
-  (`Game::summary_round`; its turns nest under the call) and returns that the summary was rewritten (the
+  (`Game::summary_round`; its turns nest under the call) and returns the Storyteller's note of the change, a second side inference of about 20 words (the
   current summary is in the Questioner's per-request context), so the Questioner keeps asking in the same turn until it calls the terminal
   `world_summary_complete`. The Storyteller answers each question as text in its one chat
   (migration 0017; both roles have exactly one chat), seeing the seed and the one current summary

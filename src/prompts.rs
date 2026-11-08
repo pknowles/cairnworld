@@ -45,7 +45,6 @@ pub struct WorldTexts {
 pub struct Questioner {
     pub role: String,
     pub meta_request: String,
-    pub summary_result: String,
     pub summary_state: String,
     pub objects_result: String,
     pub ask_request: String,
@@ -69,6 +68,7 @@ pub struct Storyteller {
     pub round_start: String,
     pub next_question: String,
     pub summary_request: String,
+    pub summary_note_request: String,
     pub name_request: String,
     pub uncreated_mentions: String,
     pub create_objects_request: String,

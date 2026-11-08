@@ -91,11 +91,14 @@ The Storyteller is also given the initial world prompt. It is first run with the
 Questioner's questions, asked one at a time. We should experiment with a high
 LLM temperature (if the model supports it) just for the initial round of
 questions. This expands the seed and story variance. Once done it is asked to
-write a world summary, which gets stored and returned as the result to the
-Questioner. The Questioner then asks follow-up questions until it's satisfied.
-I'd like to avoid the Storyteller's context getting overloaded and confused with
-multiple world summaries, so we must only present it with one version and remove
-old versions from its context.
+write a world summary, which gets stored. The storyteller should reply with a
+very short description of what it changed, which is returned as the tool call
+result to the Questioner. The Questioner then asks follow-up questions until
+it's satisfied. I'd like to avoid the Storyteller and Questioner contexts
+getting overloaded and confused with multiple world summaries, so we must only
+present it with one version and remove or otherwise avoid leaving old versions
+in their chat history, e.g. providing it only in the system prompt rather than
+message history.
 
 The world summary should define the overall setting, factions, NPCs of high
 importance, motives, possible player interaction. The next phases need to turn
@@ -256,9 +259,9 @@ especially NPCs, one at a time to allow the model to give focused descriptions
 to each. Rust should validate as much as it can, where explicit relations/IDs
 are given.
 
-For each NPC's location, the Questioner concept is again executed to add
-detail to each. The Questioner is given the world summary and the seed prompt
-provided by the Storyteller.
+The Questioner concept is executed to review and add detail during object
+creation too. The Questioner is given the world summary and the seed prompt
+provided by the Storyteller as context.
 
 Introducing randomness in LLMs is difficult. My favorite idea so far is to
 choose questions and meta-questions at random. Maybe also a small list of random
@@ -1111,7 +1114,9 @@ second edition.
 - RollBonds
 - RollAge
 - ReadyToBegin - called when the player has finished character creation; rust
-  validates the character sheet is complete
+  validates the character sheet is complete and the storyteller is called to
+  give either an exicting group to add the PC to (more common) or a new group,
+  location ID and character location description
 
 ChooseBackground and RollBackground are only available when the Storyteller is
 not being used, e.g. during initial development (see An initial proof of
