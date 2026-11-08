@@ -1375,6 +1375,13 @@ item counts.
 We may need to create some prefab ItemTypes to make it easier for the
 storyteller; not sure yet.
 
+It would be good to have the storyteller return a summary result of the updates
+it intended to make in its final turn message. This should include any
+misunderstanding or rejection and the Storyteller must be aware that no action
+when the request doesn't make sense is perfectly acceptable provided a reason is
+given. The Questioner could also receive a summary of changes from the code to
+help corroborate the result text.
+
 Validation must include making sure locations are fully connected, necessary
 fields such as the NPC background, motives etc are populated. ItemTypes have
 Items. Some validation is implicit, e.g. you can't have an item that is not at a
