@@ -507,7 +507,7 @@ objects_state = """\
     """
 
 [storyteller.tools.create_object]
-description = "Create an object. Fields: location name, location_kind, description; connection name, from_id, to_id, travel_time, description; npc name, location_id, description, background, motive, ambition, sheet; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
+description = "Create an object. Fields: location name, location_kind, description; connection name, from_id, to_id, travel_time, description; npc name, location_id, description, background, motive, ambition, sheet; item_type name, description, stats; item name, item_type_id, location_id, description. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
 
 [storyteller.tools.create_object.arguments]
 object = "The object's kind."
@@ -517,9 +517,8 @@ description = "What it is like."
 from_id = "Starting location ID."
 to_id = "Destination location ID."
 travel_time = "Minutes."
-location_id = "The location the item is at, or where the NPC starts, in a group of its own."
+location_id = "The location the item lies at, or where the NPC starts, in a group of its own."
 item_type_id = "The item type this item is of."
-held_by_id = "NPC ID holding the item."
 background = "What only the NPC knows."
 motive = "What the NPC wants now."
 ambition = "What the NPC wants in the long run."
@@ -540,12 +539,16 @@ group_name = "Unique name of the new group."
 location_id = "The location of the group."
 description = "Where in that location the NPCs are, written to each of them."
 
+[storyteller.tools.give_item]
+description = "An NPC picks up an item, wherever it was."
+
+[storyteller.tools.give_item.arguments]
+item_id = "The item."
+npc_id = "The NPC who takes it."
+
 [storyteller.tools.delete_object]
 description = "Flag an object deleted. Dependencies may require one option."
 
 [storyteller.tools.delete_object.arguments]
 object = "The object's kind."
 id = "Its ID from the object list."
-item_location_id = "Location ID for an NPC's carried items."
-item_description = "New description for each dropped item."
-delete_items = "Delete an NPC's carried items too."

@@ -1918,10 +1918,11 @@ not a separate autonomous agent. A safety limit is a visible incomplete-generati
 failure, not permission to declare readiness or advance automatically.
 
 Storyteller has Create/Update/Delete tools for Location, Connection, NPC,
-ItemType and Item, GroupNPCs, plus shared text editing and hierarchical lookup.
+ItemType and Item, GroupNPCs and GiveItem (an NPC picks an item up), plus shared
+text editing and hierarchical lookup.
 Create supplies all initial fields; Update replaces selected fields by object ID.
 A tool's inputs never overlap or contradict, so a call with valid fields is
-valid. A new NPC starts in a group of its own, named after it, at the location
+valid: an Item is created lying at a location, and Delete takes only the object. A new NPC starts in a group of its own, named after it, at the location
 given when it is created; an NPC has no location of its own. GroupNPCs takes
 NPC IDs, a new group name, a location ID and a description of where in the
 location they are, which is written to every one of them: it makes the new
@@ -1934,9 +1935,8 @@ Normal discovery, counts, model context, NPC scheduling and action/tool targets
 exclude deleted objects. Developer Mode can explicitly include them with their
 retained relationships and history. Whether a delete blocks, cascades or leaves
 a dependent alone is decided per object type: an Item or Connection is flagged
-alone; an ItemType is blocked while active Items use it; an NPC carrying Items
-takes either a location ID and description written to every carried Item or a
-flag that deletes them too, and is otherwise blocked; a Group is never deleted
+alone; an ItemType is blocked while active Items use it; an NPC carrying Items is
+blocked until they are moved or deleted; a Group is never deleted
 directly (no DeleteGroup tool) and is flagged when its last character is removed;
 a Location is blocked while Groups are there unless a flag also deletes them, and
 its Connections are flagged with it. World validation checks the remaining active

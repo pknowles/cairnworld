@@ -1406,7 +1406,7 @@ highlight character names, important items and locations with special syntax. We
 should then parse this and remind the storyteller which it has not created. This
 is non-blocking reminder and the storyteller will be explicitly instructed to
 ignore those it ultimately decides do not need to exist. We help it; we do not
-force things.
+force things. I.e. do NOT use these markers as a definitive list.
 
 The Questioner can only read/review world objects, ask questions or make a tool
 call to say it is satisfied. It does not get access to any of the storyteller's

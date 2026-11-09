@@ -18,7 +18,7 @@ use crate::{
     inspection::DevEvent,
     llm::ToolDefinition,
     prompts,
-    store::{Change, DeleteOptions, Fields, ObjectKind, Rejected, Store},
+    store::{Change, Fields, ObjectKind, Rejected, Store},
     tools::{Tool, ToolOutcome},
     world::World,
 };
@@ -50,8 +50,12 @@ struct GroupNpcs {
 struct DeleteObject {
     object: ObjectKind,
     id: i64,
-    #[serde(flatten)]
-    options: DeleteOptions,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GiveItem {
+    item_id: i64,
+    npc_id: i64,
 }
 
 /// The tools for the Storyteller to create, change and delete the world's
@@ -112,6 +116,13 @@ pub(super) fn storyteller_tools(store: &Store, world: &Arc<World>) -> Result<Vec
     )?;
     drop_null_types(&mut delete.schema);
     remove_group_kind(&mut delete.schema);
+    list.push(give_item_tool(
+        world,
+        tools.tool(
+            "give_item",
+            serde_json::to_value(schema_for!(GiveItem)).expect("schema should serialize"),
+        )?,
+    ));
     list.push(group_npcs_tool(
         world,
         tools.tool(
@@ -122,15 +133,10 @@ pub(super) fn storyteller_tools(store: &Store, world: &Arc<World>) -> Result<Vec
     list.push(changer::<DeleteObject>(
         world,
         delete,
-        ["object", "id"]
-            .map(String::from)
-            .into_iter()
-            .chain(DeleteOptions::names())
-            .collect(),
+        ["object", "id"].map(String::from).to_vec(),
         Box::new(|call| Change::Delete {
             kind: call.object,
             id: call.id,
-            options: &call.options,
         }),
     ));
     Ok(list)
@@ -142,6 +148,42 @@ fn remove_group_kind(schema: &mut serde_json::Value) {
     if let Some(kinds) = schema["properties"]["object"]["enum"].as_array_mut() {
         kinds.retain(|kind| kind != "group");
     }
+}
+
+/// An NPC picks an item up.
+fn give_item_tool((store, world): (&Store, &Arc<World>), definition: ToolDefinition) -> Tool {
+    let store = store.clone();
+    let world = Arc::clone(world);
+    Tool::new(definition, move |context| {
+        let arguments = context.arguments.to_string();
+        let store = store.clone();
+        let world = Arc::clone(&world);
+        Box::pin(async move {
+            let allowed = ["item_id", "npc_id"].map(String::from).to_vec();
+            let call: GiveItem = match parse(&arguments, &allowed) {
+                Ok(call) => call,
+                Err(error) => return Ok(ToolOutcome::rejected(error)),
+            };
+            match store.give_item(world.id, call.item_id, call.npc_id).await {
+                Ok(()) => {
+                    world.publish(DevEvent::Changed {
+                        sequence_id: None,
+                        inference_id: None,
+                    });
+                    Ok(ToolOutcome::Completed(format!(
+                        "Gave item {} to npc {}.",
+                        call.item_id, call.npc_id
+                    )))
+                }
+                Err(error) => match rejection_or_failure(error)? {
+                    ToolOutcome::Rejected(reason) => {
+                        Ok(ToolOutcome::Rejected(format!("Not given. {reason}")))
+                    }
+                    other => Ok(other),
+                },
+            }
+        })
+    })
 }
 
 /// Puts NPCs in one group; the result says which group they are in.

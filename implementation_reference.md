@@ -694,7 +694,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   After the name the Storyteller creates the world's objects (the stage stored as `create_objects`) with three
   tools that take an `object` kind and the IDs the tools return: `create_object` (every kind requires a
   description), `update_object` (the same fields, described once in `create_object`) and `delete_object`
-  (`game/authoring.rs`), and `group_npcs`. A group has no tool of its own: a new NPC starts in a group of its
+  (object and ID only; what depends on an object blocks the delete and is listed in the refusal)
+  (`game/authoring.rs`), `group_npcs` and `give_item`. A group has no tool of its own: a new NPC starts in a group of its
   own, named after it, at its `location_id` (`Store::start_group`); `group_npcs` (`Store::group_npcs`) makes a new
   group at a location, moves the listed NPCs into it with a description written to each of them, and a group
   left without a member is flagged deleted, so no group is ever empty. Names of groups, connections and the
@@ -703,7 +704,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   which the tool refuses to go beyond. A connection has a name, and its ends can change (`Store::ensure_ends` applies the creation checks). A refused call's result begins "Not created.",
   "Not changed." or "Not deleted." The stage is driven by `Game::storyteller_creates_first_objects`: a locations
   and connections request, then a "next NPC" request repeated until a turn makes no NPC, one request to group the NPCs, and one for the items. The summary's unused `[[Name]]`
-  marks are only listed as a reminder in each request. An item lies at a location or is held by an NPC. `Store::change_object` creates
+  marks are only listed as a reminder in each request. An item is created at a location, and `give_item` (`Store::give_item`) puts it in an NPC's hands. `Store::change_object` creates
   (`store/authoring.rs`, sharing its per-object inserts with `install_scenario`), updates and deletes
   (`store/editing.rs`); a delete only sets `deleted`, and the gameplay queries that enumerate characters,
   items, locations and connections skip deleted ones; Developer Mode lists them labelled. A result says

@@ -1177,3 +1177,22 @@ A Storyteller tool result says only what that call did ("Changed npc 2."). The c
 are context: the Questioner and the Storyteller are given them in their per-request context
 (`user_declarations.md` now says so), and the Questioner receives a summary of the Storyteller's actions as
 the result of `ask_questions`.
+
+
+On how tools take their inputs (2026-11-09):
+
+> don't ask for stuff that can conflict. a valid tool call is correct by design, not validated at runtime
+
+> objects must be complete at construction. review your tools to verify you aren't asking for bullshit duplicate inputs
+
+> group_name can NEVER be used to identify a group. that's what a group_id is for. the name is purely for dev mode and to help agents know which is which
+
+Applied: an NPC takes only the location it starts at (its own group, named after it); `group_npcs` makes a
+new group; an item is created at a location and `give_item` picks it up; `delete_object` takes only the
+object, and what depends on it blocks the delete. Group names stay unique but are never looked up.
+
+On the Storyteller creating NPCs the summary did not name:
+
+> that prevents the storyteller from creating NPCs it forgot to name
+
+Creation asks for the next NPC until a turn makes none; marked names are only a reminder, with no limit.

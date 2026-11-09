@@ -9,7 +9,7 @@ use crate::scenario::{Group, Notes};
 
 use super::{
     Store,
-    authoring::{Changed, DeleteOptions, Fields, Holder, ObjectKind, reject},
+    authoring::{Changed, Fields, Holder, ObjectKind, reject},
 };
 
 /// One change to the world being built.
@@ -26,7 +26,6 @@ pub enum Change<'a> {
     Delete {
         kind: ObjectKind,
         id: i64,
-        options: &'a DeleteOptions,
     },
 }
 
@@ -48,9 +47,7 @@ impl Store {
             Change::Update { kind, id, fields } => {
                 self.update_object(world_id, kind, id, fields).await
             }
-            Change::Delete { kind, id, options } => {
-                self.delete_object(world_id, kind, id, options).await
-            }
+            Change::Delete { kind, id } => self.delete_object(world_id, kind, id).await,
         }
     }
 
@@ -188,32 +185,10 @@ impl Store {
                 .context("updating an item")?;
                 // Whoever held the item, and whoever holds it now, changed with it.
                 Self::clear_holder_review(&mut transaction, id).await?;
-                let holder = match (fields.location_id, fields.held_by_id) {
-                    (None, None) => None,
-                    (Some(location), None) => {
-                        Self::ensure_exists(
-                            &mut transaction,
-                            world_id,
-                            ObjectKind::Location,
-                            location,
-                        )
+                if let Some(location) = fields.location_id {
+                    Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, location)
                         .await?;
-                        Some(Holder::Location(location))
-                    }
-                    (None, Some(npc)) => {
-                        Self::ensure_exists(&mut transaction, world_id, ObjectKind::Npc, npc)
-                            .await?;
-                        Some(Holder::Character(npc))
-                    }
-                    (Some(_), Some(_)) => {
-                        return reject(
-                            "Give either location_id or held_by_id to say where the item is."
-                                .into(),
-                        );
-                    }
-                };
-                if let Some(holder) = holder {
-                    Self::move_item(&mut transaction, id, holder).await?;
+                    Self::move_item(&mut transaction, id, Holder::Location(location)).await?;
                     Self::clear_holder_review(&mut transaction, id).await?;
                 }
             }
@@ -306,15 +281,30 @@ impl Store {
         Ok(new_group)
     }
 
-    /// Flag an object as deleted. What depends on it either blocks the delete or
-    /// is dealt with as the options say; nothing is removed.
-    pub async fn delete_object(
-        &self,
-        world_id: i64,
-        kind: ObjectKind,
-        id: i64,
-        options: &DeleteOptions,
-    ) -> Result<Changed> {
+    /// An NPC picks the item up, wherever it was.
+    pub async fn give_item(&self, world_id: i64, item_id: i64, npc_id: i64) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .with_context(|| format!("giving an item in world {world_id}"))?;
+        Self::ensure_stage(&mut transaction, world_id, &["create_objects", "review"]).await?;
+        Self::ensure_exists(&mut transaction, world_id, ObjectKind::Item, item_id).await?;
+        Self::ensure_exists(&mut transaction, world_id, ObjectKind::Npc, npc_id).await?;
+        // Whoever held the item, and whoever holds it now, changed with it.
+        Self::clear_holder_review(&mut transaction, item_id).await?;
+        Self::move_item(&mut transaction, item_id, Holder::Character(npc_id)).await?;
+        Self::clear_holder_review(&mut transaction, item_id).await?;
+        Self::clear_review(&mut transaction, ObjectKind::Item, item_id).await?;
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("committing giving in world {world_id}"))
+    }
+
+    /// Flag an object as deleted. What depends on it blocks the delete, which
+    /// says what to deal with first; nothing is removed.
+    pub async fn delete_object(&self, world_id: i64, kind: ObjectKind, id: i64) -> Result<Changed> {
         let mut transaction = self
             .pool
             .begin()
@@ -392,56 +382,14 @@ impl Store {
                 .await
                 .context("finding what an NPC carries")?;
                 if !carried.is_empty() {
-                    match (options.item_location_id, options.delete_items) {
-                        (Some(_), true) => {
-                            return reject(
-                                "Give item_location_id or delete_items, not both.".into(),
-                            );
-                        }
-                        (None, false) => {
-                            return reject(format!(
-                                "NPC {id} carries {}. Give item_location_id to leave them somewhere, or set delete_items.",
-                                carried
-                                    .iter()
-                                    .map(|item| format!("{} ({})", item.name, item.id))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ));
-                        }
-                        (Some(location), false) => {
-                            Self::ensure_exists(
-                                &mut transaction,
-                                world_id,
-                                ObjectKind::Location,
-                                location,
-                            )
-                            .await?;
-                            for item in &carried {
-                                Self::move_item(
-                                    &mut transaction,
-                                    item.id,
-                                    Holder::Location(location),
-                                )
-                                .await?;
-                                if let Some(description) = &options.item_description {
-                                    sqlx::query!(
-                                        "UPDATE item SET description = ? WHERE id = ?",
-                                        description,
-                                        item.id,
-                                    )
-                                    .execute(&mut *transaction)
-                                    .await
-                                    .context("describing a dropped item")?;
-                                }
-                            }
-                        }
-                        (None, true) => {
-                            for item in &carried {
-                                Self::flag_deleted(&mut transaction, ObjectKind::Item, item.id)
-                                    .await?;
-                            }
-                        }
-                    }
+                    return reject(format!(
+                        "NPC {id} carries {}. Move or delete them first.",
+                        carried
+                            .iter()
+                            .map(|item| format!("{} ({})", item.name, item.id))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
                 let group = sqlx::query_scalar!(
                     "SELECT group_id FROM character_group WHERE character_id = ?",
@@ -586,7 +534,7 @@ impl Store {
 #[cfg(test)]
 mod id_tests {
     use crate::store::authoring::fixtures::*;
-    use crate::store::{DeleteOptions, Fields, ObjectKind};
+    use crate::store::{Fields, ObjectKind};
 
     #[tokio::test]
     async fn a_connections_ends_can_change_to_two_different_locations_it_does_not_already_join() {
@@ -738,7 +686,7 @@ mod id_tests {
             .unwrap();
         assert_eq!(store.group_npc_ids(kin).await.unwrap(), vec![toma, mara]);
         store
-            .delete_object(world, ObjectKind::Npc, toma, &DeleteOptions::default())
+            .delete_object(world, ObjectKind::Npc, toma)
             .await
             .unwrap();
         assert_eq!(store.group_npc_ids(kin).await.unwrap(), vec![mara]);
@@ -801,7 +749,7 @@ mod id_tests {
         // Deleting the last NPC takes the group as well.
         for npc in [toma, mara] {
             store
-                .delete_object(world, ObjectKind::Npc, npc, &DeleteOptions::default())
+                .delete_object(world, ObjectKind::Npc, npc)
                 .await
                 .unwrap();
         }

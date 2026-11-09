@@ -40,8 +40,8 @@ impl ObjectKind {
 
     /// The fields creating or changing an object of this kind takes, and whether
     /// creating one needs it. They never overlap or contradict, so a call with
-    /// valid fields is valid. An item needs exactly one of `location_id` and
-    /// `held_by_id`.
+    /// valid fields is valid. An item is created lying at a location; it is
+    /// picked up with `give_item`.
     pub fn fields(self, creating: bool) -> &'static [(&'static str, bool)] {
         match (self, creating) {
             (Self::Location, _) => &[
@@ -85,12 +85,17 @@ impl ObjectKind {
                 ("sheet", false),
             ],
             (Self::ItemType, _) => &[("name", true), ("description", true), ("stats", false)],
-            (Self::Item, _) => &[
+            (Self::Item, true) => &[
                 ("name", true),
                 ("item_type_id", true),
                 ("description", true),
+                ("location_id", true),
+            ],
+            (Self::Item, false) => &[
+                ("name", false),
+                ("item_type_id", false),
+                ("description", false),
                 ("location_id", false),
-                ("held_by_id", false),
             ],
         }
     }
@@ -108,7 +113,6 @@ pub struct Fields {
     pub travel_time: Option<i64>,
     pub location_id: Option<i64>,
     pub item_type_id: Option<i64>,
-    pub held_by_id: Option<i64>,
     pub background: Option<String>,
     pub motive: Option<String>,
     pub ambition: Option<String>,
@@ -175,28 +179,6 @@ impl Fields {
             }
         }
         Ok(())
-    }
-}
-
-// What to do about what depends on an object being deleted.
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
-pub struct DeleteOptions {
-    pub item_location_id: Option<i64>,
-    pub item_description: Option<String>,
-    #[serde(default)]
-    pub delete_items: bool,
-}
-
-impl DeleteOptions {
-    /// All fields the generic deletion tool accepts.
-    pub fn names() -> Vec<String> {
-        serde_json::to_value(Self::default())
-            .expect("default delete options should serialize")
-            .as_object()
-            .expect("delete options should serialize as an object")
-            .keys()
-            .cloned()
-            .collect()
     }
 }
 
@@ -594,31 +576,10 @@ impl Store {
                     item_type_id,
                 )
                 .await?;
-                let holder = match (fields.location_id, fields.held_by_id) {
-                    (Some(location), None) => {
-                        Self::ensure_exists(
-                            &mut transaction,
-                            world_id,
-                            ObjectKind::Location,
-                            location,
-                        )
-                        .await?;
-                        Holder::Location(location)
-                    }
-                    (None, Some(npc)) => {
-                        Self::ensure_exists(&mut transaction, world_id, ObjectKind::Npc, npc)
-                            .await?;
-                        // What an NPC carries is part of the NPC.
-                        Self::clear_review(&mut transaction, ObjectKind::Npc, npc).await?;
-                        Holder::Character(npc)
-                    }
-                    _ => {
-                        return reject(
-                            "Give either location_id or held_by_id to say where the item is."
-                                .into(),
-                        );
-                    }
-                };
+                let location = need(&fields.location_id, "location_id")?;
+                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, location)
+                    .await?;
+                let holder = Holder::Location(location);
                 Self::insert_item(
                     &mut transaction,
                     world_id,
@@ -1132,22 +1093,6 @@ mod id_tests {
             .await
             .unwrap();
         set_stage(&store, world, "create_objects").await;
-        let error = store
-            .create_object(
-                world,
-                ObjectKind::Item,
-                &Fields {
-                    name: Some("wood axe".into()),
-                    item_type_id: Some(axe_type),
-                    location_id: Some(hut),
-                    held_by_id: Some(toma),
-                    description: Some(String::new()),
-                    ..Fields::default()
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("either location_id or held_by_id"));
         let item = create(
             &store,
             world,
@@ -1155,12 +1100,13 @@ mod id_tests {
             Fields {
                 name: Some("wood axe".into()),
                 item_type_id: Some(axe_type),
-                held_by_id: Some(toma),
+                location_id: Some(hut),
                 description: Some(String::new()),
                 ..Fields::default()
             },
         )
         .await;
+        store.give_item(world, item, toma).await.unwrap();
         assert!(
             store
                 .review_list(world)
@@ -1220,7 +1166,7 @@ mod id_tests {
                 world,
                 ObjectKind::Location,
                 &Fields {
-                    held_by_id: Some(1),
+                    item_type_id: Some(1),
                     ..location_fields("yard")
                 },
             )
@@ -1228,7 +1174,7 @@ mod id_tests {
             .unwrap_err();
         assert!(
             format!("{error:#}").contains(
-                "A location has the fields name, location_kind, description, not `held_by_id`"
+                "A location has the fields name, location_kind, description, not `item_type_id`"
             ),
             "{error:#}"
         );
@@ -1276,7 +1222,7 @@ mod id_tests {
             "{error:#}"
         );
 
-        // An item is somewhere exactly once.
+        // An item is created at a location.
         let loaf = create(
             &store,
             world,
@@ -1288,24 +1234,23 @@ mod id_tests {
             },
         )
         .await;
-        let item = |location_id, held_by_id| Fields {
-            name: Some("stale loaf".into()),
-            item_type_id: Some(loaf),
-            description: Some(String::new()),
-            location_id,
-            held_by_id,
-            ..Fields::default()
-        };
-        for fields in [item(None, None), item(Some(hut), Some(1))] {
-            let error = store
-                .create_object(world, ObjectKind::Item, &fields)
-                .await
-                .unwrap_err();
-            assert!(
-                format!("{error:#}").contains("either location_id or held_by_id"),
-                "{error:#}"
-            );
-        }
+        let error = store
+            .create_object(
+                world,
+                ObjectKind::Item,
+                &Fields {
+                    name: Some("stale loaf".into()),
+                    item_type_id: Some(loaf),
+                    description: Some(String::new()),
+                    ..Fields::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("needs location_id"),
+            "{error:#}"
+        );
 
         // An update is refused the same way, but needs nothing.
         let error = store
