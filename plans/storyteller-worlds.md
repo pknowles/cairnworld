@@ -1,12 +1,68 @@
 # Storyteller world initialization
 
-Phases 1 and 2 are implemented and committed; not yet verified. With the device-test settings (4096-token
-context, compaction at 2048) real-model runs from a seed do not reliably reach a ready world: the object
-creation step took between 13 and 68 model calls across runs, and no run has finished review within 25
-minutes (the Storyteller re-creates objects that already exist, and chat summaries sometimes replace its
-task with an in-story one). Next round: make the tools' alternatives explicit as `prompt_standards.md` now asks
-(an NPC joining a group or starting one; an item at a location or held by an NPC), and fix the
-re-creation loop from the real model's inputs. Phases 3 and 4 and the smaller-world checkbox wait for that.
+Status, 2026-11-09, branch `pknowles/storyteller-questioner`. Facts only. Evidence is in the
+databases under `target/dev/` (not committed).
+
+Implemented and committed (phases 1 and 2):
+- Stages `meta`, `ask`, `name`, `create_objects`, `review`, `failed`, `complete`. World generation has
+  no inference limits. A step interrupted by a stop is closed without an error and runs again.
+  `World.failure` is set only at stage `failed`.
+- Creation: the locations; a reachability step (connections are requested for locations that cannot
+  be reached from the first); NPCs one request at a time until a turn makes none (no cap);
+  `group_npcs`; an items request. `[[marks]]` in the summary are only a reminder in each request.
+- Tools: `create_object`, `update_object`, `delete_object` (object and ID only), `group_npcs`,
+  `give_item`; Questioner `read_object` (one object), `mark_object_reviewed`, `ask_questions`,
+  `core_objects_created`. Refusals begin "Not created.", "Not changed.", "Not deleted.",
+  "Not grouped." or "Not given.".
+- A refused plain-text reply is shown in later requests as its first 400 characters and a note.
+- World detail page: phase, inferences and objects for every member, updated over
+  `/world/{id}/progress/ws`.
+- `generate-world --minutes N` (default 5, 0 for none); running it again on the same database
+  continues the unfinished world. `serve` and `generate-world` call `close_interrupted_turns` first.
+- Test databases and logs are kept until the next `scripts/run-tests.sh`.
+
+Measured on the real model (dev-qwen35, 4096 context, compaction 2048, keep 8 raw messages):
+- Question stage and naming completed in 14 minutes (Valley of Echoes run, default limits).
+- Creation of the Saltgate test world: 15 replies, 4,508 output tokens, none capped; 4 locations,
+  3 connections, 5 NPCs in 3 groups, 1 item type, 1 item; 3 refused calls.
+- Review of that world: `complete` in 9 min 17 s, 42 inferences, 11 requests rejected as too big
+  (largest accepted request 3,938 tokens).
+- Valley of Echoes (11 NPCs): `complete` only with an 8192 context and raised inference limits;
+  7 locations, 8 connections, 11 NPCs, 2 item types, 2 items.
+- A seed-to-ready run at 4096 has not been achieved. Port of Gloom (Saltgate seed, five 5-minute
+  chunks and part of a sixth): stage `review`, 305 inferences, 65 requests rejected as too big, 22 rejected calls,
+  3 objects reviewed; 4 locations, 4 connections, 3 NPCs, 6 item types, 1 item.
+- Salvage Bay (earlier build): failed in review at the then 32-inference turn limit; 12 locations
+  (two named `Order of the Dry Shore`), 1 connection, 3 NPCs, 7 item types, 0 items.
+
+Open:
+- Review at 4096: the Questioner's request was 3,168 tokens at inference 133 of the Valley run
+  (tools 16%, role/summary/object list 39%, question-phase chat 42%); a request needs its input plus
+  1,024 output tokens within 4,096. The Questioner called `read_object` for about 10 objects in one
+  reply; the results (about 600 tokens each) overflowed, and capacity recovery then removed retained
+  messages one at a time (13 consecutive rejections seen).
+- The question-phase chat stays in the review request; no compaction at the phase boundary.
+- Each NPC starts in its own group and each group has its own review mark.
+- The Port of Gloom review did not converge: item types grew from 2 to 6.
+- The reachability request has not fired on the real model (scripted test only). The Salvage Bay
+  database (`target/dev/run21/run21.sqlite`) holds 12 locations and 1 connection for that test.
+- Locations were made from factions or concepts (Salvage Bay); item types were made without items.
+- Connections lack `name` on the first call in about 75% of calls; a required schema field, three
+  wordings and a separate request changed nothing; the refusal and retry correct it.
+- Storyteller tools are 3,725 characters (about 1,000 tokens, 35% to 40% of creation requests).
+  `update_object` repeats `create_object`'s fields (750 characters); the kind list appears in three tools.
+- `give_item` is not in `user_declarations.md`.
+- The Questioner asks 8 to 19 questions despite "up to five"; a schema maximum of 5 changed nothing.
+- The summary-writing side inference has no capacity recovery (one request one token over the window
+  failed a world). A doubled batch after compaction was not reproduced.
+- The real-model stop and relaunch of `serve` was not run; a unit test and `generate-world` chunk
+  continuation cover it.
+
+Not built:
+- ReadyToBegin entry placement by the Storyteller (declared); `place_waiting_adventurers` is TEMPORARY.
+- Phases 3 and 4 (extended summary and detail objects); the smaller-world checkbox.
+- Merge of `pknowles/npcs` (group description removal `d9dec09`, migration 0017). This branch adds
+  migrations 0019 to 0021.
 
 ## Goal and authority
 
@@ -312,3 +368,37 @@ Update implementation_reference.md only for implemented behaviour. Re-read both
 standards, run appropriate Rust/SQL/browser checks and representative real-chat
 verification within the testing budget, then complete AGENTS.md self-review.
 Archive only after both checkpoints are implemented and verified.
+
+# Work Summary Backups
+
+The following are quotes added by the User in case the context is lost from compaction. Take with a grain of salt; this is WIP thinking output.
+
+## 26/22/09 01
+
+Written for: you, as the status of world generation and what remains before merge. It cannot merge yet. No full generation has reached a ready world.
+
+Done since my last report (257 unit tests pass, quality script clean)
+
+80bf832. After the Storyteller rewrites the summary, a second short call asks it to say, in about 20 words, what its answers changed. That reply is what the Questioner gets back. Measured: 29–37 words against 55 for "one short sentence". This follows your updated declarations, which I committed with it. The summary stays in the system context, as your edit says.
+484546a. I had accidentally committed my temporary replay test with a blanket git add -u. It is removed. I now add files by name.
+Creation and review now reach a ready world from a finished summary. The real-model test took 158 seconds on the Saltgate world. The first pass left out two NPCs, the review's missing-names note caught them, and the Storyteller created them. That is one world only.
+Your questions
+
+Per-question rewrites: dropped.
+NPC groups (implicit single-NPC groups plus a grouping call): not built. Baseline data supports it: in my replays 34 of 44 NPC calls gave no group fields at all, so models mostly ignore "give a group when creating". My replay of the new interface was inconclusive because every reply hit the output cap on locations before reaching any NPC. I won't build it until creation replies fit.
+Your point about cut-off handling: agreed, it is a fail-fast error. The cut-off call stays visible in the model's history and its result says why. But the fix is for replies not to overrun. I measured, and wording does not control that. With "3 to 5", "about 5" or one-sentence fields, replies still reach the cap with 6–9 calls. A call costs about 140 tokens in this format, so the cap fits about 7 calls and a small world needs about 12. The structural answer is the staged creation your declaration already describes ("NPCs one at a time"): small focused requests driven by code.
+Open findings, nothing lost from earlier
+
+Questioner won't converge. It asks 7–13 questions per round despite "up to five", and loops by repeating its question list about 1 time in 6. The question phase took over 23 minutes in the last full run and never finished.
+The summary-writing side inference has no overflow recovery. In an earlier run it overflowed the context by one token and killed the world generation. Not fixed.
+The doubled batch after compaction was never reproduced.
+Item tool alternatives (location_id against held_by_id) have not been reviewed against the prompt standards.
+Merge with the other agent's d9dec09 (they already dropped group description, with migration 0017 on their branch; their version should win) is untouched.
+Entry placement: store/review.rs still has the marked-temporary first-group placement for new characters. Your new ReadyToBegin declaration (the Storyteller picks the group and location) is not built.
+Reliability: several seeds reaching a ready world, then a played world, are still needed.
+My self-review gaps
+
+My prompt measurements use small samples on one or two worlds.
+Creation passed on one world only.
+Staged creation is a design change, so I want your go-ahead before building it.
+Next unless you redirect: build staged creation (locations and connections, then each NPC in its own request) and re-measure the implicit-groups idea on it.
