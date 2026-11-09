@@ -1,9 +1,9 @@
 # Storyteller world initialization
 
-Status, 2026-11-09, branch `pknowles/storyteller-questioner`. Facts only. Evidence is in the
-databases under `target/dev/` (not committed).
+Status, 2026-11-09, branch `pknowles/storyteller-questioner` at `f52e6e3` (code as of `c18d8f1`).
+Evidence lives in databases and logs under `target/dev/` and `target/tmp/` (not committed).
 
-Implemented and committed (phases 1 and 2):
+### Implemented and committed (phases 1 and 2)
 - Stages `meta`, `ask`, `name`, `create_objects`, `review`, `failed`, `complete`. World generation has
   no inference limits. A step interrupted by a stop is closed without an error and runs again.
   `World.failure` is set only at stage `failed`.
@@ -21,51 +21,97 @@ Implemented and committed (phases 1 and 2):
   continues the unfinished world. `serve` and `generate-world` call `close_interrupted_turns` first.
 - Test databases and logs are kept until the next `scripts/run-tests.sh`.
 
-Measured on the real model (dev-qwen35, 4096 context, compaction 2048, keep 8 raw messages):
-- Question stage and naming completed in 14 minutes (Valley of Echoes run, default limits).
-- Creation of the Saltgate test world: 15 replies, 4,508 output tokens, none capped; 4 locations,
+### Evidence (measured)
+Code and tests:
+- E1. 261 unit tests, the quality script and the browser checks (`npm run test:hydration`, including
+  `check_generation_progress.cjs`) pass at the code of `c18d8f1`.
+- E2. `max_inferences_per_chat = 32` and `max_inferences_total = 256` entered in commits `ab1a96a` and
+  `ba38daa` (2026-09-01). `user_declarations.md` does not ask for them.
+- E3. A merge attempt of `pknowles/npcs` (aborted, nothing merged) conflicted in `design.md`,
+  `plans/agent-tuning.md`, `prompts.toml`, `src/agent.rs`, `src/game.rs` (20 blocks), `src/store.rs`
+  (11), `src/tools.rs`, `src/ui.rs`, `src/web.rs` (7), `user_declarations.md`, `user_exerpts.md` and
+  `.sqlx`. Migrations `0017` and `0018` exist twice with different content, and both sides drop the
+  group description (theirs `0017`, ours `0019`).
+
+Real model (dev-qwen35; 4096 context, compaction 2048, keep 8 raw messages unless stated):
+- E4. Saltgate test world (summary written in the test), build `d87c223` plus the delete-tool text
+  trim of `2c9f7bc`. Creation: 15 replies, 4,508 output tokens, none capped; 4 locations,
   3 connections, 5 NPCs in 3 groups, 1 item type, 1 item; 3 refused calls.
-- Review of that world: `complete` in 9 min 17 s, 42 inferences, 11 requests rejected as too big
-  (largest accepted request 3,938 tokens).
-- Valley of Echoes (11 NPCs): `complete` only with an 8192 context and raised inference limits;
-  7 locations, 8 connections, 11 NPCs, 2 item types, 2 items.
-- A seed-to-ready run at 4096 has not been achieved. Port of Gloom (Saltgate seed, five 5-minute
-  chunks and part of a sixth): stage `review`, 305 inferences, 65 requests rejected as too big, 22 rejected calls,
-  3 objects reviewed; 4 locations, 4 connections, 3 NPCs, 6 item types, 1 item.
-- Salvage Bay (earlier build): failed in review at the then 32-inference turn limit; 12 locations
-  (two named `Order of the Dry Shore`), 1 connection, 3 NPCs, 7 item types, 0 items.
+- E5. Review of that world, same build: `complete` in 9 min 17 s, 42 inferences, 11 requests refused
+  by the engine for length (largest accepted request 3,938 tokens).
+- E6. Neither the Saltgate creation nor its review has been run at `c18d8f1`. `d5691ae` (no limits,
+  resume, progress, reachability step, CLI) and `c18d8f1` came after E4 and E5.
+- E7. Port of Gloom (seed "A smuggler's port town where something is wrong with the tide.", code of
+  `d5691ae`, five 5-minute chunks and part of a sixth): stage `review`, 305 inferences, 65 requests
+  refused for length, 22 rejected calls; 4 locations, 4 connections, 3 NPCs, 6 item types, 1 item.
+  In the review the Questioner made 249 `read_object` calls over 21 distinct objects (the first
+  locations and connections 15 or 16 times each), 3 `mark_object_reviewed` calls (item types only),
+  9 `core_objects_created` calls (all refused: "Not yet reviewed: location Main Pier; …") and 6
+  `ask_questions` rounds; item types went from 2 to 6.
+- E8. Valley of Echoes (seed "someone is imprisoned in a high tower by 7 demons…"): question stage and
+  naming took 14 minutes at 4096. Its review reached `complete` only in a run with 8192 context,
+  compaction 4096 and inference limits of 400 and 1000 set by environment variables; that run says
+  nothing about 4096. Result: 7 locations, 8 connections, 11 NPCs, 2 item types, 2 items.
+- E9. Salvage Bay (same seed as E7, code of `2c9f7bc`): failed in review at the 32-inference turn
+  limit; 12 locations (two named `Order of the Dry Shore`), 1 connection, 3 NPCs, 7 item types, 0 items.
+- E10. At `80bf832` this plan said runs from a seed did not reliably reach a ready world, creation took
+  13 to 68 model calls, and no run had finished review within 25 minutes.
+- E11. One earlier Saltgate creation and review from a finished summary took 158 s in total; its
+  object counts are not recorded.
+- E12. Questioner review request (inference 133 of the Valley run): 3,168 tokens; tool definitions
+  16%, role/summary/object list 39%, question-phase chat 42%. The object list is one line per object
+  (about 10 tokens each; 33 lines, 316 tokens).
+- E13. The engine refuses a request whose token count is above its fixed 4,096-token cache and reports
+  the count. Reported counts match the prompt length alone (3,439 tokens plus 12,157 characters of
+  results gave 6,692), not prompt plus the 1,024-token reply allowance.
+- E14. Storyteller tools: 3,725 characters for five tools now; about 4,000 for three before. The
+  Questioner's first request: 1,671 tokens before, 1,584 now.
+- E15. Question count: 8 to 19 per call in replays; a schema maximum of 5 changed nothing (one call
+  still had 10).
+- E16. Connections lacked `name` on the first call in 12 of 17, 13 of 15 (required in schema),
+  22 of 23 (request says "named") and 14 of 15 (argument text) created objects; a separate connection
+  request gave 5 refusals against 3. The refusal and retry corrects it.
+- E17. Repetition loop of the Questioner: with its long failed reply in the history, 11 of 12
+  samples looped; with that reply removed, 0 of 6; with it shortened to 400 characters and a note,
+  0 of 20 (three variants of the note).
+- E18. Refused calls in comparable creation runs: 36 before the NPC and group interface changes, 4 after.
+- E19. `generate-world` with `--minutes 2` stopped with exit 2; the next run printed "Continuing world 1"
+  and carried on from the question stage into creation.
+- E20. The reachability request ("These locations cannot be reached from …") has never been sent on the
+  real model; the scripted test covers it.
 
-Open:
-- Review at 4096: the Questioner's request was 3,168 tokens at inference 133 of the Valley run
-  (tools 16%, role/summary/object list 39%, question-phase chat 42%). The engine refuses a request
-  whose token count is above its fixed 4,096-token cache and reports the count; the reported counts
-  match the prompt length alone (3,439 tokens plus 12,157 characters of results gave 6,692), not
-  prompt plus the 1,024-token reply allowance. The Questioner called `read_object` for about 10
-  objects in one reply; the results (about 600 tokens each) overflowed, and capacity recovery then
-  removed retained messages one at a time (13 consecutive rejections seen). Why the Port of Gloom
-  review does not converge is not established.
-- The question-phase chat stays in the review request; no compaction at the phase boundary.
+### Guesses (not established)
+Each is a guess. The lead is the observation that suggested it.
+- G1. The Questioner re-reads without marking because its earlier reads leave its history. Lead: E7
+  (249 reads, 3 marks, 65 refusals) and one run in which 13 consecutive refusals removed retained
+  messages one at a time.
+- G2. The review is slower now than in E11 because of one-object reads, more objects (a group per NPC,
+  items) and refusal churn. Lead: E5 against E11, where the earlier world's size is unknown.
+- G3. `d5691ae` or `c18d8f1` caused E7. Lead: E4 and E5 passed on the build before them; E7 failed on
+  `d5691ae`; the worlds differ.
+- G4. A small model treats a connection as an unlabelled edge, so it leaves out `name`. Lead: E16;
+  in earlier runs, when connections had no name field, the model added names in 5 of 8 first calls.
+- G5. Locations were made from factions because every marked name reads as a place. Lead: E9.
+- G6. Item types grew in the review because Questioner questions asked whether factions should be item
+  types. Lead: one question in E7 (inference 85) says so.
+- G7. A doubled batch after compaction exists. Lead: seen once before this work; not reproduced.
+- G8. The question-phase chat, a third of the review request (E12), is not needed in the review. Lead:
+  it is the largest single part of that request; whether the Questioner uses it is not checked.
+
+### Open
+- Review of a world made from a real seed has not completed at 4096 on the current code (E7).
 - Each NPC starts in its own group and each group has its own review mark.
-- The Port of Gloom review did not converge: item types grew from 2 to 6.
-- The reachability request has not fired on the real model (scripted test only). The Salvage Bay
-  database (`target/dev/run21/run21.sqlite`) holds 12 locations and 1 connection for that test.
-- Locations were made from factions or concepts (Salvage Bay); item types were made without items.
-- Connections lack `name` on the first call in about 75% of calls; a required schema field, three
-  wordings and a separate request changed nothing; the refusal and retry correct it.
-- Storyteller tools are 3,725 characters (about 1,000 tokens, 35% to 40% of creation requests).
-  `update_object` repeats `create_object`'s fields (750 characters); the kind list appears in three tools.
+- The Storyteller's tools are about 1,000 tokens, 35% to 40% of creation requests; `update_object`
+  repeats `create_object`'s fields (750 characters); the kind list appears in three tools.
 - `give_item` is not in `user_declarations.md`.
-- The Questioner asks 8 to 19 questions despite "up to five"; a schema maximum of 5 changed nothing.
 - The summary-writing side inference has no capacity recovery (one request one token over the window
-  failed a world). A doubled batch after compaction was not reproduced.
-- The real-model stop and relaunch of `serve` was not run; a unit test and `generate-world` chunk
-  continuation cover it.
+  failed a world).
+- A real-model stop and relaunch of `serve` was not run; a unit test and E19 cover it.
+- Merge of `pknowles/npcs` (E3) is not done.
 
-Not built:
+### Not built
 - ReadyToBegin entry placement by the Storyteller (declared); `place_waiting_adventurers` is TEMPORARY.
 - Phases 3 and 4 (extended summary and detail objects); the smaller-world checkbox.
-- Merge of `pknowles/npcs` (group description removal `d9dec09`, migration 0017). This branch adds
-  migrations 0019 to 0021.
 
 ## Goal and authority
 
