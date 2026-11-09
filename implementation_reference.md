@@ -709,7 +709,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   (`store/editing.rs`); a delete only sets `deleted`, and the gameplay queries that enumerate characters,
   items, locations and connections skip deleted ones; Developer Mode lists them labelled. A result says
   only what that call created, changed or deleted; the Storyteller and the Questioner see which objects exist, and how many of each kind, in their
-  per-request context. The Questioner reviews (`review`, `store/review.rs`): `read_object` (takes any number of objects),
+  per-request context. The Questioner reviews (`review`, `store/review.rs`): `read_object` (one object, so the context never holds more than a few),
   `mark_object_reviewed`, `ask_questions` (runs a Storyteller fix turn inside the call, `Game::objects_round`;
   the result lists the objects it added, changed or removed; Storyteller tools work in the object-creation and review stages)
   or the terminal `core_objects_created`. Reviewed flags are

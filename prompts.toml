@@ -418,10 +418,11 @@ questions = "Up to five questions, each one a single question."
 description = "Say the world summary has a solid foundation. The Storyteller then names the world and creates its objects."
 
 [questioner.tools.read_object]
-description = "Read everything about the objects you name. Your context is small, so read only a few at a time, about five: review and mark those, then read more."
+description = "Read everything about one object."
 
 [questioner.tools.read_object.arguments]
-objects = "The objects to read, each with its kind (object) and its ID from the object list (id)."
+object = "The object's kind."
+id = "Its ID from the object list."
 
 [questioner.tools.mark_object_reviewed]
 description = "Record that you reviewed an object and it is ready for play, or that it is not."

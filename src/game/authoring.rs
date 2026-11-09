@@ -323,36 +323,25 @@ pub(super) fn review_tools(store: &Store, world_id: i64) -> Result<Vec<Tool>> {
     let tools = &prompts::current()?.questioner.tools;
     let allowed = ["object", "id", "reviewed"].map(String::from).to_vec();
     let read_store = store.clone();
-    let read_allowed = vec!["objects".to_string()];
+    let read_allowed = ["object", "id"].map(String::from).to_vec();
     let read = Tool::new(
         tools.tool(
             "read_object",
-            serde_json::to_value(schema_for!(ReadObjects)).expect("schema should serialize"),
+            serde_json::to_value(schema_for!(ReadObject)).expect("schema should serialize"),
         )?,
         move |context| {
             let arguments = context.arguments.to_string();
             let store = read_store.clone();
             let allowed = read_allowed.clone();
             Box::pin(async move {
-                let read: ReadObjects = match parse(&arguments, &allowed) {
+                let read: ReadObject = match parse(&arguments, &allowed) {
                     Ok(read) => read,
                     Err(error) => return Ok(ToolOutcome::rejected(error)),
                 };
-                if read.objects.is_empty() {
-                    return Ok(ToolOutcome::Rejected("Name at least one object.".into()));
+                match store.read_object(world_id, read.object, read.id).await {
+                    Ok(text) => Ok(ToolOutcome::Completed(text)),
+                    Err(error) => rejection_or_failure(error),
                 }
-                let mut texts = Vec::new();
-                for object in read.objects {
-                    match store.read_object(world_id, object.object, object.id).await {
-                        Ok(text) => texts.push(text),
-                        Err(error) => return rejection_or_failure(error),
-                    }
-                }
-                Ok(ToolOutcome::Completed(texts.join(
-                    "
-
-",
-                )))
             })
         },
     );
@@ -412,15 +401,9 @@ pub(super) fn review_tools(store: &Store, world_id: i64) -> Result<Vec<Tool>> {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct ObjectId {
+struct ReadObject {
     object: ObjectKind,
     id: i64,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ReadObjects {
-    objects: Vec<ObjectId>,
 }
 
 #[derive(Deserialize, JsonSchema)]

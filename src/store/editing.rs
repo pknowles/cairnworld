@@ -205,9 +205,10 @@ impl Store {
         })
     }
 
-    /// Put NPCs together in a new group at a location, writing where in the
-    /// location they are to each of them. A group left without a member goes.
-    /// Returns the new group.
+    /// Put NPCs together in a group at a location, writing where in the
+    /// location they are to each of them. The group is new, unless the name is
+    /// that of a group one of them is already in, which is then kept. A group
+    /// left without a member goes. Returns the group.
     pub async fn group_npcs(
         &self,
         world_id: i64,
@@ -235,30 +236,54 @@ impl Store {
             location_id,
         )
         .await?;
-        if let Some(existing) =
-            Self::find_by_name(&mut transaction, world_id, ObjectKind::Group, name, true).await?
-        {
-            return reject(format!(
-                "Group {existing} is already called `{name}`; name the new group something else."
-            ));
-        }
-        let group = Group {
-            name: name.to_string(),
-            location: String::new(),
-            notes: Notes::default(),
-        };
-        let new_group = Self::insert_group(&mut transaction, world_id, location_id, &group).await?;
+        let mut current = Vec::new();
         for &npc in npc_ids {
-            let old = sqlx::query_scalar!(
-                "SELECT group_id FROM character_group WHERE character_id = ?",
-                npc,
-            )
-            .fetch_one(&mut *transaction)
-            .await
-            .context("finding an NPC's group")?;
-            if old == new_group {
-                continue;
+            current.push(
+                sqlx::query_scalar!(
+                    "SELECT group_id FROM character_group WHERE character_id = ?",
+                    npc,
+                )
+                .fetch_one(&mut *transaction)
+                .await
+                .context("finding an NPC's group")?,
+            );
+        }
+        let new_group = match Self::find_by_name(
+            &mut transaction,
+            world_id,
+            ObjectKind::Group,
+            name,
+            true,
+        )
+        .await?
+        {
+            // One of them is in it: keep it, which leaves no group by that name behind.
+            Some(existing) if current.contains(&existing) => {
+                sqlx::query!(
+                    "UPDATE \"group\" SET location_id = ? WHERE id = ?",
+                    location_id,
+                    existing,
+                )
+                .execute(&mut *transaction)
+                .await
+                .context("moving a group")?;
+                existing
             }
+            Some(existing) => {
+                return reject(format!(
+                    "Group {existing} is already called `{name}`; name the new group something else."
+                ));
+            }
+            None => {
+                let group = Group {
+                    name: name.to_string(),
+                    location: String::new(),
+                    notes: Notes::default(),
+                };
+                Self::insert_group(&mut transaction, world_id, location_id, &group).await?
+            }
+        };
+        for (&npc, &old) in npc_ids.iter().zip(&current) {
             sqlx::query!(
                 "UPDATE character_group SET group_id = ?, description = ? WHERE character_id = ?",
                 new_group,
@@ -269,7 +294,7 @@ impl Store {
             .await
             .context("moving an NPC to another group")?;
             // A group goes with its last character.
-            if Self::active_members(&mut transaction, old).await? == 0 {
+            if old != new_group && Self::active_members(&mut transaction, old).await? == 0 {
                 Self::flag_deleted(&mut transaction, ObjectKind::Group, old).await?;
             }
             Self::clear_review(&mut transaction, ObjectKind::Npc, npc).await?;
@@ -696,6 +721,34 @@ mod id_tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("called `Toma`"));
+    }
+
+    #[tokio::test]
+    async fn grouping_under_the_name_of_a_members_own_group_keeps_that_group() {
+        let (store, _db, world) = world_creating_objects().await;
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
+        let (family, toma) = group_with_npc(&store, world, "family", hut, "Toma").await;
+        let (guild, mara) = group_with_npc(&store, world, "guild", hut, "Mara").await;
+        let (_, kin) = group_with_npc(&store, world, "kin", hut, "Kai").await;
+        // A name that belongs to a group none of them is in is refused.
+        let error = store
+            .group_npcs(world, &[toma, mara], "kin", yard, "")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is already called `kin`"),
+            "{error:#}"
+        );
+        // The name of one of their own groups keeps that group, now at the new location.
+        let kept = store
+            .group_npcs(world, &[toma, mara], "family", yard, "by the well")
+            .await
+            .unwrap();
+        assert_eq!(kept, family);
+        assert_eq!(store.group_npc_ids(family).await.unwrap(), vec![toma, mara]);
+        assert!(store.group_npc_ids(guild).await.unwrap().is_empty());
+        let _ = kin;
     }
 
     #[tokio::test]

@@ -2480,7 +2480,7 @@ mod tests {
             text("No items are needed."),
             // The first review asks a question instead of completing...
             calls(&[
-                ("read_object", r#"{"objects":[{"object":"npc","id":2}]}"#),
+                ("read_object", r#"{"object":"npc","id":2}"#),
                 (
                     "ask_questions",
                     r#"{"questions":["Who stands against Ysolde?"]}"#,
