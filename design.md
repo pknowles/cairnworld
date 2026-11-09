@@ -495,11 +495,12 @@ GM agent (`group.gm_agent_id`) with one chat, resolved through the same
 graph nodes visualize groups and their GM chats, not another ownership layer.
 There is no single world GM selecting among several group chats.
 
-A group retains its membership and GM chat as historical facts when retired;
-only an active group's GM takes new turns. Characters leaving an established
-group produce successor groups through split/merge rather than changing that
-group's historical membership in place. Gameplay resolves the character's active
-group; historical inspection can still read predecessor memberships. A blank
+A group exists only while its characters interact together. Split/merge replaces
+the source groups and deletes them after moving their characters and settling
+their work. The GM agents/chats survive independently, retaining their labels,
+participant IDs and bounded source-chat relationships for context and inspection.
+Only a GM attached to an existing group takes gameplay turns. Gameplay resolves
+current group membership; historical navigation reads chat participants. A blank
 Adventurer awaiting creation/placement has no group yet. Entry placement follows
 the lifecycle described under Storyteller world creation below.
 
@@ -518,10 +519,9 @@ differs: with an optional destination on one tool the GM left it out or avoided 
 meant to join a group (experiments/0009-group-tools.md). Groups are fungible, so each result is a
 new group with bounded source history through the settled positions of the group they left and,
 for a move, of the destination, in ascending group order. Characters left behind get a new group
-whose single source is the old chat. The source groups retire. Under the pending per-group GM
-ownership plan (`plans/gm-per-group.md`), each resulting group will own a new GM agent/chat,
-and retired groups will retain their historical membership. Successor memberships, GM agents/chats
-and source references will commit together. The tools return the ids of the resulting groups.
+whose single source is the old chat. Source chats retain their participant IDs;
+source groups are deleted. Successor memberships, GM agents/chats, source references and source
+group deletion commit together. The tools return the ids of the resulting groups.
 
 **Merge.** There is no separate merge tool. When `move_to_group` names every character of the GM's
 group, the two groups become one: a merge of both histories into a new group, each source
@@ -532,8 +532,8 @@ character, 2 of 2.
 
 **Names.** The GM names each group in a short phrase of who and where ("Toma by the fire in the
 hut"). A name another active group has is made unique by adding a number; a call never fails over a
-name, since a rejected name made the GM repeat the same failing call. A retired group gives up its
-name (`name (retired id)`), so a name can be reused. A name must not be empty.
+name, since a rejected name made the GM repeat the same failing call. Deleting a replaced group
+frees its name; the old name remains on its chat. A name must not be empty.
 
 The tools act on the acting character's group as it is when each call is made, since an earlier
 call in the same turn may have replaced the group the turn began with.
@@ -608,8 +608,8 @@ summaries and the retained raw ranges, not every historical message. A bounded
 cut applies only to that branch's own entries. Thus root `[a,b]`, left suffix
 `[c,d]`, right suffix `[e]`, merge suffix `[f]` assembles `[a,b,c,d,e,f]`;
 wall-clock interleaving never changes it. Labels identify branch/group provenance
-without adding another model role: each names its group and lists who was in it (the members it
-ended with, once retired). A GM answering one character's ask is shown only the groups that
+without adding another model role: each names its group and lists its participants,
+recorded on the chat when the group was replaced. A GM answering one character's ask is shown only the groups that
 character was in, since a character may only learn what they perceived (Observed Events). Input recipes record the resulting ordered
 ranges, not a pointer to a mutable current head.
 
@@ -1349,7 +1349,7 @@ announced set and copies pending deadlines; merge unions it and retains the earl
 deadline. Empty results await return; an occupied result with an unannounced
 difference arms the configured window. Timer validation and group changes are serialized in the world task; each timer
 rechecks the current presence generation and group, so stale events cannot narrate
-membership from a retired group. `party_presence()` resolves the caller's group and returns character IDs,
+membership from a deleted group. `party_presence()` resolves the caller's group and returns character IDs,
 names and online state from this data. It does not mutate group membership.
 Narration recipients are NPCs and connected PCs in the interacting group;
 offline PCs do not receive it (accepted 2026-09-18, see user_exerpts.md).

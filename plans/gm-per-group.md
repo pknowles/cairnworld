@@ -31,9 +31,10 @@ Follow [AGENTS.md's checklist](../AGENTS.md#post-feature-and-pre-commit-checklis
 - Split: each resulting group gets a new GM agent/chat with a reference to the
   source chat through its settled split point. Merge: the new group's GM chat
   references all source chats through their settled merge points. Source groups
-  retire; their membership, chats and relationships remain inspectable. Moving a
-  character out of an established group is a split, not an in-place change to
-  that group's historical membership. Only active groups' GMs take new turns.
+  are deleted; their GM agents/chats retain the participant IDs, labels and
+  source relationships needed for inspection. Moving a character out of an
+  established group is a split. Only GMs attached to existing groups take
+  gameplay turns; recorded inferences and compaction belong to durable chats.
 - Preserve each chat's own messages separately from its inherited context.
   Inference assembly follows bounded source references, includes shared ancestry
   once and uses the existing compaction policy. Selecting a group in the
@@ -51,8 +52,8 @@ Follow [AGENTS.md's checklist](../AGENTS.md#post-feature-and-pre-commit-checklis
 - At a chat's beginning/end, scrolling can continue to a predecessor/successor
   group's chat. Choose the adjacent group with the most player characters, then
   the most characters in total; a remaining tie may take either path. Use the
-  memberships of the actual groups, retained on retirement, not a separately
-  maintained preference or current-membership approximation. Split/merge boundary
+  participant IDs recorded on the source chats when the groups were replaced,
+  not a separately maintained preference or current-membership approximation. Split/merge boundary
   entries name and link the other related groups so every alternative path is
   accessible. Preserve paging and message/inference deep links during navigation.
 
@@ -73,20 +74,33 @@ shared-ancestor deduplication and captured input ranges with corrected ownership
 Derive graph edges and history boundaries from these same transition records;
 do not maintain another graph or duplicate the transcripts.
 
+Gameplay groups and recorded chats have different lifetimes. Keeping retired
+gameplay groups would require active/retired filtering and name-reuse handling
+throughout gameplay. Keeping transcripts alone would lose the participants and
+relationships required for context privacy and navigation. Retain that metadata
+with the chats and delete replaced gameplay groups; no separate historical-group
+system is needed.
+
+Existing development saves are not a compatibility requirement for this change
+(user clarification, recorded in user_exerpts.md). Target fresh databases, retain
+SQLx migrations, and leave existing database files untouched. Do not reconstruct
+missing historical membership or rewrite recorded inference authorship.
+
 ## Build order
 
-This changes code the item before it in todo.md may also touch (groups, split and
-merge, inspector), so it starts only after that work is merged, and the
-Storyteller plan's later steps wait for it.
+The NPC gameplay and Storyteller branches are merged. Coordinate changes to
+groups, split/move and inspection with the other plans in todo.md; the
+Storyteller plan's later steps depend on this ownership correction.
 
 1. Trace the group/GM selectors, split/merge, history validation, compaction and
    inspector against the aligned design. The declarations and this task authorize
    the ownership/graph correction; do not implement the old world-GM model again.
-2. Schema and store: `group.gm_agent_id`, migrating existing GM chats; one chat
+2. Schema and store: `group.gm_agent_id`; one chat
    per agent everywhere (add the constraint the schema now lacks), and same-world
-   source-chat references. Preserve retired groups' memberships for graph labels
-   and navigation counts, while resolving gameplay membership only in active
-   groups. Remove `world_gm` and the special selectors for choosing among several
+   source-chat references. Store source participant IDs and labels with their
+   chats before deleting replaced groups. Historical NPC response records must
+   refer to durable chat identity; live presence state must end with its group.
+   Remove `world_gm` and the special selectors for choosing among several
    chats of one GM. Keep recorded inference provenance and exact reconstruction;
    do not rewrite old inputs to pretend another agent produced them.
 3. Game: split and merge create GM agents with parent references; GM turns select
@@ -97,8 +111,8 @@ Storyteller plan's later steps wait for it.
    graph, one-group history selection, scroll navigation and named clickable
    boundaries. Share ordinary chat rendering/paging with other agents. The graph
    is graphical, not merely a list of headings saying "continues from".
-5. Tests: split and merge produce the right agents and chat references; a retired
-   group's GM never takes a turn; existing GM scenario tests pass unchanged in
+5. Tests: split and merge produce the right agents and chat references; replaced
+   group rows are absent and their GMs take no new gameplay turns; existing GM scenario tests pass unchanged in
    behaviour. Include shared ancestry, cross-world rejection and the navigation
    cases below. Remove obsolete multi-chat selectors/UI/tests as their replacement
    lands, rather than shipping both systems or compatibility fallbacks.
@@ -109,7 +123,7 @@ Storyteller plan's later steps wait for it.
 
 | Case | Required outcome |
 | --- | --- |
-| Ownership and retirement | Each resulting group has one GM agent/chat; retired source groups retain their own messages and membership and take no new turns. |
+| Group deletion and durable history | Each resulting group has one GM agent/chat; replaced group rows and live presence are gone, while their chats, participant IDs, recorded responses and inference evidence remain inspectable. |
 | Split then merge | New own messages appear only in their group's chat; captured GM input contains the required source context, with the shared ancestor once. Expandable compaction and old inference reconstruction remain valid. |
 | Graph and selection | Browser displays groups connected by split/merge edges. Selecting either group opens that group's own entries, not all ancestors' messages. |
 | Navigation | Scrolling across both kinds of boundary chooses by PC count, then total count, allowing either final tie. Named boundary links reach every other source/result. No messages are lost or duplicated across paged navigation. |

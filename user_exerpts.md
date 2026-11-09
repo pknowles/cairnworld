@@ -1311,3 +1311,23 @@ When to merge and split, and how to avoid a split-and-merge storm when a party f
 
 The free-text group description is not shown to the GM about other groups (the user dropped it).
 The pending, batched split depends on unified game time, which does not exist yet.
+
+## 2026-11-09: Delete replaced groups; retain their chats
+
+On keeping gameplay group objects after a split or merge:
+
+> the group should be deleted. only the chat remains. why would the group still be needed
+
+This supersedes the design/plan assumption that retired gameplay groups should
+remain. The durable GM/chat history retains its participant IDs, label and
+bounded source-chat relationships for inspection, inherited context and graph
+navigation. Current membership and presence belong to the live group, which is
+deleted when replaced. This is the agreed target; implementation remains pending
+in plans/gm-per-group.md.
+
+On compatibility with existing development databases:
+
+> we don't really have existing databases I care about. it'd be a nice to have.
+
+Target fresh databases for the ownership/lifetime correction rather than adding
+historical membership reconstruction. Existing database files are left untouched.
