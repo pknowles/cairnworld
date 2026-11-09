@@ -2458,13 +2458,25 @@ mod tests {
             text("Added who rules and what is feared."),
             call("world_summary_complete", "{}"),
             text("  The Drowned Bell \n"),
-            // Creation runs in stages: the locations, NPCs one at a time until the
-            // Storyteller says none are left, then the items.
+            // Creation runs in stages: the locations, the connections that make
+            // them all reachable, NPCs one at a time until the Storyteller says
+            // none are left, then the items.
+            calls(&[
+                (
+                    "create_object",
+                    r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"A tower above the water."}"#,
+                ),
+                (
+                    "create_object",
+                    r#"{"object":"location","name":"Harbor","location_kind":"quay","description":"Boats below the tower."}"#,
+                ),
+            ]),
+            text("The locations exist."),
             calls(&[(
                 "create_object",
-                r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"A tower above the water."}"#,
+                r#"{"object":"connection","name":"Stair","from_id":1,"to_id":2,"travel_time":5,"description":"Steps down to the quay."}"#,
             )]),
-            text("The locations exist."),
+            text("They are connected."),
             calls(&[
                 (
                     "create_object",
@@ -2497,6 +2509,14 @@ mod tests {
                 (
                     "mark_object_reviewed",
                     r#"{"object":"location","id":1,"reviewed":true}"#,
+                ),
+                (
+                    "mark_object_reviewed",
+                    r#"{"object":"location","id":2,"reviewed":true}"#,
+                ),
+                (
+                    "mark_object_reviewed",
+                    r#"{"object":"connection","id":1,"reviewed":true}"#,
                 ),
                 (
                     "mark_object_reviewed",
@@ -2571,12 +2591,12 @@ mod tests {
         assert!(world.ready, "reviewed core objects open play");
         assert!(world.failure.is_none());
         let objects = store.review_list(member.world_id).await.unwrap();
-        assert_eq!(objects.len(), 5);
+        assert_eq!(objects.len(), 7);
         assert!(objects.iter().all(|object| object.reviewed));
         store.character_group_id(member.character_id).await.unwrap();
 
         let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
-        assert_eq!(shown.len(), 18);
+        assert_eq!(shown.len(), 20);
         assert!(shown[0].contains("A drowned city"));
         let prompts = crate::prompts::current().unwrap();
         let sampled = |questions: &[String]| {
@@ -2635,60 +2655,68 @@ mod tests {
             "{}",
             shown[8]
         );
-        // Then NPCs one at a time, with the marked names without an object as a
-        // reminder, until the Storyteller says none are left, then the items.
+        // The locations were made apart, so the Storyteller is told exactly which
+        // cannot be reached and asked for connections.
         assert!(
-            shown[10].contains("create the next NPC")
-                && shown[10].contains("no object has them yet: Ysolde, Drowned Bell")
-                && shown[10].contains("- location 1 Belfry"),
+            shown[10].contains("These locations cannot be reached from Belfry: Harbor.")
+                && shown[10].contains("create connections"),
             "{}",
             shown[10]
         );
+        // Then NPCs one at a time, with the marked names without an object as a
+        // reminder, until the Storyteller says none are left, then the items.
         assert!(
-            shown[12].contains("create the next NPC") && shown[12].contains("- npc 2 Ysolde"),
+            shown[12].contains("create the next NPC")
+                && shown[12].contains("no object has them yet: Ysolde, Drowned Bell")
+                && shown[12].contains("- location 1 Belfry"),
             "{}",
             shown[12]
         );
         assert!(
-            shown[13].contains("create the item types and items"),
-            "{}",
-            shown[13]
-        );
-        // A refused call reaches the Storyteller as a tool result it can act on.
-        assert!(shown[11].contains("called `Belfry`"), "{}", shown[11]);
-        // The Questioner reviews the objects, not the Storyteller's answers.
-        assert!(shown[14].contains("- [ ] npc 2 Ysolde") && shown[14].contains("read_object"));
-        assert!(!shown[14].contains("The tide-wardens rule."));
-        // It is told which marked name has no object, and not the one that has.
-        assert!(
-            shown[14].contains("no object has them yet: Drowned Bell"),
+            shown[14].contains("create the next NPC") && shown[14].contains("- npc 2 Ysolde"),
             "{}",
             shown[14]
+        );
+        assert!(
+            shown[15].contains("create the item types and items"),
+            "{}",
+            shown[15]
+        );
+        // A refused call reaches the Storyteller as a tool result it can act on.
+        assert!(shown[13].contains("called `Belfry`"), "{}", shown[13]);
+        // The Questioner reviews the objects, not the Storyteller's answers.
+        assert!(shown[16].contains("- [ ] npc 2 Ysolde") && shown[16].contains("read_object"));
+        assert!(!shown[16].contains("The tide-wardens rule."));
+        // It is told which marked name has no object, and not the one that has.
+        assert!(
+            shown[16].contains("no object has them yet: Drowned Bell"),
+            "{}",
+            shown[16]
         );
         // The Questioner's question sends the Storyteller back to create objects, and it
         // is shown what already exists (a fact, not kept in its chat).
         assert!(
-            shown[15].contains("Who stands against Ysolde?"),
+            shown[17].contains("Who stands against Ysolde?"),
             "{}",
-            shown[15]
+            shown[17]
         );
         assert!(
-            shown[15]
-                .contains("The world so far (locations: 1, connections: 0, groups: 1, npcs: 1")
-                && shown[15].contains("- location 1 Belfry")
-                && shown[15].contains("- npc 2 Ysolde"),
+            shown[17]
+                .contains("The world so far (locations: 2, connections: 1, groups: 1, npcs: 1")
+                && shown[17].contains("- location 1 Belfry")
+                && shown[17].contains("- npc 2 Ysolde"),
             "{}",
-            shown[15]
+            shown[17]
         );
         // The Storyteller's change comes back to the Questioner as the result
         // of its own question, in the same turn.
         assert!(
-            shown[17].contains("Added Corvin.")
-                && shown[17].contains("Changes to the world:")
-                && shown[17].contains("- added npc 3 Corvin")
-                && !shown[17].contains("create_object"),
+            shown[19].contains("Added Corvin.")
+                && shown[19].contains("Changes to the world:")
+                && shown[19].contains("- added npc 3 Corvin")
+                && !shown[19].contains("create_object"),
             "{}",
-            shown[17]
+            shown[19]
         );
         // The result is the Storyteller's note of the change; the summary itself
         // is the Questioner's context.

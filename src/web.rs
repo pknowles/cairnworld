@@ -1686,9 +1686,8 @@ fn WorldDetail(
     members: Vec<WorldMember>,
     invitations: Vec<crate::store::Invitation>,
     viewer_id: i64,
-    /// Where the world has got while it is being made; shown to every member.
-    #[prop(optional)]
-    progress: Option<crate::inspection::GenerationProgress>,
+    /// Where the world has got; shown to every member while it is being made.
+    progress: crate::inspection::GenerationProgress,
 ) -> impl IntoView {
     let is_owner = world.owner_id == viewer_id;
     let making = !world.ready && world.failure.is_none();
@@ -1707,9 +1706,7 @@ fn WorldDetail(
                 <span class="badge badge-lg">{if world.ready { "Complete" } else if world.failure.is_some() { "Failed" } else { "In progress" }}</span>
             </div>
             {world.failure.map(|failure| view! { <div class="alert alert-error whitespace-pre-wrap">{failure}</div> })}
-            {progress.filter(|_| making).map(|progress| {
-                view! { <GenerationProgressPanel world_id progress=library_progress(progress)/> }
-            })}
+            {making.then(|| view! { <GenerationProgressPanel world_id progress=library_progress(progress)/> })}
             {(!world.seed.is_empty()).then(|| view! {
                 <details><summary class="cursor-pointer">"Seed prompt"</summary><p class="whitespace-pre-wrap">{world.seed}</p></details>
             })}
@@ -3460,6 +3457,7 @@ mod tests {
                     ]
                     invitations=vec![crate::store::Invitation { token: "invite".into(), world_id: 7, max_uses: Some(2), uses: 1 }]
                     viewer_id
+                    progress=crate::inspection::GenerationProgress { phase: "Complete".into(), inferences: 0, objects: String::new(), finished: true }
                 /> }
             })
         }
@@ -3528,6 +3526,7 @@ mod tests {
                     members=vec![]
                     invitations=vec![]
                     viewer_id
+                    progress=crate::inspection::GenerationProgress { phase: "Complete".into(), inferences: 0, objects: String::new(), finished: true }
                 /> }
             })
         }

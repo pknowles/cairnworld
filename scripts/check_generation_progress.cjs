@@ -18,8 +18,8 @@ checkBrowser(server, async (tab, port) => {
 
   // Mark this document: a reload would lose the mark.
   await tab.evaluate(() => { window.generationPageMarker = "same page"; });
-  // Give the island time to hydrate and connect before the world moves on.
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  // The island says when its socket is open; only then does the world move on.
+  await tab.locator('#generation-progress[data-connected="true"]').waitFor();
   const advance = await fetch(`${fixture.base}/browser/generation/advance`, { method: "POST" });
   assert.equal(advance.status, 204);
 

@@ -2606,10 +2606,11 @@ pub fn GenerationProgressPanel(
     let inferences = RwSignal::new(progress.inferences);
     let objects = RwSignal::new(progress.objects);
     let error = RwSignal::new(None::<String>);
+    let connected = RwSignal::new(false);
     #[cfg(feature = "hydrate")]
-    follow_generation(world_id, phase, inferences, objects, error);
+    follow_generation(world_id, phase, inferences, objects, connected, error);
     view! {
-        <div class="alert" id="generation-progress" role="status">
+        <div class="alert" id="generation-progress" role="status" data-connected=move || connected.get().to_string()>
             <div>
                 <p class="font-semibold">{move || phase.get()}</p>
                 <p>{move || format!("{} inferences so far. Objects made: {}.", inferences.get(), objects.get())}</p>
@@ -2625,6 +2626,7 @@ fn follow_generation(
     phase: RwSignal<String>,
     inferences: RwSignal<i64>,
     objects: RwSignal<String>,
+    connected: RwSignal<bool>,
     error: RwSignal<Option<String>>,
 ) {
     let url = match websocket_url(&format!("/world/{world_id}/progress/ws")) {
@@ -2670,7 +2672,11 @@ fn follow_generation(
     websocket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     // The browser owns this callback until the document unloads with its WebSocket.
     on_message.forget();
+    let on_open = Closure::<dyn FnMut(Event)>::new(move |_| connected.set(true));
+    websocket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    on_open.forget();
     let on_close = Closure::<dyn FnMut(Event)>::new(move |_| {
+        connected.set(false);
         if error.get_untracked().is_none() {
             error.set(Some(
                 "Progress updates stopped. Reload to reconnect.".into(),
