@@ -48,5 +48,105 @@ question rule never enters the judgement it is making.
 player agent. In all 3 runs every line failed: it wrote text after its `speak` call
 (Toma's and Mara's reactions, or a repeat of the tool result), it rewrote the player's
 words ("Mara says: ..."), and for a line addressed to a character by name it made no
-call at all. Rewriting the role and end-of-turn text to say what the agent is for did
-not change that in 2 runs of each of 2 rewrites.
+call at all.
+
+**After the action.** With thinking switched on, the agent's reasoning at that point is
+"Now I need to continue the scene by having Toma respond... Since this is a roleplay
+scenario, I should provide the GM's narration". The role said "Guide the player through
+the current scene". The request after a `speak` call was replayed 10 times for each of
+`speak`, `ask`, `look` and `take`: the original role, a role saying the game tells the
+player what happens next, and the same with an end-of-turn line each produced text of
+its own in 40 of 40, and never an empty reply. A model that does not produce an empty
+reply cannot be told to; ending the turn after an action is deterministic, so the
+code does it (`Tool::ending` on the action tools).
+
+**The first step.** "Toma, I will defend you if Mara tries to take it." got a text reply
+in character in 12 of 12 samples without thinking (the other three lines: `speak` 12 of
+12). The role is what changed it: "The player types what their character does or says,
+and you carry it out with the action tools." made all four lines `speak` 10 of 10, as
+did two longer variants. The check now passes 3 of 3 runs (every line failed before).
+Questions to the agent itself were replayed 8 times each, old role against new: "What
+do you think Toma wants?" is answered in text in both; "Ask the GM what the hut is built
+from." is an `ask` in both; "What should I do next?" was a text answer and now calls
+the read-only `party_presence` tool first (8 of 8; what it writes afterwards was not
+measured). The listener scenario in the device suite, a player asking what the other
+player said, still gets a text answer.
+
+## Correction: the replay sampling
+
+The GM and player-agent replays above were captured from scripted scenes, which use
+temperature 0, so each "12 of 12" was one deterministic answer repeated. The runs
+through the real game (temperature 0.7) are what carry weight: the all-real NPC
+scenario, the player-agent check, the GM ask check and the device suite. With the production
+sampling (40 samples), the GM's first answer to a take named an invalid set of characters
+(a player or the actor) 18 times: the check asks NPCs only, and the GM sees one list of
+characters. The GM's second step put speech controls on the take in 11 of 60 intervention
+turns, with the complete approval schema. Both end as invalid output in the device suite.
+Letting the check skip players was tried and dropped: the declarations ask players
+(user_declarations.md, InterventionCheck and "Players are expected to respond in a timely
+manner"), so a silent skip is not what is declared.
+
+## Speech options on an approval
+
+The GM step after the intervention check, replayed 60 times at the production sampling
+with each form of `approve_action`. Counted: speech options placed on the take (not on
+Toma's spoken warning, which they apply to), which the tool rejects as invalid output.
+
+| Form | On the take | Used on the warning |
+|---|---|---|
+| flat `include`, `exclude`, `prefix` ("Only for speech; leave out...") | 5 of 60 | 19 of 60 |
+| the same, positive wording ("For speech: ...") | 6 of 60 | 38 of 60 |
+| the same, a sentence in the tool description | 6 of 60 | 35 of 60 |
+| both wording changes | 10 of 60 | 38 of 60 |
+| options nested in one `hearing` object | 11 of 60 | 42 of 60 |
+| options renamed `speech_include` and so on | 13 of 60 | 58 of 60 |
+| nested and renamed | 15 of 60 | 28 of 60 |
+| two tools: `approve_action` (id only) and `approve_speech` (id and the options) | **0 of 60** | 24 of 60 through `approve_speech`, the rest through `approve_action` |
+
+Wording and naming do not reduce the misuse, and anything that makes the options more
+visible raises it. The two-tool form removes it; the request is 55 tokens longer.
+
+## The GM and asks, at the production sampling
+
+The earlier GM-ask replays ran at temperature 0 (see the correction above), so they are
+repeated here with 20 samples per ask at the production sampling. Each cell is how many of
+the 20 first answers were the approving call. The last column is the story-end question
+sent as an ask, which is a question but not one the GM can answer.
+
+| Wording | Toma speaking | Mara addressing the Adventurer | An action | Story-end question rejected |
+|---|---|---|---|---|
+| as it is | 12 | 6 | 15 | 0 |
+| a sentence in the role | 11 | 14 | 14 | refuses in text (not a rejection) |
+| `ask_gm` rename | 13 | 20 | 20 | 0 |
+| `ask_gm(question)` as its own tool | 12 | 20 | 12 | refuses in text |
+| the rule in the role, the request, the approve tool and the reject tool | 20 | 20 | 20 | **19** |
+| request framed as "a question for the GM: ... answer it, or reject it with a reason if it is not a question you can answer" | 4 | 10 | 0 (it narrates instead) | **18** |
+
+Where the GM did not approve, it narrated the speech or the action (for example
+`narrate_characters` addressed to Toma) or called `intervention_check`. It rejected a
+non-question 0 times in 100 under every wording, and rejected the unanswerable question in
+19 of 20 only when the rule was said in four places or the request asked it to answer or
+reject. Reading its reasoning (thinking switched on): it treats the description as the
+character's action, judges whether that could happen in the scene, and plans to narrate
+what Toma says.
+
+## A request of its own for an ask
+
+The ask is judged in a request that offers only `answer` (delivered to the asker alone, which
+approves the ask) and `reject_action`, with the role "A character sent you this as a question.
+Answer it from the scene. If it is not a question to you, such as speech to another character,
+a request or an action, or you cannot or may not answer it, reject it...". 20 samples each at
+the production sampling, on the request the product sends; answered / rejected:
+
+| Request | Real question | Toma speaking | Mara addressing the Adventurer | An action | Story-end question |
+|---|---|---|---|---|---|
+| as the product sends it | 20 / 0 | 17 / 0 (3 plain text) | 20 / 0 | 0 / 20 | 0 / 20 |
+| request line neutral ("sent this as an ask") instead of "asks you" | 20 / 0 | 20 / 0 | 20 / 0 | 7 / 13 | 0 / 20 |
+| criterion on the `answer` and `reject_action` descriptions | 20 / 0 | 14 / 6 | 20 / 0 | 0 / 20 | 20 / 0 |
+| neutral line and tool descriptions | 20 / 0 | 20 / 0 | 20 / 0 | 0 / 20 | 20 / 0 |
+
+The hypothesis that the request line "X asks you" made the GM treat the text as a question was
+not supported: the neutral line did not improve speech or requests. Thinking-mode reasoning shows
+the GM often recognising that the text is speech to another character and still choosing to
+respond to it as the GM. The speech and request cases remain unsolved here; the decision was to
+fix the characters misusing `ask` rather than add rules to the GM (user_exerpts.md, 2026-11-03).

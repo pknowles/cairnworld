@@ -68,11 +68,12 @@ turn_time + 10)` update and immediate tool-call order as declared constraints.
   ends the short opportunity without an extra forced move/action; it does not
   replace a long activity merely to close an LLM inference. Apply immediate
   actions in call order, not as a simultaneous outcome batch.
-- Reuse the declared player-response deadline/AFK mechanism from
+- [Player replies](archive/player-replies.md) implements the generic player-response deadline and
+  consecutive-timeout handling first; reuse it. Reuse the declared player-response deadline/AFK mechanism from
   [Player replies and coordinated travel](../design.md#player-replies-and-coordinated-travel)
   when an eligible human blocks progress. Implement the generic deadline and
-  consecutive-timeout handling here; Rules and travel adds its Intervention/
-  Travel call continuations later. Ordinary turn waiting must not require a fake
+  consecutive-timeout handling here; Rules and travel adds its Travel
+  replies later. Ordinary turn waiting must not require a fake
   character action or serialized Rust future. A skip uses EndTurn, does not reset
   cooldowns and does not turn five minutes of wall time into five game minutes.
 - Publish actual eligibility/current activity through existing UI/game paths.
@@ -113,6 +114,17 @@ turn_time + 10)` update and immediate tool-call order as declared constraints.
   completion must not automatically replay uncertain GM effects. Game-time due
   work uses the world loop; wall-clock human/presence deadlines retain their
   existing earliest-deadline wake-up. Do not add per-character polling loops.
+
+## Batched group splits
+
+User direction (2026-11-05, user_exerpts.md): when every player follows one player, each moving
+individually, the group should split once, not split and merge repeatedly. The first split of a
+group schedules a pending split. The split call returns before it resolves, and the GM sees the
+pending split. It resolves when every player's game time has passed the first mover's move time
+plus a combat turn. `split_group` can name an existing or pending group to move a character into,
+so one call splits one character out and into the pending group. Needs the time state above, so
+it follows the time checkpoint. Design first: the pending split's stored form, what the GM sees,
+and how a stale pending split is rejected.
 
 ## Dependent features and explicit exclusions
 

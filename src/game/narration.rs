@@ -14,7 +14,7 @@ use super::Game;
 use crate::{
     llm::{Backend, ToolDefinition},
     prompts,
-    store::{Narration, NarrationText, PendingAction},
+    store::{ActionOutcome, Hearing, Narration, NarrationText, PendingAction},
     tools::{Tool, ToolFuture, ToolOutcome},
 };
 
@@ -38,6 +38,9 @@ pub(super) struct NarrationScope {
 /// and narrate them.
 pub(super) type PresentedActions = Arc<Mutex<Vec<PendingAction>>>;
 
+/// Records a rejection's reason as the narration of an ask.
+pub(super) type RejectionNotice = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// The narrate tools of one GM turn, and the narration its call captured.
 pub(super) struct NarrationTools {
     pub tools: Vec<Tool>,
@@ -45,6 +48,13 @@ pub(super) struct NarrationTools {
     captured: Arc<Mutex<Option<Draft>>>,
     /// Whether the game shares one detailed account among the player characters.
     shares: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Answer {
+    action_id: i64,
+    answer: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -200,6 +210,108 @@ impl NarrationTools {
             tools: narrate,
             captured,
             shares: game.rules.characters_share_narration,
+        })
+    }
+
+    /// The tools for judging an `ask`, a question to the GM: its one answer
+    /// approves the question and reaches only the asker.
+    pub fn asking<B>(game: &Arc<Game<B>>, scope: NarrationScope) -> Result<Self>
+    where
+        B: Backend + Send + Sync + 'static,
+    {
+        let definition = prompts::current()?
+            .gm
+            .tools
+            .tool("answer", schema(schema_for!(Answer)))?;
+        let asker = scope.actor.context("an ask has an asking character")?;
+        let captured = Arc::new(Mutex::new(None));
+        let game_for_tool = Arc::clone(game);
+        let captured_for_tool = Arc::clone(&captured);
+        let scope = Arc::new(scope);
+        let answer = Tool::ending(definition, move |context| {
+            let arguments = context.arguments.to_string();
+            let tool_execution_id = context.tool_execution_id;
+            let game = Arc::clone(&game_for_tool);
+            let captured = Arc::clone(&captured_for_tool);
+            let scope = Arc::clone(&scope);
+            Box::pin(async move {
+                let call: Answer =
+                    match serde_json::from_str(&arguments).context("parsing answer arguments") {
+                        Ok(call) => call,
+                        Err(error) => return Ok(ToolOutcome::rejected(error)),
+                    };
+                if let Err(error) = nonempty(&call.answer) {
+                    return Ok(ToolOutcome::rejected(error));
+                }
+                let pending = scope
+                    .presented
+                    .lock()
+                    .expect("presented actions lock poisoned")
+                    .first()
+                    .cloned()
+                    .context("an ask is presented")?;
+                if call.action_id != pending.id {
+                    return Ok(ToolOutcome::Rejected(format!(
+                        "Tool arguments were rejected: the question is action {}, not {}",
+                        pending.id, call.action_id
+                    )));
+                }
+                let resolved = game
+                    .store
+                    .resolve_pending_action(
+                        pending.gm_agent_id,
+                        pending.world_id,
+                        pending.id,
+                        tool_execution_id,
+                        "approved",
+                        &Hearing::default(),
+                    )
+                    .await
+                    .with_context(|| format!("answering action {}", pending.id))?;
+                if let ActionOutcome::Rejected(_) = resolved.outcome {
+                    return Ok(ToolOutcome::Rejected(format!(
+                        "Tool arguments were rejected: action {} was already rejected, it cannot now be answered",
+                        pending.id
+                    )));
+                }
+                game.world(pending.world_id)?
+                    .publish(crate::inspection::DevEvent::Changed {
+                        sequence_id: Some(pending.sequence_id),
+                        inference_id: None,
+                    });
+                *captured.lock().expect("narration lock poisoned") = Some(Draft {
+                    named: Vec::new(),
+                    texts: vec![NarrationText {
+                        text: call.answer,
+                        only: Some(vec![asker]),
+                        except: Vec::new(),
+                    }],
+                    private: true,
+                });
+                Ok(ToolOutcome::Completed("Answered.".to_string()))
+            }) as ToolFuture
+        });
+        Ok(Self {
+            tools: vec![answer],
+            captured,
+            shares: false,
+        })
+    }
+
+    /// Tells the asker why their ask was rejected: a rejected ask is narrated by
+    /// nobody, and the reason is for the asker alone.
+    pub fn rejection_notice(&self, asker: i64) -> RejectionNotice {
+        let captured = Arc::clone(&self.captured);
+        Arc::new(move |reason| {
+            *captured.lock().expect("narration lock poisoned") = Some(Draft {
+                named: Vec::new(),
+                texts: vec![NarrationText {
+                    text: reason.to_string(),
+                    only: Some(vec![asker]),
+                    except: Vec::new(),
+                }],
+                private: true,
+            });
         })
     }
 

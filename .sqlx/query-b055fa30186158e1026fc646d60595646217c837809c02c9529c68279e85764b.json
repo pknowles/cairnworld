@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_action SET sequence_id = ? WHERE world_id = ? AND (id = ? OR reacts_to = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b055fa30186158e1026fc646d60595646217c837809c02c9529c68279e85764b"
+}

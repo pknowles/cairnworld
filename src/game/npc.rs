@@ -162,6 +162,7 @@ where
                 sampling: self.sampling.clone(),
                 model: &self.model,
                 compact_before_next_input_tokens: self.limits.compact_before_next_input_tokens,
+                perceiver: None,
             },
             |_| {},
         )
@@ -238,8 +239,11 @@ where
                         .then_some(prompts::current()?.gm.tied_note.as_str()),
                 )
                 .await?;
-            self.deliver_narration(collection.world_id, &narration)
-                .await?;
+            // Nothing to deliver while the GM waits for players it asked.
+            if let Some(narration) = narration {
+                self.deliver_narration(collection.world_id, &narration)
+                    .await?;
+            }
             self.store
                 .finish_npc_execution(&claim, budget.spent())
                 .await

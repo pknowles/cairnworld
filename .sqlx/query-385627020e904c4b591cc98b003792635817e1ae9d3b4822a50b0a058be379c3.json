@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE world_member SET missed_replies = CASE WHEN ? THEN missed_replies + 1 ELSE 0 END WHERE id = (SELECT member_id FROM player_character WHERE character_id = ?) RETURNING missed_replies",
+  "describe": {
+    "columns": [
+      {
+        "name": "missed_replies",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "385627020e904c4b591cc98b003792635817e1ae9d3b4822a50b0a058be379c3"
+}

@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::llm::Sampling;
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 pub struct Settings {
     /// Which entry of `models` to use when `--model` is not given.
     pub model: Option<String>,
@@ -17,9 +17,10 @@ pub struct Settings {
     /// field by field.
     #[serde(default)]
     pub sampling: SamplingConfig,
-    #[serde(default)]
     pub game: GameSettings,
     pub web: Option<Web>,
+    #[serde(default)]
+    pub testing: Testing,
 }
 
 /// Rules of play that apply to every world.
@@ -28,12 +29,17 @@ pub struct GameSettings {
     /// Whether every character receives the same detailed narration of an event,
     /// for a shared experience, unless the GM narrates something privately.
     pub characters_share_narration: bool,
+    /// Seconds a player has to answer when the game cannot go on without them.
+    /// Required: a missing value is a startup error, so it is always chosen.
+    pub player_response_timeout: u64,
 }
 
+#[cfg(test)]
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
             characters_share_narration: true,
+            player_response_timeout: 300,
         }
     }
 }
@@ -73,6 +79,7 @@ impl SamplingConfig {
             min_p: self.min_p,
             presence_penalty: self.presence_penalty,
             enable_thinking: self.enable_thinking.unwrap_or(false),
+            seed: None,
         }
     }
 }
@@ -86,6 +93,16 @@ pub struct Web {
     pub google_client_id: String,
     pub google_client_secret: String,
     pub google_redirect_url: String,
+}
+
+/// Aids for testing a deployment by hand. Everything is off unless set.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Testing {
+    /// Shows the world detail page's "Create character" button, which lets one
+    /// account run several players.
+    #[serde(default)]
+    pub create_character_button: bool,
 }
 
 /// A model and everything needed to talk to it. The chat template travels with
@@ -342,6 +359,10 @@ mod tests {
         let settings: Settings = config::Config::builder()
             .add_source(config::File::from_str(
                 r#"
+                    [game]
+                    characters_share_narration = true
+                    player_response_timeout = 300
+
                     [models.dev-qwen35]
                     path = "models/Qwen_Qwen3.5-4B-Q4_K_M.gguf"
                     source_model = "Qwen/Qwen3.5-4B"
@@ -362,6 +383,10 @@ mod tests {
         let settings: Settings = config::Config::builder()
             .add_source(config::File::from_str(
                 r#"
+                    [game]
+                    characters_share_narration = true
+                    player_response_timeout = 300
+
                     [sampling]
                     temperature = 0.7
                     top_p = 0.8
@@ -396,6 +421,30 @@ mod tests {
         // An unconfigured path falls back to the temperature default.
         let bare = settings.sampling(&settings.model(Some("x/y.gguf")).unwrap());
         assert_eq!(bare.top_p, Some(0.8));
+    }
+
+    #[test]
+    fn a_missing_player_response_timeout_is_a_startup_error() {
+        let error = config::Config::builder()
+            .add_source(config::File::from_str(
+                "[game]
+characters_share_narration = true
+",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<Settings>()
+            .err()
+            .expect("the timeout has no code default");
+        assert!(
+            error.to_string().contains("player_response_timeout"),
+            "{error}"
+        );
+        assert_eq!(
+            Settings::for_test("").unwrap().game.player_response_timeout,
+            300
+        );
     }
 
     #[test]

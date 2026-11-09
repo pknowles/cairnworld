@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_reply (world_id, action_id, character_id, deadline, status)              VALUES (?, ?, ?, datetime(CURRENT_TIMESTAMP, ? || ' seconds'), 'open')              ON CONFLICT (world_id, action_id, character_id) DO UPDATE              SET deadline = excluded.deadline, status = 'open', response = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "92c0ec6a1f9390068fe4a4c5c1b89d7f6db2ba4e0365dcb7bd16bf891ef3f575"
+}

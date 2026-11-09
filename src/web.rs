@@ -93,6 +93,8 @@ struct App {
     store: Store,
     google: Google,
     game: GameLoad,
+    /// `[testing] create_character_button`: whether members may add characters.
+    create_character_button: bool,
 }
 
 /// The web-visible lifetime of the one in-process game model.
@@ -318,7 +320,12 @@ fn router(app: App, sessions: SqliteStore, secure_cookies: bool) -> Router {
 /// Serve the OAuth-only browser entrypoint. The Google exchange is deliberately
 /// performed by the OpenID Connect crate; Cairnworld only persists the verified
 /// email identity it receives and resolves access from that identity.
-pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Result<()> {
+pub async fn serve(
+    store: Store,
+    config: &settings::Web,
+    testing: settings::Testing,
+    game: GameLoad,
+) -> Result<()> {
     let bind: SocketAddr = config
         .bind
         .parse()
@@ -337,6 +344,7 @@ pub async fn serve(store: Store, config: &settings::Web, game: GameLoad) -> Resu
             store,
             google,
             game,
+            create_character_button: testing.create_character_button,
         },
         sessions,
         secure_cookies,
@@ -616,10 +624,11 @@ async fn world_detail(
         vec![]
     };
     let progress = app.store.generation_progress(world_id).await?;
+    let create_character = app.create_character_button;
     Ok(Html(render_page(
         "Cairnworld",
         true,
-        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=viewer.id progress=progress/> },
+        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=viewer.id progress=progress create_character/> },
     )))
 }
 
@@ -1115,6 +1124,11 @@ async fn create_player_character(
     Path(world_id): Path<i64>,
 ) -> Result<Redirect, WebError> {
     let user = session_user(&app.store, &session).await?;
+    if !app.create_character_button {
+        return Err(WebError::forbidden(
+            "creating extra characters is not enabled (`[testing] create_character_button`)",
+        ));
+    }
     app.store.create_player_character(user.id, world_id).await?;
     Ok(Redirect::to(&format!("/world/{world_id}")))
 }
@@ -1256,10 +1270,24 @@ async fn play(
     member: PlayerAgent,
     after_message_id: Option<i64>,
 ) {
-    if let Err(error) = play_connection(socket, game, stream, member, after_message_id).await {
+    if let Err(error) = play_connection(socket, game, stream, member, after_message_id).await
+        && error.downcast_ref::<AwayDisconnect>().is_none()
+    {
         tracing::error!(error = %format!("{error:#}"), "player chat websocket ended with an error");
     }
 }
+
+/// The player's connection ends because they missed too many response deadlines.
+#[derive(Debug)]
+struct AwayDisconnect;
+
+impl std::fmt::Display for AwayDisconnect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("player disconnected for being away")
+    }
+}
+
+impl std::error::Error for AwayDisconnect {}
 
 async fn play_connection<B: Backend + Send + Sync + 'static>(
     mut socket: WebSocket,
@@ -1470,6 +1498,10 @@ async fn play_connected<B: Backend + Send + Sync + 'static>(
                 }
             }
             narration = broadcasts.recv() => match narration {
+                Ok(crate::world::ChatChange::Away { character_id }) if character_id == member.character_id => {
+                    send_event(socket, &ServerEvent::Away).await?;
+                    return Err(AwayDisconnect.into());
+                }
                 Ok(change) => {
                     send_chat_failure(socket, game, member, change, cursor).await?;
                     cursor = send_ready_broadcasts(socket, game, member, &mut broadcasts, cursor).await?;
@@ -1542,6 +1574,12 @@ async fn send_ready_broadcasts<B: Backend + Send + Sync + 'static>(
     let mut missed = 0;
     loop {
         match broadcasts.try_recv() {
+            Ok(crate::world::ChatChange::Away { character_id })
+                if character_id == member.character_id =>
+            {
+                send_event(socket, &ServerEvent::Away).await?;
+                return Err(AwayDisconnect.into());
+            }
             Ok(change) => {
                 send_chat_failure(socket, game, member, change, cursor).await?;
             }
@@ -1688,6 +1726,7 @@ fn WorldDetail(
     viewer_id: i64,
     /// Where the world has got; shown to every member while it is being made.
     progress: crate::inspection::GenerationProgress,
+    #[prop(default = false)] create_character: bool,
 ) -> impl IntoView {
     let is_owner = world.owner_id == viewer_id;
     let making = !world.ready && world.failure.is_none();
@@ -1730,12 +1769,14 @@ fn WorldDetail(
                 let is_active = member.access == "active";
                 let remove = is_owner && member.user_id != viewer_id && is_active;
                 let enter = member.user_id == viewer_id && is_active;
-                let create = member.user_id == viewer_id && is_active && ready;
+                let create = create_character && member.user_id == viewer_id && is_active && ready;
                 let player = format!("{} ({})", member.display_name, member.access);
+                let away = enter && member.away;
                 let remove_path = format!("{member_path}/{}", member.user_id);
                 view! { <li class=WORLD_DETAIL_ROW_CLASSES>
                     <div class="w-full flex flex-wrap items-center justify-between gap-3">
                         <span>{player}</span>
+                        {away.then(|| view! { <span class="alert alert-warning">"You were disconnected for being AFK: you did not respond in time. Enter the world to continue."</span> })}
                         {create.then(|| view! { <form action=format!("{world_path}/characters") method="post"><button class="btn btn-sm" type="submit">"Create character"</button></form> })}
                         {remove.then(|| view! { <form action=remove_path method="post"><button class="btn btn-error btn-sm" type="submit">"Remove"</button></form> })}
                     </div>
@@ -2050,11 +2091,10 @@ mod tests {
             .create_invitation(owner.id, world_id, None)
             .await
             .unwrap();
-        let viewer_character_id = store
+        store
             .accept_invitation(&viewer, &invitation.token)
             .await
-            .unwrap()
-            .character_id;
+            .unwrap();
 
         // A real split, so check_developer_mode.cjs can exercise the GM's
         // branch-graph DAG view (D6), not just the trivial one-branch case
@@ -2112,21 +2152,13 @@ mod tests {
                     split_executions[0],
                     crate::tools::TopologyChange::Split {
                         group_id: original_group_id,
-                        partitions: vec![
-                            crate::tools::GroupPartition {
-                                character_ids: vec![
-                                    installed.member.character_id,
-                                    mara_id,
-                                    viewer_character_id,
-                                ],
-                                name: "player side".into(),
-                            },
-                            crate::tools::GroupPartition {
-                                character_ids: vec![toma_id],
-                                name: "Toma side".into(),
-                            },
-                        ],
-                        continue_with_character_id: Some(installed.member.character_id),
+                        target_group_id: None,
+                        split: crate::tools::SplitGroup {
+                            character_ids: vec![toma_id],
+                            current_name: "player side".into(),
+                            target_name: "Toma side".into(),
+                            continue_with_character_id: Some(installed.member.character_id),
+                        },
                     },
                 )],
             )
@@ -2153,6 +2185,9 @@ mod tests {
         let mut responses: Vec<Response> =
             serde_json::from_str(include_str!("../testdata/real_model_creation_round.json"))
                 .unwrap();
+        // The captured opening had both NPCs listening. This fixture split
+        // Toma into another group, so only Mara answers the opening here.
+        responses.pop().expect("the captured Toma reply");
         // The third recorded response answered the compaction summary request.
         let summary = responses.remove(2);
         let (backend, captured_requests) = ScriptedBackend::new(responses);
@@ -2288,19 +2323,24 @@ mod tests {
                         .filter(|id| *id != mara_id && *id != isolated.character_id)
                         .collect();
                     hearing_npcs.retain(|id| members.contains(id));
-                    calls.push(ToolCall {id: "split-chat".into(), name: "split_group".into(), arguments: serde_json::json!({
-                        "partitions": [
-                            {"character_ids": members, "name": "chat players"},
-                            {"character_ids": [mara_id, isolated.character_id], "name": "chat companions"}
-                        ]
-                    }).to_string()});
+                    calls.push(ToolCall {
+                        id: "split-chat".into(),
+                        name: "split_group".into(),
+                        arguments: serde_json::json!({
+                            "character_ids": [mara_id, isolated.character_id],
+                            "current_group_name": "chat players",
+                            "new_group_name": "chat companions"
+                        })
+                        .to_string(),
+                    });
                 } else if stage == 3 {
                     let other = store
                         .character_group_id(isolated.character_id)
                         .await
                         .unwrap();
                     hearing_npcs.extend(store.group_npc_ids(other).await.unwrap());
-                    calls.push(ToolCall {id: "merge-chat".into(), name: "merge_groups".into(), arguments: serde_json::json!({"group_ids": [group, other], "name": "chat reunited"}).to_string()});
+                    let members = store.group_character_ids(group).await.unwrap();
+                    calls.push(ToolCall {id: "merge-chat".into(), name: "move_to_group".into(), arguments: serde_json::json!({"character_ids": members, "group_id": other, "current_group_name": "chat", "joined_group_name": "chat reunited"}).to_string()});
                 }
                 let narration = [
                     "Passive split narration.",
@@ -2328,7 +2368,6 @@ mod tests {
                         name: "narrate_group".into(),
                         arguments: serde_json::json!({ "text": narration }).to_string(),
                     }])),
-                    reply(Content::Text("Done.".into())),
                 ]);
                 responses
                     .lock()
@@ -2969,6 +3008,10 @@ mod tests {
         (app, store, db)
     }
 
+    async fn test_app_with_game() -> (Router, Store, crate::store::TestDatabase, GameLoad) {
+        test_app_with_options(false).await
+    }
+
     #[tokio::test]
     async fn model_failure_leaves_world_inspection_notifications_available() {
         let (app, store, _db, game) = test_app_with_game().await;
@@ -3105,7 +3148,9 @@ mod tests {
         ));
     }
 
-    async fn test_app_with_game() -> (Router, Store, crate::store::TestDatabase, GameLoad) {
+    async fn test_app_with_options(
+        create_character_button: bool,
+    ) -> (Router, Store, crate::store::TestDatabase, GameLoad) {
         use openidconnect::{
             AuthUrl, EmptyAdditionalProviderMetadata, JsonWebKeySetUrl, ResponseTypes,
             core::{CoreJwsSigningAlgorithm, CoreResponseType, CoreSubjectIdentifierType},
@@ -3139,6 +3184,7 @@ mod tests {
                 store: store.clone(),
                 google,
                 game: game.clone(),
+                create_character_button,
             },
             sessions,
             true,
@@ -3451,13 +3497,14 @@ mod tests {
                 view! { <WorldDetail
                     world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode: false, seed: String::new(), ready: true, failure: None }
                     members=vec![
-                        WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 8, name: "Rook".into() }, crate::store::WorldCharacter { id: 11, name: "Lark".into() }] },
-                        WorldMember { user_id: 2, display_name: "Invitee".into(), access: "active".into(), characters: vec![crate::store::WorldCharacter { id: 9, name: "Moth".into() }] },
-                        WorldMember { user_id: 3, display_name: "Removed".into(), access: "removed".into(), characters: vec![crate::store::WorldCharacter { id: 10, name: "Ash".into() }] },
+                        WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), away: false, characters: vec![crate::store::WorldCharacter { id: 8, name: "Rook".into() }, crate::store::WorldCharacter { id: 11, name: "Lark".into() }] },
+                        WorldMember { user_id: 2, display_name: "Invitee".into(), access: "active".into(), away: false, characters: vec![crate::store::WorldCharacter { id: 9, name: "Moth".into() }] },
+                        WorldMember { user_id: 3, display_name: "Removed".into(), access: "removed".into(), away: false, characters: vec![crate::store::WorldCharacter { id: 10, name: "Ash".into() }] },
                     ]
                     invitations=vec![crate::store::Invitation { token: "invite".into(), world_id: 7, max_uses: Some(2), uses: 1 }]
                     viewer_id
                     progress=crate::inspection::GenerationProgress { phase: "Complete".into(), inferences: 0, objects: String::new(), finished: true }
+                    create_character=true
                 /> }
             })
         }
@@ -3515,6 +3562,59 @@ mod tests {
         );
         // Once the world is ready the page shows no progress.
         assert!(!detail(true, false).contains("inferences so far"));
+    }
+
+    #[test]
+    fn world_detail_hides_the_create_character_button_unless_enabled() {
+        let detail = render_page("Cairnworld", false, move || {
+            view! { <WorldDetail
+                world=World { id: 7, name: "Bread Thief".into(), owner_id: 1, developer_mode: false, seed: String::new(), ready: true, failure: None }
+                members=vec![WorldMember { user_id: 1, display_name: "Owner".into(), access: "active".into(), away: false, characters: vec![] }]
+                invitations=vec![]
+                viewer_id=1
+                progress=crate::inspection::GenerationProgress { phase: "Complete".into(), inferences: 0, objects: String::new(), finished: true }
+            /> }
+        });
+        assert!(!detail.contains("Create character"));
+        assert!(!detail.contains("action=\"/world/7/characters\""));
+    }
+
+    #[tokio::test]
+    async fn creating_a_character_needs_the_button_enabled() {
+        for enabled in [false, true] {
+            let (app, store, _db, _game) = test_app_with_options(enabled).await;
+            let owner = store
+                .find_or_create_user("owner@example.test", "Owner")
+                .await
+                .unwrap();
+            let cookie = session_cookie(&store, owner.id).await;
+            assert_eq!(
+                request(&app, "POST", "/worlds", Some(&cookie)).await,
+                StatusCode::SEE_OTHER
+            );
+            let world_id = store.owned_worlds(owner.id).await.unwrap()[0].id;
+            let characters = |store: Store| async move {
+                store.world_members(world_id).await.unwrap()[0]
+                    .characters
+                    .len()
+            };
+            let before = characters(store.clone()).await;
+            let status = request(
+                &app,
+                "POST",
+                &format!("/world/{world_id}/characters"),
+                Some(&cookie),
+            )
+            .await;
+            let after = characters(store.clone()).await;
+            if enabled {
+                assert_eq!(status, StatusCode::SEE_OTHER);
+                assert_eq!(after, before + 1);
+            } else {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert_eq!(after, before);
+            }
+        }
     }
 
     #[test]

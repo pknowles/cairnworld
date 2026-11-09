@@ -94,6 +94,8 @@ pub struct Storyteller {
 #[serde(deny_unknown_fields)]
 pub struct Gm {
     pub role: String,
+    pub ask_role: String,
+    pub ask_request: String,
     pub narrate_reminder: String,
     pub narrate_next: String,
     pub decide_next: String,
@@ -104,6 +106,11 @@ pub struct Gm {
     pub scene_request: String,
     pub entrance_request: String,
     pub presence_request: String,
+    pub intervention_request: String,
+    pub waiting_for: String,
+    pub answers_request: String,
+    pub reply_answered: String,
+    pub reply_timed_out: String,
     pub tools: Tools,
 }
 
@@ -114,6 +121,8 @@ pub struct Player {
     pub scene: String,
     pub turn_end: String,
     pub entered: String,
+    pub reply_sent: String,
+    pub action_waiting: String,
     pub tools: Tools,
 }
 
@@ -122,7 +131,6 @@ pub struct Player {
 pub struct Npc {
     pub role: String,
     pub situation: String,
-    pub intervention_request: String,
     pub before_deciding: String,
     pub eagerness: String,
     pub tools: Tools,
@@ -326,11 +334,27 @@ pub fn drop_blanks(value: &mut serde_json::Value) {
 /// about a tenth of a request (experiments/0006-context-size.md) and replaying
 /// requests without them changed none of the model's choices. The names of an
 /// object's properties are not schema keys, so a property called `format` stays.
+///
+/// An optional field's `["integer", "null"]` becomes `"integer"`: leaving the field
+/// out already means nothing, and mistral.rs's Qwen call parser reads only a single
+/// `type`, so it returned an optional number as a string that Rust then rejected.
 fn strip_generated(schema: &mut serde_json::Value) {
     match schema {
         serde_json::Value::Object(map) => {
             for key in ["$schema", "title", "format", "default"] {
                 map.remove(key);
+            }
+            let null = serde_json::Value::from("null");
+            let plain = match map.get("type") {
+                Some(serde_json::Value::Array(kinds))
+                    if kinds.len() == 2 && kinds.contains(&null) =>
+                {
+                    kinds.iter().find(|kind| **kind != null).cloned()
+                }
+                _ => None,
+            };
+            if let Some(plain) = plain {
+                map.insert("type".to_string(), plain);
             }
             for (key, child) in map.iter_mut() {
                 match (key.as_str(), child) {
@@ -384,6 +408,34 @@ fn describe(schema: &mut serde_json::Value, texts: &BTreeMap<String, String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_optional_fields_null_alternative_is_left_out_of_its_type() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": ["integer", "null"]},
+                "text": {"type": ["null", "string"], "maxLength": 9},
+                "either": {"type": ["integer", "string"]},
+                "plain": {"type": "integer"},
+            },
+        });
+        strip_generated(&mut schema);
+        let kinds: Vec<_> = ["id", "text", "either", "plain"]
+            .iter()
+            .map(|name| schema["properties"][name]["type"].clone())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                serde_json::json!("integer"),
+                serde_json::json!("string"),
+                serde_json::json!(["integer", "string"]),
+                serde_json::json!("integer"),
+            ]
+        );
+        assert_eq!(schema["properties"]["text"]["maxLength"], 9);
+    }
 
     #[test]
     fn the_checked_in_prompt_file_loads() {
@@ -504,7 +556,7 @@ rolle = \"typo\"",
         assert_eq!(
             schema,
             serde_json::json!({"properties": {
-                "to": {"type": ["integer", "null"]},
+                "to": {"type": "integer"},
                 "format": {"type": "string"},
             }})
         );

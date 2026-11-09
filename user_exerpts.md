@@ -1209,3 +1209,105 @@ Tried on the real model (dev-qwen35, 4096 context) and did not help, so not kept
 - Telling the model in a tool description to read "about five" objects at a time (or asking for "up to five"
   questions): the model ignores counts in tool text. Make the interface take one.
 - `read_object` taking any number of objects: 18 at once overflowed the context. It takes one.
+
+## 2026-11-03: separate tools, and evidence before changing a tool
+
+On the GM's approval carrying speech-only options (the model placed them on non-speech
+approvals 8% to 25% of the time; a separate speech approval made it 0 of 60):
+
+> ok, go with separate. I added to user decs.
+
+The declaration added: "LLMs do respond better to separate tool calls particularly when
+optional arguments are involved that can change the meaning - LLMs will often
+unnecessarily fill optionals." On not splitting `attempt` (required arguments only, no
+measured problem):
+
+> yeah if you don't have evidence to do this then we should not be doing it. optionals
+> sound like a proven risk, but not something to blindly change everywhere
+
+On asking players in an InterventionCheck: "yes, ask players now unless you have a good
+reason not to, i.e. it is blocked by a future item" (plans/archive/player-replies.md).
+
+## 2026-11-03: `ask` misuse is fixed at the source, not by a page of GM rules
+
+The GM was approving anything sent as an `ask` (speech, actions, requests to others), and
+tuning its judgement of what is a question did not hold across cases (experiments/0008).
+
+> the initial failure is an agent using "ask" incorrectly. that should be the focus. it would
+> be nice to have the GM get things back on track when they go wrong, but making them not go
+> wrong in the first place is better
+>
+> lets keep what works best on balance (i.e. a page of rules is just not worth it as the GM
+> already has a lot to contend with)
+
+Earlier the same day, for the requirement itself: "ask invites an answer only - this is a
+strict question to the GM", and an ask that "isn't a question or isn't something the gm can
+or is allowed to answer" should be rejected with a reason. The GM now judges an ask in a
+request of its own (answer or reject only); how reliably it rejects speech and requests to
+other characters is not solved there.
+
+## 2026-11-04: Player replies run in parallel and join; no stored continuation
+
+Alternatives for waiting on a human in an InterventionCheck: (a) design.md's original
+stored continuation, unwinding the GM loop, the player's `attempt` tool and the player agent
+loop and resuming mid-response; (b) the GM's turn ends and a new turn runs on the answers.
+Chosen (b), after the user's direction:
+
+> This actually matches how we handle NPCs too I think where we first record all NPC
+> responses and can do that in any order. The player responses (remember that we can have
+> multiple) can be shown in parallel (do NOT serialize this) while we also run NPC
+> inference. Then we join them all, waiting with a timeout for players that do not respond
+> in time and finally process all responses.
+
+design.md (Player replies and coordinated travel) and plans/archive/player-replies.md updated to match.
+
+## 2026-11-05: Sampling, test seeds and chat templates
+
+Production sampling temperature went from 0.7 to 0.5 (Qwen's model card gives 0.7 for ordinary
+chat and nothing for tool calling; nearly every agent here picks a tool):
+
+> lets tighten the temperature a bit in production to something practical for our use case
+
+Tests must repeat exactly, with the production temperature (not greedy):
+
+> lets make sure we are using a fixed seed for tests!!
+> patch the fork in a standalone patch. sounds straightforward
+
+Chat templates: a changed rendering of the tools needs a copy of Qwen's template, which the user
+allows only as separate, optional, removable files:
+
+> same as the lean json, we should keep it separate and optional
+> lets drop the template changes for now - keep the optional/experimental code and the numbers
+> you found so far - measured wins and costs/issues
+> my hunch is we should stick to what the model was trained with for now and worry about it later
+> after we have implemented the rest of the project
+
+## 2026-11-05: What the GM sees of other groups, and when groups merge and split
+
+The GM must know which other groups are at its location so it can merge. It sees only their
+characters, and nothing relative within a location, because groups have no position:
+
+> gms should see other groups at a location so they can call merge, yes. only characters and
+> their location description
+
+> - Group
+>   - Location ID (no sub-Location position description since groups cannot move;
+>     they only define interacting characters).
+>
+> It would be too confusing to have a relative position within a group or maintain a group location
+
+When to merge and split, and how to avoid a split-and-merge storm when a party follows one player:
+
+> merge happens when any characters of different groups could perceive each other. split happens
+> when characters move away from a group. We may need some mechanism to batch splits so when all
+> players follow one player (necessarily moving individually) that is just one split and not many
+> splits and merges. maybe we can have a pending split time for a group and only resolve that
+> split after all player game times (not implemented yet) move past the initial player's move time
+> (plus a combat turn length for a margin). maybe this could all be done in the standard split
+> tool call, where the initial split schedules a lazy pending split and we just delay resolving
+> that tool call for a bit. the GM would then see the pending split and perhaps split could take a
+> target group to transfer a character so it can effectively split and merge a single character to
+> the new pending group in one call
+
+The free-text group description is not shown to the GM about other groups (the user dropped it).
+The pending, batched split depends on unified game time, which does not exist yet.

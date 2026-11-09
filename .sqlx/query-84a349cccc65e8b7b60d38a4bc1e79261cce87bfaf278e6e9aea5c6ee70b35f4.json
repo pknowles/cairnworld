@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*) FROM pending_reply WHERE world_id = ? AND action_id = ? AND status = 'open'",
+  "describe": {
+    "columns": [
+      {
+        "name": "count(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "84a349cccc65e8b7b60d38a4bc1e79261cce87bfaf278e6e9aea5c6ee70b35f4"
+}

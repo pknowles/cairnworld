@@ -31,8 +31,9 @@ pub type AfterToolResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub enum TopologyChange<G = i64> {
     Split {
         group_id: G,
-        partitions: Vec<GroupPartition>,
-        continue_with_character_id: Option<i64>,
+        /// An existing group at the same location for the characters to join.
+        target_group_id: Option<G>,
+        split: SplitGroup,
     },
     Merge {
         group_ids: Vec<G>,
@@ -40,9 +41,13 @@ pub enum TopologyChange<G = i64> {
     },
 }
 
-pub struct GroupPartition {
+/// The characters leaving the GM's group, and the names of the group they leave and the group
+/// they go to.
+pub struct SplitGroup {
     pub character_ids: Vec<i64>,
-    pub name: String,
+    pub current_name: String,
+    pub target_name: String,
+    pub continue_with_character_id: Option<i64>,
 }
 
 /// The model receives a rejected call as an ordinary tool result and can
@@ -55,6 +60,9 @@ pub enum ToolOutcome {
         after_result: AfterToolResult,
     },
     Rejected(String),
+    /// The call completed and the answer it asked for will arrive later: it
+    /// ends the turn, and the calls after it in the response do not run.
+    Waiting(String),
     /// A proposed split/merge, not yet applied - see `TopologyChange`.
     PendingTopologyChange(TopologyChange),
 }
@@ -69,8 +77,11 @@ impl ToolOutcome {
 pub struct Tool {
     definition: ToolDefinition,
     execute: Arc<ToolExecution>,
-    /// A completed call to this tool ends the agent's turn: the model is not
-    /// run again to read its result.
+    /// A completed call to this tool ends the agent's turn once its response is
+    /// done: the model is not run again to read its result.
+    ends_turn: bool,
+    /// The call must also be the last in its response, after calls that all
+    /// succeeded, and the turn can end no other way than through such a call.
     terminal: bool,
 }
 
@@ -88,6 +99,10 @@ impl Tool {
     pub fn is_terminal(&self) -> bool {
         self.terminal
     }
+
+    pub fn ends_turn(&self) -> bool {
+        self.ends_turn
+    }
 }
 
 impl Tool {
@@ -98,8 +113,27 @@ impl Tool {
         Self {
             definition,
             execute: Arc::new(execute),
+            ends_turn: false,
             terminal: false,
         }
+    }
+
+    /// A tool whose completed call ends the turn, after any other calls in the
+    /// same response. Plain text still ends a turn that has no such call.
+    pub fn ending(
+        definition: ToolDefinition,
+        execute: impl Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            ends_turn: true,
+            ..Self::new(definition, execute)
+        }
+    }
+
+    /// This tool, but a completed call ends the turn like `ending`.
+    pub fn into_ending(mut self) -> Self {
+        self.ends_turn = true;
+        self
     }
 
     /// A tool whose completed call ends the turn. It must be the last call in
@@ -109,6 +143,7 @@ impl Tool {
         execute: impl Fn(ToolCallContext<'_>) -> ToolFuture + Send + Sync + 'static,
     ) -> Self {
         Self {
+            ends_turn: true,
             terminal: true,
             ..Self::new(definition, execute)
         }
@@ -196,10 +231,10 @@ pub fn definitions(tools: &[Tool]) -> Result<Vec<ToolDefinition>> {
 }
 
 /// Whether a call to this tool ends the turn once it completes.
-pub fn is_terminal(tools: &[Tool], name: &str) -> bool {
+pub fn ends_turn(tools: &[Tool], name: &str) -> bool {
     tools
         .iter()
-        .any(|tool| tool.terminal && tool.definition.name == name)
+        .any(|tool| tool.ends_turn && tool.definition.name == name)
 }
 
 /// Run one call. `cannot_end_turn` says why this response cannot end the turn

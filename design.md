@@ -510,19 +510,47 @@ arbitrary unrelated-agent or foreign-world history is not accessible. The
 call-stack prohibition on re-entering an active agent still applies. Grouping
 does not grant another action allowance or reset the triggering inference budget.
 
-**Split.** `split_group(group_id, partitions)` accepts a complete, nonempty,
-disjoint partition of its character IDs with names. Rust validates exact
-membership. Each resulting group gets a new GM agent/chat whose single source is
-the old chat through its settled position. The old group retires. Successor
-memberships, agents/chats and source references commit in one transaction without
-erasing predecessor membership. IDs of resulting groups are returned.
+**Split and move.** `split_group(character_ids, current_group_name, new_group_name)` forms a new
+group from the named characters of the GM's own group, and `move_to_group(character_ids, group_id,
+current_group_name, joined_group_name)` moves them into another group at the same location. Rust
+validates that they are distinct members of the GM's group. They are two tools because the meaning
+differs: with an optional destination on one tool the GM left it out or avoided the tool when it
+meant to join a group (experiments/0009-group-tools.md). Groups are fungible, so each result is a
+new group with bounded source history through the settled positions of the group they left and,
+for a move, of the destination, in ascending group order. Characters left behind get a new group
+whose single source is the old chat. The source groups retire. Under the pending per-group GM
+ownership plan (`plans/gm-per-group.md`), each resulting group will own a new GM agent/chat,
+and retired groups will retain their historical membership. Successor memberships, GM agents/chats
+and source references will commit together. The tools return the ids of the resulting groups.
 
-**Merge.** `merge_groups(group_ids, name)` validates distinct nonempty
-groups at one location in the same world. Sort source group IDs ascending for
-parent order. The resulting group gets a new GM agent/chat with those bounded
-sources; source groups retire. Successor membership and the new GM/chat commit
-together. Its own chat does not acquire copies of ancestor entries; inference
-assembly includes the relevant source histories once.
+**Merge.** There is no separate merge tool. When `move_to_group` names every character of the GM's
+group, the two groups become one: a merge of both histories into a new group, each source
+compacted first as a merge prepares (`TopologyChanges::merge_branches`) and its history labelled
+with the group's name. With a merge tool beside `move_to_group` the GM chose to merge the whole
+group when one character joined another, 2 of 2 times, and with it withheld it moved only that
+character, 2 of 2.
+
+**Names.** The GM names each group in a short phrase of who and where ("Toma by the fire in the
+hut"). A name another active group has is made unique by adding a number; a call never fails over a
+name, since a rejected name made the GM repeat the same failing call. A retired group gives up its
+name (`name (retired id)`), so a name can be reused. A name must not be empty.
+
+The tools act on the acting character's group as it is when each call is made, since an earlier
+call in the same turn may have replaced the group the turn began with.
+
+**Awareness of other groups.** A GM sees the other active groups at its location: each
+group's id and name and its characters (id, name and each character's own position text), and
+nothing else of them. A group has a name and a location and no description or position of its
+own; where a character is within the location is that character's position text. A merge is due when characters of different groups could perceive
+each other; a split is due when characters move away from a group. Other groups' NPCs and
+players are shown alike.
+
+TODO (needs unified game time, plans/unified-game-time.md): batch splits so that a party
+following one player is one split. The first split of a group schedules a pending split that the
+split call returns before it resolves; it resolves once every player's game time passes the
+first mover's move time plus a combat turn, and the GM sees the pending split meanwhile.
+A split may also name a pending group as its target, so a character leaves one group and
+joins another in one call. Until then a split resolves at once.
 
 **Tool boundary.** Grouping tools produce a typed pending topology change in
 `ToolOutcome`; it is applied at the end of the current model-returned tool batch.
@@ -580,7 +608,9 @@ summaries and the retained raw ranges, not every historical message. A bounded
 cut applies only to that branch's own entries. Thus root `[a,b]`, left suffix
 `[c,d]`, right suffix `[e]`, merge suffix `[f]` assembles `[a,b,c,d,e,f]`;
 wall-clock interleaving never changes it. Labels identify branch/group provenance
-without adding another model role. Input recipes record the resulting ordered
+without adding another model role: each names its group and lists who was in it (the members it
+ended with, once retired). A GM answering one character's ask is shown only the groups that
+character was in, since a character may only learn what they perceived (Observed Events). Input recipes record the resulting ordered
 ranges, not a pointer to a mutable current head.
 
 **Summaries.** Resolve each summary's covered ranges to original message IDs.
@@ -660,7 +690,14 @@ guarantees the distinctions above survive into the prompt.
 
 Per user_declarations.md: send context + tools; if the model returns tool
 calls, validate (serde against the schema), execute, append results, repeat;
-stop on a final text (possibly empty) response.
+stop on a final text (possibly empty) response. Rust can also end a turn itself
+when a tool completes: the GM's narrate tools must be the last call, and the
+player agent's action tools (`speak`, `attempt`, `take`) end its turn once their
+response is done, because the game shows the player what happened. Asked to continue
+after acting, the 4B model wrote the story itself (the NPCs' reactions, even a
+rewrite of the player's words) in every sample, and "reply with nothing" never
+worked: ending a turn the code can end is not left to the model
+(experiments/0008-attempt-misuse.md).
 
 Structural rules, enforced in rust:
 
@@ -716,10 +753,10 @@ sequences) so a session is fully replayable as data.
 
 Authority: Scheduling, Agent syntax and tool calls, Character actions' human
 replies. One Tokio task per world processes game events sequentially. An event
-runs until its invocation completes, fails or is left waiting for a player
-reply. Waiting stores the continuation and releases the queue: nothing runs or
-counts down while it waits. A later reply or deadline event continues the same
-recorded continuation. Other legal events can run while a reply is outstanding.
+runs until its invocation completes or fails. A turn that needs a player reply
+ends, with the reply stored as rows and a deadline: nothing runs or counts down
+while it waits. A later reply or deadline event starts a new turn of the asking
+agent with the answers. Other legal events can run while a reply is outstanding.
 Connection presence uses short-lived state locks; membership writes use short
 Store transactions. Both run independently of model work, so a long inference
 cannot postpone a disconnect or ban.
@@ -1423,14 +1460,20 @@ the model-facing tool definitions small (four near-identical definitions were
 44% of a player agent's tool text). Preserve the chosen kind and description in
 the recorded request and GM context. Shared submission, authorization and
 arbitration do not imply identical fictional effects or separate executors. Ask
-addresses the GM; spoken questions to characters still use Speak. Existing action rules and world-state operations determine what
+addresses the GM; spoken questions to characters still use Speak. An ask is judged in a
+request of its own that offers the GM only `answer` (delivered to the asker alone, and it
+approves the ask) and `reject_action` (its reason is delivered to the asker alone); the GM's
+other decisions and narration are not offered, so an ask cannot be approved and narrated
+to the group. Existing action rules and world-state operations determine what
 can actually happen; a new tool name does not itself implement missing mechanics.
 
 Likewise expose take, give, drop and place as one `transfer` tool: a `kind`, the
 `item`, `to` (the receiving character for give, where within the location for
 place; unused for take and drop) and `committed`. Approval goes through the same
-GM approval and intervention path as take; the GM's approve call carries the new
-location description for a drop or place, as it carries the audience for speech.
+GM approval and intervention path as take; the new location description for a drop
+or place travels with its own approval tool, as the audience for speech does with
+`approve_speech`: options that apply to one kind of action are not optional
+arguments of the general approval (experiments/0008-attempt-misuse.md).
 The receiver's agreement is not a protocol: the request is intervenable like any
 tentative or committed action, and a clear refusal from the receiver makes the GM
 reject it.
@@ -1837,32 +1880,34 @@ A character whose player has timed out or is away does nothing and skips its
 short turns through EndTurn, without resetting its ready times. For travel it goes with
 a strict majority of the party, and otherwise, including a tie, stays where it is.
 
-The action that needs a human response persists
-`pending_reply(action_id, character_id, deadline, status, response_content_id)`;
-its deadline and intended character are explicit. The corresponding
-`pending_action` also holds a typed `Intervention|Travel` continuation, original
-invocation/call IDs and the ordered remaining tool-call ordinals. It retains
-budget consumption. It never serializes a Rust future or re-executes earlier tools.
-
-The agent loop returns `AwaitingReply(action_id)` up through its call stack; each
-waiting invocation remains recorded. The world queue is then free. Only the
+A reply that needs a human persists
+`pending_reply(action_id, character_id, deadline, status, response)`; its
+deadline and intended character are explicit. Nothing is suspended and nothing
+is resumed mid-response: the asking agent's turn simply ends with a result saying
+who it is waiting for, and the answers later reach it as a new message that starts
+a new turn of the same agent on the same pending action. State lives in rows and
+agent histories, never in a stored continuation, a serialized future or an
+unwound call stack. The world queue is free while players think. Only the
 requested character's ordinary input is accepted as a response to that action;
 their player agent interprets text and calls the offered tools (stay/join/object
-for travel; do_nothing or an action for an intervention) with
-that explicit action ID. Other characters may continue legal independent work.
-A response or deadline event updates the pending reply and continues the stored
-continuation once; original completed tool results are reused. Recheck mutable
-preconditions before moving. Restart reconstructs these concrete
-continuations from rows and wakes for outstanding deadlines.
+for travel; do_nothing or an action for an intervention) with that explicit
+action ID. Other characters may continue legal independent work. A response or a
+deadline updates the pending reply; when the last reply of the question settles,
+exactly one message carrying all the answers is appended to the asking agent's
+history and its turn runs. Restart re-evaluates settled questions and wakes for
+outstanding deadlines. Recheck mutable preconditions before acting on an answer.
 
-InterventionCheck asks players as well as NPCs. NPCs answer at once through child
-decisions; each selected player character gets a pending reply, the question
-(what is about to happen, who is doing it) appears in their chat, and their agent
-returns do_nothing or the action they intervene with. The GM's call continues
-when every selected character has answered or timed out. A timeout is not an
-error: the recorded answer is do_nothing, so the original action then goes ahead
-unless the GM decides otherwise. A reaction that comes back is handled as any
-other (approve it, see its result, then decide the original action).
+InterventionCheck asks players as well as NPCs, all at once: the question (what is
+about to happen, who is doing it) appears in every selected player's chat and their
+deadlines start together, while the NPCs' decisions run in the meantime and are
+recorded in any order (they do not depend on each other). Players are never asked
+one after another. The GM's next turn starts when every selected character has
+answered or timed out, and it receives all the answers together. A timeout is not
+an error: the recorded answer is do_nothing, so the original action then goes
+ahead unless the GM decides otherwise. A reaction that comes back is handled as
+any other (approve it, see its result, then decide the original action). Calls
+that follow the check in the same response are not run, and say so in their
+result, because the model wrote them before seeing the answers.
 
 Travel takes a Connection ID, validates that one endpoint is the source group's
 location, and asks the group's other characters to Follow/stay/object through

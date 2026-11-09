@@ -208,6 +208,11 @@ pub struct Sampling {
     /// One-shot penalty applied to tokens that have already appeared.
     pub presence_penalty: Option<f32>,
     pub enable_thinking: bool,
+    /// Fixes the sampler's random draws so the same request gives the same
+    /// output. Tests set it; production leaves it unset, and an unset seed stays
+    /// out of the record so existing inference hashes do not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -221,6 +226,10 @@ pub struct Usage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Segment {
+    /// Frozen group provenance for a historical branch, presented as a user turn.
+    Provenance {
+        provenance: i64,
+    },
     Text {
         text: i64,
         role: Role,

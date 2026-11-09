@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT character.id, character.name, character.description, character.sheet, character.gm_notes              FROM character_group JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? AND character.deleted = 0 ORDER BY character.id",
+  "query": "SELECT character.id, character.name, character.description, character_group.description AS position, character.sheet, character.gm_notes              FROM character_group JOIN character ON character.id = character_group.character_id              WHERE character_group.group_id = ? AND character.deleted = 0 ORDER BY character.id",
   "describe": {
     "columns": [
       {
@@ -19,13 +19,18 @@
         "type_info": "Text"
       },
       {
-        "name": "sheet",
+        "name": "position",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "gm_notes",
+        "name": "sheet",
         "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "gm_notes",
+        "ordinal": 5,
         "type_info": "Text"
       }
     ],
@@ -37,8 +42,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "05d9583ea7a8347095013725f966448b8d0a258c3f31b98ec5b5a3830b59fe7a"
+  "hash": "1bce6ecd59cd21e92b58e0ac060f381a439d48cbcee6aedd3d650569202ddecb"
 }

@@ -27,6 +27,9 @@ pub struct RecordedCompletion<'a> {
     pub sampling: Sampling,
     pub model: &'a str,
     pub compact_before_next_input_tokens: usize,
+    /// The character this completion answers, when it may only be told what that character
+    /// perceived (a merged GM history is cut to the groups they were in).
+    pub perceiver: Option<&'a str>,
 }
 
 /// Runs one recipe as an ordinary chat turn and finishes it through
@@ -48,6 +51,7 @@ pub async fn complete_recorded<B: Backend>(
             completion.static_messages,
             completion.dynamic_context,
             completion.tools,
+            completion.perceiver,
         )
         .await?;
         match complete_recipe(
@@ -135,6 +139,7 @@ pub async fn segments(
     static_messages: &[Message],
     dynamic_context: &[&str],
     tools: &[ToolDefinition],
+    perceiver: Option<&str>,
 ) -> Result<Vec<Segment>> {
     let mut segments = Vec::new();
     for message in static_messages {
@@ -169,7 +174,7 @@ pub async fn segments(
     }
     segments.extend(
         store
-            .live_segments(branch)
+            .live_segments_for(branch, perceiver)
             .await
             .context("assembling agent message context")?,
     );
@@ -583,6 +588,7 @@ mod tests {
                 },
                 model: "streaming-model",
                 compact_before_next_input_tokens: usize::MAX,
+                perceiver: None,
             },
             |token| streamed.push_str(token),
         )
@@ -642,6 +648,7 @@ mod tests {
                 },
                 model: "failing-model",
                 compact_before_next_input_tokens: usize::MAX,
+                perceiver: None,
             },
             |_| {},
         )
@@ -752,6 +759,7 @@ mod tests {
                 },
                 model: "capacity-test",
                 compact_before_next_input_tokens: 90,
+                perceiver: None,
             },
             |_| {},
         )

@@ -76,6 +76,9 @@ pub enum ServerEvent {
     Progress(crate::inspection::GenerationProgress),
     /// The server is shutting down and is about to close this connection.
     Stopping,
+    /// The player missed too many response deadlines in a row: this connection
+    /// ends and the world page says why.
+    Away,
 }
 
 /// Work the server is currently performing for a connected player.
@@ -2992,6 +2995,19 @@ fn connect_player_chat(
             Ok(ServerEvent::Error { message }) => add_notice(on_message_entries, message),
             // Only the world page's progress socket sends this.
             Ok(ServerEvent::Progress(_)) => {}
+            Ok(ServerEvent::Away) => {
+                // The world page explains why the player was disconnected.
+                if let Some(window) = web_sys::window()
+                    && let Err(error) = window.location().set_href(&format!("/world/{world_id}"))
+                {
+                    add_notice(
+                        on_message_entries,
+                        format!(
+                            "You were disconnected for being AFK, but the world page could not open: {error:?}"
+                        ),
+                    );
+                }
+            }
             Ok(ServerEvent::Stopping) => add_notice(
                 on_message_entries,
                 "The server is stopping. Reload this page once it is running again.".into(),

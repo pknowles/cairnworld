@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action_id, character_id, max(0, unixepoch(deadline) - unixepoch('now')) AS \"after_seconds!: i64\" FROM pending_reply WHERE world_id = ? AND status = 'open' ORDER BY deadline, action_id, character_id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "character_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "after_seconds!: i64",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "46a46c4b8bfb9b37cee3e00ef1415cb4669dbb2282af89413e2672574a460537"
+}

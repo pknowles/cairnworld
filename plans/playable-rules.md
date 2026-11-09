@@ -42,13 +42,13 @@ and travel rather than implementing movement or scheduling again.
    ready_to_begin validates the full creation state; the group's initial ready
    barrier performs RollOmens once and then opens play. Test incomplete/duplicate
    creation and the youngest-character omen rule through real agent chat.
-2. Extend the timing feature's existing human deadlines/AFK handling to calls
+2. Done by [Player replies](archive/player-replies.md), which implements what follows; kept here
+   as the record of the original scope. Extend the timing feature's existing human deadlines/AFK handling to calls
    waiting for player replies, and use it for InterventionCheck. Reuse the
    required `[game] player_response_timeout` setting and consecutive-timeout
-   counting. Add the concrete pending_reply rows and the
-   `Intervention` continuation. agent.rs returns AwaitingReply while preserving
-   invocation/call IDs, tool ordinals and budgets. Game::process_world releases
-   the current event and accepts the requested character's reply through ordinary
+   counting. Add the concrete pending_reply rows; the asking turn ends and a new
+   turn of the same agent starts on the answers (no stored continuation).
+   Game::process_world accepts the requested character's reply through ordinary
    chat. The deadline is a persisted wake-up that records the idle response (do_nothing for an intervention); nothing
    counts down in memory, and restart answers overdue replies first, using the
    earliest-deadline mechanism connection presence already has. Allow
@@ -155,7 +155,7 @@ and travel rather than implementing movement or scheduling again.
    Distant NPC opportunities use the agreed derived-time policy; do not restore
    hourly processing from a global maximum clock. Delay remains a future idea.
 6. Add Travel/Follow(Connection/action references) using the waiting-for-replies
-   machinery from the second step with a `Travel` continuation. Collect
+   machinery from the second step with `Travel` replies. Collect
    PC/NPC responses, apply the approved stay/join/object policy and ask the GM
    for final arbitration with all responses visible, as with InterventionCheck.
    Approval starts timed travel and applies the real group split operation; it

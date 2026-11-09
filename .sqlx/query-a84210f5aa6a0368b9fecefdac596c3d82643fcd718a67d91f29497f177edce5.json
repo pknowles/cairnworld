@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT member.id AS member_id, member.user_id, user.display_name, member.access, member.missed_replies >= ? AS \"away: bool\", character.id AS character_id, character.name AS character_name FROM world_member AS member JOIN user ON user.id = member.user_id JOIN player_character ON player_character.member_id = member.id JOIN character ON character.id = player_character.character_id WHERE member.world_id = ? ORDER BY member.id, character.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "member_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "access",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "away: bool",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "character_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "character_name",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a84210f5aa6a0368b9fecefdac596c3d82643fcd718a67d91f29497f177edce5"
+}

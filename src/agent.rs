@@ -165,12 +165,15 @@ pub struct Turn<'a> {
     pub static_messages: &'a [Message],
     pub dynamic_context: DynamicContext<'a>,
     pub tools: &'a [Tool],
-    /// Set exactly when `tools` holds a terminal tool: the turn then ends only
+    /// Set only when `tools` holds a terminal tool: the turn then ends only
     /// through one, and an agent that answers in plain text is told this and
-    /// run again. That is an error to investigate, not a path to rely on.
+    /// run again. That is an error to investigate, not a path to rely on. A turn
+    /// with tools that merely end it has no reminder: plain text ends it too.
     pub terminal_reminder: Option<&'a str>,
     pub sampling: Sampling,
     pub model: &'a str,
+    /// The character this turn answers and may only tell what they perceived.
+    pub perceiver: Option<&'a str>,
 }
 
 /// A settled turn's final completion: a plain-text reply, or the tool calls
@@ -287,6 +290,7 @@ pub async fn complete_aside<B: Backend>(
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             &[],
+            turn.perceiver,
         )
         .await?;
         segments.push(Segment::Text {
@@ -373,13 +377,13 @@ pub async fn complete_with_call_context<B: Backend>(
         let definitions =
             tools::definitions(turn.tools).context("validating declared tool schemas")?;
         ensure!(
-            turn.terminal_reminder.is_some() == turn.tools.iter().any(Tool::is_terminal),
-            "a turn must have a terminal reminder exactly when it has a terminal tool"
+            turn.terminal_reminder.is_none() || turn.tools.iter().any(Tool::is_terminal),
+            "a turn can only remind the model to end with a terminal tool if it has one"
         );
         let ending_tools: Vec<String> = turn
             .tools
             .iter()
-            .filter(|tool| tool.is_terminal())
+            .filter(|tool| tool.ends_turn())
             .map(|tool| tool.definition().name)
             .collect();
         let mut chat_spent = 0;
@@ -408,6 +412,7 @@ pub async fn complete_with_call_context<B: Backend>(
                     compact_before_next_input_tokens: budget
                         .limits()
                         .compact_before_next_input_tokens,
+                    perceiver: turn.perceiver,
                 },
                 &mut on_token,
             )
@@ -487,6 +492,9 @@ pub async fn complete_with_call_context<B: Backend>(
             // Whether an earlier call in this response was rejected, so the
             // response cannot be the one that ends the turn.
             let mut batch_rejected = false;
+            // A call that ended the turn to wait for an answer: the calls after it
+            // were written before the answer and do not run.
+            let mut waiting = false;
             // Deliveries put messages into histories, possibly the caller's
             // own, so they wait until every call of the batch has its result:
             // a message between a call and a sibling's result would break the
@@ -534,6 +542,10 @@ pub async fn complete_with_call_context<B: Backend>(
                     };
                     let (status, result, after_result) = match outcome {
                         tools::ToolOutcome::Completed(content) => ("completed", content, None),
+                        tools::ToolOutcome::Waiting(content) => {
+                            waiting = true;
+                            ("completed", content, None)
+                        }
                         tools::ToolOutcome::CompletedAfter {
                             content,
                             after_result,
@@ -571,8 +583,8 @@ pub async fn complete_with_call_context<B: Backend>(
                             format!("storing result for tool call {}", tool_call.id)
                         })?;
                     on_activity(format!("tool result {}: {result}", tool_call.id));
-                    ended |=
-                        status == "completed" && tools::is_terminal(turn.tools, &tool_call.name);
+                    ended |= waiting
+                        || (status == "completed" && tools::ends_turn(turn.tools, &tool_call.name));
                     batch_rejected |= status == "rejected";
                     if let Some(after_result) = after_result {
                         deliveries.push((tool_call.id.clone(), after_result));
@@ -581,13 +593,39 @@ pub async fn complete_with_call_context<B: Backend>(
                 }
                 .await;
                 if let Err(error) = outcome {
-                    return Err(close_failed_calls(
+                    let error = close_failed_calls(
                         store,
                         completion.inference_id,
                         Some(*tool_execution_id),
                         error,
                     )
-                    .await);
+                    .await;
+                    // Every call has its result now, so the deliveries of the calls
+                    // that did complete go ahead: a failure later in the response
+                    // does not take back what already happened.
+                    for (call_id, delivery) in deliveries {
+                        if let Err(delivery_error) = delivery.await {
+                            tracing::error!(
+                                call_id = %call_id,
+                                error = %format!("{delivery_error:#}"),
+                                "delivering an earlier call's result after a later call failed"
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
+                if waiting {
+                    store
+                        .close_unrun_tool_calls(
+                            completion.inference_id,
+                            &format!(
+                                "`{}` ended your turn to wait for an answer. Call this again afterwards if it is still wanted.",
+                                tool_call.name
+                            ),
+                        )
+                        .await
+                        .context("closing the calls after a waiting call")?;
+                    break;
                 }
             }
             for (call_id, delivery) in deliveries {
@@ -821,6 +859,7 @@ mod tests {
                 ..Default::default()
             },
             model: "scripted",
+            perceiver: None,
         }
     }
 
@@ -1728,10 +1767,6 @@ mod tests {
             .fetch_one(&store.pool())
             .await
             .unwrap();
-        let mara_id: i64 = sqlx::query_scalar("SELECT id FROM character WHERE name = 'Mara'")
-            .fetch_one(&store.pool())
-            .await
-            .unwrap();
 
         // Split the player off from Toma so each side gets its own branch:
         // the player's side is seeded with raw messages (over threshold),
@@ -1777,17 +1812,13 @@ mod tests {
                     executions[0],
                     tools::TopologyChange::Split {
                         group_id: original_group_id,
-                        partitions: vec![
-                            tools::GroupPartition {
-                                character_ids: vec![installed.member.character_id, mara_id],
-                                name: "player side".into(),
-                            },
-                            tools::GroupPartition {
-                                character_ids: vec![toma_id],
-                                name: "Toma side".into(),
-                            },
-                        ],
-                        continue_with_character_id: Some(installed.member.character_id),
+                        target_group_id: None,
+                        split: tools::SplitGroup {
+                            character_ids: vec![toma_id],
+                            current_name: "player side".into(),
+                            target_name: "Toma side".into(),
+                            continue_with_character_id: Some(installed.member.character_id),
+                        },
                     },
                 )],
             )
@@ -1882,6 +1913,7 @@ mod tests {
             terminal_reminder: None,
             sampling: Sampling::default(),
             model: "test-model",
+            perceiver: None,
         };
         let changes = vec![(
             "merge-1".to_string(),

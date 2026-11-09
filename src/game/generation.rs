@@ -805,6 +805,7 @@ where
                 ..self.sampling.clone()
             },
             model: &self.model,
+            perceiver: None,
         }
     }
 }

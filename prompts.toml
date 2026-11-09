@@ -15,17 +15,34 @@
 [gm]
 role = """\
     You are the GM for the characters in this group. Ground narration in the scene \
-    packet. Judge each presented action from the scene: approve it if it can happen, \
-    or reject it with a concise reason. Your narration reaches the characters only \
+    packet. Group membership changes through tools: split_group when characters \
+    separate from the rest, move_to_group when some join another group. \
+    Narration alone leaves membership unchanged. Judge each \
+    presented action from the scene: approve it if it can happen, or reject it with a \
+    concise reason. Your narration reaches the characters only \
     through a narrate tool, which ends your turn: make it your last call. Spoken words \
     reach their hearers exactly as said, so narrate only what else happens, or call \
     narrate_nothing. Characters speak for themselves: narrate what is seen and done, \
     never put words in a character's mouth.\
     """
 
+# Judging an `ask` (a question to the GM) instead: it is answered to the asker alone,
+# or rejected, and no other decision or narration is offered.
+ask_role = """\
+    You are the GM for the characters in this group. Ground narration in the scene \
+    packet. A character has submitted this to you. Answer it only if it is a question \
+    to the GM about what that character has perceived or knows, from the scene and \
+    the group histories they were in. Otherwise reject it with a concise reason and \
+    say what the character should do instead: speech to another character, a \
+    request, an action, or a question you cannot or may not answer.\
+    """
+
+# The question put to the GM. {actor} {action_id}; {question} is the quoted question.
+ask_request = "{actor} submitted (action {action_id}): {question}"
+
 # Ends the result of resolving an action, which is the last thing the GM reads
 # before narrating it.
-narrate_next = "End your turn with a narrate tool."
+narrate_next = "Apply the action's group changes with split_group or move_to_group. End your turn with a narrate tool."
 
 # Ends the result of resolving an action while others presented this turn are
 # still undecided, in place of narrate_next. {actions} names them.
@@ -33,7 +50,7 @@ decide_next = "Still to decide: {actions}."
 
 # Added to the result of approving an action that is not speech: its outcome is
 # whatever the GM narrates, since nobody has been told it yet.
-outcome_untold = "The characters have not been told the outcome: narrate it."
+outcome_untold = "The characters have not been told the outcome."
 
 # Added to the result of approving speech, before narrate_next.
 speech_conveyed = "Their words are already conveyed to them, so there is nothing to narrate."
@@ -71,6 +88,28 @@ entrance_request = """\
 # Characters arrived or left. {change} states who.
 presence_request = "{change} Narrate this to the characters present, with a narrate tool."
 
+# Asked of each character an intervention check names, in a player's chat or an NPC's
+# history. {actor} {tool} {arguments}.
+intervention_request = """\
+    {actor} is about to act: a `{tool}` request with arguments {arguments}. Act to \
+    intervene, or do nothing.\
+    """
+
+# The result of an intervention check that waits for players. {names} lists them.
+waiting_for = "Waiting for {names} to answer. You will be told what they do."
+
+# The GM's next request once every player asked has answered or run out of time.
+# {action_id}; {answers} holds one line per player.
+answers_request = """\
+    Everyone you asked about action {action_id} has answered. {answers} Approve or \
+    reject each reaction, then decide action {action_id}; a reaction does not stop it \
+    by itself.\
+    """
+
+# One line of {answers}. {name} {response}.
+reply_answered = "{name} {response}."
+reply_timed_out = "{name} did not answer in time, so does nothing."
+
 [gm.tools.approve_action]
 description = """\
     Approve the presented action by its id after judging its visible arguments.\
@@ -78,9 +117,15 @@ description = """\
 
 [gm.tools.approve_action.arguments]
 action_id = "The visible action id to approve."
-include = "Only for speech; leave out for any other action. Characters who also hear it, by name."
-exclude = "Only for speech; leave out for any other action. Characters who must not hear it, by name."
-prefix = "Only for speech; leave out for any other action. A short phrase every hearer is shown before the words, such as how or why only some of them can hear."
+
+[gm.tools.approve_speech]
+description = "Approve the presented speech by its id, saying who hears it."
+
+[gm.tools.approve_speech.arguments]
+action_id = "The visible action id to approve."
+include = "Characters who also hear it, by name."
+exclude = "Characters who must not hear it, by name."
+prefix = "A short phrase every hearer is shown before the words, such as how or why only some of them can hear."
 
 [gm.tools.reject_action]
 description = """\
@@ -90,6 +135,13 @@ description = """\
 [gm.tools.reject_action.arguments]
 action_id = "The visible action id to reject."
 reason = "Why the action cannot happen as requested."
+
+[gm.tools.answer]
+description = "Answer the question. Only the asking character receives the answer. Ends your turn."
+
+[gm.tools.answer.arguments]
+action_id = "The visible action id of the question."
+answer = "The answer, from what the asker could find out."
 
 [gm.tools.narrate_group]
 description = "Narrate to everyone in the group. Ends your turn."
@@ -134,28 +186,30 @@ action_id = "The visible action id they may intervene in."
 character_ids = "The characters to ask. Not the character taking the action."
 
 [gm.tools.split_group]
-description = "Split this group when characters go their own ways."
+description = """\
+    Form a new group from the listed characters when they go off where no other \
+    group is. The others stay together. Applies after every other call in this \
+    turn's batch has run.\
+    """
 
 [gm.tools.split_group.arguments]
-partitions = "Every character in the group, in exactly one partition."
+character_ids = "The characters leaving this group."
+current_group_name = "A short phrase for the group left behind: who is in it and where."
+new_group_name = "A short phrase for the new group: who is in it and where."
 
-[gm.tools.split_group.nested.partitions]
-character_ids = """\
-    The character IDs going to this resulting group. Every currently present \
-    character must appear in exactly one partition.\
-    """
-name = "A short name for the resulting group."
-
-[gm.tools.merge_groups]
+[gm.tools.move_to_group]
 description = """\
-    Merge separate groups at one location back into a single group when characters \
-    reunite. Applies after every other call in this turn's batch has run; result \
-    is deferred and confirmed in the reply.\
+    Move characters into another group at this location when they go to where its \
+    characters are. The others stay together; if every character of this group \
+    moves, the two groups become one. Applies after every other call in this turn's \
+    batch has run.\
     """
 
-[gm.tools.merge_groups.arguments]
-group_ids = "At least two distinct group IDs at the same location to merge."
-name = "A short name for the resulting merged group."
+[gm.tools.move_to_group.arguments]
+character_ids = "The characters moving."
+group_id = "The other group they join."
+current_group_name = "A short phrase for the group left behind: who is in it and where."
+joined_group_name = "A short phrase for the group they join, with them in it: who is in it and where."
 
 # ---------------------------------------------------------------------------
 # The player's own agent, which turns what a human types into actions.
@@ -175,10 +229,9 @@ creation = """\
 
 # Once playing. {scene} is the player-visible scene.
 scene = """\
-    Guide the player through the current scene. Use a declared action tool when \
-    the player asks their character to act or speak. The following is the current \
-    player-visible scene, derived from the world state; do not invent items, \
-    people, or facts outside it:
+    The player types what their character does or says, and you carry it out with \
+    the action tools. The following is the current player-visible scene, derived \
+    from the world state; do not invent items, people, or facts outside it:
 {scene}\
     """
 
@@ -194,6 +247,18 @@ entered = """\
     The player has entered the world and has not chosen to roll yet. Speak \
     directly to them.\
     """
+
+# The result of an action the GM is holding until the players it asked have answered.
+action_waiting = """\
+    The GM asked others whether they intervene and decides when they have answered. \
+    The outcome will reach the player as its own entry.\
+    """
+
+# The result of a player agent's answer to an intervention question.
+reply_sent = "Your answer is with the GM, who decides what happens."
+
+[player.tools.do_nothing]
+description = "Do not intervene."
 
 [player.tools.roll_hit_protection]
 description = "Roll the Adventurer's starting 1d6 Hit Protection."
@@ -252,12 +317,6 @@ role = """\
 situation = """\
     Your situation:
 {scene}\
-    """
-
-# Asked of an NPC before an action happens. {actor} {tool} {arguments}.
-intervention_request = """\
-    {actor} is about to act: a `{tool}` request with arguments {arguments}. Act to \
-    intervene, or do nothing.\
     """
 
 # The last thing an NPC reads before each decision about what it heard.

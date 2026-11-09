@@ -143,6 +143,9 @@ enum Command {
         /// Configured model name or GGUF path. Falls back to `model` in settings.
         #[arg(long)]
         model: Option<String>,
+        /// Chat template overriding the GGUF's and the configured one.
+        #[arg(long)]
+        chat_template: Option<PathBuf>,
         /// Permit a model that does not fit entirely in GPU memory.
         #[arg(long)]
         allow_cpu: bool,
@@ -332,6 +335,7 @@ async fn main() -> Result<()> {
         Command::Serve {
             database,
             model,
+            chat_template,
             allow_cpu,
         } => {
             let settings = Settings::load()?;
@@ -339,7 +343,7 @@ async fn main() -> Result<()> {
             let store = Store::open(&database)
                 .await
                 .context("opening web database")?;
-            let model = resolve_model(model.as_deref(), None, &settings)?;
+            let model = resolve_model(model.as_deref(), chat_template, &settings)?;
             let sampling = settings.sampling(&model);
             let rules = settings.game;
             store
@@ -383,7 +387,7 @@ async fn main() -> Result<()> {
                     })
                     .await;
             });
-            web::serve(store, web, game).await
+            web::serve(store, web, settings.testing, game).await
         }
     }
 }
@@ -574,6 +578,7 @@ async fn run_chat(
                 terminal_reminder: None,
                 sampling: sampling.clone(),
                 model: &model.path,
+                perceiver: None,
             },
             |token| {
                 print!("{token}");

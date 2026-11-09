@@ -38,8 +38,11 @@ path = "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 # Sampling shared by every model. A model's own `[models.<name>.sampling]`
 # overrides any field. Truncation (top_p, top_k) is on: sampling a small
 # model's full distribution at a normal temperature produces incoherent tails.
+# Qwen's model card gives 0.7 for ordinary chat; nearly every agent here picks a tool,
+# where a wrong pick breaks the game, so this is tighter (0.5, our choice, not the
+# vendor's).
 [sampling]
-temperature = 0.7
+temperature = 0.5
 top_p = 0.8
 top_k = 20
 
@@ -87,9 +90,19 @@ presence_departure_seconds = 60
 # google_client_secret = "..."
 # google_redirect_url = "http://localhost:3000/auth/google/callback"
 
+# Aids for testing by hand. Everything here is off unless set; enable in local.toml.
+[testing]
+# Shows "Create character" on the world detail page so one account can run several
+# players.
+create_character_button = false
+
 # Rules of play for every world.
 [game]
 # Every character receives the same detailed narration of an event, for a shared
 # experience, unless the GM narrates something privately. When off, players get
 # the accounts the GM wrote for them. The GM is not told about this setting.
 characters_share_narration = true
+# Seconds a player has to answer when the game cannot go on without them, such as
+# being asked whether they intervene. When it passes, do-nothing is applied for
+# them. Three passed in a row without a response and they are treated as away.
+player_response_timeout = 300

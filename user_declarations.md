@@ -74,7 +74,7 @@ The intent of the questioner is to ask questions that, in order of priority:
 In practice, the Storyteller and Questioner are just roles in chats that may not
 see the entire history from each other. However they should be aware of each
 other's role and the process so that they understand what they should be doing.
-World building is done through iterations of meta-questions and questions.
+World building is done through iterations of meta-questions and questions,
 answers and summaries.
 
 The Questioner runs first and is actually the top level agent guiding and
@@ -915,20 +915,22 @@ Game objects
   - Current intent action and end time
   - Next ready times for short combat-length actions (combat-moved and
     combat-action, etc.)
-  - Group - both a reference to the group object and a string description within
-    it, e.g. the player has climbed a tree, rather than just generally with the
-    rest of the group's characters. Any number of players can be part of a group
-    and individual players can have their own group. Players must belong to
-    exactly one group at any one time. This will be used by the GM to share
-    GM-facing character context/chat history. E.g. when the party enter an
-    ambush, all PCs and enemies merge into one group/chat history for the GM to
-    operate in.
+  - Group - both a reference to the group object (implying the location ID) and
+    a string description the exact position within the location, e.g. the player
+    has climbed a tree at the south of the clearing. Any number of players can
+    be part of a group and individual players can have their own group. Players
+    must belong to exactly one group at any one time. This will be used by the
+    GM to share GM-facing character context/chat history. E.g. when the party
+    enter an ambush, all PCs and enemies merge into one group/chat that
+    effectively has its own GM.
 - Player characters
   - Character
   - Player-specific character sheet info
 - Non-player characters
   - Character
 - Group - temporary character grouping; empty groups are invalid state
+  - Name, e.g. "Player party" or "Goblin ambush" (Not sure if this is required
+    TBH; handy for developer mode but I may remove it later)
   - Location ID (no sub-Location position description since groups cannot move;
     they only define interacting characters).
   - Travel Connection ID
@@ -1239,8 +1241,11 @@ indirectly explains why this happened to connect the character with the story.
 Many have duplicate names for similar actions, like Say/Whisper/Lie. I'd ideally
 like these to be separate tool calls to help agents use the right one. However,
 schema gets duplicated for each, which is exceedingly dumb, so the
-implementation should merge them and have an enum to distinguish until we figure
-out a better way.
+implementation may need to merge them and have an enum to distinguish until we
+figure out a better way. We really should do this soon. The problem is that in
+practice LLMs do respond better to separate tool calls particularly when
+optional arguments are involved that can change the meaning - LLMs will often
+unnecessarily fill optionals.
 
 The Give/Take actions are a formal way to let rust transfer items in the world.
 The idea is to avoid the risk that the GM fails/hallucinates and an item is
@@ -1347,7 +1352,19 @@ the case may be.
   at the new location, replacing the current one(s).
 - UpdateStoryteller - send the Storyteller a text summary of some
   event/interaction/resolution that just happened or completed, letting the
-  Storyteller make actions, update notes in turn.
+  Storyteller make actions, update notes in turn. Any GM visible changes the
+  storyteller makes should be included in the tool's result. I.e. notes and
+  changes to characters in the group, location etc..
+- MoveToGroup/SplitGroup - takes a list of characters to remove from the GM's
+  group, a target group ID if MoveToGroup and new names for the current and
+  target/new group. Used when one or more characters move away from a group, out
+  of possible interaction range. Groups created by splitting are created lazily
+  and only resolved once the game time of all characters catches up to the time
+  the first character created the group. The intent of this is to batch the
+  actual split action for all characters that follow the initial character
+  moving away from a group. Merging groups is always handled by moving
+  characters in the current group to the target group. A shortcut to specify the
+  whole group rather than individual characters so far went unused.
 
 Saves could be rolled immediately by rust code. Character agents do not roll or
 resolve saves. If a player's character is making a save, we may want to add an

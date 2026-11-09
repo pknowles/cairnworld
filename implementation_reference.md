@@ -93,7 +93,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   Sampling starts from `SamplingParams::neutral()`, not the crate's default
   `deterministic()` (which forces greedy `top_k = 1` independent of
   temperature), then applies the request's `temperature` and any of `top_p`,
-  `top_k`, `min_p`, `presence_penalty` that are set. Truncation matters: a
+  `top_k`, `min_p`, `presence_penalty` that are set, and `seed` (tests only; it needs the
+  fork's request-seed commit). Truncation matters: a
   small model sampled from its full distribution at a normal temperature
   produces incoherent text and, with tools present, spurious tool calls. It
   maps native structured tool calls and reasoning deltas to the shared types,
@@ -133,6 +134,15 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   template that silently drops tool definitions, so its tool surface is unusable
   without it. `[models.hermes]` supplies it automatically. It renders a stored
   tool call's object `arguments` with `| tojson`, matching the other templates.
+- `templates/experimental/qwen35-text-tools.jinja` - EXPERIMENTAL, off by default: tools as plain-text
+  signatures (-31% of the GM's tool tokens) but the player agent chose worse. Chosen like the lean one.
+- `templates/experimental/qwen35-lean-tools.jinja` - EXPERIMENTAL, off by default. Qwen3.5's own
+  template, copied whole (the setting takes a whole file), with only the tool loop changed: each
+  tool is one JSON object of name, description, parameters and required (plus `$defs`), without
+  the OpenAI wrapper, `type: object` or `additionalProperties`. Used only when chosen with
+  a `--chat-template` flag (`serve`, chat and replay) or `CAIRNWORLD_CHAT_TEMPLATE` for the device
+  tests. It cuts the tool block 8 to 13% (experiments/0006-context-size.md). Remove it by deleting
+  the folder.
 - `src/context.rs` - the only model-call boundary. It assembles a request from
   stored static prompt text and persisted agent messages, records the bounded
   input recipe before execution, then completes that same inference ID with
@@ -244,11 +254,12 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   separate GM and Storyteller JSON notes. Blank player characters are named
   `AdventurerN` from their globally unique `charN` suffix. `world_gm(world_id,
   agent_id)` is one GM agent per world; `"group"(id, world_id, name,
-  location_id, description, branch_id, gm_notes, storyteller_notes,
+  location_id, branch_id, gm_notes, storyteller_notes,
   retired_at)` owns one GM history branch each, and `character_group`
   replaces the removed `character_location` - every active character has
-  exactly one group. A group's fresh scene packet has one `characters` list: every character
-  in it, however controlled, with the same fields (sheet, GM notes and what it
+  exactly one group. A group has a name, a location and members and no description (migration 0019). A
+  group's fresh scene packet has one `characters` list: every character
+  in it, however controlled, with the same fields (position text, sheet, GM notes and what it
   carries, from the one `Store::character_items` that also fills a player's and
   an NPC's own scene); and its role prompt tells the
   world_gm to narrate to the characters as a group; an arbitration request
@@ -290,9 +301,12 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   while a summary's activation is a distinct entry from the message range it
   covers (`summary.covered_ranges`, JSON `[{branch_id, first_position,
   last_position}, ...]`). `history_parent(branch_id, agent_id, ordinal, parent_branch_id,
-  through_position)` is the bounded-parent list `split_group`/`merge_groups`
-  (D4, `Store::spawn_group_branch`) populate: a split's resulting branches
-  each get one parent (the source), a merge's resulting branch gets one
+  through_position)` is the bounded-parent list `split_group`/`move_to_group` (a retired group keeps its
+  `final_members`, migration 0023, for the history labels; `Store::live_segments_for` cuts a merged
+  history to the groups one character was in, for a GM answering their ask)
+  (D4, `Store::spawn_group_branch`) populate: the group left behind by a split gets one parent
+  (the source), the characters' group gets the source and, with a target group, the target as well; a
+  merge's resulting branch gets one
   parent per source group. Composite foreign keys to
   `history_branch(id, agent_id)` make both branches share one agent (and so
   one world), and `CHECK (parent_branch_id < branch_id)` makes cycles
@@ -577,7 +591,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   described above, `model` naming the default among them, and `limits`,
   including `max_concurrent_inferences`, `max_context_tokens`,
   `max_output_tokens`, `compact_before_next_input_tokens`, and
-  `keep_raw_messages`. The fixed paged KV-cache reservation is
+  `keep_raw_messages`. `[game]` (`GameSettings`) holds `characters_share_narration` and the
+  required `player_response_timeout` (seconds; no code default, so a missing value fails startup).
+  The fixed paged KV-cache reservation is
   `max_context_tokens` per concurrently admitted inference. A completed turn
   queues compaction only when its measured input plus output would make the
   next input reach the lazy threshold; that agent's next inference waits for
@@ -613,7 +629,11 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   remains temporary because player chat correctly renders stored user messages
   as player speech. The ordinary agent loop executes any creation-roll
   calls and stores its final completion, including a deliberate empty text
-  completion. Empty player-agent completions end the turn without a chat
+  completion. The player agent's action tools (`speak`, `attempt`, `take`, built
+  with `Tool::ending`) end its turn when a response containing them is done, with no
+  further inference; plain text still ends a turn with no action, such as an answer.
+  The tools are offered speech first (`action_kinds`). A failure later in a response
+  still delivers the narration of the calls that completed. Empty player-agent completions end the turn without a chat
   entry; Developer Mode names them "No player-facing response." in turns,
   inference detail and raw history. `agent::Settled` retains whether tools
   ran and the final inference ID, so an empty first reply logs durable
@@ -632,14 +652,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   according to durable character state. `attempt` (`kind` of
   look, investigate, open or ask, plus a description) goes through the shared
   action path (`action_tools`); the GM reads the kind in the request and, once
-  approved, it changes no state: the GM's narration is the result. `take` and
-  `speak` have their own arguments.
+  approved, it changes no state: the GM's narration is the result. An `ask` is
+  routed by `Game::arbitrate` (`asked_question`) to a request with `gm.ask_role` and
+  only the `answer` tool (`NarrationTools::asking`) and `reject_action`; both end the
+  turn and reach the asker alone. `take` and `speak` have their own arguments.
 - Speech (design.md: Character perceptions and NPC responses; migrations 0004, 0007).
   `speak` (`words`, `to`, `private`: `to` is only a private speech's listeners; a public speech's addressee is in its words) is validated
   against the speaker's group when submitted. On approval
   `Store::resolve_pending_action` plans the hearers in `src/store/speech.rs`
   (everyone in the group for public speech, the listeners for private, adjusted by the
-  GM's `approve_action` include/exclude, plus an optional short `prefix` shown to every hearer before the words; an
+  GM's `approve_speech` include/exclude (`approve_action` takes only an action id), plus an optional short `prefix` shown to every hearer before the words; an
   unknown or contradictory name, or an overlong prefix, is refused as
   `InvalidHearing` without resolving) and, in the same transaction
   as the action row, records a `speech` row and a `Role::Speech`
@@ -847,7 +869,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   before the action is approved or rejected. A valid call is captured in
   `NarrationTools` and delivered after the player agent settles as `NarrationText`
   entries (`only` / `except` recipients); `Narration::restrict_to` keeps speech
-  privacy. The GM scene packet carries character ids and leaves out empty fields (`prompts::drop_blanks`). The global
+  privacy. The GM scene packet carries character ids and leaves out empty fields (`prompts::drop_blanks`), and
+  `other_groups`: each other active group at the location as id, name and its characters (id, name,
+  position text) so the GM can merge. The global
   `[game] characters_share_narration` rule (`GameSettings`, on by default) is never told to
   the GM: `Narration::players_share` makes `append_group_narration_in` show every perceiving
   player character the first account a player received; `narrate_characters` is exempt.
@@ -856,13 +880,24 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
 - Tentative and committed actions, InterventionCheck (`arbitrate` in
   `src/game.rs`). `take` carries `committed` (default false), which the GM reads in
   the recorded request; Rust does not act on it. The GM's `intervention_check`
-  names the presented action and NPCs in the actor's group (not the actor, not
-  players). Each NPC is asked in the GM's call as a child invocation
-  (`Game::ask_npc`, the same decision a response collection asks for, plus an
-  `npc.intervention_request` in its history), answers do_nothing or an action,
-  and the strongest proposals become pending actions of their own
-  (`Store::create_reaction_action`). Those join the turn's `PresentedActions`: the
-  GM approves or rejects each with the ordinary tools, and narration is refused
+  names the presented action and characters in the actor's group. Every character but the
+  actor is asked at once; the result says that the actor was not asked. Each player gets a
+  `pending_reply` and the question in their chat (`Store::ask_player`, `gm.intervention_request`)
+  before any NPC inference; each NPC is asked in the GM's call as a child invocation
+  (`Game::ask_npc`, the same decision a response collection asks for), answers do_nothing or an
+  action, and the strongest proposals become pending actions of their own
+  (`Store::create_reaction_action`, linked by `reacts_to`). With players asked the call returns
+  `ToolOutcome::Waiting`: it ends the GM's turn, calls after it in the response do not run
+  (`Store::close_unrun_tool_calls`), `arbitrate` returns `None` and the actor's call is told
+  the GM is waiting. A player's next input answers (`Game::reply_tools`: `do_nothing` or an
+  action tool, proposed as a reaction); a passed deadline records do-nothing (`WorldEvent::ReplyDeadline`,
+  `Store::next_reply_deadline`, the persisted earliest-deadline wake of `process_world`) and counts a miss
+  per membership (`world_member.missed_replies`, `[game] player_response_timeout`);
+  `AFK_AFTER_MISSES` in a row broadcast `ChatChange::Away`, which ends the connection
+  (`ServerEvent::Away`) and the WorldDetail page says why. The settle that closes the last
+  open reply runs `Game::decide_after_replies`: the question moves to the deciding sequence
+  and the GM's next turn starts from `gm.answers_request` with every reaction presented.
+  The GM approves or rejects each with the ordinary tools, and narration is refused
   until every presented action is decided. Nobody is blocked by proposing, and a
   committed retry is the GM's to approve. Nested work spends the turn's budget.
 - Group-scoped narration. `Store::append_group_narration` selects connected
@@ -897,7 +932,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   creates, limits, lists, revokes, and accepts invitation links, and lets an
   owner remove an active member while retaining its durable association. It
   renders every retained membership with its characters nested below it; an
-  active member can create another blank Adventurer, and every entry link names
+  active member can create another blank Adventurer when `[testing]
+  create_character_button` is set (off by default; the POST is refused
+  otherwise), and every entry link names
   its exact character. Landing,
   world, invitation, and membership routes all resolve access through `Store`
   rather than trusting a client user or agent id. `POST
@@ -953,7 +990,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   up. Never mind without a hand does nothing. The player-chat socket reads
   `interrupt` / `never_mind` while a turn runs and reports `control { hand_raised }`; the
   page swaps Interrupt for Never mind only while the hand is up.
-- `game::tests::device_suite` (ignored) loads the CUDA model once (`DeviceModel`,
+- `game::tests::device_suite` (ignored) loads the CUDA model once (`DeviceModel`, with a fixed
+  sampler seed `DEVICE_TEST_SEED`, so a scenario repeats exactly at production sampling;
   shared by each scenario's `Game` through `SharedModel`) and runs the real-model
   scenarios from `mistralrs_backend::tests` and `game::tests` in turn, each with
   its own time limit and printed elapsed time, to keep the full test suite inside
@@ -961,6 +999,18 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   the player agent and the GM are scripted, the NPCs are the real model;
   `RealPlayerOnly` (the "routing" scenario) makes the player agent the real model; both
   use `mechanical_gm` for the GM.
+- `game::tests::real_model_gm_resolves_a_look_and_a_spoken_line` (the "gm turns" scenario) has the
+  real GM resolve a look and a spoken line. `real_model_gm_regroups_characters` (ignored test
+  `the_gm_regroups_characters_as_they_move`) puts three moves to the GM, each from its own known
+  start, and reads who shares a group afterwards; it is an open requirement (plans/agent-tuning.md).
+  The creation scenario ends at the GM opening; committed-take cases share the player-routing scenario.
+- `game::tests::real_model_every_tool_can_be_called` (the "other tools" device scenario, also `every_tool_can_be_called`
+  alone): a scripted game captures one real request per kind of agent (GM, player, asked player,
+  NPC; `one_request_per_kind_of_agent`), then the model is asked to call tools by name
+  with only that agent's system messages, and a player who says "I don't mind" must do nothing. With
+  the fixed seed it is the quick check for a change in how tools reach the model.
+  Tools with their own scenarios are omitted by default; `CAIRNWORLD_ALL_TOOLS`
+  includes every tool.
 - `src/lib.rs` exports Leptos's required islands `hydrate()` entrypoint, which
   initializes the island hydrator before the generated loader invokes each
   island. `npm run test:hydration` builds the frontend and explicitly runs

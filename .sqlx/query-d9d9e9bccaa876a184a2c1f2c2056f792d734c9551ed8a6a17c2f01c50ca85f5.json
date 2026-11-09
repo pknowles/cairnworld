@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT agent_id FROM player_character WHERE character_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d9d9e9bccaa876a184a2c1f2c2056f792d734c9551ed8a6a17c2f01c50ca85f5"
+}
