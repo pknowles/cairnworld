@@ -117,7 +117,7 @@ itself apparent.
   without explicit sign-off from the user.
 - The project comes first. Don't sacrifice good code to make testing easier,
   although this may be a sign to improve modularity.
-  
+
 ## Telemetry
 
 If you ever find you needed to re-run anything becuase you lost the output on
