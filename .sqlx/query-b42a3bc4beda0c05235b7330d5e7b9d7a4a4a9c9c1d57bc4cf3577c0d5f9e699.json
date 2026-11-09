@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\", world.initial_prompt AS seed, world.generation_stage = 'complete' AS \"ready!: bool\", (SELECT sequence.error FROM sequence WHERE sequence.world_id = world.id AND sequence.trigger = 'world generation' AND sequence.error IS NOT NULL ORDER BY sequence.id DESC LIMIT 1) AS failure FROM world JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
+  "query": "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\", world.initial_prompt AS seed, world.generation_stage = 'complete' AS \"ready!: bool\", CASE WHEN world.generation_stage = 'failed' THEN (SELECT sequence.error FROM sequence WHERE sequence.world_id = world.id AND sequence.trigger = 'world generation' AND sequence.error IS NOT NULL ORDER BY sequence.id DESC LIMIT 1) END AS failure FROM world JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
   "describe": {
     "columns": [
       {
@@ -52,5 +52,5 @@
       true
     ]
   },
-  "hash": "67a3ccf28c9485ed51a582e578d9b9b895de70183f66b98fe95e2fc8d1007e7e"
+  "hash": "b42a3bc4beda0c05235b7330d5e7b9d7a4a4a9c9c1d57bc4cf3577c0d5f9e699"
 }

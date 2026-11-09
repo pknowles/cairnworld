@@ -52,6 +52,12 @@ We could actually have a user facing checkbox to create a small world where we
 only do the core objects and not the extended world summary. Only the smaller
 world would be a handy first milestone for development too.
 
+While generation is in progress the world detail page should show the current
+phase, total LLM inferences so far and number of objects generated (if up to
+that phase). This is effectively a progress indicator for users. When testing,
+we want a time limit, e.g. 5 minutes. When running in production we do not want
+any limits.
+
 The intent of the questioner is to ask questions that, in order of priority:
 
 1. Enrich the world with interest, depth, internal connections

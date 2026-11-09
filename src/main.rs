@@ -127,7 +127,12 @@ enum Command {
         /// Development identity that will own the world.
         #[arg(long, default_value = "maker@example.test")]
         owner_email: String,
-        /// The world seed prompt.
+        /// Stop after this many minutes, leaving the world to continue the next
+        /// time this is run with the same database. 0 means no limit.
+        #[arg(long, default_value_t = 5)]
+        minutes: u64,
+        /// The world seed prompt. Ignored when the database already holds a
+        /// world that is still being made, which is continued instead.
         seed: String,
     },
     /// Serve the OAuth-only browser interface.
@@ -215,12 +220,17 @@ async fn main() -> Result<()> {
             temperature,
             allow_cpu,
             owner_email,
+            minutes,
             seed,
         } => {
             let settings = Settings::load()?;
             let store = Store::open(&database)
                 .await
                 .context("opening world database")?;
+            store
+                .close_interrupted_turns()
+                .await
+                .context("closing the turns a stopped server left open")?;
             let model = resolve_model(model.as_deref(), None, &settings)?;
             let mut sampling = settings.sampling(&model);
             if let Some(temperature) = temperature {
@@ -230,15 +240,30 @@ async fn main() -> Result<()> {
                 .find_or_create_user(&owner_email, "Maker")
                 .await
                 .context("creating the owner")?;
-            let member = store
-                .create_world_to_generate(&owner, &seed)
-                .await
-                .context("creating the world")?;
+            let unfinished = store
+                .owned_worlds(owner.id)
+                .await?
+                .into_iter()
+                .rev()
+                .find(|world| !world.ready && world.failure.is_none());
+            let world_id = match unfinished {
+                Some(world) => {
+                    println!("Continuing world {} \"{}\".", world.id, world.name);
+                    world.id
+                }
+                None => {
+                    store
+                        .create_world_to_generate(&owner, &seed)
+                        .await
+                        .context("creating the world")?
+                        .world_id
+                }
+            };
             let worlds = world::World::load(&store).await?;
             let backend =
                 load_game_backend(&store, &worlds, &model, settings.limits, allow_cpu).await?;
-            let mut events = world::World::get(&worlds, member.world_id)
-                .context("the new world has no worker")?
+            let mut events = world::World::get(&worlds, world_id)
+                .context("the world has no worker")?
                 .events
                 .subscribe();
             let _game = game::Game::with_rules(
@@ -250,21 +275,47 @@ async fn main() -> Result<()> {
                 sampling,
                 settings.game,
             );
+            let deadline = (minutes > 0).then(|| {
+                tokio::time::Instant::now() + std::time::Duration::from_secs(minutes * 60)
+            });
+            let mut shown = None;
             let world = loop {
                 let world = store
-                    .world(member.world_id)
+                    .world(world_id)
                     .await?
                     .context("the world disappeared")?;
+                let progress = store.generation_progress(world_id).await?;
+                let line = format!(
+                    "{} | {} inferences | objects: {}",
+                    progress.phase, progress.inferences, progress.objects
+                );
+                if shown.as_ref() != Some(&line) {
+                    println!("{line}");
+                    shown = Some(line);
+                }
                 if world.ready || world.failure.is_some() {
                     break world;
                 }
-                let _ = events.recv().await;
+                let next = events.recv();
+                match deadline {
+                    Some(deadline) => {
+                        if tokio::time::timeout_at(deadline, next).await.is_err() {
+                            println!(
+                                "Stopped after {minutes} minutes. Run the same command again with --database {database} to continue."
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                    None => {
+                        let _ = next.await;
+                    }
+                }
             };
             println!(
                 "world {} \"{}\": ready={} failure={:?}",
-                member.world_id, world.name, world.ready, world.failure
+                world_id, world.name, world.ready, world.failure
             );
-            for entry in store.review_list(member.world_id).await? {
+            for entry in store.review_list(world_id).await? {
                 println!(
                     "  [{}] {} {} {}",
                     if entry.reviewed { "x" } else { " " },
@@ -295,6 +346,11 @@ async fn main() -> Result<()> {
                 .recover_presence()
                 .await
                 .context("recovering execution-host presence")?;
+            // A world that was being made when the server stopped simply carries on.
+            store
+                .close_interrupted_turns()
+                .await
+                .context("closing the turns a stopped server left open")?;
             let game = web::GameLoad::loading(&store).await?;
             let worlds = game.worlds();
             let loading_game = game.clone();

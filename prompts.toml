@@ -488,6 +488,8 @@ uncreated_mentions = "The summary marks these names but no object has them yet: 
 # Staged creation: the locations, then NPCs one at a time, then their groups, then items.
 create_locations_request = "The world summary is complete. Use create_object to create each location the summary needs, then a connection for each pair of locations that join. Give every field a value."
 
+connect_locations_request = "Use create_object to create connections so that every location can be reached. {problem}"
+
 next_npc_request = "Use create_object to create the next NPC the world needs, giving every field a value. If every NPC it needs exists, reply that none are left."
 
 group_npcs_request = "Use group_npcs to put the NPCs that belong together in a group, as the world summary describes."

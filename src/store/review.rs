@@ -276,6 +276,34 @@ impl Store {
         Self::core_problems(&mut connection, world_id).await
     }
 
+    /// The locations that cannot be reached from the first one, if any, said
+    /// as the readiness check says it.
+    pub async fn unreachable_locations(&self, world_id: i64) -> Result<Option<String>> {
+        let locations = sqlx::query!(
+            "SELECT id, name FROM location WHERE world_id = ? AND deleted = 0 ORDER BY id",
+            world_id
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("loading locations")?;
+        let links = sqlx::query!(
+            "SELECT from_location_id, to_location_id FROM connection WHERE world_id = ? AND deleted = 0",
+            world_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("loading connections")?;
+        let named: Vec<(i64, &str)> = locations
+            .iter()
+            .map(|location| (location.id, location.name.as_str()))
+            .collect();
+        let ends: Vec<(i64, i64)> = links
+            .iter()
+            .map(|link| (link.from_location_id, link.to_location_id))
+            .collect();
+        Ok(unreachable_locations(&named, &ends))
+    }
+
     pub(super) async fn core_problems(
         connection: &mut sqlx::SqliteConnection,
         world_id: i64,
@@ -298,33 +326,15 @@ impl Store {
         .fetch_all(&mut *connection)
         .await
         .context("loading connections")?;
-        if let Some(first) = locations.first() {
-            let mut reached = std::collections::HashSet::from([first.id]);
-            let mut grew = true;
-            while grew {
-                grew = false;
-                for link in &links {
-                    let (a, b) = (link.from_location_id, link.to_location_id);
-                    if reached.contains(&a) != reached.contains(&b) {
-                        reached.insert(a);
-                        reached.insert(b);
-                        grew = true;
-                    }
-                }
-            }
-            let apart: Vec<&str> = locations
-                .iter()
-                .filter(|location| !reached.contains(&location.id))
-                .map(|location| location.name.as_str())
-                .collect();
-            if !apart.is_empty() {
-                problems.push(format!(
-                    "These locations cannot be reached from {}: {}.",
-                    first.name,
-                    apart.join(", ")
-                ));
-            }
-        }
+        let ends: Vec<(i64, i64)> = links
+            .iter()
+            .map(|link| (link.from_location_id, link.to_location_id))
+            .collect();
+        let named: Vec<(i64, &str)> = locations
+            .iter()
+            .map(|location| (location.id, location.name.as_str()))
+            .collect();
+        problems.extend(unreachable_locations(&named, &ends));
         let groups = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM \"group\" WHERE world_id = ? AND deleted = 0",
             world_id
@@ -386,10 +396,55 @@ impl Store {
     }
 }
 
+/// Which locations cannot be reached from the first, when connections run
+/// both ways.
+fn unreachable_locations(locations: &[(i64, &str)], links: &[(i64, i64)]) -> Option<String> {
+    let (first_id, first_name) = *locations.first()?;
+    let mut reached = std::collections::HashSet::from([first_id]);
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for &(a, b) in links {
+            if reached.contains(&a) != reached.contains(&b) {
+                reached.insert(a);
+                reached.insert(b);
+                grew = true;
+            }
+        }
+    }
+    let apart: Vec<&str> = locations
+        .iter()
+        .filter(|(id, _)| !reached.contains(id))
+        .map(|(_, name)| *name)
+        .collect();
+    (!apart.is_empty()).then(|| {
+        format!(
+            "These locations cannot be reached from {first_name}: {}.",
+            apart.join(", ")
+        )
+    })
+}
+
 #[cfg(test)]
 mod id_tests {
     use crate::store::authoring::fixtures::*;
     use crate::store::{Fields, ObjectKind};
+
+    #[test]
+    fn locations_that_no_connection_leads_to_are_named() {
+        let places = [(1, "Quay"), (2, "Cellar"), (3, "Tower"), (4, "Watch")];
+        // Connections work both ways, and only the first location's side counts.
+        let said = super::unreachable_locations(&places, &[(2, 1), (3, 2)]);
+        assert_eq!(
+            said.as_deref(),
+            Some("These locations cannot be reached from Quay: Watch.")
+        );
+        assert_eq!(
+            super::unreachable_locations(&places, &[(1, 2), (3, 2), (4, 3)]),
+            None
+        );
+        assert_eq!(super::unreachable_locations(&[], &[]), None);
+    }
 
     #[tokio::test]
     async fn core_objects_are_not_whole_until_connected_complete_and_reviewed() {

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP WHERE finished_at IS NULL AND trigger = 'world generation'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "fd084727019d1584501b40dcc5a7017699cea932eb5149d513910f44d16b2e9a"
+}

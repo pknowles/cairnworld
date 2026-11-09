@@ -572,3 +572,16 @@ pub struct WorldObjects {
     pub objects: Vec<GameObject>,
     pub cursor: Option<WorldObjectCursor>,
 }
+
+/// How far a world being made has got, for the people waiting for it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct GenerationProgress {
+    /// What is being done now, in plain words.
+    pub phase: String,
+    /// Inferences the model has run for this world so far.
+    pub inferences: i64,
+    /// Objects made so far, such as "7 locations, 8 connections".
+    pub objects: String,
+    /// The world is no longer being made: it is ready, or it stopped.
+    pub finished: bool,
+}

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use sqlx::{Sqlite, Transaction};
 
 use super::{AgentBranch, PlayerAgent, Store, User};
+use crate::inspection::GenerationProgress;
 
 /// The name a world has until the Storyteller names it.
 const UNNAMED_WORLD: &str = "Unnamed world";
@@ -31,6 +32,19 @@ pub enum GenerationStage {
 }
 
 impl GenerationStage {
+    /// What a user is told is happening in this stage.
+    fn phase(self) -> &'static str {
+        match self {
+            Self::Meta => "Preparing the setting",
+            Self::Ask => "Developing the world summary",
+            Self::Name => "Naming the world",
+            Self::CreateObjects => "Creating locations, characters and items",
+            Self::Review => "Reviewing the objects",
+            Self::Failed => "Stopped",
+            Self::Complete => "Complete",
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Meta => "meta",
@@ -185,6 +199,48 @@ impl Store {
     }
 
     /// The world's next generation step, if it is still being initialized.
+    /// Where a world being made has got.
+    pub async fn generation_progress(&self, world_id: i64) -> Result<GenerationProgress> {
+        let stage =
+            sqlx::query_scalar!("SELECT generation_stage FROM world WHERE id = ?", world_id)
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("loading the stage of world {world_id}"))?;
+        let stage = GenerationStage::parse(&stage)?;
+        let inferences = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM inference JOIN sequence ON sequence.id = inference.sequence_id \
+             WHERE sequence.world_id = ? AND sequence.trigger = 'world generation'",
+            world_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("counting the inferences of world {world_id}"))?;
+        let entries = self.review_list(world_id).await?;
+        let count = |kind: &str| entries.iter().filter(|entry| entry.kind == kind).count();
+        let kinds = [
+            ("location", "locations"),
+            ("connection", "connections"),
+            ("npc", "NPCs"),
+            ("item_type", "item types"),
+            ("item", "items"),
+        ];
+        let objects: Vec<String> = kinds
+            .iter()
+            .filter(|(kind, _)| count(kind) > 0)
+            .map(|(kind, name)| format!("{} {name}", count(kind)))
+            .collect();
+        Ok(GenerationProgress {
+            phase: stage.phase().to_string(),
+            inferences,
+            objects: if objects.is_empty() {
+                "none yet".to_string()
+            } else {
+                objects.join(", ")
+            },
+            finished: matches!(stage, GenerationStage::Complete | GenerationStage::Failed),
+        })
+    }
+
     pub async fn next_generation(&self, world_id: i64) -> Result<Option<Generation>> {
         let Some(row) = sqlx::query!(
             "SELECT world.generation_stage, world.initial_prompt, world.storyteller_summary, \
@@ -494,6 +550,30 @@ mod tests {
             store.world(world_id).await.unwrap().unwrap().name,
             "Saltmarsh"
         );
+    }
+
+    /// Stopping the server while a world is being made is not a failure: the
+    /// step that was running runs again when the server is started again.
+    #[tokio::test]
+    async fn a_world_being_made_continues_after_the_server_stops() {
+        let (store, _db, world_id) = new_world("generation-restart").await;
+        store
+            .advance_generation(world_id, Advance::MetaQuestionsAnswered, 7)
+            .await
+            .unwrap();
+        let before = store.next_generation(world_id).await.unwrap().unwrap();
+        let sequence = store
+            .begin_sequence(world_id, "world generation")
+            .await
+            .unwrap();
+        // The process stops here: the sequence never finishes.
+        store.close_interrupted_turns().await.unwrap();
+        let world = store.world(world_id).await.unwrap().unwrap();
+        assert_eq!(world.failure, None, "an interrupted step is not a failure");
+        let after = store.next_generation(world_id).await.unwrap().unwrap();
+        assert_eq!(after.stage, before.stage, "the same step comes next");
+        assert_eq!(after.spent, before.spent);
+        let _ = sequence;
     }
 
     #[tokio::test]

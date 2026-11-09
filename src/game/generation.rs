@@ -21,6 +21,7 @@ use crate::{
     inspection::DevEvent,
     llm::{Backend, Content, Message, Role, Sampling},
     prompts,
+    settings::Limits,
     store::{Advance, AgentBranch, Generation, GenerationStage, ReviewEntry},
     tools::{Tool, ToolFuture, ToolOutcome},
     world::World,
@@ -302,7 +303,14 @@ where
             .begin_sequence(world.id, "world generation")
             .await
             .context("starting a world generation sequence")?;
-        let budget = Budget::restore(self.limits, generation.spent);
+        // Making a world takes as long as it takes: it is bounded by the model's
+        // own output limits, not by a count of inferences.
+        let limits = Limits {
+            max_inferences_per_chat: u32::MAX,
+            max_inferences_total: u32::MAX,
+            ..self.limits
+        };
+        let budget = Budget::restore(limits, generation.spent);
         let result: Result<()> = async {
             let scope = StepScope {
                 world: Arc::clone(world),
@@ -619,6 +627,18 @@ where
         let world_id = scope.world.id;
         self.storyteller_object_turn(scope, storyteller.create_locations_request.clone())
             .await?;
+        // Every location must be reachable, which code can tell exactly.
+        while let Some(problem) = self.store.unreachable_locations(world_id).await? {
+            let connections = self.connection_count(world_id).await?;
+            let text = prompts::fill(
+                &storyteller.connect_locations_request,
+                &[("problem", &problem)],
+            )?;
+            self.storyteller_object_turn(scope, text).await?;
+            if self.connection_count(world_id).await? == connections {
+                break;
+            }
+        }
         // It ends when a turn makes no NPC; a Storyteller that never stops is
         // caught by the limit on inferences for the world.
         let npcs = || async {
@@ -645,6 +665,11 @@ where
             .await?;
         self.storyteller_object_turn(scope, text).await?;
         Ok(())
+    }
+
+    async fn connection_count(&self, world_id: i64) -> Result<usize> {
+        let entries = self.store.review_list(world_id).await?;
+        Ok(entries.iter().filter(|e| e.kind == "connection").count())
     }
 
     /// One Storyteller turn creating objects to fix what the Questioner's

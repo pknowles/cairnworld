@@ -13,7 +13,7 @@ use axum::{
 };
 use cairnworld::ui::{
     ChatActivity, ChatEntry, ChatRole, ChatTranscript, ClientEvent, DeveloperModeEnableButton,
-    GameLoading, PlayerChat, ServerEvent, WorldInspector,
+    GameLoading, GenerationProgressPanel, PlayerChat, ServerEvent, WorldInspector,
 };
 use hydration_context::SsrSharedContext;
 use leptos::prelude::*;
@@ -255,6 +255,7 @@ fn router(app: App, sessions: SqliteStore, secure_cookies: bool) -> Router {
         .route("/worlds", post(create_bread_thief_world))
         .route("/worlds/generate", post(create_generated_world))
         .route("/world/{world_id}", get(world_detail))
+        .route("/world/{world_id}/progress/ws", get(progress_socket))
         .route("/world/{world_id}/developer-mode", post(set_developer_mode))
         .route(
             "/world/{world_id}/inspect/sequences",
@@ -614,11 +615,88 @@ async fn world_detail(
     } else {
         vec![]
     };
+    let progress = app.store.generation_progress(world_id).await?;
     Ok(Html(render_page(
         "Cairnworld",
         true,
-        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=viewer.id/> },
+        move || view! { <WorldDetail world=world members=members invitations=invitations viewer_id=viewer.id progress=progress/> },
     )))
+}
+
+/// The world page's live progress: the same kind of websocket event stream
+/// the player chat uses, sent whenever the world changes while it is made.
+async fn progress_socket(
+    State(app): State<App>,
+    session: Session,
+    Path(world_id): Path<i64>,
+    websocket: WebSocketUpgrade,
+) -> Result<axum::response::Response, WebError> {
+    let viewer = session_user(&app.store, &session).await?;
+    if !app.store.has_active_membership(viewer.id, world_id).await? {
+        return Err(WebError::forbidden(format!(
+            "user {} has no active access to world {world_id}",
+            viewer.id
+        )));
+    }
+    let events = app.game.world(world_id)?.events.subscribe();
+    let stream = app.game.open_stream();
+    Ok(websocket
+        .on_upgrade(move |socket| progress_connection(socket, events, stream, app.store, world_id)))
+}
+
+async fn progress_connection(
+    mut socket: WebSocket,
+    mut events: tokio::sync::broadcast::Receiver<crate::inspection::DevEvent>,
+    mut stream: OpenStream,
+    store: Store,
+    world_id: i64,
+) {
+    loop {
+        let progress = match store.generation_progress(world_id).await {
+            Ok(progress) => progress,
+            Err(error) => {
+                tracing::error!(world_id, error = %format!("{error:#}"), "reading generation progress");
+                return;
+            }
+        };
+        let finished = progress.finished;
+        if send_event(
+            &mut socket,
+            &ServerEvent::Progress(library_progress(progress)),
+        )
+        .await
+        .is_err()
+            || finished
+        {
+            return;
+        }
+        // Wait for the world to change; streamed tokens do not change the progress.
+        loop {
+            tokio::select! {
+                received = events.recv() => match received {
+                    Ok(crate::inspection::DevEvent::Token { .. }) => continue,
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+                _ = stream.stopped() => {
+                    let _ = send_event(&mut socket, &ServerEvent::Stopping).await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The islands are built in the library crate, so they take that crate's type.
+fn library_progress(
+    progress: crate::inspection::GenerationProgress,
+) -> cairnworld::inspection::GenerationProgress {
+    cairnworld::inspection::GenerationProgress {
+        phase: progress.phase,
+        inferences: progress.inferences,
+        objects: progress.objects,
+        finished: progress.finished,
+    }
 }
 
 async fn create_invitation(
@@ -1608,8 +1686,12 @@ fn WorldDetail(
     members: Vec<WorldMember>,
     invitations: Vec<crate::store::Invitation>,
     viewer_id: i64,
+    /// Where the world has got while it is being made; shown to every member.
+    #[prop(optional)]
+    progress: Option<crate::inspection::GenerationProgress>,
 ) -> impl IntoView {
     let is_owner = world.owner_id == viewer_id;
+    let making = !world.ready && world.failure.is_none();
     let world_id = world.id;
     let ready = world.ready;
     let developer_mode = world.developer_mode;
@@ -1625,6 +1707,9 @@ fn WorldDetail(
                 <span class="badge badge-lg">{if world.ready { "Complete" } else if world.failure.is_some() { "Failed" } else { "In progress" }}</span>
             </div>
             {world.failure.map(|failure| view! { <div class="alert alert-error whitespace-pre-wrap">{failure}</div> })}
+            {progress.filter(|_| making).map(|progress| {
+                view! { <GenerationProgressPanel world_id progress=library_progress(progress)/> }
+            })}
             {(!world.seed.is_empty()).then(|| view! {
                 <details><summary class="cursor-pointer">"Seed prompt"</summary><p class="whitespace-pre-wrap">{world.seed}</p></details>
             })}
@@ -2445,6 +2530,14 @@ mod tests {
                 .unwrap();
         }
 
+        // A world that is still being made, for check_generation_progress.cjs.
+        let making_world_id = store
+            .create_world_to_generate(&owner, "A fixture seed")
+            .await
+            .unwrap()
+            .world_id;
+        let making_world = crate::world::World::install(&game_load.worlds, making_world_id);
+        let making_store = store.clone();
         let lag_notifications = game_load.world(world_id).unwrap().broadcasts.clone();
         let app = app
             .route("/browser/chat/{index}", get(chat_page))
@@ -2484,6 +2577,29 @@ mod tests {
                     Html(render_page("Cairnworld", true, || view! { <GameLoading/> }))
                 }),
             )
+            // Moves the world being made on one step and announces it, as its worker would.
+            .route(
+                "/browser/generation/advance",
+                post(move || {
+                    let store = making_store.clone();
+                    let making_world = Arc::clone(&making_world);
+                    async move {
+                        store
+                            .advance_generation(
+                                making_world_id,
+                                crate::store::Advance::MetaQuestionsAnswered,
+                                0,
+                            )
+                            .await
+                            .unwrap();
+                        making_world.publish(crate::inspection::DevEvent::Changed {
+                            sequence_id: None,
+                            inference_id: None,
+                        });
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            )
             .route("/browser/inference/start", post(start_live_inference))
             .route("/browser/inference/token", post(token_live_inference))
             .route("/browser/inference/finish", post(finish_live_inference))
@@ -2498,6 +2614,7 @@ mod tests {
             "request": recorded_request,
             "tool_call_id": "call-d95cbfac-d6c0-4d92-a5ab-58498440d128",
             "agent_id": agent_id, "modal_world_id": modal_world_id,
+            "making_world_id": making_world_id,
             "live_agent_id": live_agent_id, "live_sequence_id": live_sequence.id,
             "live_message_id": live_message_id,
             "gm_agent_id": gm_history.agent_id,
@@ -2519,6 +2636,7 @@ mod tests {
             "check_player_chat.cjs",
             "check_developer_mode.cjs",
             "check_world_detail.cjs",
+            "check_generation_progress.cjs",
             "check_presence_chat.cjs",
             "check_failed_turn_chat.cjs",
             "check_interrupt_chat.cjs",
@@ -3368,6 +3486,37 @@ mod tests {
         assert!(owner.contains("action=\"/world/7/members/2\""));
         assert!(owner.contains("action=\"/world/7/invitations\""));
         assert!(owner.contains("action=\"/world/7/invitations/invite/revoke\""));
+    }
+
+    #[test]
+    fn a_world_being_made_shows_its_phase_inferences_and_objects_to_every_member() {
+        fn detail(ready: bool, developer_mode: bool) -> String {
+            render_page("Cairnworld", true, move || {
+                view! { <WorldDetail
+                    world=World { id: 7, name: "Salvage Bay".into(), owner_id: 1, developer_mode, seed: String::new(), ready, failure: None }
+                    members=vec![]
+                    invitations=vec![]
+                    viewer_id=2
+                    progress=crate::inspection::GenerationProgress {
+                        phase: "Reviewing the objects".into(),
+                        inferences: 41,
+                        objects: "7 locations, 8 connections".into(),
+                        finished: ready,
+                    }
+                /> }
+            })
+        }
+        // Not the owner and Developer Mode off: the progress is still there.
+        let making = detail(false, false);
+        assert!(making.contains("Reviewing the objects"), "{making}");
+        assert!(making.contains("41 inferences so far"), "{making}");
+        assert!(making.contains("7 locations, 8 connections"), "{making}");
+        assert!(
+            !making.contains("http-equiv"),
+            "the page does not reload itself"
+        );
+        // Once the world is ready the page shows no progress.
+        assert!(!detail(true, false).contains("inferences so far"));
     }
 
     #[test]

@@ -534,9 +534,13 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   <name> [--database <path>] <scenario.json>` initializes a fresh scenario
   world without loading model settings; `export-scenario [--database <path>]
   <world-id> <output.json>` writes its reusable scenario template.
-  `generate-world [--database <path>] [--temperature <t>] <seed>` creates a world and
-  runs its generation to ready or failed with the real model, printing the objects
-  (`serve` on the same database shows it in Developer Mode). Agent roles
+  `generate-world [--database <path>] [--temperature <t>] [--minutes <n>] <seed>` creates a
+  world (or continues the one in the database that is still being made) and runs its
+  generation to ready or failed with the real model, printing the phase, inferences and
+  objects whenever they change, then the objects (`serve` on the same database shows it in
+  Developer Mode). After `--minutes` (default 5, 0 for no limit) it exits with code 2, and
+  running it again continues. `serve` and `generate-world` both run
+  `Store::close_interrupted_turns` first, so a stopped run leaves nothing open. Agent roles
   come from their game relationships, not a `kind` switch.
 - `src/scenario.rs` and `scenarios/bread_thief.json` - strict scenario JSON
   loader/validator and the checked-in Bread Thief setup: a shared hut location,
@@ -671,7 +675,10 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   (`join_world_unplaced`; `place_adventurer` completes a join), and one Questioner and
   one Storyteller agent (`world_role_agent`) with loop progress in `world_generation`.
   The world worker takes one step per stage after NPC steps (`Store::next_generation`,
-  `Game::run_generation_step`, restoring `spent` into the shared `Budget`): the
+  `Game::run_generation_step`, which has no inference limits; an interrupted step is closed
+  without an error and runs again, and `World.failure` is set only once the stage is `failed`).
+  The world page shows `Store::generation_progress` in the `GenerationProgressPanel` island,
+  kept current by the `/world/{id}/progress/ws` socket (a `ServerEvent::Progress`, like chat): the
   Questioner answers `questioner.example_questions` and `meta_questions` once (its
   history keeps them), then one `ask` turn: `ask_questions` runs the Storyteller inside the call
   (`Game::summary_round`; its turns nest under the call) and returns the Storyteller's note of the change, a second side inference of about 20 words (the

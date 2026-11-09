@@ -1493,9 +1493,10 @@ impl Store {
             World,
             "SELECT world.id, world.name, world_owner.user_id AS owner_id, world.developer_mode AS \"developer_mode: bool\", \
                     world.initial_prompt AS seed, world.generation_stage = 'complete' AS \"ready!: bool\", \
-                    (SELECT sequence.error FROM sequence WHERE sequence.world_id = world.id \
-                       AND sequence.trigger = 'world generation' AND sequence.error IS NOT NULL \
-                       ORDER BY sequence.id DESC LIMIT 1) AS failure \
+                    CASE WHEN world.generation_stage = 'failed' THEN \
+                      (SELECT sequence.error FROM sequence WHERE sequence.world_id = world.id \
+                         AND sequence.trigger = 'world generation' AND sequence.error IS NOT NULL \
+                         ORDER BY sequence.id DESC LIMIT 1) END AS failure \
              FROM world JOIN world_owner ON world_owner.world_id = world.id WHERE world.id = ?",
             world_id,
         )

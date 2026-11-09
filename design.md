@@ -1914,8 +1914,11 @@ created so far, not Storyteller's answer history. During conceptual development
 the summary supplies the artifact under review; construction review includes
 persisted objects. The four declared phases and focused location/NPC development
 reuse these roles and bounded context assembly. Questioner is an invocation role,
-not a separate autonomous agent. A safety limit is a visible incomplete-generation
-failure, not permission to declare readiness or advance automatically.
+not a separate autonomous agent. World creation has no limit on inferences or
+time: a step the server was stopped during is not a failure and runs again when
+the server starts, and only a step that errors fails the world. The world page
+shows, to every member, the current phase, the inferences so far and the objects
+made, updated live over a websocket; test runs are given a time limit instead.
 
 Storyteller has Create/Update/Delete tools for Location, Connection, NPC,
 ItemType and Item, GroupNPCs and GiveItem (an NPC picks an item up), plus shared

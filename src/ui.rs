@@ -72,6 +72,8 @@ pub enum ServerEvent {
     Error {
         message: String,
     },
+    /// How far the world being made has got (the world page's live progress).
+    Progress(crate::inspection::GenerationProgress),
     /// The server is shutting down and is about to close this connection.
     Stopping,
 }
@@ -2591,6 +2593,111 @@ fn watch_inspect_clicks(
     });
 }
 
+/// What a world being made is doing, kept up to date in place while the page
+/// stays open; the page reloads once, when the world is ready or has stopped.
+#[island]
+pub fn GenerationProgressPanel(
+    world_id: i64,
+    progress: crate::inspection::GenerationProgress,
+) -> impl IntoView {
+    #[cfg(not(feature = "hydrate"))]
+    let _ = world_id;
+    let phase = RwSignal::new(progress.phase);
+    let inferences = RwSignal::new(progress.inferences);
+    let objects = RwSignal::new(progress.objects);
+    let error = RwSignal::new(None::<String>);
+    #[cfg(feature = "hydrate")]
+    follow_generation(world_id, phase, inferences, objects, error);
+    view! {
+        <div class="alert" id="generation-progress" role="status">
+            <div>
+                <p class="font-semibold">{move || phase.get()}</p>
+                <p>{move || format!("{} inferences so far. Objects made: {}.", inferences.get(), objects.get())}</p>
+                {move || error.get().map(|message| view! { <p class="text-error">{message}</p> })}
+            </div>
+        </div>
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn follow_generation(
+    world_id: i64,
+    phase: RwSignal<String>,
+    inferences: RwSignal<i64>,
+    objects: RwSignal<String>,
+    error: RwSignal<Option<String>>,
+) {
+    let url = match websocket_url(&format!("/world/{world_id}/progress/ws")) {
+        Ok(url) => url,
+        Err(message) => {
+            error.set(Some(format!("Progress cannot update: {message}.")));
+            return;
+        }
+    };
+    let websocket = match WebSocket::new(&url) {
+        Ok(websocket) => websocket,
+        Err(failure) => {
+            error.set(Some(format!("Progress cannot update: {failure:?}")));
+            return;
+        }
+    };
+    let on_message = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        let Some(text) = event
+            .dyn_ref::<MessageEvent>()
+            .and_then(|message| message.data().as_string())
+        else {
+            return;
+        };
+        match serde_json::from_str::<ServerEvent>(&text) {
+            Ok(ServerEvent::Progress(progress)) => {
+                phase.set(progress.phase);
+                inferences.set(progress.inferences);
+                objects.set(progress.objects);
+                // The rest of the page changes when the world is ready.
+                if progress.finished
+                    && let Some(window) = web_sys::window()
+                {
+                    let _ = window.location().reload();
+                }
+            }
+            Ok(ServerEvent::Stopping) => error.set(Some(
+                "The server is stopping. Reload this page once it is running again.".into(),
+            )),
+            Ok(_) => {}
+            Err(failure) => error.set(Some(format!("Progress sent an invalid message: {failure}"))),
+        }
+    });
+    websocket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    // The browser owns this callback until the document unloads with its WebSocket.
+    on_message.forget();
+    let on_close = Closure::<dyn FnMut(Event)>::new(move |_| {
+        if error.get_untracked().is_none() {
+            error.set(Some(
+                "Progress updates stopped. Reload to reconnect.".into(),
+            ));
+        }
+    });
+    websocket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+    on_close.forget();
+}
+
+/// A websocket address on this page's own host.
+#[cfg(feature = "hydrate")]
+fn websocket_url(path: &str) -> Result<String, String> {
+    let location = web_sys::window()
+        .ok_or("no browser window is available")?
+        .location();
+    let scheme = if location.protocol().ok().as_deref() == Some("https:") {
+        "wss"
+    } else {
+        "ws"
+    };
+    let host = location
+        .host()
+        .map_err(|_| "could not determine the browser host".to_string())?;
+    Ok(format!("{scheme}://{host}{path}"))
+}
+
 /// The Inspect panel on a world's own page, so Developer Mode can follow a
 /// world that has no group to play in yet. It starts open on the agent list.
 #[island]
@@ -2798,38 +2905,21 @@ fn connect_player_chat(
     } = signals;
     let socket = Rc::new(RefCell::new(None));
     let socket_for_connection = socket.clone();
-    let Some(window) = web_sys::window() else {
-        add_notice(
-            entries,
-            "Could not open chat: no browser window is available.".into(),
-        );
-        disconnected.set(true);
-        return socket;
+    let path = match after_message_id {
+        Some(after_message_id) => {
+            format!(
+                "/world/{world_id}/characters/{character_id}/ws?after_message_id={after_message_id}"
+            )
+        }
+        None => format!("/world/{world_id}/characters/{character_id}/ws"),
     };
-    let location = window.location();
-    let scheme = if location.protocol().ok().as_deref() == Some("https:") {
-        "wss"
-    } else {
-        "ws"
-    };
-    let host = match location.host() {
-        Ok(host) => host,
-        Err(_) => {
-            add_notice(
-                entries,
-                "Could not determine the browser host for chat.".into(),
-            );
+    let url = match websocket_url(&path) {
+        Ok(url) => url,
+        Err(message) => {
+            add_notice(entries, format!("Could not open chat: {message}."));
             disconnected.set(true);
             return socket;
         }
-    };
-    let url = match after_message_id {
-        Some(after_message_id) => {
-            format!(
-                "{scheme}://{host}/world/{world_id}/characters/{character_id}/ws?after_message_id={after_message_id}"
-            )
-        }
-        None => format!("{scheme}://{host}/world/{world_id}/characters/{character_id}/ws"),
     };
     let websocket = match WebSocket::new(&url) {
         Ok(socket) => socket,
@@ -2894,6 +2984,8 @@ fn connect_player_chat(
                 hand_raised: raised,
             }) => hand_raised.set(raised),
             Ok(ServerEvent::Error { message }) => add_notice(on_message_entries, message),
+            // Only the world page's progress socket sends this.
+            Ok(ServerEvent::Progress(_)) => {}
             Ok(ServerEvent::Stopping) => add_notice(
                 on_message_entries,
                 "The server is stopping. Reload this page once it is running again.".into(),
@@ -3027,27 +3119,14 @@ fn connect_dev_events(
             socket.close();
         }
         dev_error.set(None);
-        let Some(window) = web_sys::window() else {
-            dev_error.set(Some(
-                "Could not open live updates: no browser window is available.".into(),
-            ));
-            return;
+        let url = match websocket_url(&format!("/world/{world_id}/inspect/events")) {
+            Ok(url) => url,
+            Err(message) => {
+                dev_error.set(Some(format!("Could not open live updates: {message}.")));
+                return;
+            }
         };
-        let location = window.location();
-        let scheme = if location.protocol().ok().as_deref() == Some("https:") {
-            "wss"
-        } else {
-            "ws"
-        };
-        let Ok(host) = location.host() else {
-            dev_error.set(Some(
-                "Could not determine the browser host for live updates.".into(),
-            ));
-            return;
-        };
-        let websocket = match WebSocket::new(&format!(
-            "{scheme}://{host}/world/{world_id}/inspect/events"
-        )) {
+        let websocket = match WebSocket::new(&url) {
             Ok(websocket) => websocket,
             Err(error) => {
                 dev_error.set(Some(format!("Could not open live updates: {error:?}")));

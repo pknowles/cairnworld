@@ -329,6 +329,15 @@ impl Store {
         .execute(&mut *transaction)
         .await
         .context("marking interrupted invocations")?;
+        // A world still being made simply runs its step again on restart, so
+        // that step is not a failure.
+        sqlx::query!(
+            "UPDATE sequence SET finished_at = CURRENT_TIMESTAMP \
+             WHERE finished_at IS NULL AND trigger = 'world generation'",
+        )
+        .execute(&mut *transaction)
+        .await
+        .context("closing interrupted world generation steps")?;
         sqlx::query!(
             "UPDATE sequence SET error = ?, finished_at = CURRENT_TIMESTAMP, \
                     error_position = (SELECT COALESCE(MAX(id), 0) FROM history_entry) \
