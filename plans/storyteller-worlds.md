@@ -37,10 +37,13 @@ Measured on the real model (dev-qwen35, 4096 context, compaction 2048, keep 8 ra
 
 Open:
 - Review at 4096: the Questioner's request was 3,168 tokens at inference 133 of the Valley run
-  (tools 16%, role/summary/object list 39%, question-phase chat 42%); a request needs its input plus
-  1,024 output tokens within 4,096. The Questioner called `read_object` for about 10 objects in one
-  reply; the results (about 600 tokens each) overflowed, and capacity recovery then removed retained
-  messages one at a time (13 consecutive rejections seen).
+  (tools 16%, role/summary/object list 39%, question-phase chat 42%). The engine refuses a request
+  whose token count is above its fixed 4,096-token cache and reports the count; the reported counts
+  match the prompt length alone (3,439 tokens plus 12,157 characters of results gave 6,692), not
+  prompt plus the 1,024-token reply allowance. The Questioner called `read_object` for about 10
+  objects in one reply; the results (about 600 tokens each) overflowed, and capacity recovery then
+  removed retained messages one at a time (13 consecutive rejections seen). Why the Port of Gloom
+  review does not converge is not established.
 - The question-phase chat stays in the review request; no compaction at the phase boundary.
 - Each NPC starts in its own group and each group has its own review mark.
 - The Port of Gloom review did not converge: item types grew from 2 to 6.
