@@ -117,6 +117,24 @@ itself apparent.
   without explicit sign-off from the user.
 - The project comes first. Don't sacrifice good code to make testing easier,
   although this may be a sign to improve modularity.
+  
+## Telemetry
+
+If you ever find you needed to re-run anything becuase you lost the output on
+the first run, STOP. This is far worse than forgetting to keep output. You have
+messed up the process itself. The last build output must be recorded. The last
+test logs must be recorded. Any temporary test data must be recorded. Until the
+test passes, do not delete the data. It is vital to be able to inspect
+telemetry/logs/whatever and see what went wrong without wasting time recreating
+the data.
+
+Do NOT let test output and temporary data sprawl. Running successive tests
+should not result in runaway disk usage. This must be balanced with the above
+without creating unnecessary or over-engineered machinery. E.g. overwriting
+files from the last full run is simple and straightforward. Do NOT write to the
+tmp directory expecting something to clean up after you (tmp may or may not be
+cleaned up or test output may be lost due to a system reboot). Ideally we have a
+gitignored test output directory in the project.
 
 ## Mocking
 

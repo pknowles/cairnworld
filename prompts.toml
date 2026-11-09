@@ -476,7 +476,12 @@ name_request = "Reply with only a short name for this world."
 # Added to the create-objects request when the summary marks names that have no object yet. {names}
 uncreated_mentions = "The summary marks these names but no object has them yet: {names}. Create the ones that need an object and ignore the rest."
 
-create_objects_request = "The world summary is complete. Create the world's objects from it, for a small first world of about three locations and three NPCs in two groups: the locations and their connections first, then the NPCs one at a time (each starts a group or joins one), then item types and items. Give every field a value. When everything the summary needs exists, reply with a short note saying so."
+# Staged creation: one request for the locations, then one per other marked name. {name}
+create_locations_request = "The world summary is complete. Use create_object to create each location the summary needs, then a connection for each pair of locations that join. Give every field a value."
+
+create_object_request = "Create the object for [[{name}]] from the world summary, giving every field a value. If it needs nothing created, say so."
+
+group_npcs_request = "Use group_npcs to put the NPCs that belong together in a group, as the world summary describes."
 
 # {questions}
 fix_request = """\
@@ -488,24 +493,21 @@ fix_request = """\
 # What exists in the world and how much, shown with every create-objects request. {stats} {objects}
 objects_state = """\
     The world so far ({stats}):
-{objects}
-    Make 3 to 5 tool calls at a time.\
+{objects}\
     """
 
 [storyteller.tools.create_object]
-description = "Create an object. Fields: location name, location_kind, description; connection from_id, to_id, travel_time, description; npc name, description, background, motive, ambition, sheet, and either group_id to join a group or group_name and location_id to start a new one; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
+description = "Create an object. Fields: location name, location_kind, description; connection name, from_id, to_id, travel_time, description; npc name, location_id, description, background, motive, ambition, sheet; item_type name, description, stats; item name, item_type_id, description, and location_id or held_by_id. Refer to another object by the ID in the result of creating it, so create that object first, in an earlier step."
 
 [storyteller.tools.create_object.arguments]
 object = "The object's kind."
-name = "Unique name, where it has one."
+name = "Unique name."
 location_kind = "What kind of place the location is."
 description = "What it is like."
 from_id = "Starting location ID."
 to_id = "Destination location ID."
 travel_time = "Minutes."
-location_id = "The location an item is at, or where an NPC's new group is."
-group_id = "The existing group this NPC joins."
-group_name = "Unique name of the new group this NPC starts."
+location_id = "The location the item is at, or where the NPC starts, in a group of its own."
 item_type_id = "The item type this item is of."
 held_by_id = "NPC ID holding the item."
 background = "What only the NPC knows."
@@ -516,8 +518,17 @@ stats = "Item type rules numbers."
 
 # The fields are those of create_object, so they are not described again.
 [storyteller.tools.update_object]
-description = "Change an object by its ID, giving the create_object fields to change: only those change. A connection's ends cannot change. To move an NPC to another group, give group_id, or group_name and location_id for a new one."
+description = "Change an object by its ID, giving the create_object fields to change: only those change."
 bare = true
+
+[storyteller.tools.group_npcs]
+description = "Put NPCs in a new group at a location, which they move to. NPCs not listed keep their group, and groups left empty are removed."
+
+[storyteller.tools.group_npcs.arguments]
+npc_ids = "The NPCs to put in the group."
+group_name = "Unique name of the new group."
+location_id = "The location of the group."
+description = "Where in that location the NPCs are, written to each of them."
 
 [storyteller.tools.delete_object]
 description = "Flag an object deleted. Dependencies may require one option."

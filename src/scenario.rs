@@ -58,6 +58,7 @@ pub struct Location {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
+    pub name: String,
     pub from: String,
     pub to: String,
     pub travel_time: i64,

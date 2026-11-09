@@ -95,13 +95,10 @@ fn inference_input_hash(request: &Request) -> Result<String> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
-/// A test database at a unique path, removed on drop where the platform allows.
-/// Windows cannot delete a database file while a connection pool (which may
-/// outlive this value in a background task) still holds it open, so drop alone
-/// leaks files. Each test process therefore owns a fresh directory under
-/// `target/tmp` and holds a lock on it until it exits; the next run deletes
-/// every directory whose owner has exited, so at most one finished run's files
-/// remain and nothing can collide with a previous run's leftovers.
+/// A test database at a unique path that nothing deletes: its recorded
+/// inferences are the telemetry for debugging a failure or a model run. Each
+/// test process gets its own directory under `target/tmp/test-databases`;
+/// `scripts/run-tests.sh` replaces them at the start of the next whole-suite run.
 /// Where tests keep their scratch files: inside the project, not the system
 /// temporary directory, so nothing depends on the environment and a reboot
 /// cannot delete a run's files.
@@ -155,10 +152,19 @@ impl TestDatabase {
             OnceLock,
             atomic::{AtomicU64, Ordering},
         };
-        static RUN_DIRECTORY: OnceLock<(std::path::PathBuf, std::fs::File)> = OnceLock::new();
+        static RUN_DIRECTORY: OnceLock<std::path::PathBuf> = OnceLock::new();
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let (directory, _owner_lock) = RUN_DIRECTORY
-            .get_or_init(|| claim_run_directory(&test_scratch_dir().join("test-databases")));
+        let directory = RUN_DIRECTORY.get_or_init(|| {
+            let started = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before the Unix epoch")
+                .as_nanos();
+            let directory = test_scratch_dir()
+                .join("test-databases")
+                .join(format!("{}-{started}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("creating test database directory");
+            directory
+        });
         Self {
             path: directory.join(format!(
                 "{prefix}-{}.sqlite",
@@ -169,57 +175,6 @@ impl TestDatabase {
 
     pub(crate) fn path(&self) -> &std::path::Path {
         &self.path
-    }
-}
-
-/// Held while a run is claiming its directory, so no run's scan can see
-/// another run's directory half set up.
-#[cfg(test)]
-const CLAIM_GUARD: &str = ".claim.lock";
-
-/// Delete the directories of test runs that have exited, then create and lock
-/// one for this run. Claims are serialized, so a directory without its owner
-/// lock can only belong to a creator that died mid-setup.
-#[cfg(test)]
-fn claim_run_directory(root: &std::path::Path) -> (std::path::PathBuf, std::fs::File) {
-    std::fs::create_dir_all(root).expect("creating test database root");
-    let guard = std::fs::File::create(root.join(CLAIM_GUARD)).expect("creating claim guard");
-    guard.lock().expect("locking claim guard");
-    for entry in std::fs::read_dir(root).expect("listing old test databases") {
-        let old = entry.expect("reading old test database entry").path();
-        if !old.is_dir() {
-            continue;
-        }
-        let owner = std::fs::File::options()
-            .write(true)
-            .open(old.join("owner.lock"));
-        let owner_exited = match owner {
-            Ok(file) => file.try_lock().is_ok(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-            Err(error) => panic!("opening test database owner lock: {error}"),
-        };
-        if owner_exited {
-            std::fs::remove_dir_all(&old).expect("removing old test databases");
-        }
-    }
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch")
-        .as_nanos();
-    let directory = root.join(format!("{}-{started}", std::process::id()));
-    std::fs::create_dir(&directory).expect("creating test database directory");
-    let lock = std::fs::File::create(directory.join("owner.lock"))
-        .expect("creating test database owner lock");
-    lock.lock().expect("locking test database directory");
-    (directory, lock)
-}
-
-#[cfg(test)]
-impl Drop for TestDatabase {
-    fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", self.path.display()));
-        }
     }
 }
 
@@ -3949,13 +3904,13 @@ impl Store {
             (start.group_name, start.location_name)
         };
         let connections = sqlx::query!(
-            "SELECT from_location.name AS from_name, to_location.name AS to_name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
+            "SELECT connection.name, from_location.name AS from_name, to_location.name AS to_name, connection.travel_time, connection.description, connection.gm_notes, connection.storyteller_notes \
              FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id \
              JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? AND connection.deleted = 0 ORDER BY connection.id",
             world_id,
         ).fetch_all(&self.pool).await.context("loading scenario connections")?.into_iter()
             .map(|row| Ok(ScenarioConnection {
-                from: row.from_name, to: row.to_name, travel_time: row.travel_time, description: row.description,
+                name: row.name, from: row.from_name, to: row.to_name, travel_time: row.travel_time, description: row.description,
                 notes: decode_notes(&row.gm_notes, &row.storyteller_notes)?,
             })).collect::<Result<_>>()?;
         let groups = sqlx::query!(
@@ -6038,7 +5993,7 @@ impl Store {
             ObjectIndexRow,
             "WITH object_index AS ( \
                 SELECT 'character' AS object_type, id, name || IIF(deleted, ' (deleted)', '') AS name, description, gm_notes, storyteller_notes FROM character WHERE world_id = ? \
-                UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name || IIF(connection.deleted, ' (deleted)', ''), connection.description, connection.gm_notes, connection.storyteller_notes FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.world_id = ? \
+                UNION ALL SELECT 'connection', connection.id, connection.name || IIF(connection.deleted, ' (deleted)', ''), connection.description, connection.gm_notes, connection.storyteller_notes FROM connection WHERE connection.world_id = ? \
                 UNION ALL SELECT 'group', id, name || IIF(deleted, ' (deleted)', ''), '', gm_notes, storyteller_notes FROM \"group\" WHERE world_id = ? \
                 UNION ALL SELECT 'item', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM item WHERE world_id = ? \
                 UNION ALL SELECT 'item_type', id, name || IIF(deleted, ' (deleted)', ''), description, gm_notes, storyteller_notes FROM item_type WHERE world_id = ? \
@@ -6179,7 +6134,7 @@ impl Store {
                 Vec::new(),
                 sqlx::query_as!(
                     ObjectLinkRow,
-                    "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM \"group\" WHERE location_id = ?1 UNION ALL SELECT 'item', item.id, item.name FROM item_location JOIN item ON item.id = item_location.item_id WHERE item_location.location_id = ?1 UNION ALL SELECT 'connection', connection.id, from_location.name || ' <-> ' || to_location.name FROM connection JOIN location AS from_location ON from_location.id = connection.from_location_id JOIN location AS to_location ON to_location.id = connection.to_location_id WHERE connection.from_location_id = ?1 OR connection.to_location_id = ?1 ORDER BY object_type, id",
+                    "SELECT 'group' AS object_type, \"group\".id, \"group\".name AS label FROM \"group\" WHERE location_id = ?1 UNION ALL SELECT 'item', item.id, item.name FROM item_location JOIN item ON item.id = item_location.item_id WHERE item_location.location_id = ?1 UNION ALL SELECT 'connection', connection.id, connection.name FROM connection WHERE connection.from_location_id = ?1 OR connection.to_location_id = ?1 ORDER BY object_type, id",
                     id,
                 ).fetch_all(&self.pool).await,
             ),
@@ -6481,34 +6436,6 @@ mod tests {
             .await?
             .context("completed test summary was not activated")
             .map(|summary| summary.id)
-    }
-
-    /// A run still setting up its directory (created, owner lock not yet
-    /// taken) must not be mistaken for an exited run by a concurrent one.
-    #[test]
-    fn claiming_a_run_directory_never_deletes_one_still_being_set_up() {
-        let scratch = super::ScratchDir::new("cairnworld-claim-test");
-        let root = scratch.path().to_path_buf();
-        // A creator mid-setup holds the claim guard, as claim_run_directory does.
-        let guard = std::fs::File::create(root.join(super::CLAIM_GUARD)).unwrap();
-        guard.lock().unwrap();
-        let setting_up = root.join("setting-up");
-        std::fs::create_dir(&setting_up).unwrap();
-
-        let claiming_root = root.clone();
-        let claim = std::thread::spawn(move || super::claim_run_directory(&claiming_root));
-        // Give the concurrent claim ample opportunity to scan.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        assert!(
-            setting_up.exists(),
-            "a directory that is still being set up was deleted by a concurrent claim"
-        );
-        // Finish setting up: take the owner lock, as the real creator does.
-        let lock = std::fs::File::create(setting_up.join("owner.lock")).unwrap();
-        lock.lock().unwrap();
-        drop(guard);
-        let (claimed, _lock) = claim.join().unwrap();
-        assert!(setting_up.exists() && claimed.exists());
     }
 
     fn database() -> super::TestDatabase {

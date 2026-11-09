@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO connection (world_id, name, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "aeaf3c4619a9909ba0d90631e75295a318252a0dfa1a9f4906ce68af0e4c5ef9"
+}

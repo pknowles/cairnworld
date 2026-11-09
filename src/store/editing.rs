@@ -5,6 +5,8 @@
 use anyhow::{Context, Result};
 use sqlx::{Sqlite, Transaction};
 
+use crate::scenario::{Group, Notes};
+
 use super::{
     Store,
     authoring::{Changed, DeleteOptions, Fields, Holder, ObjectKind, reject},
@@ -62,9 +64,7 @@ impl Store {
         fields: &Fields,
     ) -> Result<Changed> {
         if kind == ObjectKind::Group {
-            return reject(
-                "A group cannot be changed; move an npc to another group with its group_id.".into(),
-            );
+            return reject("A group cannot be changed; put NPCs together with group_npcs.".into());
         }
         fields.check(kind, false)?;
         let mut transaction = self
@@ -77,7 +77,6 @@ impl Store {
         if let Some(name) = &fields.name {
             Self::ensure_name_free(&mut transaction, world_id, kind, name, id).await?;
         }
-        let mut made_group = None;
         match kind {
             ObjectKind::Location => {
                 sqlx::query!(
@@ -93,17 +92,26 @@ impl Store {
                 .context("updating a location")?;
             }
             ObjectKind::Connection => {
-                if fields.from_id.is_some() || fields.to_id.is_some() {
-                    return reject(
-                        "A connection's ends cannot change; delete it and create another.".into(),
-                    );
-                }
                 if fields.travel_time.is_some_and(|time| time < 0) {
                     return reject("A connection's travel time cannot be negative.".into());
                 }
+                let ends = sqlx::query!(
+                    "SELECT from_location_id, to_location_id FROM connection WHERE id = ?",
+                    id,
+                )
+                .fetch_one(&mut *transaction)
+                .await
+                .context("reading a connection's ends")?;
+                let from = fields.from_id.unwrap_or(ends.from_location_id);
+                let to = fields.to_id.unwrap_or(ends.to_location_id);
+                Self::ensure_ends(&mut transaction, world_id, from, to, Some(id)).await?;
                 sqlx::query!(
-                    "UPDATE connection SET travel_time = COALESCE(?, travel_time), \
+                    "UPDATE connection SET name = COALESCE(?, name), from_location_id = ?, \
+                     to_location_id = ?, travel_time = COALESCE(?, travel_time), \
                      description = COALESCE(?, description) WHERE id = ?",
+                    fields.name,
+                    from,
+                    to,
                     fields.travel_time,
                     fields.description,
                     id,
@@ -114,33 +122,6 @@ impl Store {
             }
             ObjectKind::Group => unreachable!("a group is refused before it is changed"),
             ObjectKind::Npc => {
-                if let Some((group, made)) =
-                    Self::npc_group(&mut transaction, world_id, fields).await?
-                {
-                    made_group = made.then_some(group);
-                    let old = sqlx::query_scalar!(
-                        "SELECT group_id FROM character_group WHERE character_id = ?",
-                        id,
-                    )
-                    .fetch_optional(&mut *transaction)
-                    .await
-                    .context("finding an NPC's group")?;
-                    sqlx::query!(
-                        "UPDATE character_group SET group_id = ? WHERE character_id = ?",
-                        group,
-                        id,
-                    )
-                    .execute(&mut *transaction)
-                    .await
-                    .context("moving an NPC to another group")?;
-                    // A group goes with its last character.
-                    if let Some(old) = old
-                        && old != group
-                        && Self::active_members(&mut transaction, old).await? == 0
-                    {
-                        Self::flag_deleted(&mut transaction, ObjectKind::Group, old).await?;
-                    }
-                }
                 let sheet = fields
                     .sheet
                     .as_ref()
@@ -245,8 +226,84 @@ impl Store {
         Ok(Changed {
             kind: kind.as_str(),
             id,
-            group: made_group,
+            group: None,
         })
+    }
+
+    /// Put NPCs together in a new group at a location, writing where in the
+    /// location they are to each of them. A group left without a member goes.
+    /// Returns the new group.
+    pub async fn group_npcs(
+        &self,
+        world_id: i64,
+        npc_ids: &[i64],
+        name: &str,
+        location_id: i64,
+        description: &str,
+    ) -> Result<i64> {
+        if npc_ids.is_empty() {
+            return reject("Name at least one NPC.".into());
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .with_context(|| format!("grouping NPCs in world {world_id}"))?;
+        Self::ensure_stage(&mut transaction, world_id, &["create_objects", "review"]).await?;
+        for id in npc_ids {
+            Self::ensure_exists(&mut transaction, world_id, ObjectKind::Npc, *id).await?;
+        }
+        Self::ensure_exists(
+            &mut transaction,
+            world_id,
+            ObjectKind::Location,
+            location_id,
+        )
+        .await?;
+        if let Some(existing) =
+            Self::find_by_name(&mut transaction, world_id, ObjectKind::Group, name, true).await?
+        {
+            return reject(format!(
+                "Group {existing} is already called `{name}`; name the new group something else."
+            ));
+        }
+        let group = Group {
+            name: name.to_string(),
+            location: String::new(),
+            notes: Notes::default(),
+        };
+        let new_group = Self::insert_group(&mut transaction, world_id, location_id, &group).await?;
+        for &npc in npc_ids {
+            let old = sqlx::query_scalar!(
+                "SELECT group_id FROM character_group WHERE character_id = ?",
+                npc,
+            )
+            .fetch_one(&mut *transaction)
+            .await
+            .context("finding an NPC's group")?;
+            if old == new_group {
+                continue;
+            }
+            sqlx::query!(
+                "UPDATE character_group SET group_id = ?, description = ? WHERE character_id = ?",
+                new_group,
+                description,
+                npc,
+            )
+            .execute(&mut *transaction)
+            .await
+            .context("moving an NPC to another group")?;
+            // A group goes with its last character.
+            if Self::active_members(&mut transaction, old).await? == 0 {
+                Self::flag_deleted(&mut transaction, ObjectKind::Group, old).await?;
+            }
+            Self::clear_review(&mut transaction, ObjectKind::Npc, npc).await?;
+        }
+        transaction
+            .commit()
+            .await
+            .with_context(|| format!("committing grouping in world {world_id}"))?;
+        Ok(new_group)
     }
 
     /// Flag an object as deleted. What depends on it either blocks the delete or
@@ -532,6 +589,86 @@ mod id_tests {
     use crate::store::{DeleteOptions, Fields, ObjectKind};
 
     #[tokio::test]
+    async fn a_connections_ends_can_change_to_two_different_locations_it_does_not_already_join() {
+        let (store, _db, world) = world_creating_objects().await;
+        let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
+        let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
+        let well = create(&store, world, ObjectKind::Location, location_fields("well")).await;
+        let connect = |name: &str, from, to| Fields {
+            name: Some(name.into()),
+            from_id: Some(from),
+            to_id: Some(to),
+            travel_time: Some(1),
+            description: Some(String::new()),
+            ..Fields::default()
+        };
+        let path = create(
+            &store,
+            world,
+            ObjectKind::Connection,
+            connect("path", hut, yard),
+        )
+        .await;
+        create(
+            &store,
+            world,
+            ObjectKind::Connection,
+            connect("lane", hut, well),
+        )
+        .await;
+        let change = |fields: Fields| {
+            let store = store.clone();
+            async move {
+                store
+                    .update_object(world, ObjectKind::Connection, path, &fields)
+                    .await
+            }
+        };
+        let refused = |result: anyhow::Result<_>| format!("{:#}", result.expect_err("a refusal"));
+        assert!(
+            refused(
+                change(Fields {
+                    to_id: Some(hut),
+                    ..Fields::default()
+                })
+                .await
+            )
+            .contains("cannot join a location to itself")
+        );
+        assert!(
+            refused(
+                change(Fields {
+                    to_id: Some(well),
+                    ..Fields::default()
+                })
+                .await
+            )
+            .contains("already leads from location")
+        );
+        assert!(
+            refused(
+                change(Fields {
+                    from_id: Some(99),
+                    ..Fields::default()
+                })
+                .await
+            )
+            .contains("no location with id 99")
+        );
+        change(Fields {
+            from_id: Some(well),
+            ..Fields::default()
+        })
+        .await
+        .unwrap();
+        let read = store
+            .read_object(world, ObjectKind::Connection, path)
+            .await
+            .unwrap();
+        assert!(read.contains("well") && read.contains("yard"), "{read}");
+    }
+
+    #[tokio::test]
     async fn an_update_replaces_only_given_fields_and_unreviews_the_object() {
         let (store, _db, world) = world_creating_objects().await;
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
@@ -593,17 +730,21 @@ mod id_tests {
     async fn deletion_flags_an_npc_and_removes_it_from_scheduling() {
         let (store, _db, world) = world_creating_objects().await;
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
-        let (family, toma) = group_with_npc(&store, world, "family", hut, "Toma").await;
-        let mara = create(&store, world, ObjectKind::Npc, npc_fields("Mara", family)).await;
-        assert_eq!(store.group_npc_ids(family).await.unwrap(), vec![toma, mara]);
+        let (_, toma) = group_with_npc(&store, world, "family", hut, "Toma").await;
+        let mara = create(&store, world, ObjectKind::Npc, npc_at("Mara", hut)).await;
+        let kin = store
+            .group_npcs(world, &[toma, mara], "kin", hut, "by the fire")
+            .await
+            .unwrap();
+        assert_eq!(store.group_npc_ids(kin).await.unwrap(), vec![toma, mara]);
         store
             .delete_object(world, ObjectKind::Npc, toma, &DeleteOptions::default())
             .await
             .unwrap();
-        assert_eq!(store.group_npc_ids(family).await.unwrap(), vec![mara]);
+        assert_eq!(store.group_npc_ids(kin).await.unwrap(), vec![mara]);
         assert!(store.npc_scene(mara).await.unwrap().present.is_empty());
         let error = store
-            .create_object(world, ObjectKind::Npc, &npc_fields("Toma", family))
+            .create_object(world, ObjectKind::Npc, &npc_at("Toma", hut))
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("called `Toma`"));
@@ -649,21 +790,13 @@ mod id_tests {
         );
 
         // Moving the last NPC out takes the group with it.
-        store
-            .update_object(
-                world,
-                ObjectKind::Npc,
-                toma,
-                &Fields {
-                    group_id: Some(guild),
-                    ..Fields::default()
-                },
-            )
+        let merged = store
+            .group_npcs(world, &[toma, mara], "merged", hut, "")
             .await
             .unwrap();
-        assert_eq!(groups(&store).await, ["guild"]);
-        assert_eq!(store.group_npc_ids(guild).await.unwrap(), vec![toma, mara]);
-        let _ = family;
+        assert_eq!(groups(&store).await, ["merged"]);
+        assert_eq!(store.group_npc_ids(merged).await.unwrap(), vec![toma, mara]);
+        let _ = (family, guild);
 
         // Deleting the last NPC takes the group as well.
         for npc in [toma, mara] {

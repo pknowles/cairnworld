@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT from_location_id, to_location_id FROM connection WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "from_location_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "to_location_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "dd5eac3b0bbea30fb24a21d320eabe467474727905538e2ccfa1f651ae1e11b2"
+}

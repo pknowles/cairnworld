@@ -2458,21 +2458,25 @@ mod tests {
             text("Added who rules and what is feared."),
             call("world_summary_complete", "{}"),
             text("  The Drowned Bell \n"),
+            // Creation runs in stages: the locations, then one request for each
+            // other name the summary marks.
+            calls(&[(
+                "create_object",
+                r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"A tower above the water."}"#,
+            )]),
+            text("The locations exist."),
             calls(&[
                 (
                     "create_object",
-                    r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"A tower above the water."}"#,
-                ),
-                (
-                    "create_object",
-                    r#"{"object":"npc","name":"Ysolde","group_name":"Wardens","location_id":1,"description":"A stern warden.","background":"Lost her brother to the tide.","motive":"Keep the bell silent."}"#,
+                    r#"{"object":"npc","name":"Ysolde","location_id":1,"description":"A stern warden.","background":"Lost her brother to the tide.","motive":"Keep the bell silent."}"#,
                 ),
                 (
                     "create_object",
                     r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"Again."}"#,
                 ),
             ]),
-            text("The objects exist."),
+            text("Ysolde exists."),
+            text("The bell needs no object."),
             // The first review asks a question instead of completing...
             calls(&[
                 ("read_object", r#"{"objects":[{"object":"npc","id":2}]}"#),
@@ -2484,7 +2488,7 @@ mod tests {
             // ...the Storyteller adds an object for it...
             calls(&[(
                 "create_object",
-                r#"{"object":"npc","name":"Corvin","group_id":1,"description":"A rival warden.","background":"Wants her post.","motive":"Replace Ysolde."}"#,
+                r#"{"object":"npc","name":"Corvin","location_id":1,"description":"A rival warden.","background":"Wants her post.","motive":"Replace Ysolde."}"#,
             )]),
             text("Added Corvin."),
             // ...and the second review marks everything and completes.
@@ -2496,6 +2500,10 @@ mod tests {
                 (
                     "mark_object_reviewed",
                     r#"{"object":"group","id":1,"reviewed":true}"#,
+                ),
+                (
+                    "mark_object_reviewed",
+                    r#"{"object":"group","id":2,"reviewed":true}"#,
                 ),
                 (
                     "mark_object_reviewed",
@@ -2562,12 +2570,12 @@ mod tests {
         assert!(world.ready, "reviewed core objects open play");
         assert!(world.failure.is_none());
         let objects = store.review_list(member.world_id).await.unwrap();
-        assert_eq!(objects.len(), 4);
+        assert_eq!(objects.len(), 5);
         assert!(objects.iter().all(|object| object.reviewed));
         store.character_group_id(member.character_id).await.unwrap();
 
         let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
-        assert_eq!(shown.len(), 14);
+        assert_eq!(shown.len(), 17);
         assert!(shown[0].contains("A drowned city"));
         let prompts = crate::prompts::current().unwrap();
         let sampled = |questions: &[String]| {
@@ -2616,59 +2624,63 @@ mod tests {
                 .all(|temperature| *temperature == 0.0)
         );
 
-        // The Storyteller creates objects with creation tools and sees the one summary.
+        // The Storyteller creates the locations first with creation tools, seeing
+        // the one summary and that nothing exists yet.
         assert!(
-            shown[8].contains("no object has them yet: Ysolde, Drowned Bell"),
+            shown[8].contains("Use create_object to create each location")
+                && shown[8].contains("a city ruled by tide-wardens")
+                && shown[8]
+                    .contains("The world so far (locations: 0, connections: 0, groups: 0, npcs: 0"),
             "{}",
             shown[8]
         );
+        // Then one request for each marked name that still has no object.
         assert!(
-            shown[8].contains("Create the world's objects"),
-            "{}",
-            shown[8]
-        );
-        assert!(
-            shown[8].contains("create_object") && shown[8].contains("a city ruled by tide-wardens")
-        );
-        // A refused call reaches the Storyteller as a tool result it can act on.
-        assert!(shown[9].contains("called `Belfry`"), "{}", shown[9]);
-        // The Questioner reviews the objects, not the Storyteller's answers.
-        assert!(shown[10].contains("- [ ] npc 2 Ysolde") && shown[10].contains("read_object"));
-        assert!(!shown[10].contains("The tide-wardens rule."));
-        // It is told which marked name has no object, and not the one that has.
-        assert!(
-            shown[10].contains("no object has them yet: Drowned Bell"),
+            shown[10].contains("Create the object for [[Ysolde]]")
+                && shown[10].contains("- location 1 Belfry"),
             "{}",
             shown[10]
+        );
+        assert!(
+            shown[12].contains("Create the object for [[Drowned Bell]]"),
+            "{}",
+            shown[12]
+        );
+        // A refused call reaches the Storyteller as a tool result it can act on.
+        assert!(shown[11].contains("called `Belfry`"), "{}", shown[11]);
+        // The Questioner reviews the objects, not the Storyteller's answers.
+        assert!(shown[13].contains("- [ ] npc 2 Ysolde") && shown[13].contains("read_object"));
+        assert!(!shown[13].contains("The tide-wardens rule."));
+        // It is told which marked name has no object, and not the one that has.
+        assert!(
+            shown[13].contains("no object has them yet: Drowned Bell"),
+            "{}",
+            shown[13]
         );
         // The Questioner's question sends the Storyteller back to create objects, and it
         // is shown what already exists (a fact, not kept in its chat).
         assert!(
-            shown[11].contains("Who stands against Ysolde?"),
+            shown[14].contains("Who stands against Ysolde?"),
             "{}",
-            shown[11]
+            shown[14]
         );
         assert!(
-            shown[11]
+            shown[14]
                 .contains("The world so far (locations: 1, connections: 0, groups: 1, npcs: 1")
-                && shown[11].contains("- location 1 Belfry")
-                && shown[11].contains("- npc 2 Ysolde"),
+                && shown[14].contains("- location 1 Belfry")
+                && shown[14].contains("- npc 2 Ysolde"),
             "{}",
-            shown[11]
-        );
-        // The first request already shows what is missing: nothing exists yet.
-        assert!(
-            shown[8].contains("The world so far (locations: 0, connections: 0, groups: 0, npcs: 0")
+            shown[14]
         );
         // The Storyteller's change comes back to the Questioner as the result
         // of its own question, in the same turn.
         assert!(
-            shown[13].contains("Added Corvin.")
-                && shown[13].contains("Changes to the world:")
-                && shown[13].contains("- added npc 3 Corvin")
-                && !shown[13].contains("create_object"),
+            shown[16].contains("Added Corvin.")
+                && shown[16].contains("Changes to the world:")
+                && shown[16].contains("- added npc 3 Corvin")
+                && !shown[16].contains("create_object"),
             "{}",
-            shown[13]
+            shown[16]
         );
         // The result is the Storyteller's note of the change; the summary itself
         // is the Questioner's context.
@@ -2732,7 +2744,7 @@ mod tests {
         name: &str,
     ) -> (crate::store::TestDatabase, Store, crate::store::PlayerAgent) {
         use crate::store::Advance;
-        const SALTGATE_SUMMARY: &str = "Saltgate is a smuggler town on an estuary whose tide has stopped             coming in. The Harbor Guild, led by Warden [[Ysolde Varn]], blames the smugglers and             wants the channel dredged. The smugglers, led by [[Captain Brannoch]], hide their             cargo in the [[Bell Cellar]] below [[Saltgate Quay]], where a drowned bell rings             against the tide; Brannoch wants the tide to stay wrong because it hides his boats.             Ysolde's brother drowned near the bell and she will not let the cellar stay hidden.             Players arrive at the quay with a [[Guild writ]] from a distant client who wants the             bell silenced, and must choose between the Guild, the smugglers and their own aims.";
+        const SALTGATE_SUMMARY: &str = "Saltgate is a smuggler town on an estuary whose tide has stopped             coming in. The Harbor Guild, led by Warden [[Ysolde Varn]] and her clerk [[Tamsin Reed]], blames the smugglers and             wants the channel dredged. The smugglers, led by [[Captain Brannoch]] and his boatswain [[Old Pell]], hide their             cargo in the [[Bell Cellar]] below [[Saltgate Quay]], where a drowned bell rings             against the tide; Brannoch wants the tide to stay wrong because it hides his boats.             Ysolde's brother drowned near the bell and she will not let the cellar stay hidden.             The bell is tended by [[Mother Wick]], who answers to neither side. Players arrive at the quay with a [[Guild writ]] from a distant client who wants the             bell silenced, and must choose between the Guild, the smugglers and their own aims.";
         let db = crate::store::TestDatabase::new(name);
         let store = Store::open(db.path()).await.unwrap();
         let owner = store
@@ -2872,18 +2884,33 @@ mod tests {
         for (inference, reason) in reasons {
             println!("REJECTED in inference {inference}: {reason}");
         }
-        let calls: Vec<(i64, i64, String)> = sqlx::query_as(
-            "SELECT tool_execution.inference_id, tool_execution.ordinal, recorded_content.body FROM tool_execution              JOIN inference ON inference.id = tool_execution.inference_id              JOIN recorded_content ON recorded_content.id = inference.output              WHERE tool_execution.status = 'rejected'",
+        let calls: Vec<(i64, i64, String, String)> = sqlx::query_as(
+            "SELECT tool_execution.inference_id, tool_execution.ordinal, tool_execution.status, recorded_content.body FROM tool_execution              JOIN inference ON inference.id = tool_execution.inference_id              JOIN recorded_content ON recorded_content.id = inference.output",
         )
         .fetch_all(&pool)
         .await
         .unwrap();
-        for (inference, ordinal, body) in calls {
+        for (inference, ordinal, status, body) in calls {
             let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-            println!(
-                "REJECTED CALL {inference}/{ordinal}: {}",
+            let arguments =
                 body["content"]["value"][usize::try_from(ordinal).unwrap()]["arguments"]
+                    .to_string();
+            println!(
+                "CALL {inference}/{ordinal} {status}: {}",
+                arguments.chars().take(160).collect::<String>()
             );
+        }
+        let outputs: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT inference.id, recorded_content.body FROM inference              JOIN recorded_content ON recorded_content.id = inference.output ORDER BY inference.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (inference, body) in outputs {
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if body["content"]["type"] == "Text" {
+                println!("TEXT {inference}: {}", body["content"]["value"]);
+            }
         }
         let world = store.world(member.world_id).await.unwrap().unwrap();
         let objects = store.review_list(member.world_id).await.unwrap();
@@ -2944,27 +2971,13 @@ mod tests {
                 .await
                 .unwrap()
                 .id;
-            let guild = store
-                .create_object(
-                    member.world_id,
-                    ObjectKind::Group,
-                    &Fields {
-                        name: Some("The Harbor Guild".into()),
-                        location_id: Some(quay),
-                        description: Some("Officials who want the channel dredged.".into()),
-                        ..Fields::default()
-                    },
-                )
-                .await
-                .unwrap()
-                .id;
             store
                 .create_object(
                     member.world_id,
                     ObjectKind::Npc,
                     &Fields {
                         name: Some("Ysolde Varn".into()),
-                        group_id: Some(guild),
+                        location_id: Some(quay),
                         description: Some("A stern Guild warden.".into()),
                         background: Some("Her brother drowned near the bell.".into()),
                         motive: Some("Dredge the channel.".into()),

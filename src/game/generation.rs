@@ -402,7 +402,7 @@ where
                 Ok(Advance::Name(reply_text(&settled)?.to_string()))
             }
             GenerationStage::CreateObjects => {
-                self.storyteller_creates_objects(scope, &[]).await?;
+                self.storyteller_creates_first_objects(scope).await?;
                 Ok(Advance::ObjectsCreated)
             }
             GenerationStage::Review => {
@@ -589,7 +589,7 @@ where
         questions: &[String],
     ) -> Result<String> {
         let before = self.store.review_list(scope.world.id).await?;
-        let settled = self.storyteller_creates_objects(scope, questions).await?;
+        let settled = self.storyteller_fixes_objects(scope, questions).await?;
         let after = self.store.review_list(scope.world.id).await?;
         let prompts = prompts::current()?;
         let mut result = prompts::fill(
@@ -610,9 +610,40 @@ where
         Ok(result)
     }
 
-    /// One Storyteller turn creating objects: first the summary's objects, then
-    /// whatever the Questioner's questions found missing.
-    async fn storyteller_creates_objects(
+    /// The summary's objects in stages, so each reply is short and each object
+    /// gets a focused description: the locations and their connections, then
+    /// one request for each other name the summary marks, then the grouping of
+    /// the NPCs.
+    async fn storyteller_creates_first_objects(self: &Arc<Self>, scope: &StepScope) -> Result<()> {
+        let storyteller = &prompts::current()?.storyteller;
+        self.storyteller_object_turn(scope, storyteller.create_locations_request.clone())
+            .await?;
+        let generation = self.current_generation(scope).await?;
+        for name in self
+            .uncreated_names(scope.world.id, &generation.summary)
+            .await?
+        {
+            let text = prompts::fill(&storyteller.create_object_request, &[("name", &name)])?;
+            self.storyteller_object_turn(scope, text).await?;
+        }
+        // Every NPC starts in a group of its own; grouping is a follow-up.
+        let npcs = self
+            .store
+            .review_list(scope.world.id)
+            .await?
+            .iter()
+            .filter(|entry| entry.kind == "npc")
+            .count();
+        if npcs > 1 {
+            self.storyteller_object_turn(scope, storyteller.group_npcs_request.clone())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// One Storyteller turn creating objects to fix what the Questioner's
+    /// questions found missing.
+    async fn storyteller_fixes_objects(
         self: &Arc<Self>,
         scope: &StepScope,
         questions: &[String],
@@ -620,26 +651,36 @@ where
         let prompts = prompts::current()?;
         let storyteller = &prompts.storyteller;
         let generation = self.current_generation(scope).await?;
-        let mut text = if questions.is_empty() {
-            storyteller.create_objects_request.clone()
-        } else {
-            prompts::fill(
-                &storyteller.fix_request,
-                &[("questions", &bullets(questions))],
-            )?
-        };
+        let mut text = prompts::fill(
+            &storyteller.fix_request,
+            &[("questions", &bullets(questions))],
+        )?;
         // A reminder, not a requirement: the Storyteller decides which marked
         // names need an object.
         let uncreated = self
             .uncreated_names(scope.world.id, &generation.summary)
             .await?;
         if !uncreated.is_empty() {
-            text.push_str("\n\n");
+            text.push_str(
+                "
+
+",
+            );
             text.push_str(&prompts::fill(
                 &storyteller.uncreated_mentions,
                 &[("names", &uncreated.join(", "))],
             )?);
         }
+        self.storyteller_object_turn(scope, text).await
+    }
+
+    /// One Storyteller turn with the object tools, shown what already exists.
+    async fn storyteller_object_turn(
+        self: &Arc<Self>,
+        scope: &StepScope,
+        text: String,
+    ) -> Result<Settled> {
+        let generation = self.current_generation(scope).await?;
         let request = Request {
             tools: authoring::storyteller_tools(&self.store, &scope.world)?,
             context: ContextKind::StorytellerCreatingObjects,

@@ -4,7 +4,8 @@
 //! `create_object` and `update_object` take the kind as an argument; creating
 //! requires a description, which every kind has, and changing carries no field
 //! text of its own, so each field is described once. There is no tool for a
-//! group: an NPC joins one or starts one, and a group goes with its last NPC.
+//! group: every NPC starts in one of its own, `group_npcs` puts NPCs together,
+//! and a group goes with its last NPC.
 //! Every tool is built for one world, so a call can only touch that world.
 
 use std::sync::Arc;
@@ -35,6 +36,14 @@ struct UpdateObject {
     id: i64,
     #[serde(flatten)]
     fields: Fields,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GroupNpcs {
+    npc_ids: Vec<i64>,
+    group_name: String,
+    location_id: i64,
+    description: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -103,6 +112,13 @@ pub(super) fn storyteller_tools(store: &Store, world: &Arc<World>) -> Result<Vec
     )?;
     drop_null_types(&mut delete.schema);
     remove_group_kind(&mut delete.schema);
+    list.push(group_npcs_tool(
+        world,
+        tools.tool(
+            "group_npcs",
+            serde_json::to_value(schema_for!(GroupNpcs)).expect("schema should serialize"),
+        )?,
+    ));
     list.push(changer::<DeleteObject>(
         world,
         delete,
@@ -126,6 +142,53 @@ fn remove_group_kind(schema: &mut serde_json::Value) {
     if let Some(kinds) = schema["properties"]["object"]["enum"].as_array_mut() {
         kinds.retain(|kind| kind != "group");
     }
+}
+
+/// Puts NPCs in one group; the result says which group they are in.
+fn group_npcs_tool((store, world): (&Store, &Arc<World>), mut definition: ToolDefinition) -> Tool {
+    drop_null_types(&mut definition.schema);
+    let store = store.clone();
+    let world = Arc::clone(world);
+    Tool::new(definition, move |context| {
+        let arguments = context.arguments.to_string();
+        let store = store.clone();
+        let world = Arc::clone(&world);
+        Box::pin(async move {
+            let allowed = ["npc_ids", "group_name", "location_id", "description"]
+                .map(String::from)
+                .to_vec();
+            let call: GroupNpcs = match parse(&arguments, &allowed) {
+                Ok(call) => call,
+                Err(error) => return Ok(ToolOutcome::rejected(error)),
+            };
+            match store
+                .group_npcs(
+                    world.id,
+                    &call.npc_ids,
+                    &call.group_name,
+                    call.location_id,
+                    &call.description,
+                )
+                .await
+            {
+                Ok(group) => {
+                    world.publish(DevEvent::Changed {
+                        sequence_id: None,
+                        inference_id: None,
+                    });
+                    Ok(ToolOutcome::Completed(format!(
+                        "Grouped in new group {group}."
+                    )))
+                }
+                Err(error) => match rejection_or_failure(error)? {
+                    ToolOutcome::Rejected(reason) => {
+                        Ok(ToolOutcome::Rejected(format!("Not grouped. {reason}")))
+                    }
+                    other => Ok(other),
+                },
+            }
+        })
+    })
 }
 
 type Wrap<T> = Box<dyn for<'a> Fn(&'a T) -> Change<'a> + Send + Sync>;
@@ -170,7 +233,14 @@ where
                         changed.kind, changed.id
                     )))
                 }
-                Err(error) => rejection_or_failure(error),
+                Err(error) => match rejection_or_failure(error)? {
+                    // Say plainly that the call did nothing.
+                    ToolOutcome::Rejected(reason) => Ok(ToolOutcome::Rejected(format!(
+                        "Not {}. {reason}",
+                        done.to_lowercase()
+                    ))),
+                    other => Ok(other),
+                },
             }
         })
     })

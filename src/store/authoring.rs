@@ -38,37 +38,54 @@ impl ObjectKind {
         }
     }
 
-    /// The fields an object of this kind has, and whether creating one needs it.
-    /// An item needs exactly one of `location_id` and `held_by_id`.
-    pub fn fields(self) -> &'static [(&'static str, bool)] {
-        match self {
-            Self::Location => &[
+    /// The fields creating or changing an object of this kind takes, and whether
+    /// creating one needs it. They never overlap or contradict, so a call with
+    /// valid fields is valid. An item needs exactly one of `location_id` and
+    /// `held_by_id`.
+    pub fn fields(self, creating: bool) -> &'static [(&'static str, bool)] {
+        match (self, creating) {
+            (Self::Location, _) => &[
                 ("name", true),
                 ("location_kind", true),
                 ("description", true),
             ],
-            Self::Connection => &[
+            (Self::Connection, true) => &[
+                ("name", true),
                 ("from_id", true),
                 ("to_id", true),
                 ("travel_time", true),
                 ("description", true),
             ],
-            // A group is never created or changed by itself: an NPC joins one or
-            // makes one, and it goes with its last NPC.
-            Self::Group => &[],
-            Self::Npc => &[
+            (Self::Connection, false) => &[
+                ("name", false),
+                ("from_id", false),
+                ("to_id", false),
+                ("travel_time", false),
+                ("description", false),
+            ],
+            // A group is never created or changed by itself: every NPC starts in
+            // a group of its own, `group_npcs` puts NPCs together, and a group
+            // goes with its last NPC.
+            (Self::Group, _) => &[],
+            (Self::Npc, true) => &[
                 ("name", true),
-                ("group_id", false),
-                ("group_name", false),
-                ("location_id", false),
+                ("location_id", true),
                 ("description", true),
                 ("background", true),
                 ("motive", true),
                 ("ambition", false),
                 ("sheet", false),
             ],
-            Self::ItemType => &[("name", true), ("description", true), ("stats", false)],
-            Self::Item => &[
+            (Self::Npc, false) => &[
+                ("name", false),
+                ("description", false),
+                ("background", false),
+                ("motive", false),
+                ("ambition", false),
+                ("sheet", false),
+            ],
+            (Self::ItemType, _) => &[("name", true), ("description", true), ("stats", false)],
+            (Self::Item, _) => &[
                 ("name", true),
                 ("item_type_id", true),
                 ("description", true),
@@ -90,8 +107,6 @@ pub struct Fields {
     pub to_id: Option<i64>,
     pub travel_time: Option<i64>,
     pub location_id: Option<i64>,
-    pub group_id: Option<i64>,
-    pub group_name: Option<String>,
     pub item_type_id: Option<i64>,
     pub held_by_id: Option<i64>,
     pub background: Option<String>,
@@ -130,8 +145,18 @@ impl Fields {
     /// Refuse a field the kind does not have and, when creating, a missing one.
     pub(super) fn check(&self, kind: ObjectKind, creating: bool) -> Result<()> {
         let given = self.given();
-        let has: Vec<&str> = kind.fields().iter().map(|(name, _)| *name).collect();
+        let has: Vec<&str> = kind
+            .fields(creating)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
         if let Some(extra) = given.iter().find(|field| !has.contains(&field.as_str())) {
+            if !creating && kind.fields(true).iter().any(|(name, _)| name == extra) {
+                return reject(format!(
+                    "A {}'s `{extra}` cannot be changed after it is created.",
+                    kind.as_str()
+                ));
+            }
             return reject(format!(
                 "A {} has the fields {}, not `{extra}`.",
                 kind.as_str(),
@@ -140,7 +165,7 @@ impl Fields {
         }
         if creating {
             let missing: Vec<&str> = kind
-                .fields()
+                .fields(true)
                 .iter()
                 .filter(|(name, needed)| *needed && !given.iter().any(|field| field == name))
                 .map(|(name, _)| *name)
@@ -241,6 +266,40 @@ impl Store {
         .last_insert_rowid())
     }
 
+    /// Refuse ends that are not two different locations of the world, or that
+    /// another connection (not `except`) already joins in that direction.
+    pub(super) async fn ensure_ends(
+        transaction: &mut Transaction<'_, Sqlite>,
+        world_id: i64,
+        from: i64,
+        to: i64,
+        except: Option<i64>,
+    ) -> Result<()> {
+        if from == to {
+            return reject("A connection cannot join a location to itself.".into());
+        }
+        Self::ensure_exists(transaction, world_id, ObjectKind::Location, from).await?;
+        Self::ensure_exists(transaction, world_id, ObjectKind::Location, to).await?;
+        let except = except.unwrap_or(0);
+        if let Some(existing) = sqlx::query_scalar!(
+            "SELECT id FROM connection WHERE world_id = ? AND from_location_id = ? \
+             AND to_location_id = ? AND deleted = 0 AND id <> ?",
+            world_id,
+            from,
+            to,
+            except,
+        )
+        .fetch_optional(&mut **transaction)
+        .await
+        .context("looking for an existing connection")?
+        {
+            return reject(format!(
+                "Connection {existing} already leads from location {from} to location {to}."
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn insert_connection(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
@@ -251,9 +310,10 @@ impl Store {
         let gm_notes = Json(&connection.notes.gm);
         let storyteller_notes = Json(&connection.notes.storyteller);
         Ok(sqlx::query!(
-            "INSERT INTO connection (world_id, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO connection (world_id, name, from_location_id, to_location_id, travel_time, description, gm_notes, storyteller_notes) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             world_id,
+            connection.name,
             from_location_id,
             to_location_id,
             connection.travel_time,
@@ -440,7 +500,7 @@ impl Store {
     ) -> Result<Changed> {
         if kind == ObjectKind::Group {
             return reject(
-                "A group is made with its first NPC: give the NPC group_name and location_id."
+                "A group is made with an NPC: create the NPC at a location, and put NPCs together with group_npcs."
                     .into(),
             );
         }
@@ -466,34 +526,18 @@ impl Store {
                 Self::insert_location(&mut transaction, world_id, &location).await?
             }
             ObjectKind::Connection => {
+                let name = need(&fields.name, "name")?;
                 let from = need(&fields.from_id, "from_id")?;
                 let to = need(&fields.to_id, "to_id")?;
                 let travel_time = need(&fields.travel_time, "travel_time")?;
                 if travel_time < 0 {
                     return reject("A connection's travel time cannot be negative.".into());
                 }
-                if from == to {
-                    return reject("A connection cannot join a location to itself.".into());
-                }
-                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, from).await?;
-                Self::ensure_exists(&mut transaction, world_id, ObjectKind::Location, to).await?;
-                if let Some(existing) = sqlx::query_scalar!(
-                    "SELECT id FROM connection WHERE world_id = ? AND from_location_id = ? \
-                     AND to_location_id = ? AND deleted = 0",
-                    world_id,
-                    from,
-                    to,
-                )
-                .fetch_optional(&mut *transaction)
-                .await
-                .context("looking for an existing connection")?
-                {
-                    return reject(format!(
-                        "Connection {existing} already leads from location {from} to location {to}."
-                    ));
-                }
+                Self::ensure_ends(&mut transaction, world_id, from, to, None).await?;
+                Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
                 // The ends are given as IDs, so the names in the record stay empty.
                 let connection = Connection {
+                    name,
                     from: String::new(),
                     to: String::new(),
                     travel_time,
@@ -506,15 +550,10 @@ impl Store {
             ObjectKind::Npc => {
                 let name = need(&fields.name, "name")?;
                 Self::ensure_unused(&mut transaction, world_id, kind, &name).await?;
-                let Some((group_id, made)) =
-                    Self::npc_group(&mut transaction, world_id, fields).await?
-                else {
-                    return reject(
-                        "An NPC needs a group: give group_id to join one, or group_name and location_id to make one."
-                            .into(),
-                    );
-                };
-                made_group = made.then_some(group_id);
+                let location_id = need(&fields.location_id, "location_id")?;
+                let group_id =
+                    Self::start_group(&mut transaction, world_id, &name, location_id).await?;
+                made_group = Some(group_id);
                 let npc = Npc {
                     name,
                     group: String::new(),
@@ -603,44 +642,29 @@ impl Store {
         })
     }
 
-    /// The group an NPC goes into: an existing one, or a new one made for it, so
-    /// a group never exists without a character. The flag says it was made.
-    pub(super) async fn npc_group(
+    /// The group a new NPC starts in on its own, so a group never exists
+    /// without a character. It is named after the NPC until it is renamed.
+    async fn start_group(
         transaction: &mut Transaction<'_, Sqlite>,
         world_id: i64,
-        fields: &Fields,
-    ) -> Result<Option<(i64, bool)>> {
-        let new_group = fields.group_name.is_some() || fields.location_id.is_some();
-        match (fields.group_id, &fields.group_name, fields.location_id) {
-            (Some(_), _, _) if new_group => reject(
-                "Give group_id to join a group, or group_name and location_id to make one, not both."
-                    .into(),
-            ),
-            (Some(id), _, _) => {
-                Self::ensure_exists(transaction, world_id, ObjectKind::Group, id).await?;
-                Ok(Some((id, false)))
-            }
-            (None, Some(name), Some(location_id)) => {
-                if let Some(existing) =
-                    Self::find_by_name(transaction, world_id, ObjectKind::Group, name, true).await?
-                {
-                    return reject(format!(
-                        "The world already has group {existing} called `{name}`: give group_id {existing} to join it."
-                    ));
-                }
-                Self::ensure_exists(transaction, world_id, ObjectKind::Location, location_id)
-                    .await?;
-                let group = Group {
-                    name: name.clone(),
-                    location: String::new(),
-                    notes: Notes::default(),
-                };
-                let id = Self::insert_group(transaction, world_id, location_id, &group).await?;
-                Ok(Some((id, true)))
-            }
-            (None, None, None) => Ok(None),
-            (None, _, _) => reject("A new group needs group_name and location_id.".into()),
+        npc: &str,
+        location_id: i64,
+    ) -> Result<i64> {
+        let name = format!("{npc}'s group");
+        if let Some(existing) =
+            Self::find_by_name(transaction, world_id, ObjectKind::Group, &name, true).await?
+        {
+            return reject(format!(
+                "Group {existing} is already called `{name}`; rename it with group_npcs first."
+            ));
         }
+        Self::ensure_exists(transaction, world_id, ObjectKind::Location, location_id).await?;
+        let group = Group {
+            name,
+            location: String::new(),
+            notes: Notes::default(),
+        };
+        Self::insert_group(transaction, world_id, location_id, &group).await
     }
 
     /// The object of `kind` called `name` in the world, if there is one.
@@ -672,6 +696,16 @@ impl Store {
                 .fetch_optional(&mut **transaction)
                 .await
             }
+            ObjectKind::Connection => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM connection WHERE world_id = ? AND name = ? AND (deleted = 0 OR ?)",
+                    world_id,
+                    name,
+                    include_deleted,
+                )
+                .fetch_optional(&mut **transaction)
+                .await
+            }
             ObjectKind::ItemType => {
                 sqlx::query_scalar!(
                     "SELECT id FROM item_type WHERE world_id = ? AND name = ? AND (deleted = 0 OR ?)",
@@ -682,8 +716,6 @@ impl Store {
                 .fetch_optional(&mut **transaction)
                 .await
             }
-            // A connection has no name; it is told apart by the locations it joins.
-            ObjectKind::Connection => Ok(None),
             ObjectKind::Npc => {
                 sqlx::query_scalar!(
                     "SELECT id FROM character WHERE world_id = ? AND role = 'npc' AND name = ? AND (deleted = 0 OR ?)",
@@ -951,24 +983,27 @@ pub(in crate::store) mod fixtures {
         npc: &str,
     ) -> (i64, i64) {
         let changed = store
-            .create_object(
-                world,
-                ObjectKind::Npc,
-                &Fields {
-                    group_name: Some(group.into()),
-                    location_id: Some(location_id),
-                    ..npc_fields(npc, 0)
-                },
-            )
+            .create_object(world, ObjectKind::Npc, &npc_at(npc, location_id))
             .await
             .unwrap();
-        (changed.group.expect("a new group"), changed.id)
+        let group_id = store
+            .group_npcs(world, &[changed.id], group, location_id, "")
+            .await
+            .unwrap();
+        (group_id, changed.id)
     }
 
-    pub(in crate::store) fn npc_fields(name: &str, group_id: i64) -> Fields {
+    /// An NPC that starts in a group of its own at a location.
+    pub(in crate::store) fn npc_at(name: &str, location: i64) -> Fields {
+        Fields {
+            location_id: Some(location),
+            ..npc_fields(name)
+        }
+    }
+
+    pub(in crate::store) fn npc_fields(name: &str) -> Fields {
         Fields {
             name: Some(name.into()),
-            group_id: (group_id != 0).then_some(group_id),
             description: Some(String::new()),
             background: Some("Has a past.".into()),
             motive: Some("Has a goal.".into()),
@@ -992,6 +1027,7 @@ mod id_tests {
             world,
             ObjectKind::Connection,
             Fields {
+                name: Some("Hut path".into()),
                 from_id: Some(hut),
                 to_id: Some(yard),
                 travel_time: Some(1),
@@ -1051,7 +1087,7 @@ mod id_tests {
                 ObjectKind::Npc,
                 &Fields {
                     name: Some("Toma".into()),
-                    group_id: Some(99),
+                    location_id: Some(99),
                     description: Some(String::new()),
                     background: Some(String::new()),
                     motive: Some(String::new()),
@@ -1060,7 +1096,7 @@ mod id_tests {
             )
             .await
             .unwrap_err();
-        assert!(format!("{error:#}").contains("no group with id 99"));
+        assert!(format!("{error:#}").contains("no location with id 99"));
         let changed = store
             .create_object(world, ObjectKind::Location, &location_fields("yard"))
             .await
@@ -1158,6 +1194,7 @@ mod id_tests {
         let hut = create(&store, world, ObjectKind::Location, location_fields("hut")).await;
         let yard = create(&store, world, ObjectKind::Location, location_fields("yard")).await;
         let fields = Fields {
+            name: Some("Hut path".into()),
             from_id: Some(hut),
             to_id: Some(yard),
             travel_time: Some(1),
@@ -1183,7 +1220,7 @@ mod id_tests {
                 world,
                 ObjectKind::Location,
                 &Fields {
-                    group_id: Some(1),
+                    held_by_id: Some(1),
                     ..location_fields("yard")
                 },
             )
@@ -1191,7 +1228,7 @@ mod id_tests {
             .unwrap_err();
         assert!(
             format!("{error:#}").contains(
-                "A location has the fields name, location_kind, description, not `group_id`"
+                "A location has the fields name, location_kind, description, not `held_by_id`"
             ),
             "{error:#}"
         );
@@ -1209,33 +1246,18 @@ mod id_tests {
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("A group is made with its first NPC"),
+            format!("{error:#}").contains("A group is made with an NPC"),
             "{error:#}"
         );
         let error = store
-            .create_object(world, ObjectKind::Npc, &npc_fields("Toma", 0))
+            .create_object(world, ObjectKind::Npc, &npc_fields("Toma"))
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("An NPC needs a group"),
+            format!("{error:#}").contains("A npc needs location_id"),
             "{error:#}"
         );
-        let error = store
-            .create_object(
-                world,
-                ObjectKind::Npc,
-                &Fields {
-                    group_name: Some("family".into()),
-                    ..npc_fields("Toma", 0)
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("A new group needs group_name and location_id"),
-            "{error:#}"
-        );
-        // Naming a group that exists says to join it, not to change it.
+        // A group name is unique, though only its ID identifies the group.
         let orchard = create(
             &store,
             world,
@@ -1244,20 +1266,13 @@ mod id_tests {
         )
         .await;
         let (family, _) = group_with_npc(&store, world, "family", orchard, "Toma").await;
+        let mara = create(&store, world, ObjectKind::Npc, npc_at("Mara", orchard)).await;
         let error = store
-            .create_object(
-                world,
-                ObjectKind::Npc,
-                &Fields {
-                    group_name: Some("family".into()),
-                    location_id: Some(orchard),
-                    ..npc_fields("Mara", 0)
-                },
-            )
+            .group_npcs(world, &[mara], "family", orchard, "")
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains(&format!("give group_id {family} to join it")),
+            format!("{error:#}").contains(&format!("Group {family} is already called `family`")),
             "{error:#}"
         );
 

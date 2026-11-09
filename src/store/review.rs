@@ -38,11 +38,9 @@ impl Store {
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'location' AND object_id = location.id) AS \"reviewed!: bool\" \
                FROM location WHERE world_id = ?1 AND deleted = 0 \
              UNION ALL \
-             SELECT 'connection', connection.id, origin.name || ' -> ' || target.name, \
+             SELECT 'connection', connection.id, connection.name, \
                     EXISTS(SELECT 1 FROM object_reviewed WHERE kind = 'connection' AND object_id = connection.id) \
                FROM connection \
-               JOIN location AS origin ON origin.id = connection.from_location_id \
-               JOIN location AS target ON target.id = connection.to_location_id \
               WHERE connection.world_id = ?1 AND connection.deleted = 0 \
              UNION ALL \
              SELECT 'group', id, name, \
@@ -156,7 +154,7 @@ impl Store {
             }
             ObjectKind::Connection => {
                 let row = sqlx::query!(
-                    "SELECT origin.name AS origin, target.name AS target, connection.travel_time, connection.description \
+                    "SELECT connection.name, origin.name AS origin, target.name AS target, connection.travel_time, connection.description \
                      FROM connection \
                      JOIN location AS origin ON origin.id = connection.from_location_id \
                      JOIN location AS target ON target.id = connection.to_location_id \
@@ -167,7 +165,7 @@ impl Store {
                 .await
                 .context("reading a connection")?;
                 serde_json::json!({
-                    "from": row.origin, "to": row.target,
+                    "name": row.name, "from": row.origin, "to": row.target,
                     "travel_time": row.travel_time, "description": row.description,
                 })
             }
@@ -404,7 +402,6 @@ mod id_tests {
                 ObjectKind::Npc,
                 &Fields {
                     name: Some("Toma".into()),
-                    group_name: Some("family".into()),
                     location_id: Some(hut),
                     description: Some(String::new()),
                     background: Some(String::new()),
@@ -428,6 +425,7 @@ mod id_tests {
             world,
             ObjectKind::Connection,
             Fields {
+                name: Some("Hut path".into()),
                 from_id: Some(hut),
                 to_id: Some(yard),
                 travel_time: Some(1),

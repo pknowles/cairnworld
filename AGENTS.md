@@ -129,6 +129,10 @@ them for fact and act on them. For each,
 - As always check that the solution works, generically and holistically across
   the requirements and use cases. Simply avoiding a specific failure case is a
   shortcut and violates our standards. Sometimes a restructure is needed.
+- Do not over-test before you have something working. There is no point running
+  full test suites when you already know what is broken and haven't yet
+  surgically verified a fix. Extended testing is only appropriate to validate no
+  side effects. Busy work is not just wasteful but damaging.
 
 # Implementation loop
 

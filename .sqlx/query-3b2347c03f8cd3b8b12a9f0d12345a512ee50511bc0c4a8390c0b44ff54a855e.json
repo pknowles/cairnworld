@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE connection SET name = COALESCE(?, name), from_location_id = ?, to_location_id = ?, travel_time = COALESCE(?, travel_time), description = COALESCE(?, description) WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "3b2347c03f8cd3b8b12a9f0d12345a512ee50511bc0c4a8390c0b44ff54a855e"
+}

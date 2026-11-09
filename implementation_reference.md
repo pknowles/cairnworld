@@ -4,7 +4,7 @@ Index of what exists, mapped to design.md sections. Plans describe remaining
 work; their completion claims do not override the source.
 
 Cargo's package lint table denies warnings and forbids unsafe code for every
-application target, including build.rs and tests. `scripts/check-quality.sh`
+application target, including build.rs and tests. `scripts/check-quality.sh` and `scripts/run-tests.sh` (the whole suite, keeping its databases and logs)
 checks formatting and server/WASM Clippy; dependency lints remain upstream-owned.
 
 ## Current alignment boundary
@@ -228,7 +228,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   checked macros and committed `.sqlx` metadata, including recording, history
   reconstruction and Developer Mode inspection. JSON encoding and semantic
   validation remain at the existing boundaries. `.cargo/config.toml` defaults builds
-  to offline checking; `scripts/check-quality.sh` validates metadata against
+  to offline checking; `scripts/check-quality.sh` and `scripts/run-tests.sh` (the whole suite, then removing the kept test databases) validates metadata against
   migrations in `target/sqlx-schema.sqlite` using SQLx CLI 0.8.6.
   JSON summary extraction retains runtime type checking (`content?: _`) and
   rejects missing text before constructing a Summary.
@@ -592,10 +592,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   runs fast and avoids duplicating dependency symbols in every test binary.
 - `store::TestDatabase` gives each test an on-disk SQLite database in a
   per-process directory under `target/tmp/test-databases` (unique by process id
-  and start time, so a reused process id cannot meet a stale file) that the
-  process keeps locked; claims are serialized by a guard lock so a concurrent
-  run never deletes a directory still being set up. Drop removes files where Windows allows; the next run
-  deletes every directory whose owner has exited.
+  and start time). Nothing deletes them: `scripts/run-tests.sh` clears them at the start
+  of a whole-suite run and keeps the databases, `target/tmp/build.log` and
+  `target/tmp/test.log` afterwards, pass or fail.
 
 ## Web play (design.md: Web server and UI; Auth)
 
@@ -695,10 +694,16 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   After the name the Storyteller creates the world's objects (the stage stored as `create_objects`) with three
   tools that take an `object` kind and the IDs the tools return: `create_object` (every kind requires a
   description), `update_object` (the same fields, described once in `create_object`) and `delete_object`
-  (`game/authoring.rs`). A group has no tool of its own: an NPC joins one with `group_id` or starts one with
-  `group_name` and `location_id` (`Store::npc_group`), and moving or deleting a group's last NPC deletes the
-  group, so no group is ever empty. Its schema is `Fields`, and `ObjectKind::fields` is the one list of what each
-  kind has, which the tool refuses to go beyond. An item lies at a location or is held by an NPC. `Store::change_object` creates
+  (`game/authoring.rs`), and `group_npcs`. A group has no tool of its own: a new NPC starts in a group of its
+  own, named after it, at its `location_id` (`Store::start_group`); `group_npcs` (`Store::group_npcs`) makes a new
+  group at a location, moves the listed NPCs into it with a description written to each of them, and a group
+  left without a member is flagged deleted, so no group is ever empty. Names of groups, connections and the
+  other named kinds are unique, and only IDs identify an object. Its schema is `Fields`, and
+  `ObjectKind::fields(creating)` is the one list of what each kind takes when it is created or changed,
+  which the tool refuses to go beyond. A connection has a name, and its ends can change (`Store::ensure_ends` applies the creation checks). A refused call's result begins "Not created.",
+  "Not changed." or "Not deleted." The stage is driven by `Game::storyteller_creates_first_objects`: a locations
+  and connections request, one request for each other `[[Name]]` the summary marks, then one request to group
+  the NPCs. An item lies at a location or is held by an NPC. `Store::change_object` creates
   (`store/authoring.rs`, sharing its per-object inserts with `install_scenario`), updates and deletes
   (`store/editing.rs`); a delete only sets `deleted`, and the gameplay queries that enumerate characters,
   items, locations and connections skip deleted ones; Developer Mode lists them labelled. A result says
@@ -721,7 +726,7 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   history to replace and the summary prompt (no role text: a role such as the Storyteller's was followed instead of summarising) (under 150 words, beginning with the last request the
   agent was given, leaving out the world state
   that is shown again with each request): its tools stay out because a model given them answers by
-  calling one. The Storyteller's three tools are about 4 thousand characters, guarded by a test (under 4,200). Real-model
+  calling one. The Storyteller's four tools are about 4 thousand characters, guarded by a test (under 4,200). Real-model
   tests (ignored, GPU, device-test settings: 4096-token context): `a_world_is_generated_from_a_seed_by_the_real_model`
   runs the whole flow from a seed to a ready world; `a_summary_of_a_stuck_tool_loop_keeps_the_task_in_progress`
   and `the_real_model_questioner_catches_what_the_storyteller_left_out` cover the summary and the review;

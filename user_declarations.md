@@ -910,13 +910,13 @@ Game objects
   - Next ready times for short combat-length actions (combat-moved and
     combat-action, etc.)
   - Group - both a reference to the group object and a string description within
-    it only if specified, e.g. the player has climbed a tree, rather than just
-    generally with the rest of the group's characters. Any number of players can
-    be part of a group and individual players can have their own group. Players
-    must belong to exactly one group at any one time. This will be used by the
-    GM to share GM-facing character context/chat history. E.g. when the party
-    enter an ambush, all PCs and enemies merge into one group/chat history for
-    the GM to operate in.
+    it, e.g. the player has climbed a tree, rather than just generally with the
+    rest of the group's characters. Any number of players can be part of a group
+    and individual players can have their own group. Players must belong to
+    exactly one group at any one time. This will be used by the GM to share
+    GM-facing character context/chat history. E.g. when the party enter an
+    ambush, all PCs and enemies merge into one group/chat history for the GM to
+    operate in.
 - Player characters
   - Character
   - Player-specific character sheet info
@@ -1368,7 +1368,9 @@ item counts.
 
 - CreateLocation/Connection/NPC/ItemType/Item - initial attributes and details
   for all fields must be given in the tool call. NPCs must have a group - either
-  existing or created with their first NPC.
+  existing or created with their first NPC. It may be cleaner to default NPCs to
+  their own group named after the NPC (location given at creation); then have
+  the storyteller group in a follow-up call.
 - UpdateLocation/Connection/NPC/ItemType/Item - Just like create, but
   supports replacing individual fields without specifing them all. 
 - DeleteLocation/Connection/NPC/ItemType/Item - flags them as deleted and
@@ -1376,6 +1378,10 @@ item counts.
   findable in developer mode, but default filtered out. I'm tempted to leave out
   DeleteGroup and have groups implicitly delete when the last NPC is moved or
   deleted.
+- GroupNPCs - takes a list of NPC IDs, new group name and a location ID and
+  sub-location description. The sub-location description is written to all NPCs,
+  avoiding the risk of changing their location without updating the description
+  of where they are in that location.
 - Storyteller notes text editing tools (See "Game state" section)
 
 We may need to create some prefab ItemTypes to make it easier for the

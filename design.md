@@ -1917,9 +1917,16 @@ reuse these roles and bounded context assembly. Questioner is an invocation role
 not a separate autonomous agent. A safety limit is a visible incomplete-generation
 failure, not permission to declare readiness or advance automatically.
 
-Storyteller has Create/Update/Delete tools for Location, Connection, NPC, Group,
-ItemType and Item, plus shared text editing and hierarchical lookup. Create
-supplies all initial fields; Update replaces selected fields by object ID.
+Storyteller has Create/Update/Delete tools for Location, Connection, NPC,
+ItemType and Item, GroupNPCs, plus shared text editing and hierarchical lookup.
+Create supplies all initial fields; Update replaces selected fields by object ID.
+A tool's inputs never overlap or contradict, so a call with valid fields is
+valid. A new NPC starts in a group of its own, named after it, at the location
+given when it is created; an NPC has no location of its own. GroupNPCs takes
+NPC IDs, a new group name, a location ID and a description of where in the
+location they are, which is written to every one of them: it makes the new
+group, moves the NPCs into it and flags any group it leaves empty. A refused
+call says plainly that nothing was created, changed or deleted.
 Return assigned IDs and the committed change; what exists, with counts, is shown to the Storyteller and the Questioner with each request. Reuse constructors,
 field access, world-local validation and existing object relationships. Delete
 only flags an object as deleted; it never removes records, owned links or history.
@@ -1935,7 +1942,10 @@ a Location is blocked while Groups are there unless a flag also deletes them, an
 its Connections are flagged with it. World validation checks the remaining active
 objects.
 Create records in dependency order and develop locations/NPCs individually from
-their seeds and the world summary. NPC private backgrounds guide their own agents;
+their seeds and the world summary. Code drives the stages so that each reply is
+short and each object gets a focused request: the locations and their
+connections, then one request for each other name the summary marks (so NPCs are
+created one at a time), then the grouping of the NPCs. NPC private backgrounds guide their own agents;
 they are not public descriptions or scripted dialogue. Storyteller notes and the
 large editable world summary remain separate from GM notes, which Storyteller
 cannot read. Explicitly marked generation mentions supply non-blocking reminders

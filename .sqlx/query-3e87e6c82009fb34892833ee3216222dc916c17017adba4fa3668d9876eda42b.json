@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id FROM connection WHERE world_id = ? AND from_location_id = ? AND to_location_id = ? AND deleted = 0",
+  "query": "SELECT id FROM connection WHERE world_id = ? AND name = ? AND (deleted = 0 OR ?)",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "c7c2b884b9f27cdb6109ce46ece19e1e80646a448b4fd53511c58284a84790ea"
+  "hash": "3e87e6c82009fb34892833ee3216222dc916c17017adba4fa3668d9876eda42b"
 }
