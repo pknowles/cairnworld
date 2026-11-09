@@ -484,12 +484,14 @@ name_request = "Reply with only a short name for this world."
 # Added to the create-objects request when the summary marks names that have no object yet. {names}
 uncreated_mentions = "The summary marks these names but no object has them yet: {names}. Create the ones that need an object and ignore the rest."
 
-# Staged creation: one request for the locations, then one per other marked name. {name}
+# Staged creation: the locations, then NPCs one at a time, then their groups, then items.
 create_locations_request = "The world summary is complete. Use create_object to create each location the summary needs, then a connection for each pair of locations that join. Give every field a value."
 
-create_object_request = "Create the object for [[{name}]] from the world summary, giving every field a value. If it needs nothing created, say so."
+next_npc_request = "Use create_object to create the next NPC the world needs, giving every field a value. If every NPC it needs exists, reply that none are left."
 
 group_npcs_request = "Use group_npcs to put the NPCs that belong together in a group, as the world summary describes."
+
+create_items_request = "Use create_object to create the item types and items the world needs, giving every field a value. If it needs none, say so."
 
 # {questions}
 fix_request = """\

@@ -1944,8 +1944,9 @@ objects.
 Create records in dependency order and develop locations/NPCs individually from
 their seeds and the world summary. Code drives the stages so that each reply is
 short and each object gets a focused request: the locations and their
-connections, then one request for each other name the summary marks (so NPCs are
-created one at a time), then the grouping of the NPCs. NPC private backgrounds guide their own agents;
+connections, then NPCs one at a time for as long as the Storyteller says the
+world needs more, then the grouping of the NPCs, then the items. Names the
+summary marks are only a reminder in each request. NPC private backgrounds guide their own agents;
 they are not public descriptions or scripted dialogue. Storyteller notes and the
 large editable world summary remain separate from GM notes, which Storyteller
 cannot read. Explicitly marked generation mentions supply non-blocking reminders

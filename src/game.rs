@@ -2458,8 +2458,8 @@ mod tests {
             text("Added who rules and what is feared."),
             call("world_summary_complete", "{}"),
             text("  The Drowned Bell \n"),
-            // Creation runs in stages: the locations, then one request for each
-            // other name the summary marks.
+            // Creation runs in stages: the locations, NPCs one at a time until the
+            // Storyteller says none are left, then the items.
             calls(&[(
                 "create_object",
                 r#"{"object":"location","name":"Belfry","location_kind":"tower","description":"A tower above the water."}"#,
@@ -2476,7 +2476,8 @@ mod tests {
                 ),
             ]),
             text("Ysolde exists."),
-            text("The bell needs no object."),
+            text("No NPCs are left."),
+            text("No items are needed."),
             // The first review asks a question instead of completing...
             calls(&[
                 ("read_object", r#"{"objects":[{"object":"npc","id":2}]}"#),
@@ -2575,7 +2576,7 @@ mod tests {
         store.character_group_id(member.character_id).await.unwrap();
 
         let shown: Vec<String> = requests.lock().unwrap().iter().map(shown).collect();
-        assert_eq!(shown.len(), 17);
+        assert_eq!(shown.len(), 18);
         assert!(shown[0].contains("A drowned city"));
         let prompts = crate::prompts::current().unwrap();
         let sampled = |questions: &[String]| {
@@ -2634,53 +2635,60 @@ mod tests {
             "{}",
             shown[8]
         );
-        // Then one request for each marked name that still has no object.
+        // Then NPCs one at a time, with the marked names without an object as a
+        // reminder, until the Storyteller says none are left, then the items.
         assert!(
-            shown[10].contains("Create the object for [[Ysolde]]")
+            shown[10].contains("create the next NPC")
+                && shown[10].contains("no object has them yet: Ysolde, Drowned Bell")
                 && shown[10].contains("- location 1 Belfry"),
             "{}",
             shown[10]
         );
         assert!(
-            shown[12].contains("Create the object for [[Drowned Bell]]"),
+            shown[12].contains("create the next NPC") && shown[12].contains("- npc 2 Ysolde"),
             "{}",
             shown[12]
+        );
+        assert!(
+            shown[13].contains("create the item types and items"),
+            "{}",
+            shown[13]
         );
         // A refused call reaches the Storyteller as a tool result it can act on.
         assert!(shown[11].contains("called `Belfry`"), "{}", shown[11]);
         // The Questioner reviews the objects, not the Storyteller's answers.
-        assert!(shown[13].contains("- [ ] npc 2 Ysolde") && shown[13].contains("read_object"));
-        assert!(!shown[13].contains("The tide-wardens rule."));
+        assert!(shown[14].contains("- [ ] npc 2 Ysolde") && shown[14].contains("read_object"));
+        assert!(!shown[14].contains("The tide-wardens rule."));
         // It is told which marked name has no object, and not the one that has.
         assert!(
-            shown[13].contains("no object has them yet: Drowned Bell"),
+            shown[14].contains("no object has them yet: Drowned Bell"),
             "{}",
-            shown[13]
+            shown[14]
         );
         // The Questioner's question sends the Storyteller back to create objects, and it
         // is shown what already exists (a fact, not kept in its chat).
         assert!(
-            shown[14].contains("Who stands against Ysolde?"),
+            shown[15].contains("Who stands against Ysolde?"),
             "{}",
-            shown[14]
+            shown[15]
         );
         assert!(
-            shown[14]
+            shown[15]
                 .contains("The world so far (locations: 1, connections: 0, groups: 1, npcs: 1")
-                && shown[14].contains("- location 1 Belfry")
-                && shown[14].contains("- npc 2 Ysolde"),
+                && shown[15].contains("- location 1 Belfry")
+                && shown[15].contains("- npc 2 Ysolde"),
             "{}",
-            shown[14]
+            shown[15]
         );
         // The Storyteller's change comes back to the Questioner as the result
         // of its own question, in the same turn.
         assert!(
-            shown[16].contains("Added Corvin.")
-                && shown[16].contains("Changes to the world:")
-                && shown[16].contains("- added npc 3 Corvin")
-                && !shown[16].contains("create_object"),
+            shown[17].contains("Added Corvin.")
+                && shown[17].contains("Changes to the world:")
+                && shown[17].contains("- added npc 3 Corvin")
+                && !shown[17].contains("create_object"),
             "{}",
-            shown[16]
+            shown[17]
         );
         // The result is the Storyteller's note of the change; the summary itself
         // is the Questioner's context.

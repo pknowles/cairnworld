@@ -702,8 +702,8 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   `ObjectKind::fields(creating)` is the one list of what each kind takes when it is created or changed,
   which the tool refuses to go beyond. A connection has a name, and its ends can change (`Store::ensure_ends` applies the creation checks). A refused call's result begins "Not created.",
   "Not changed." or "Not deleted." The stage is driven by `Game::storyteller_creates_first_objects`: a locations
-  and connections request, one request for each other `[[Name]]` the summary marks, then one request to group
-  the NPCs. An item lies at a location or is held by an NPC. `Store::change_object` creates
+  and connections request, then a "next NPC" request repeated until a turn makes no NPC, one request to group the NPCs, and one for the items. The summary's unused `[[Name]]`
+  marks are only listed as a reminder in each request. An item lies at a location or is held by an NPC. `Store::change_object` creates
   (`store/authoring.rs`, sharing its per-object inserts with `install_scenario`), updates and deletes
   (`store/editing.rs`); a delete only sets `deleted`, and the gameplay queries that enumerate characters,
   items, locations and connections skip deleted ones; Developer Mode lists them labelled. A result says

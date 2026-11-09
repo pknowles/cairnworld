@@ -612,32 +612,38 @@ where
 
     /// The summary's objects in stages, so each reply is short and each object
     /// gets a focused description: the locations and their connections, then
-    /// one request for each other name the summary marks, then the grouping of
-    /// the NPCs.
+    /// NPCs one at a time for as long as the Storyteller says the world needs
+    /// more, then the grouping of the NPCs, then the items.
     async fn storyteller_creates_first_objects(self: &Arc<Self>, scope: &StepScope) -> Result<()> {
         let storyteller = &prompts::current()?.storyteller;
+        let world_id = scope.world.id;
         self.storyteller_object_turn(scope, storyteller.create_locations_request.clone())
             .await?;
-        let generation = self.current_generation(scope).await?;
-        for name in self
-            .uncreated_names(scope.world.id, &generation.summary)
-            .await?
-        {
-            let text = prompts::fill(&storyteller.create_object_request, &[("name", &name)])?;
+        // It ends when a turn makes no NPC; a Storyteller that never stops is
+        // caught by the limit on inferences for the world.
+        let npcs = || async {
+            let entries = self.store.review_list(world_id).await?;
+            Ok::<_, anyhow::Error>(entries.iter().filter(|entry| entry.kind == "npc").count())
+        };
+        loop {
+            let before = npcs().await?;
+            let text = self
+                .with_uncreated_reminder(scope, storyteller.next_npc_request.clone())
+                .await?;
             self.storyteller_object_turn(scope, text).await?;
+            if npcs().await? == before {
+                break;
+            }
         }
         // Every NPC starts in a group of its own; grouping is a follow-up.
-        let npcs = self
-            .store
-            .review_list(scope.world.id)
-            .await?
-            .iter()
-            .filter(|entry| entry.kind == "npc")
-            .count();
-        if npcs > 1 {
+        if npcs().await? > 1 {
             self.storyteller_object_turn(scope, storyteller.group_npcs_request.clone())
                 .await?;
         }
+        let text = self
+            .with_uncreated_reminder(scope, storyteller.create_items_request.clone())
+            .await?;
+        self.storyteller_object_turn(scope, text).await?;
         Ok(())
     }
 
@@ -648,30 +654,29 @@ where
         scope: &StepScope,
         questions: &[String],
     ) -> Result<Settled> {
-        let prompts = prompts::current()?;
-        let storyteller = &prompts.storyteller;
-        let generation = self.current_generation(scope).await?;
-        let mut text = prompts::fill(
-            &storyteller.fix_request,
+        let text = prompts::fill(
+            &prompts::current()?.storyteller.fix_request,
             &[("questions", &bullets(questions))],
         )?;
-        // A reminder, not a requirement: the Storyteller decides which marked
-        // names need an object.
+        let text = self.with_uncreated_reminder(scope, text).await?;
+        self.storyteller_object_turn(scope, text).await
+    }
+
+    /// A reminder, not a requirement: the Storyteller decides which marked
+    /// names need an object.
+    async fn with_uncreated_reminder(&self, scope: &StepScope, mut text: String) -> Result<String> {
+        let generation = self.current_generation(scope).await?;
         let uncreated = self
             .uncreated_names(scope.world.id, &generation.summary)
             .await?;
         if !uncreated.is_empty() {
-            text.push_str(
-                "
-
-",
-            );
+            text.push_str("\n\n");
             text.push_str(&prompts::fill(
-                &storyteller.uncreated_mentions,
+                &prompts::current()?.storyteller.uncreated_mentions,
                 &[("names", &uncreated.join(", "))],
             )?);
         }
-        self.storyteller_object_turn(scope, text).await
+        Ok(text)
     }
 
     /// One Storyteller turn with the object tools, shown what already exists.
