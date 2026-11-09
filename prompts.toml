@@ -270,6 +270,14 @@ eagerness = "How strongly you want to act now: 1 mild, 2 moderate, 3 strong."
 description = "Stay silent for now."
 
 # ---------------------------------------------------------------------------
+# History: how earlier turns are shown. A long refused reply (a plain-text reply
+# where a tool call was needed) is shown by its start, because a model that sees
+# its own long failed output repeats it.
+# ---------------------------------------------------------------------------
+[history]
+refused_reply_cut = " ... [The rest of this reply is not shown.]"
+
+# ---------------------------------------------------------------------------
 # Compaction: asking an agent to replace its older history with a summary.
 # ---------------------------------------------------------------------------
 [compaction]

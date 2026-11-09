@@ -832,7 +832,9 @@ its sole WebSocket. Planned behavior beyond that is not implied to exist here.
   response and no earlier call in it was rejected, and `Turn::terminal_reminder` makes a plain-text answer an error: it is
   logged, flagged (`message.reply_rejected`, migration 0010, shown with rejected
   tool calls as `output_rejected` in Developer Mode) and answered with the
-  `narrate_reminder` instruction. The tool validates the call against the group
+  `narrate_reminder` instruction. Request assembly (`Store`'s history loader) shows a refused reply
+  longer than 400 characters by its start plus `history.refused_reply_cut`: a model that sees its own
+  long failed output repeats it (the Questioner's endless question list). The record keeps it all. The tool validates the call against the group
   read from the acting character when the call is made, and rejects narrating
   before the action is approved or rejected. A valid call is captured in
   `NarrationTools` and delivered after the player agent settles as `NarrationText`

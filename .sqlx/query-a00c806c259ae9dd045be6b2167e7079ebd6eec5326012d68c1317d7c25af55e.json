@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT message.id, message.role, message.origin, message.content FROM message JOIN history_entry ON history_entry.id = message.id WHERE history_entry.branch_id = ? AND history_entry.position BETWEEN ? AND ? ORDER BY history_entry.position",
+  "query": "SELECT message.id, message.role, message.origin, message.content, message.reply_rejected AS \"reply_rejected: bool\" FROM message JOIN history_entry ON history_entry.id = message.id WHERE history_entry.branch_id = ? AND history_entry.position BETWEEN ? AND ? ORDER BY history_entry.position",
   "describe": {
     "columns": [
       {
@@ -22,6 +22,11 @@
         "name": "content",
         "ordinal": 3,
         "type_info": "Integer"
+      },
+      {
+        "name": "reply_rejected: bool",
+        "ordinal": 4,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -31,8 +36,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "0321c39af66c5310941361eafc5d50e02fa009340870ee8aaab169c48c8a88ae"
+  "hash": "a00c806c259ae9dd045be6b2167e7079ebd6eec5326012d68c1317d7c25af55e"
 }

@@ -7439,8 +7439,11 @@ mod tests {
                     arguments: "{}".into(),
                 },
             ])),
-            // Plain text instead of a narrate tool.
-            response(Content::Text("The room is empty.".into())),
+            // Plain text instead of a narrate tool, long enough to be shown shortened.
+            response(Content::Text(format!(
+                "The room is empty. {}",
+                "Dust. ".repeat(100)
+            ))),
             narrate("The room is bare."),
             response(Content::Text(String::new())),
             do_nothing(),
@@ -7481,6 +7484,21 @@ mod tests {
                 MessageContent::Text(text) if text.contains("narrate_group")),
             "the GM is told how to end its turn: {:?}",
             last_gm_request.messages.last()
+        );
+        // The refused reply is shown by its start; the record keeps all of it.
+        let cut = crate::prompts::current()
+            .unwrap()
+            .history
+            .refused_reply_cut
+            .clone();
+        let refused = &last_gm_request.messages[last_gm_request.messages.len() - 2];
+        assert!(
+            matches!(&refused.content, MessageContent::Text(text)
+                if text.starts_with("The room is empty. Dust.")
+                    && text.ends_with(&cut)
+                    && text.chars().count() < 500),
+            "{:?}",
+            refused.content
         );
         assert!(failed_sequences(&scene).await.is_empty());
     }

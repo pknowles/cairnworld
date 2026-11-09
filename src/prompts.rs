@@ -25,11 +25,20 @@ pub struct Prompts {
     pub player: Player,
     pub npc: Npc,
     pub compaction: Compaction,
+    pub history: History,
     /// Tools players and NPCs both call.
     pub shared: Shared,
     pub world: WorldTexts,
     pub questioner: Questioner,
     pub storyteller: Storyteller,
+}
+
+/// How history is shown to the model.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct History {
+    /// Ends a refused reply that is shown shortened.
+    pub refused_reply_cut: String,
 }
 
 /// Stand-ins for what world generation has not been given yet.

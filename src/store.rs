@@ -824,7 +824,11 @@ struct MessageRow {
     role: String,
     origin: String,
     content: i64,
+    reply_rejected: bool,
 }
+
+/// How much of a refused reply the model is shown again.
+const REFUSED_REPLY_SHOWN_CHARS: usize = 400;
 
 #[derive(Debug, FromRow)]
 struct SummaryRow {
@@ -4828,7 +4832,8 @@ impl Store {
                     // missing its message row is real corruption.
                     let rows = sqlx::query_as!(
                         MessageRow,
-                        "SELECT message.id, message.role, message.origin, message.content FROM message \
+                        "SELECT message.id, message.role, message.origin, message.content, \
+                                message.reply_rejected AS \"reply_rejected: bool\" FROM message \
                          JOIN history_entry ON history_entry.id = message.id \
                          WHERE history_entry.branch_id = ? AND history_entry.position BETWEEN ? AND ? \
                          ORDER BY history_entry.position",
@@ -4876,6 +4881,20 @@ impl Store {
                             self.speech_content(row.id).await?
                         } else {
                             self.recorded_content(row.content).await?.0
+                        };
+                        let content = match content {
+                            // The record keeps the whole reply; the model is shown its start.
+                            MessageContent::Text(text)
+                                if row.reply_rejected
+                                    && text.chars().count() > REFUSED_REPLY_SHOWN_CHARS =>
+                            {
+                                let shown: String =
+                                    text.chars().take(REFUSED_REPLY_SHOWN_CHARS).collect();
+                                MessageContent::Text(
+                                    shown + &crate::prompts::current()?.history.refused_reply_cut,
+                                )
+                            }
+                            content => content,
                         };
                         messages.push(Message {
                             role,
