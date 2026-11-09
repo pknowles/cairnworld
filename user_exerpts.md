@@ -1196,3 +1196,16 @@ On the Storyteller creating NPCs the summary did not name:
 > that prevents the storyteller from creating NPCs it forgot to name
 
 Creation asks for the next NPC until a turn makes none; marked names are only a reminder, with no limit.
+
+Tried on the real model (dev-qwen35, 4096 context) and did not help, so not kept (2026-11-09):
+
+- A maximum of 5 on the Questioner's question list in the tool schema: it still asked 8 to 19 questions.
+- Marking `name` required in the create schema, naming the field "unique, every object has one", or asking
+  for a "named connection": connections still lacked a name in about 75% of the calls; the refusal and retry
+  fixes it at the cost of one short turn. A separate request for connections made it slightly worse.
+- A presence penalty of 1.5 for the repetition loop: the cause was the model copying its own long failed reply
+  from its history; shortening a refused reply to its start fixed that.
+- Rewording the per-name NPC request to name the tool: no change; the one prose answer was variance.
+- Telling the model in a tool description to read "about five" objects at a time (or asking for "up to five"
+  questions): the model ignores counts in tool text. Make the interface take one.
+- `read_object` taking any number of objects: 18 at once overflowed the context. It takes one.

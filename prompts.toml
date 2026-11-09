@@ -548,7 +548,7 @@ item_id = "The item."
 npc_id = "The NPC who takes it."
 
 [storyteller.tools.delete_object]
-description = "Flag an object deleted. Dependencies may require one option."
+description = "Flag an object deleted."
 
 [storyteller.tools.delete_object.arguments]
 object = "The object's kind."
